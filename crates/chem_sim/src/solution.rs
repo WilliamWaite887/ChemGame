@@ -1,5 +1,7 @@
 //! A mixture of reagents in a container.
 
+use serde::{Deserialize, Serialize};
+
 use crate::reagent::{ReagentId, ReagentRegistry};
 use crate::units::{Kelvin, Units};
 
@@ -7,7 +9,7 @@ use crate::units::{Kelvin, Units};
 ///
 /// Contents are kept sorted by `ReagentId` with no zero entries, so iteration
 /// order — and therefore every downstream reaction — is deterministic.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Solution {
     contents: Vec<(ReagentId, Units)>,
     max_volume: Units,

@@ -7,6 +7,7 @@ mod interaction;
 mod knowledge;
 mod lab;
 mod machines;
+mod net;
 mod orders;
 mod player;
 mod radio;
@@ -25,6 +26,7 @@ fn main() {
         }))
         .init_state::<AppState>()
         .add_plugins((
+            net::NetPlugin,
             chem_data::ChemDataPlugin,
             lab::LabPlugin,
             machines::MachinePlugin,

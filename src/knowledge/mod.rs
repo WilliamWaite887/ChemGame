@@ -1,8 +1,4 @@
-//! What the chemist currently knows how to make.
-//!
-//! M5 only reads this: the book renders it and order generation uses it to
-//! stay within reach. M6 makes it change — discovery, hint purchases and
-//! persistence.
+//! What the chemist knows how to make, and how they come to know it.
 //!
 //! `chem_sim` deliberately knows nothing about any of this. The resolver
 //! always simulates real chemistry; whether the player has written the recipe
@@ -10,9 +6,11 @@
 //! behaving differently depending on who is holding it.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use bevy::prelude::*;
 use chem_sim::{ChemData, ReactionId, ReagentId};
+use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
 use crate::machines::ReactionsFired;
@@ -26,18 +24,26 @@ use crate::AppState;
 /// than a search through hundreds of combinations.
 pub const STARTING_RECIPES: [&str; 3] = ["inaprovaline", "dylovene", "kelotane"];
 
-/// Hints visible before any research is spent. One is enough to point at an
-/// approach without giving the recipe away.
+/// Hints visible before any research is spent.
 const FREE_HINTS: usize = 1;
+/// Research points a hint costs.
+pub const HINT_COST: u32 = 1;
+/// Points earned for a clean delivery.
+pub const RESEARCH_PER_SUCCESS: u32 = 1;
+
+const SAVE_PATH: &str = "save.ron";
 
 pub struct KnowledgePlugin;
 
 impl Plugin for KnowledgePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::Playing), initialise_knowledge)
+        app.add_message::<RecipeDiscovered>()
+            .add_systems(OnEnter(AppState::Playing), initialise_knowledge)
             .add_systems(
                 Update,
-                learn_from_experiments.run_if(in_state(AppState::Playing)),
+                (learn_from_experiments, persist_knowledge)
+                    .chain()
+                    .run_if(in_state(AppState::Playing)),
             );
     }
 }
@@ -48,9 +54,16 @@ pub enum Entry {
     Locked { hints_revealed: usize },
 }
 
+/// Announced when a recipe is worked out, however it happened.
+#[derive(Message)]
+pub struct RecipeDiscovered {
+    pub name: String,
+}
+
 #[derive(Resource, Default)]
 pub struct Knowledge {
     entries: HashMap<ReactionId, Entry>,
+    pub research_points: u32,
 }
 
 impl Knowledge {
@@ -70,7 +83,10 @@ impl Knowledge {
                 },
             );
         }
-        Knowledge { entries }
+        Knowledge {
+            entries,
+            research_points: 0,
+        }
     }
 
     pub fn entry(&self, reaction: ReactionId) -> Entry {
@@ -98,15 +114,32 @@ impl Knowledge {
         !already
     }
 
-    /// Reveals one more hint for a locked recipe.
-    ///
-    /// Nothing spends research points yet; M6 gives the player a way to buy
-    /// these deliberately rather than only stumbling into recipes.
-    #[allow(dead_code)]
-    pub fn reveal_hint(&mut self, reaction: ReactionId) {
+    pub fn award_research(&mut self, points: u32) {
+        self.research_points += points;
+    }
+
+    /// Whether another hint exists to buy for this recipe.
+    pub fn hint_available(&self, data: &ChemData, reaction: ReactionId) -> bool {
+        match self.entry(reaction) {
+            Entry::Known => false,
+            Entry::Locked { hints_revealed } => {
+                hints_revealed < data.reactions.get(reaction).hints.len()
+            }
+        }
+    }
+
+    /// Spends a point to reveal one more hint. Returns false if the chemist
+    /// cannot afford it or there is nothing left to reveal.
+    pub fn buy_hint(&mut self, data: &ChemData, reaction: ReactionId) -> bool {
+        if self.research_points < HINT_COST || !self.hint_available(data, reaction) {
+            return false;
+        }
         if let Some(Entry::Locked { hints_revealed }) = self.entries.get_mut(&reaction) {
             *hints_revealed += 1;
+            self.research_points -= HINT_COST;
+            return true;
         }
+        false
     }
 
     /// Every reagent the chemist can currently produce, plus the base reagents
@@ -115,7 +148,7 @@ impl Knowledge {
         let mut available: HashSet<ReagentId> =
             data.reagents.dispensable().map(|r| r.id).collect();
 
-        // Known recipes can feed each other, so keep going until nothing new
+        // Known recipes feed each other, so keep going until nothing new
         // appears rather than making a single pass.
         loop {
             let mut grew = false;
@@ -144,8 +177,7 @@ impl Knowledge {
     /// Locked recipes whose ingredients the chemist can already obtain.
     ///
     /// This is the set worth asking for: reachable with one experiment, but
-    /// not yet written down. Ordering follows the reaction list so generation
-    /// stays reproducible.
+    /// not yet written down.
     pub fn frontier(&self, data: &ChemData) -> Vec<ReactionId> {
         let available = self.available_reagents(data);
         data.reactions
@@ -170,6 +202,119 @@ impl Knowledge {
         let hints = &data.reactions.get(reaction).hints;
         &hints[..hints_revealed.min(hints.len())]
     }
+
+    // -- persistence --------------------------------------------------------
+
+    /// Reaction *keys* rather than ids, because ids are positions in the data
+    /// file: inserting a recipe would otherwise silently rewrite what a save
+    /// says the chemist knows.
+    fn to_save(&self, data: &ChemData) -> SaveData {
+        let mut known = Vec::new();
+        let mut hints = HashMap::new();
+        for reaction in data.reactions.iter() {
+            match self.entry(reaction.id) {
+                Entry::Known => known.push(reaction.key.clone()),
+                Entry::Locked { hints_revealed } if hints_revealed != FREE_HINTS => {
+                    hints.insert(reaction.key.clone(), hints_revealed);
+                }
+                Entry::Locked { .. } => {}
+            }
+        }
+        known.sort();
+        SaveData {
+            known,
+            hints,
+            research_points: self.research_points,
+        }
+    }
+
+    fn from_save(data: &ChemData, save: SaveData) -> Self {
+        let mut knowledge = Knowledge::new(data);
+        knowledge.research_points = save.research_points;
+        for key in &save.known {
+            if let Some(reaction) = data.reactions.find(key) {
+                knowledge.learn(reaction.id);
+            }
+        }
+        for (key, revealed) in &save.hints {
+            if let Some(reaction) = data.reactions.find(key) {
+                if let Some(Entry::Locked { hints_revealed }) =
+                    knowledge.entries.get_mut(&reaction.id)
+                {
+                    *hints_revealed = *revealed;
+                }
+            }
+        }
+        knowledge
+    }
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct SaveData {
+    known: Vec<String>,
+    #[serde(default)]
+    hints: HashMap<String, usize>,
+    #[serde(default)]
+    research_points: u32,
+}
+
+fn initialise_knowledge(mut commands: Commands, db: Res<ChemDb>) {
+    let knowledge = match load_save(&db) {
+        Some(loaded) => {
+            info!(
+                "resumed: {} of {} recipes, {} research",
+                loaded.known_count(),
+                db.reactions.len(),
+                loaded.research_points
+            );
+            loaded
+        }
+        None => {
+            let fresh = Knowledge::new(&db);
+            info!(
+                "new chemist: knows {} of {} recipes",
+                fresh.known_count(),
+                db.reactions.len()
+            );
+            fresh
+        }
+    };
+    commands.insert_resource(knowledge);
+}
+
+fn load_save(db: &ChemDb) -> Option<Knowledge> {
+    if !Path::new(SAVE_PATH).exists() {
+        return None;
+    }
+    // A corrupt save should cost the player their progress, not the session.
+    match std::fs::read_to_string(SAVE_PATH).map(|text| ron::from_str::<SaveData>(&text)) {
+        Ok(Ok(save)) => Some(Knowledge::from_save(db, save)),
+        Ok(Err(error)) => {
+            warn!("ignoring unreadable {SAVE_PATH}: {error}");
+            None
+        }
+        Err(error) => {
+            warn!("could not read {SAVE_PATH}: {error}");
+            None
+        }
+    }
+}
+
+fn persist_knowledge(db: Res<ChemDb>, knowledge: Res<Knowledge>) {
+    if !knowledge.is_changed() {
+        return;
+    }
+    let save = knowledge.to_save(&db);
+    let Ok(text) = ron::ser::to_string_pretty(&save, default_ron_config()) else {
+        return;
+    };
+    if let Err(error) = std::fs::write(SAVE_PATH, text) {
+        warn!("could not write {SAVE_PATH}: {error}");
+    }
+}
+
+fn default_ron_config() -> ron::ser::PrettyConfig {
+    ron::ser::PrettyConfig::default()
 }
 
 /// Records any reaction the chemist manages to cause.
@@ -181,6 +326,7 @@ fn learn_from_experiments(
     db: Res<ChemDb>,
     mut knowledge: ResMut<Knowledge>,
     mut fired: MessageReader<ReactionsFired>,
+    mut discovered: MessageWriter<RecipeDiscovered>,
     mut radio: ResMut<RadioLog>,
 ) {
     for event in fired.read() {
@@ -188,31 +334,26 @@ fn learn_from_experiments(
             if !knowledge.learn(*reaction) {
                 continue;
             }
-            let recipe = db.reactions.get(*reaction);
-            let name = recipe
-                .products
-                .first()
-                .map(|(id, _)| db.reagents.get(*id).name.clone())
-                .unwrap_or_else(|| recipe.key.clone());
-
+            let name = product_name(&db, *reaction);
             info!("recipe discovered: {name}");
             radio.push(RadioEntry {
                 channel: "LAB".to_string(),
                 text: format!("Method for {name} written up in the reference book."),
                 good: true,
             });
+            discovered.write(RecipeDiscovered { name });
         }
     }
 }
 
-fn initialise_knowledge(mut commands: Commands, db: Res<ChemDb>) {
-    let knowledge = Knowledge::new(&db);
-    info!(
-        "chemist knows {} of {} recipes",
-        knowledge.known_count(),
-        db.reactions.len()
-    );
-    commands.insert_resource(knowledge);
+/// A recipe is named after what it makes — that is how the crew ask for it.
+pub fn product_name(db: &ChemDb, reaction: ReactionId) -> String {
+    let recipe = db.reactions.get(reaction);
+    recipe
+        .products
+        .first()
+        .map(|(id, _)| db.reagents.get(*id).name.clone())
+        .unwrap_or_else(|| recipe.key.clone())
 }
 
 #[cfg(test)]
@@ -253,10 +394,8 @@ mod tests {
             .collect();
         frontier.sort();
 
-        // Bicaridine and hyronalin build on inaprovaline and dylovene;
-        // tricordrazine needs both; dermaline builds on kelotane; dexalin only
-        // needs base reagents and a catalyst. Arithrazine is two steps out and
-        // must NOT appear until hyronalin is learned.
+        // Arithrazine is two steps out and must NOT appear until hyronalin is
+        // learned.
         assert_eq!(
             frontier,
             vec![
@@ -296,31 +435,91 @@ mod tests {
     }
 
     #[test]
-    fn hints_are_revealed_one_at_a_time() {
+    fn hints_must_be_paid_for() {
         let data = data();
         let mut knowledge = Knowledge::new(&data);
         let bicaridine = data.reactions.find("bicaridine").unwrap().id;
 
         assert_eq!(knowledge.visible_hints(&data, bicaridine).len(), FREE_HINTS);
-        knowledge.reveal_hint(bicaridine);
+        assert!(
+            !knowledge.buy_hint(&data, bicaridine),
+            "cannot buy a hint with no research"
+        );
+
+        knowledge.award_research(1);
+        assert!(knowledge.buy_hint(&data, bicaridine));
+        assert_eq!(knowledge.research_points, 0);
         assert_eq!(
             knowledge.visible_hints(&data, bicaridine).len(),
             FREE_HINTS + 1
         );
+    }
 
-        // Revealing past the end must clamp rather than panic on the slice.
-        for _ in 0..10 {
-            knowledge.reveal_hint(bicaridine);
+    #[test]
+    fn buying_past_the_last_hint_costs_nothing() {
+        let data = data();
+        let mut knowledge = Knowledge::new(&data);
+        let bicaridine = data.reactions.find("bicaridine").unwrap().id;
+        knowledge.award_research(50);
+
+        while knowledge.hint_available(&data, bicaridine) {
+            assert!(knowledge.buy_hint(&data, bicaridine));
         }
+        let spent = 50 - knowledge.research_points;
+
+        // The button must go dead rather than quietly draining points.
+        assert!(!knowledge.buy_hint(&data, bicaridine));
+        assert_eq!(50 - knowledge.research_points, spent);
         let all = &data.reactions.get(bicaridine).hints;
         assert_eq!(knowledge.visible_hints(&data, bicaridine).len(), all.len());
     }
 
     #[test]
-    fn known_recipes_expose_no_hints() {
+    fn known_recipes_expose_no_hints_and_cannot_be_researched() {
         let data = data();
-        let knowledge = Knowledge::new(&data);
+        let mut knowledge = Knowledge::new(&data);
         let inaprovaline = data.reactions.find("inaprovaline").unwrap().id;
+        knowledge.award_research(5);
+
         assert!(knowledge.visible_hints(&data, inaprovaline).is_empty());
+        assert!(!knowledge.hint_available(&data, inaprovaline));
+        assert!(!knowledge.buy_hint(&data, inaprovaline));
+        assert_eq!(knowledge.research_points, 5);
+    }
+
+    #[test]
+    fn a_save_round_trips_through_reaction_keys() {
+        let data = data();
+        let mut original = Knowledge::new(&data);
+        let bicaridine = data.reactions.find("bicaridine").unwrap().id;
+        let dermaline = data.reactions.find("dermaline").unwrap().id;
+
+        original.learn(bicaridine);
+        original.award_research(4);
+        assert!(original.buy_hint(&data, dermaline));
+
+        let text = ron::ser::to_string(&original.to_save(&data)).unwrap();
+        let restored = Knowledge::from_save(&data, ron::from_str(&text).unwrap());
+
+        assert!(restored.is_known(bicaridine));
+        assert_eq!(restored.known_count(), original.known_count());
+        assert_eq!(restored.research_points, 3);
+        assert_eq!(
+            restored.visible_hints(&data, dermaline).len(),
+            FREE_HINTS + 1
+        );
+    }
+
+    #[test]
+    fn a_save_survives_recipes_being_added_to_the_data_file() {
+        // Saves store keys, not indices, so shifting the reaction list must
+        // not turn "knows bicaridine" into "knows whatever is at slot 3".
+        let data = data();
+        let mut knowledge = Knowledge::new(&data);
+        knowledge.learn(data.reactions.find("tricordrazine").unwrap().id);
+        let save = knowledge.to_save(&data);
+
+        assert!(save.known.contains(&"tricordrazine".to_string()));
+        assert!(!save.known.iter().any(|key| key.parse::<u32>().is_ok()));
     }
 }

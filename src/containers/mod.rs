@@ -6,7 +6,9 @@
 //! machine slot without any of those being a special case.
 
 use bevy::prelude::*;
+use bevy_replicon::prelude::Replicated;
 use chem_sim::{resolve, ResolveReport, Solution, Units};
+use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
 use crate::interaction::{InteractRequested, Interactable};
@@ -30,7 +32,7 @@ impl Plugin for ContainerPlugin {
     }
 }
 
-#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ContainerKind {
     Beaker,
     LargeBeaker,
@@ -69,7 +71,7 @@ impl ContainerKind {
 }
 
 /// A container and what is in it.
-#[derive(Component)]
+#[derive(Component, Serialize, Deserialize)]
 pub struct Container {
     pub kind: ContainerKind,
     pub solution: Solution,
@@ -100,12 +102,16 @@ impl Container {
 }
 
 /// Carried by this player. Source of truth for who holds what.
-#[derive(Component)]
-pub struct HeldBy(pub Entity);
+///
+/// `#[entities]` is what lets this survive replication: the entity id means
+/// nothing on the other end without being mapped to the client's own id for
+/// the same player.
+#[derive(Component, Serialize, Deserialize)]
+pub struct HeldBy(#[entities] pub Entity);
 
 /// Sitting in this machine's container slot.
-#[derive(Component)]
-pub struct InSlot(pub Entity);
+#[derive(Component, Serialize, Deserialize)]
+pub struct InSlot(#[entities] pub Entity);
 
 /// The liquid mesh inside a container, kept in sync with its contents.
 #[derive(Component)]
@@ -137,6 +143,9 @@ pub fn spawn_container(
             MeshMaterial3d(assets.glass_material.clone()),
             Transform::from_translation(position),
             Interactable::new(kind.label()),
+            // Glassware and its contents are shared lab state; the mesh and
+            // material are not, and each client builds those itself.
+            Replicated,
         ))
         .id();
 

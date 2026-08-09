@@ -65,6 +65,48 @@ fn units_are_exact_where_floats_would_drift() {
     assert_eq!(sum, Units::ONE);
 }
 
+#[test]
+fn quantities_survive_both_a_text_and_a_binary_round_trip() {
+    // These need different encodings and it is not cosmetic. Data files are
+    // hand-written, so `15` and `15.0` must both parse — which needs
+    // `deserialize_any`. Binary formats are not self-describing and cannot
+    // answer `deserialize_any` at all, so asking them to would fail at
+    // runtime, silently, only once a solution crossed the network.
+    let quantities = [
+        Units::whole(15),
+        Units::from_f64(0.5),
+        Units::from_f64(15.25),
+        Units::ZERO,
+        Units::from_f64(-2.75),
+    ];
+
+    for quantity in quantities {
+        let text = ron::to_string(&quantity).unwrap();
+        let parsed: Units = ron::from_str(&text).unwrap();
+        assert_eq!(parsed, quantity, "text round trip failed for {quantity}");
+
+        let bytes = postcard::to_stdvec(&quantity).unwrap();
+        let decoded: Units = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, quantity, "binary round trip failed for {quantity}");
+    }
+
+    // Whole numbers written without a decimal point must still parse.
+    assert_eq!(ron::from_str::<Units>("15").unwrap(), Units::whole(15));
+    assert_eq!(ron::from_str::<Units>("15.0").unwrap(), Units::whole(15));
+}
+
+#[test]
+fn a_whole_solution_survives_a_binary_round_trip() {
+    let data = data();
+    let solution = beaker(&data, 100, &[("oxygen", 15), ("sugar", 30)]);
+
+    let bytes = postcard::to_stdvec(&solution).unwrap();
+    let decoded: Solution = postcard::from_bytes(&bytes).unwrap();
+
+    assert_eq!(decoded, solution);
+    assert_eq!(decoded.max_volume(), solution.max_volume());
+}
+
 // ---------------------------------------------------------------------------
 // Solution
 // ---------------------------------------------------------------------------

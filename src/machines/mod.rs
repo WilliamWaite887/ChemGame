@@ -6,6 +6,7 @@
 
 use bevy::prelude::*;
 use chem_sim::{ReagentId, Solution, Units};
+use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
 use crate::containers::{
@@ -24,6 +25,7 @@ impl Plugin for MachinePlugin {
             .add_message::<EmptyRequested>()
             .add_message::<BufferTransferRequested>()
             .add_message::<PackageRequested>()
+            .add_message::<AnalyzeRequested>()
             .add_systems(
                 Update,
                 (
@@ -31,6 +33,7 @@ impl Plugin for MachinePlugin {
                     handle_dispense,
                     handle_buffer_transfer,
                     handle_package,
+                    handle_analyze,
                     handle_eject,
                     handle_empty,
                 )
@@ -41,7 +44,7 @@ impl Plugin for MachinePlugin {
 }
 
 /// Which piece of equipment this is.
-#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum MachineKind {
     Dispenser,
     ChemMaster,
@@ -82,9 +85,12 @@ impl MachineKind {
 ///
 /// `in_use_by` exists from the start on purpose: two chemists reaching for the
 /// dispenser is the normal case in co-op, not an edge case.
-#[derive(Component, Debug)]
+#[derive(Component, Debug, Serialize, Deserialize)]
 pub struct Machine {
     pub kind: MachineKind,
+    /// Mapped on replication so each client sees the occupying chemist as
+    /// their own entity id rather than the server's.
+    #[entities]
     pub in_use_by: Option<Entity>,
 }
 
@@ -108,12 +114,20 @@ pub struct ContainerSlot {
 }
 
 /// The ChemMaster's internal buffer.
-#[derive(Component)]
+#[derive(Component, Serialize, Deserialize)]
 pub struct Buffer(pub Solution);
 
 /// How much a dispenser gives per press. Persists between visits.
-#[derive(Component)]
+#[derive(Component, Serialize, Deserialize)]
 pub struct DispenseAmount(pub Units);
+
+/// Marks a container that has held test-bench stock.
+///
+/// The bench is for working things out, not for filling orders — without this
+/// it would simply be a second dispenser, and experimenting would carry no
+/// cost at all.
+#[derive(Component)]
+pub struct TestBenchStock;
 
 impl Default for DispenseAmount {
     fn default() -> Self {
@@ -170,6 +184,12 @@ pub struct BufferTransferRequested {
 pub struct PackageRequested {
     pub machine: Entity,
     pub kind: ContainerKind,
+}
+
+/// Run the loaded sample through the analyzer and work out how it was made.
+#[derive(Message)]
+pub struct AnalyzeRequested {
+    pub machine: Entity,
 }
 
 // ---------------------------------------------------------------------------
@@ -230,11 +250,14 @@ fn handle_machine_interact(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_dispense(
+    mut commands: Commands,
     db: Res<ChemDb>,
     mut requests: MessageReader<DispenseRequested>,
     mut fired: MessageWriter<ReactionsFired>,
     machines: Query<&DispenseAmount>,
+    kinds: Query<&Machine>,
     slotted: Query<(Entity, &InSlot)>,
     mut containers: Query<&mut Container>,
 ) {
@@ -254,6 +277,13 @@ fn handle_dispense(
             fired.write(ReactionsFired {
                 reactions: report.fired_reactions(),
             });
+        }
+
+        // Anything drawn from the test bench is practice stock. Marking the
+        // container rather than the reagent is what makes it survive being
+        // reacted, packaged and carried around.
+        if kinds.get(request.machine).map(|m| m.kind) == Ok(MachineKind::TestBench) {
+            commands.entity(target).insert(TestBenchStock);
         }
     }
 }
@@ -382,6 +412,7 @@ fn handle_eject(
 }
 
 fn handle_empty(
+    mut commands: Commands,
     mut requests: MessageReader<EmptyRequested>,
     slotted: Query<(Entity, &InSlot)>,
     mut containers: Query<&mut Container>,
@@ -392,6 +423,51 @@ fn handle_empty(
         };
         if let Ok(mut container) = containers.get_mut(target) {
             container.solution.clear();
+            // Rinsing it out clears the practice-stock mark too, so a beaker
+            // is not contaminated by association for the rest of the shift.
+            commands.entity(target).remove::<TestBenchStock>();
+        }
+    }
+}
+
+/// Works out the method behind whatever is in the analyzer.
+///
+/// This is the reverse-engineering route into a recipe: get hold of a sample
+/// by any means — a lucky mix, a vial a crew member left behind — and the
+/// machine tells you how it was put together. It is also the anti-softlock, so
+/// an order for something unmakeable is never a dead end.
+fn handle_analyze(
+    db: Res<ChemDb>,
+    mut requests: MessageReader<AnalyzeRequested>,
+    mut fired: MessageWriter<ReactionsFired>,
+    slotted: Query<(Entity, &InSlot)>,
+    containers: Query<&Container>,
+) {
+    for request in requests.read() {
+        let Some(target) = slotted_container(request.machine, &slotted) else {
+            continue;
+        };
+        let Ok(container) = containers.get(target) else {
+            continue;
+        };
+
+        // Any reaction that produces something in the sample is a reaction the
+        // analyzer can account for.
+        let identified: Vec<chem_sim::ReactionId> = db
+            .reactions
+            .iter()
+            .filter(|reaction| {
+                reaction
+                    .product_ids()
+                    .any(|product| container.solution.volume_of(product).is_positive())
+            })
+            .map(|reaction| reaction.id)
+            .collect();
+
+        if !identified.is_empty() {
+            fired.write(ReactionsFired {
+                reactions: identified,
+            });
         }
     }
 }

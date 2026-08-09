@@ -14,11 +14,12 @@ use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, InSlot};
 use crate::crew::{CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{leave_machine, InteractionMode};
+use crate::knowledge::{Knowledge, RecipeDiscovered, HINT_COST};
 use crate::machines::{
-    slotted_container, Buffer, BufferDirection, BufferTransferRequested, DispenseAmount,
-    DispenseRequested, EjectRequested, EmptyRequested, Machine, MachineKind, PackageRequested,
+    slotted_container, AnalyzeRequested, Buffer, BufferDirection, BufferTransferRequested,
+    DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested, Machine, MachineKind,
+    PackageRequested,
 };
-use crate::knowledge::Knowledge;
 use crate::orders::{Order, Shift};
 use crate::player::LocalPlayer;
 use crate::radio::RadioLog;
@@ -54,6 +55,8 @@ impl Plugin for UiPlugin {
                 sync_panel,
                 update_order_queue,
                 update_radio_feed,
+                announce_discoveries,
+                expire_toasts,
             )
                 .chain()
                 .run_if(in_state(AppState::Playing)),
@@ -79,6 +82,8 @@ enum PanelAction {
     ToBuffer(ReagentId, Units),
     ToContainer(ReagentId, Units),
     Package(ContainerKind),
+    Analyze,
+    BuyHint(chem_sim::ReactionId),
     Close,
 }
 
@@ -208,6 +213,9 @@ fn sync_panel(
                         }
                         MachineKind::ChemMaster => {
                             chemmaster_body(panel, &db, buffer, loaded);
+                        }
+                        MachineKind::Analyzer => {
+                            analyzer_body(panel, &db, &knowledge, loaded);
                         }
                         other => {
                             panel.spawn(label(
@@ -347,6 +355,84 @@ fn chemmaster_body(
     });
 }
 
+fn analyzer_body(
+    panel: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    knowledge: &Knowledge,
+    loaded: Option<&Container>,
+) {
+    panel.spawn(label(
+        "Breaks a sample down and works out how it was put together.",
+        13.0,
+        TEXT_DIM,
+    ));
+
+    panel
+        .spawn((section(), BackgroundColor(SECTION_BG)))
+        .with_children(|section| {
+            let Some(container) = loaded else {
+                section.spawn(label(
+                    "No sample loaded. Carry a container over and press E.",
+                    14.0,
+                    TEXT_DIM,
+                ));
+                return;
+            };
+            if container.solution.is_empty() {
+                section.spawn(label("Sample is empty.", 14.0, TEXT_DIM));
+                return;
+            }
+
+            // Percentages rather than raw units: composition is what the
+            // machine measures, and it is what identifies a mixture.
+            let total = container.solution.total_volume().as_f32().max(0.01);
+            for (reagent, quantity) in container.solution.iter() {
+                let share = quantity.as_f32() / total * 100.0;
+                section.spawn(label(
+                    format!(
+                        "{:<16} {:>8}   {:>5.1}%",
+                        db.reagents.get(reagent).name,
+                        quantity.to_string(),
+                        share
+                    ),
+                    14.0,
+                    TEXT,
+                ));
+            }
+
+            let unknown: Vec<&str> = db
+                .reactions
+                .iter()
+                .filter(|reaction| !knowledge.is_known(reaction.id))
+                .filter(|reaction| {
+                    reaction
+                        .product_ids()
+                        .any(|id| container.solution.volume_of(id).is_positive())
+                })
+                .map(|reaction| reaction.key.as_str())
+                .collect();
+
+            section.spawn(row()).with_children(|row| {
+                row.spawn(button("Identify method", PanelAction::Analyze));
+                row.spawn(button("Eject", PanelAction::Eject));
+            });
+
+            section.spawn(label(
+                if unknown.is_empty() {
+                    "Nothing here you have not already written up.".to_string()
+                } else {
+                    format!("{} unrecorded method(s) present.", unknown.len())
+                },
+                13.0,
+                if unknown.is_empty() {
+                    TEXT_DIM
+                } else {
+                    Color::srgb(0.70, 0.85, 0.60)
+                },
+            ));
+        });
+}
+
 /// Shared contents readout for whatever is sitting in the machine's slot.
 fn container_readout(
     panel: &mut ChildSpawnerCommands,
@@ -434,9 +520,10 @@ fn spawn_reference_book(commands: &mut Commands, db: &ChemDb, knowledge: &Knowle
                     });
                     book.spawn(label(
                         format!(
-                            "{} of {} recipes recorded   ·   B or Esc to close",
+                            "{} of {} recipes recorded   ·   {} research   ·   B or Esc to close",
                             knowledge.known_count(),
-                            db.reactions.len()
+                            db.reactions.len(),
+                            knowledge.research_points
                         ),
                         13.0,
                         TEXT_DIM,
@@ -493,6 +580,29 @@ fn spawn_reference_book(commands: &mut Commands, db: &ChemDb, knowledge: &Knowle
                                             13.0,
                                             Color::srgb(0.70, 0.78, 0.62),
                                         ));
+                                    }
+                                    // Only offer the purchase when it can
+                                    // actually go through; a button that
+                                    // silently does nothing is worse than none.
+                                    if knowledge.hint_available(db, reaction.id) {
+                                        let affordable =
+                                            knowledge.research_points >= HINT_COST;
+                                        entry.spawn(row()).with_children(|row| {
+                                            if affordable {
+                                                row.spawn(button(
+                                                    format!("Study further  ({HINT_COST} research)"),
+                                                    PanelAction::BuyHint(reaction.id),
+                                                ));
+                                            } else {
+                                                row.spawn(label(
+                                                    format!(
+                                                        "Needs {HINT_COST} research to study further."
+                                                    ),
+                                                    12.0,
+                                                    TEXT_DIM,
+                                                ));
+                                            }
+                                        });
                                     }
                                 }
                             });
@@ -672,6 +782,72 @@ fn update_order_queue(
     let mut readout = readout.into_inner();
     if readout.0 != summary {
         readout.0 = summary;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Discovery toast
+// ---------------------------------------------------------------------------
+
+#[derive(Component)]
+struct DiscoveryToast(Timer);
+
+/// A brief banner when a recipe is worked out.
+///
+/// The radio carries it too, but the radio is a slow feed you might be looking
+/// away from — and discovering a recipe is the one moment that deserves to
+/// interrupt.
+fn announce_discoveries(
+    mut commands: Commands,
+    mut discovered: MessageReader<RecipeDiscovered>,
+    existing: Query<Entity, With<DiscoveryToast>>,
+) {
+    for event in discovered.read() {
+        for toast in &existing {
+            commands.entity(toast).despawn();
+        }
+        commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: percent(22),
+                    width: percent(100),
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                },
+                DiscoveryToast(Timer::from_seconds(4.5, TimerMode::Once)),
+            ))
+            .with_children(|toast| {
+                toast
+                    .spawn((
+                        Node {
+                            flex_direction: FlexDirection::Column,
+                            align_items: AlignItems::Center,
+                            padding: UiRect::axes(px(22), px(12)),
+                            row_gap: px(3),
+                            border_radius: BorderRadius::all(px(6)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.10, 0.20, 0.13, 0.94)),
+                    ))
+                    .with_children(|card| {
+                        card.spawn(label("RECIPE RECORDED", 12.0, Color::srgb(0.62, 0.86, 0.62)));
+                        card.spawn(label(event.name.clone(), 20.0, TEXT));
+                        card.spawn(label("Added to your reference book (B)", 12.0, TEXT_DIM));
+                    });
+            });
+    }
+}
+
+fn expire_toasts(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut toasts: Query<(Entity, &mut DiscoveryToast)>,
+) {
+    for (entity, mut toast) in &mut toasts {
+        if toast.0.tick(time.delta()).just_finished() {
+            commands.entity(entity).despawn();
+        }
     }
 }
 
@@ -868,18 +1044,40 @@ fn handle_panel_clicks(
     mut empty: MessageWriter<EmptyRequested>,
     mut transfer: MessageWriter<BufferTransferRequested>,
     mut package: MessageWriter<PackageRequested>,
+    mut analyze: MessageWriter<AnalyzeRequested>,
+    mut knowledge: ResMut<Knowledge>,
+    db: Res<ChemDb>,
 ) {
     let Some((player, mut mode)) = modes.iter_mut().next() else {
         return;
     };
-    let InteractionMode::UsingMachine(machine) = *mode else {
-        return;
+    let open_machine = match *mode {
+        InteractionMode::UsingMachine(machine) => Some(machine),
+        _ => None,
     };
 
     for (interaction, action) in &buttons {
         if *interaction != Interaction::Pressed {
             continue;
         }
+
+        // Actions available without a machine panel open: the book's own
+        // controls, and closing whatever is up.
+        match action {
+            PanelAction::BuyHint(reaction) => {
+                knowledge.buy_hint(&db, *reaction);
+                continue;
+            }
+            PanelAction::Close => {
+                leave_machine(player, &mut mode, &mut machines);
+                return;
+            }
+            _ => {}
+        }
+
+        let Some(machine) = open_machine else {
+            continue;
+        };
         match action {
             PanelAction::SetAmount(units) => {
                 if let Ok(mut amount) = amounts.get_mut(machine) {
@@ -920,10 +1118,11 @@ fn handle_panel_clicks(
                     kind: *kind,
                 });
             }
-            PanelAction::Close => {
-                leave_machine(player, &mut mode, &mut machines);
-                return;
+            PanelAction::Analyze => {
+                analyze.write(AnalyzeRequested { machine });
             }
+            // Handled above, before the machine guard.
+            PanelAction::BuyHint(_) | PanelAction::Close => {}
         }
     }
 }

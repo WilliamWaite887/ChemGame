@@ -152,38 +152,52 @@ impl fmt::Debug for Units {
     }
 }
 
-// Data files write plain numbers (`15` or `15.5`), not raw hundredths.
+struct UnitsVisitor;
+
+impl Visitor<'_> for UnitsVisitor {
+    type Value = Units;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a reagent quantity, e.g. 15 or 0.5")
+    }
+
+    fn visit_f64<E: de::Error>(self, v: f64) -> Result<Units, E> {
+        Ok(Units::from_f64(v))
+    }
+
+    fn visit_i64<E: de::Error>(self, v: i64) -> Result<Units, E> {
+        Ok(Units::from_f64(v as f64))
+    }
+
+    fn visit_u64<E: de::Error>(self, v: u64) -> Result<Units, E> {
+        Ok(Units::from_f64(v as f64))
+    }
+}
+
+// Two audiences, two encodings.
+//
+// Data files are hand-written, so there a quantity is a plain number and may
+// be `15` or `15.0` — which needs `deserialize_any` to accept either. Binary
+// formats like postcard (what replication uses) are not self-describing and
+// cannot answer `deserialize_any` at all, so over the wire the raw hundredths
+// go across as a plain `i32`. That is both decodable and exact.
 impl Serialize for Units {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_f64(self.as_f64())
+        if serializer.is_human_readable() {
+            serializer.serialize_f64(self.as_f64())
+        } else {
+            serializer.serialize_i32(self.0)
+        }
     }
 }
 
 impl<'de> Deserialize<'de> for Units {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct UnitsVisitor;
-
-        impl Visitor<'_> for UnitsVisitor {
-            type Value = Units;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a reagent quantity, e.g. 15 or 0.5")
-            }
-
-            fn visit_f64<E: de::Error>(self, v: f64) -> Result<Units, E> {
-                Ok(Units::from_f64(v))
-            }
-
-            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Units, E> {
-                Ok(Units::from_f64(v as f64))
-            }
-
-            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Units, E> {
-                Ok(Units::from_f64(v as f64))
-            }
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(UnitsVisitor)
+        } else {
+            i32::deserialize(deserializer).map(Units)
         }
-
-        deserializer.deserialize_any(UnitsVisitor)
     }
 }
 

@@ -303,6 +303,8 @@ fn spawn_machine(
             },
             Machine::new(kind),
             Interactable::new(kind.label()),
+            // Occupancy and buffer contents must match for both chemists.
+            bevy_replicon::prelude::Replicated,
         ))
         .id();
 

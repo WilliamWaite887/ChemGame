@@ -5,7 +5,7 @@
 //! anything cleverer would be machinery with nothing to solve.
 
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::lab::{COUNTER_SPOT, DOOR_MAX_X, DOOR_MIN_X};
 use crate::AppState;
@@ -32,7 +32,7 @@ pub struct CrewDef {
     pub color: [f32; 3],
 }
 
-#[derive(Component, Clone)]
+#[derive(Component, Clone, Serialize, Deserialize)]
 pub struct CrewMember {
     pub name: String,
     pub role: String,
@@ -135,6 +135,8 @@ pub fn spawn_crew_member(
             Mesh3d(assets.body.clone()),
             MeshMaterial3d(uniform),
             Transform::from_translation(position),
+            // The route stays server-side; clients see the resulting Transform.
+            bevy_replicon::prelude::Replicated,
         ))
         .id();
 

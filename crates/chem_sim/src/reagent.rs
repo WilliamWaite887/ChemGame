@@ -10,7 +10,13 @@ use serde::{Deserialize, Serialize};
 use crate::units::Units;
 
 /// An interned reagent handle. Cheap to copy, compare and sort.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+///
+/// Serialisable because solutions cross the wire in co-op. The id is a
+/// position in the loaded reagent list, so both ends must agree on the data
+/// files — which is enforced by replicon's protocol hash, not by us.
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize,
+)]
 pub struct ReagentId(pub u32);
 
 impl ReagentId {

@@ -12,11 +12,13 @@ use rand::prelude::*;
 use serde::Deserialize;
 
 use crate::chem_data::ChemDb;
-use crate::containers::{Container, ContainerKind, HeldBy};
+use crate::containers::{spawn_container, Container, ContainerAssets, ContainerKind, HeldBy};
 use crate::crew::{spawn_crew_member, CrewAssets, CrewDef, CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{InteractRequested, Interactable};
-use crate::knowledge::Knowledge;
-use crate::radio::{announce_request, RadioLog};
+use crate::knowledge::{Knowledge, RESEARCH_PER_SUCCESS};
+use crate::lab::COUNTER_SPOT;
+use crate::machines::TestBenchStock;
+use crate::radio::{announce_request, channel_for, RadioEntry, RadioLog};
 use crate::AppState;
 
 /// How often the crew ask for something just past what the chemist knows.
@@ -25,6 +27,9 @@ use crate::AppState;
 /// a wall. A minority of stretch requests is what sends the player to the
 /// bench to work something out.
 const STRETCH_ORDER_CHANCE: f64 = 0.25;
+
+/// How often a clean delivery earns a sample vial of something unfamiliar.
+const SAMPLE_VIAL_CHANCE: f64 = 0.35;
 
 pub struct OrderPlugin;
 
@@ -44,6 +49,7 @@ impl Plugin for OrderPlugin {
                 generate_orders,
                 expire_orders,
                 handle_delivery,
+                leave_sample_vials,
             )
                 .chain()
                 .run_if(in_state(AppState::Playing)),
@@ -389,20 +395,36 @@ fn handle_delivery(
     db: Res<ChemDb>,
     mut requests: MessageReader<InteractRequested>,
     mut shift: ResMut<Shift>,
+    mut radio: ResMut<RadioLog>,
     mut resolved: MessageWriter<OrderResolved>,
     mut crew: Query<(&CrewMember, &Order, &mut CrewRoute)>,
-    containers: Query<(Entity, &Container, &HeldBy)>,
+    containers: Query<(Entity, &Container, &HeldBy, Has<TestBenchStock>)>,
+    mut knowledge: ResMut<Knowledge>,
 ) {
     for request in requests.read() {
         let Ok((member, order, mut route)) = crew.get_mut(request.target) else {
             continue;
         };
-        let Some((container_entity, container, _)) = containers
+        let Some((container_entity, container, _, test_stock)) = containers
             .iter()
-            .find(|(_, _, holder)| holder.0 == request.player)
+            .find(|(_, _, holder, _)| holder.0 == request.player)
         else {
             continue;
         };
+
+        // Practice stock is refused at the counter rather than graded. The
+        // order stays open, so this is a correction rather than a punishment.
+        if test_stock {
+            radio.push(RadioEntry {
+                channel: channel_for(&member.role),
+                text: format!(
+                    "{}: that's off the test bench. I need the real thing.",
+                    member.name
+                ),
+                good: false,
+            });
+            continue;
+        }
 
         let outcome = grade(
             order.reagent,
@@ -421,6 +443,7 @@ fn handle_delivery(
 
         if outcome.is_good() {
             shift.succeeded += 1;
+            knowledge.award_research(RESEARCH_PER_SUCCESS);
         } else {
             shift.botched += 1;
         }
@@ -441,6 +464,73 @@ fn handle_delivery(
             .remove::<Order>()
             .remove::<Interactable>();
         route.leave();
+    }
+}
+
+/// Grateful crew occasionally leave a sample of something else they use.
+///
+/// Run through the analyzer it yields a recipe, which is the route into
+/// anything the player cannot yet stumble onto by mixing. Tying it to clean
+/// deliveries means the game opens up in response to doing the job well.
+#[allow(clippy::too_many_arguments)]
+fn leave_sample_vials(
+    mut commands: Commands,
+    db: Res<ChemDb>,
+    knowledge: Res<Knowledge>,
+    assets: Option<Res<ContainerAssets>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut resolved: MessageReader<OrderResolved>,
+    mut radio: ResMut<RadioLog>,
+) {
+    let Some(assets) = assets else {
+        resolved.clear();
+        return;
+    };
+    let mut rng = rand::rng();
+
+    for report in resolved.read() {
+        if report.outcome != Outcome::Success || !rng.random_bool(SAMPLE_VIAL_CHANCE) {
+            continue;
+        }
+
+        let unknown: Vec<_> = db
+            .reactions
+            .iter()
+            .filter(|reaction| !knowledge.is_known(reaction.id))
+            .collect();
+        let Some(recipe) = unknown.choose(&mut rng) else {
+            continue;
+        };
+        let Some(&(product, _)) = recipe.products.first() else {
+            continue;
+        };
+
+        let vial = spawn_container(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &assets,
+            ContainerKind::Bottle,
+            Vec3::new(COUNTER_SPOT.x, 1.22, 2.9),
+        );
+        let amount = ContainerKind::Bottle.capacity();
+        commands.queue(move |world: &mut World| {
+            if let Some(mut container) = world.get_mut::<Container>(vial) {
+                let _ = container.solution.add(product, amount);
+            }
+        });
+
+        let name = db.reagents.get(product).name.clone();
+        radio.push(RadioEntry {
+            channel: channel_for(&report.role),
+            text: format!(
+                "{}: left you a sample of {} on the counter. Might be useful.",
+                report.name, name
+            ),
+            good: true,
+        });
+        info!("{} left a sample of {}", report.name, name);
     }
 }
 
