@@ -12,13 +12,19 @@ use chem_sim::{ReagentId, Units};
 
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, InSlot};
+use crate::crew::{CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{leave_machine, InteractionMode};
 use crate::machines::{
     slotted_container, Buffer, BufferDirection, BufferTransferRequested, DispenseAmount,
     DispenseRequested, EjectRequested, EmptyRequested, Machine, MachineKind, PackageRequested,
 };
+use crate::orders::{Order, Shift};
 use crate::player::LocalPlayer;
 use crate::AppState;
+
+/// How many orders the queue can show at once. Matches `max_active` in
+/// `station.orders.ron`.
+const ORDER_SLOTS: usize = 3;
 
 const PANEL_BG: Color = Color::srgba(0.07, 0.08, 0.10, 0.97);
 const SECTION_BG: Color = Color::srgba(0.12, 0.13, 0.16, 0.9);
@@ -32,12 +38,18 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            (handle_panel_clicks, button_feedback, sync_panel)
-                .chain()
-                .run_if(in_state(AppState::Playing)),
-        );
+        app.add_systems(OnEnter(AppState::Playing), spawn_order_queue)
+            .add_systems(
+                Update,
+                (
+                    handle_panel_clicks,
+                    button_feedback,
+                    sync_panel,
+                    update_order_queue,
+                )
+                    .chain()
+                    .run_if(in_state(AppState::Playing)),
+            );
     }
 }
 
@@ -349,6 +361,158 @@ fn container_readout(
                 }
             });
         });
+}
+
+// ---------------------------------------------------------------------------
+// Order queue
+// ---------------------------------------------------------------------------
+
+#[derive(Component)]
+struct OrderSlot(usize);
+
+#[derive(Component)]
+struct ShiftReadout;
+
+/// What the most urgent requester actually said.
+#[derive(Component)]
+struct PleaLine;
+
+// The disjointness filters are noisy inline; naming them keeps the queue
+// system's signature readable.
+type ShiftText<'w, 's> = Single<
+    'w,
+    's,
+    &'static mut Text,
+    (With<ShiftReadout>, Without<OrderSlot>, Without<PleaLine>),
+>;
+type PleaText<'w, 's> = Single<
+    'w,
+    's,
+    &'static mut Text,
+    (With<PleaLine>, Without<OrderSlot>, Without<ShiftReadout>),
+>;
+
+/// Fixed slots, filled in each frame.
+///
+/// The queue shows a live countdown, so rebuilding it on change would mean
+/// rebuilding every frame. Writing into pre-spawned rows keeps it to a couple
+/// of string comparisons instead.
+fn spawn_order_queue(mut commands: Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: px(16),
+                right: px(16),
+                width: px(310),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(px(12)),
+                row_gap: px(6),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.06, 0.07, 0.09, 0.82)),
+        ))
+        .with_children(|queue| {
+            queue.spawn(label("ORDERS", 13.0, TEXT_DIM));
+            for index in 0..ORDER_SLOTS {
+                queue.spawn((
+                    Text::new(""),
+                    TextFont::from_font_size(14.0),
+                    TextColor(TEXT),
+                    OrderSlot(index),
+                ));
+            }
+            queue.spawn((
+                Text::new(""),
+                TextFont::from_font_size(13.0),
+                TextColor(Color::srgb(0.72, 0.78, 0.70)),
+                PleaLine,
+            ));
+            queue.spawn((
+                Text::new(""),
+                TextFont::from_font_size(13.0),
+                TextColor(TEXT_DIM),
+                ShiftReadout,
+            ));
+        });
+}
+
+fn update_order_queue(
+    db: Res<ChemDb>,
+    shift: Res<Shift>,
+    orders: Query<(&CrewMember, &Order, &CrewRoute)>,
+    mut slots: Query<(&OrderSlot, &mut Text, &mut TextColor), Without<ShiftReadout>>,
+    readout: ShiftText,
+    plea_line: PleaText,
+) {
+    // Most urgent first, so the one about to expire is always at the top.
+    let mut pending: Vec<(&CrewMember, &Order, &CrewRoute)> = orders.iter().collect();
+    pending.sort_by(|a, b| {
+        a.1.timer
+            .remaining_secs()
+            .total_cmp(&b.1.timer.remaining_secs())
+    });
+
+    for (slot, mut text, mut color) in &mut slots {
+        let line = pending.get(slot.0).map(|(member, order, route)| {
+            let reagent = &db.reagents.get(order.reagent).name;
+            match route.phase {
+                CrewPhase::Arriving => {
+                    format!("{}\n  {} {}  ·  on the way", member.name, order.amount, reagent)
+                }
+                _ => {
+                    let remaining = order.timer.remaining_secs().max(0.0) as u32;
+                    format!(
+                        "{}\n  {} {}  ·  {}:{:02}",
+                        member.name,
+                        order.amount,
+                        reagent,
+                        remaining / 60,
+                        remaining % 60
+                    )
+                }
+            }
+        });
+
+        let urgent = pending
+            .get(slot.0)
+            .map(|(_, order, _)| order.timer.remaining_secs() < 30.0)
+            .unwrap_or(false);
+        let wanted = if urgent {
+            Color::srgb(0.95, 0.55, 0.45)
+        } else {
+            TEXT
+        };
+        if color.0 != wanted {
+            color.0 = wanted;
+        }
+
+        let line = line.unwrap_or_default();
+        if text.0 != line {
+            text.0 = line;
+        }
+    }
+
+    // Only the most urgent request gets its words shown; three at once is a
+    // wall of text nobody reads mid-shift.
+    let plea = pending
+        .first()
+        .map(|(_, order, _)| format!("\u{201c}{}\u{201d}", order.plea))
+        .unwrap_or_default();
+    let mut plea_line = plea_line.into_inner();
+    if plea_line.0 != plea {
+        plea_line.0 = plea;
+    }
+
+    let summary = format!(
+        "delivered {}   botched {}   reputation {:+}",
+        shift.succeeded, shift.botched, shift.reputation
+    );
+    let mut readout = readout.into_inner();
+    if readout.0 != summary {
+        readout.0 = summary;
+    }
 }
 
 // ---------------------------------------------------------------------------

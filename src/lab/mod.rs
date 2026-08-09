@@ -18,6 +18,12 @@ pub const ROOM_HEIGHT: f32 = 3.2;
 
 const WALL_THICKNESS: f32 = 0.25;
 
+/// Doorway in the south wall, in world x.
+pub const DOOR_MIN_X: f32 = 5.2;
+pub const DOOR_MAX_X: f32 = 6.6;
+/// Where crew queue up to collect an order.
+pub const COUNTER_SPOT: Vec3 = Vec3::new(3.2, 0.0, 3.9);
+
 pub struct LabPlugin;
 
 impl Plugin for LabPlugin {
@@ -137,6 +143,14 @@ fn spawn_shell(
     );
 
     let half_height = ROOM_HEIGHT * 0.5;
+    let south_z = ROOM_HALF_Z + WALL_THICKNESS * 0.5;
+    let east_edge = span_x * 0.5;
+
+    // The south wall is split to leave a doorway; crew walk in through it to
+    // collect their orders.
+    let west_span = DOOR_MIN_X + east_edge;
+    let east_span = east_edge - DOOR_MAX_X;
+
     let walls = [
         // (center, size)
         (
@@ -144,8 +158,12 @@ fn spawn_shell(
             Vec3::new(span_x, ROOM_HEIGHT, WALL_THICKNESS),
         ),
         (
-            Vec3::new(0.0, half_height, ROOM_HALF_Z + WALL_THICKNESS * 0.5),
-            Vec3::new(span_x, ROOM_HEIGHT, WALL_THICKNESS),
+            Vec3::new((DOOR_MIN_X - east_edge) * 0.5, half_height, south_z),
+            Vec3::new(west_span, ROOM_HEIGHT, WALL_THICKNESS),
+        ),
+        (
+            Vec3::new((DOOR_MAX_X + east_edge) * 0.5, half_height, south_z),
+            Vec3::new(east_span, ROOM_HEIGHT, WALL_THICKNESS),
         ),
         (
             Vec3::new(-ROOM_HALF_X - WALL_THICKNESS * 0.5, half_height, 0.0),
@@ -236,14 +254,15 @@ fn spawn_equipment(
         Vec3::X,
     );
 
-    // Delivery window on the south wall, opposite the machines.
+    // Delivery counter, stood off the wall so crew can reach the far side of
+    // it after coming through the door.
     spawn_machine(
         &mut commands,
         &mut materials,
         &cube,
         &bench,
         MachineKind::DeliveryWindow,
-        Vec3::new(3.2, 0.0, ROOM_HALF_Z - 0.4),
+        Vec3::new(3.2, 0.0, 2.9),
         Vec3::new(3.0, 1.15, 0.7),
         Vec3::NEG_Z,
     );

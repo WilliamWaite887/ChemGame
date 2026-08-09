@@ -1,0 +1,58 @@
+// Order generation and the requests crew can make.
+//
+// `amounts` are the quantities a requester might ask for, in units. Keep them
+// achievable with one or two beakers — an order nobody can physically carry is
+// just a guaranteed failure.
+(
+    first_order_delay: 8.0,
+    gap_seconds: (32.0, 58.0),
+    patience_seconds: (135.0, 230.0),
+    max_active: 3,
+    requests: [
+        (
+            reagent: "bicaridine",
+            amounts: [20, 30, 40],
+            plea: "Got a crewman bleeding badly down here. Bicaridine, quick as you can.",
+        ),
+        (
+            reagent: "kelotane",
+            amounts: [20, 30],
+            plea: "Welder burn. Nothing dramatic. Some kelotane would sort it.",
+        ),
+        (
+            reagent: "dermaline",
+            amounts: [15, 20, 30],
+            plea: "Plasma fire in engineering, burns are deep. Need dermaline.",
+        ),
+        (
+            reagent: "dylovene",
+            amounts: [20, 30],
+            plea: "Someone's been poisoned in the bar. Dylovene, please.",
+        ),
+        (
+            reagent: "inaprovaline",
+            amounts: [30, 45],
+            plea: "This one's crashing. Inaprovaline to hold them steady.",
+        ),
+        (
+            reagent: "tricordrazine",
+            amounts: [30, 40],
+            plea: "Bit of everything wrong with this patient. Tricordrazine.",
+        ),
+        (
+            reagent: "dexalin",
+            amounts: [20, 30],
+            plea: "Hull breach on deck two, we have asphyxiation cases. Dexalin.",
+        ),
+        (
+            reagent: "hyronalin",
+            amounts: [20, 30],
+            plea: "Walked past a leaking container. Mild dose. Hyronalin should do.",
+        ),
+        (
+            reagent: "arithrazine",
+            amounts: [20, 30],
+            plea: "Containment failure. This is a serious dose. Arithrazine, now.",
+        ),
+    ],
+)

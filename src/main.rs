@@ -2,9 +2,11 @@
 
 mod chem_data;
 mod containers;
+mod crew;
 mod interaction;
 mod lab;
 mod machines;
+mod orders;
 mod player;
 mod ui;
 
@@ -25,6 +27,8 @@ fn main() {
             lab::LabPlugin,
             machines::MachinePlugin,
             containers::ContainerPlugin,
+            crew::CrewPlugin,
+            orders::OrderPlugin,
             player::PlayerPlugin,
             interaction::InteractionPlugin,
             ui::UiPlugin,

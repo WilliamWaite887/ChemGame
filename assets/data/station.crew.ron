@@ -1,0 +1,12 @@
+// Crew who come to the window. `color` tints their uniform so departments are
+// recognisable across the room.
+[
+    (name: "Dr. Vance",       role: "Medical",     color: (0.35, 0.62, 0.92)),
+    (name: "Nurse Okonkwo",   role: "Medical",     color: (0.42, 0.74, 0.86)),
+    (name: "Officer Reyes",   role: "Security",    color: (0.80, 0.32, 0.30)),
+    (name: "Warden Bex",      role: "Security",    color: (0.72, 0.26, 0.36)),
+    (name: "Tech Lindqvist",  role: "Engineering", color: (0.92, 0.72, 0.25)),
+    (name: "Miner Sato",      role: "Cargo",       color: (0.64, 0.46, 0.24)),
+    (name: "Botanist Ivy",    role: "Service",     color: (0.45, 0.76, 0.40)),
+    (name: "Chef Dubois",     role: "Service",     color: (0.86, 0.84, 0.78)),
+]
