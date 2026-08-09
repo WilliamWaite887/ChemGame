@@ -114,10 +114,19 @@ fn spawn_host_chemist(
     });
 }
 
-/// Gives every newly connected client a chemist of their own.
+/// Gives every newly joined client a chemist of their own.
+///
+/// Keyed on `AuthorizedClient`, not `ConnectedClient`. Replicon's default
+/// auth waits for the client's protocol hash to match, and drops targeted
+/// messages until it does — so spawning on connect means the chemist exists
+/// but the client is never told which one is theirs.
+///
+/// The protocol check is worth keeping: reagent ids are positions in the data
+/// files, so a client running different chemistry would silently mis-read
+/// every solution.
 fn spawn_joining_chemists(
     mut commands: Commands,
-    joined: Query<Entity, Added<ConnectedClient>>,
+    joined: Query<Entity, Added<AuthorizedClient>>,
     existing: Query<(), With<Player>>,
     mut assign: MessageWriter<ToClients<YouAreChemist>>,
 ) {

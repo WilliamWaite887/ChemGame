@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use bevy::prelude::*;
+use bevy_replicon::prelude::*;
 use chem_sim::{ChemData, ReactionId, ReagentId};
 use serde::{Deserialize, Serialize};
 
@@ -38,15 +39,19 @@ pub struct KnowledgePlugin;
 impl Plugin for KnowledgePlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<RecipeDiscovered>()
+            .add_server_message::<KnowledgeSync>(Channel::Ordered)
             .add_systems(OnEnter(AppState::Playing), initialise_knowledge)
             .add_systems(
                 Update,
-                (learn_from_experiments, persist_knowledge)
-                    .chain()
-                    .run_if(in_state(AppState::Playing))
+                (
                     // The shared notebook belongs to the lab, so the server
                     // owns it and only the server writes the save file.
-                    .run_if(in_state(bevy_replicon::prelude::ClientState::Disconnected)),
+                    (learn_from_experiments, persist_knowledge, broadcast_knowledge)
+                        .chain()
+                        .run_if(in_state(ClientState::Disconnected)),
+                    apply_knowledge.run_if(in_state(ClientState::Connected)),
+                )
+                    .run_if(in_state(AppState::Playing)),
             );
     }
 }
@@ -252,7 +257,12 @@ impl Knowledge {
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
+/// A complete snapshot of what the lab knows.
+///
+/// Doubles as the save format and the co-op sync payload — they want exactly
+/// the same thing, and having one representation means a save and a joining
+/// client can never disagree about what "known" means.
+#[derive(Serialize, Deserialize, Default, Clone)]
 struct SaveData {
     known: Vec<String>,
     #[serde(default)]
@@ -346,6 +356,40 @@ fn learn_from_experiments(
             });
             discovered.write(RecipeDiscovered { name });
         }
+    }
+}
+
+/// The whole notebook, pushed to clients whenever it changes.
+///
+/// Sent wholesale rather than as deltas: it is a few dozen short strings, and
+/// a snapshot cannot drift out of step the way an incremental stream can if a
+/// client joins mid-shift or misses an update.
+#[derive(Message, Serialize, Deserialize, Clone)]
+pub struct KnowledgeSync(SaveData);
+
+fn broadcast_knowledge(
+    db: Res<ChemDb>,
+    knowledge: Res<Knowledge>,
+    mut outgoing: MessageWriter<ToClients<KnowledgeSync>>,
+) {
+    if !knowledge.is_changed() {
+        return;
+    }
+    outgoing.write(ToClients {
+        // The host already holds the authoritative copy; echoing to it would
+        // just overwrite the original with a copy of itself.
+        targets: SendTargets::CLIENTS_ONLY,
+        message: KnowledgeSync(knowledge.to_save(&db)),
+    });
+}
+
+fn apply_knowledge(
+    db: Res<ChemDb>,
+    mut knowledge: ResMut<Knowledge>,
+    mut incoming: MessageReader<KnowledgeSync>,
+) {
+    for sync in incoming.read() {
+        *knowledge = Knowledge::from_save(&db, sync.0.clone());
     }
 }
 

@@ -9,8 +9,9 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 use bevy_common_assets::ron::RonAssetPlugin;
+use bevy_replicon::prelude::*;
 use rand::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
 use crate::orders::{Outcome, OrderResolved};
@@ -26,11 +27,23 @@ impl Plugin for RadioPlugin {
         app.add_plugins(RonAssetPlugin::<RadioScript>::new(&["radio.ron"]))
             .init_resource::<RadioLog>()
             .init_resource::<PendingBroadcasts>()
+            .add_server_message::<RadioSync>(Channel::Ordered)
             .add_systems(Startup, start_loading)
             .add_systems(
                 Update,
-                (promote_script, queue_reports, deliver_broadcasts)
-                    .chain()
+                (
+                    // Chatter is written once, on the server, so both chemists
+                    // hear the same station rather than two divergent ones.
+                    (
+                        promote_script,
+                        queue_reports,
+                        deliver_broadcasts,
+                        broadcast_radio,
+                    )
+                        .chain()
+                        .run_if(in_state(ClientState::Disconnected)),
+                    apply_radio.run_if(in_state(ClientState::Connected)),
+                )
                     .run_if(in_state(AppState::Playing)),
             );
     }
@@ -59,7 +72,7 @@ struct PendingScript(Handle<RadioScript>);
 struct Script(RadioScript);
 
 /// One line on the feed.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RadioEntry {
     pub channel: String,
     pub text: String,
@@ -198,6 +211,26 @@ fn deliver_broadcasts(
     for entry in due {
         info!("[{}] {}", entry.channel, entry.text);
         log.push(entry);
+    }
+}
+
+/// The visible feed, pushed to clients whenever a line lands.
+#[derive(Message, Serialize, Deserialize, Clone)]
+pub struct RadioSync(Vec<RadioEntry>);
+
+fn broadcast_radio(log: Res<RadioLog>, mut outgoing: MessageWriter<ToClients<RadioSync>>) {
+    if !log.is_changed() {
+        return;
+    }
+    outgoing.write(ToClients {
+        targets: SendTargets::CLIENTS_ONLY,
+        message: RadioSync(log.entries.iter().cloned().collect()),
+    });
+}
+
+fn apply_radio(mut log: ResMut<RadioLog>, mut incoming: MessageReader<RadioSync>) {
+    for sync in incoming.read() {
+        log.entries = sync.0.iter().cloned().collect();
     }
 }
 

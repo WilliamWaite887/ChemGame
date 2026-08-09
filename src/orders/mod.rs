@@ -10,7 +10,7 @@ use bevy_common_assets::ron::RonAssetPlugin;
 use bevy_replicon::prelude::*;
 use chem_sim::{ReagentId, Solution, Units};
 use rand::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
 use crate::containers::{spawn_container, Container, ContainerAssets, ContainerKind, HeldBy};
@@ -42,22 +42,27 @@ impl Plugin for OrderPlugin {
             RonAssetPlugin::<OrderConfig>::new(&["orders.ron"]),
         ))
         .add_message::<OrderResolved>()
+        .add_server_message::<ShiftSync>(Channel::Ordered)
         .init_resource::<Shift>()
         .add_systems(Startup, start_loading)
         .add_systems(
             Update,
             (
-                promote_station_data,
-                generate_orders,
-                expire_orders,
-                handle_delivery,
-                leave_sample_vials,
-            )
-                .chain()
-                .run_if(in_state(AppState::Playing))
                 // Orders, crew and grading are the server's business. A client
                 // sees the crew arrive through replication.
-                .run_if(in_state(ClientState::Disconnected)),
+                (
+                    promote_station_data,
+                    generate_orders,
+                    expire_orders,
+                    handle_delivery,
+                    leave_sample_vials,
+                    broadcast_shift,
+                )
+                    .chain()
+                    .run_if(in_state(ClientState::Disconnected)),
+                apply_shift.run_if(in_state(ClientState::Connected)),
+            )
+                .run_if(in_state(AppState::Playing)),
         );
     }
 }
@@ -195,11 +200,32 @@ pub struct OrderResolved {
     pub outcome: Outcome,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone, Serialize, Deserialize)]
 pub struct Shift {
     pub succeeded: u32,
     pub botched: u32,
     pub reputation: i32,
+}
+
+/// The shift tally, pushed to clients. Both chemists share one score — the
+/// lab succeeds or fails together, which is the point of co-op.
+#[derive(Message, Serialize, Deserialize, Clone)]
+pub struct ShiftSync(Shift);
+
+fn broadcast_shift(shift: Res<Shift>, mut outgoing: MessageWriter<ToClients<ShiftSync>>) {
+    if !shift.is_changed() {
+        return;
+    }
+    outgoing.write(ToClients {
+        targets: SendTargets::CLIENTS_ONLY,
+        message: ShiftSync(shift.clone()),
+    });
+}
+
+fn apply_shift(mut shift: ResMut<Shift>, mut incoming: MessageReader<ShiftSync>) {
+    for sync in incoming.read() {
+        *shift = sync.0.clone();
+    }
 }
 
 /// Decides how a delivery went.
