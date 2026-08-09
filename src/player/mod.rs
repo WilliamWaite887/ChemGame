@@ -28,7 +28,7 @@ impl Plugin for PlayerPlugin {
         app.add_systems(OnEnter(AppState::Playing), (spawn_local_player, grab_cursor))
             .add_systems(
                 Update,
-                (toggle_cursor, mouse_look, movement)
+                (mouse_look, movement)
                     .chain()
                     .run_if(in_state(AppState::Playing)),
             );
@@ -79,20 +79,6 @@ fn spawn_local_player(mut commands: Commands) {
 fn grab_cursor(mut cursor: Single<&mut CursorOptions>) {
     cursor.visible = false;
     cursor.grab_mode = CursorGrabMode::Locked;
-}
-
-fn toggle_cursor(
-    mut cursor: Single<&mut CursorOptions>,
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-) {
-    if keys.just_pressed(KeyCode::Escape) {
-        cursor.visible = true;
-        cursor.grab_mode = CursorGrabMode::None;
-    } else if mouse.just_pressed(MouseButton::Left) && cursor.grab_mode == CursorGrabMode::None {
-        cursor.visible = false;
-        cursor.grab_mode = CursorGrabMode::Locked;
-    }
 }
 
 fn mouse_look(

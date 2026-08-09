@@ -8,8 +8,9 @@ edition = "2021"
 
 [dependencies]
 chem_sim = { path = "crates/chem_sim" }
-ron = "0.8"
 bevy = "0.19"
+bevy_common_assets = { version = "0.17.0", features = ["ron"] }
+serde = { version = "1.0.229", features = ["derive"] }
 
 [features]
 # Links bevy dynamically, which cuts iteration builds down a lot. Off by

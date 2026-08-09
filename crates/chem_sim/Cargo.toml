@@ -8,4 +8,6 @@ edition = "2021"
 # App, and a dedicated server can run it with no renderer.
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-ron = "0.8"
+# Kept in step with the version bevy_common_assets uses, so the game and the
+# tests parse the data files with exactly the same parser.
+ron = "0.11"

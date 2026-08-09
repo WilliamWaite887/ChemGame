@@ -5,8 +5,8 @@ use std::collections::HashSet;
 
 use chem_sim::{resolve, ChemData, ReagentId, Solution, Units};
 
-const REAGENTS_RON: &str = include_str!("../../../assets/data/reagents.ron");
-const REACTIONS_RON: &str = include_str!("../../../assets/data/reactions.ron");
+const REAGENTS_RON: &str = include_str!("../../../assets/data/chem.reagents.ron");
+const REACTIONS_RON: &str = include_str!("../../../assets/data/chem.reactions.ron");
 
 /// The recipes the player starts the game knowing.
 const STARTING_RECIPES: [&str; 3] = ["inaprovaline", "dylovene", "kelotane"];

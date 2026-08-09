@@ -5,8 +5,10 @@
 
 use bevy::prelude::*;
 
+use chem_sim::{Solution, Units};
+
 use crate::interaction::Interactable;
-use crate::machines::{Machine, MachineKind};
+use crate::machines::{Buffer, ContainerSlot, DispenseAmount, Machine, MachineKind};
 use crate::AppState;
 
 /// Room interior runs from `-HALF` to `+HALF` on each axis.
@@ -284,6 +286,28 @@ fn spawn_machine(
             Interactable::new(kind.label()),
         ))
         .id();
+
+    // Equipment-specific fittings. The slot offset puts a loaded beaker on top
+    // of the machine, nudged towards the face the player approaches from.
+    let slot = ContainerSlot {
+        offset: Vec3::Y * (size.y * 0.5 + 0.07) + facing * 0.18,
+    };
+    match kind {
+        MachineKind::Dispenser | MachineKind::TestBench => {
+            commands
+                .entity(body)
+                .insert((slot, DispenseAmount::default()));
+        }
+        MachineKind::ChemMaster => {
+            commands
+                .entity(body)
+                .insert((slot, Buffer(Solution::new(Units::whole(300)))));
+        }
+        MachineKind::Grinder | MachineKind::Analyzer => {
+            commands.entity(body).insert(slot);
+        }
+        MachineKind::DeliveryWindow => {}
+    }
 
     // The screen is a separate unparented entity rather than a child: children
     // inherit the body's non-uniform scale, which would squash it.

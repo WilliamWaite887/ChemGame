@@ -185,6 +185,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -342,12 +348,6 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
-
-[[package]]
-name = "base64"
-version = "0.21.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
 name = "base64"
@@ -601,6 +601,21 @@ dependencies = [
  "serde",
  "thiserror 2.0.20",
  "wgpu-types",
+]
+
+[[package]]
+name = "bevy_common_assets"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b9a9509ff29e5db89e1697c047fbbdc55208c8c3d07a494b013cc96814fcddb"
+dependencies = [
+ "anyhow",
+ "bevy_app",
+ "bevy_asset",
+ "bevy_reflect",
+ "ron 0.11.0",
+ "serde",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -883,7 +898,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "84e21ad83b7dc8d456491ea3d50057685d8c4cca8bc52a1b4a7161c86c369842"
 dependencies = [
  "async-lock",
- "base64 0.22.1",
+ "base64",
  "bevy_animation",
  "bevy_app",
  "bevy_asset",
@@ -1988,7 +2003,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 name = "chem_sim"
 version = "0.1.0"
 dependencies = [
- "ron 0.8.1",
+ "ron 0.11.0",
  "serde",
 ]
 
@@ -1997,8 +2012,9 @@ name = "chemgame"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy_common_assets",
  "chem_sim",
- "ron 0.8.1",
+ "serde",
 ]
 
 [[package]]
@@ -4396,14 +4412,15 @@ dependencies = [
 
 [[package]]
 name = "ron"
-version = "0.8.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b91f7eff05f748767f183df4320a63d6936e9c6107d97c9e6bdd9784f4289c94"
+checksum = "db09040cc89e461f1a265139777a2bde7f8d8c67c4936f700c63ce3e2904d468"
 dependencies = [
- "base64 0.21.7",
+ "base64",
  "bitflags 2.13.1",
  "serde",
  "serde_derive",
+ "unicode-ident",
 ]
 
 [[package]]

@@ -6,7 +6,9 @@
 //! actions later instead of rewriting every panel.
 
 use bevy::prelude::*;
+use bevy::window::{CursorGrabMode, CursorOptions};
 
+use crate::containers::HeldBy;
 use crate::lab::MachineScreen;
 use crate::machines::Machine;
 use crate::player::{LocalPlayer, PlayerCamera};
@@ -20,13 +22,85 @@ pub struct InteractionPlugin;
 impl Plugin for InteractionPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<InteractRequested>()
+            .init_resource::<CursorReleased>()
             .add_systems(OnEnter(AppState::Playing), spawn_hud)
             .add_systems(
                 Update,
-                (update_focus, request_interaction, update_prompt)
+                (panel_input, update_focus, request_interaction, update_prompt)
                     .chain()
                     .run_if(in_state(AppState::Playing)),
             );
+    }
+}
+
+/// Set when the player deliberately frees the cursor to leave the window.
+#[derive(Resource, Default)]
+struct CursorReleased(bool);
+
+/// Closes whatever panel `player` has open and releases their claim on it.
+///
+/// Shared by the Escape key and the panel's own Close button so the two can
+/// never drift apart and strand a machine marked in-use forever.
+pub fn leave_machine(
+    player: Entity,
+    mode: &mut InteractionMode,
+    machines: &mut Query<&mut Machine>,
+) {
+    if let InteractionMode::UsingMachine(machine) = *mode {
+        if let Ok(mut machine) = machines.get_mut(machine) {
+            if machine.in_use_by == Some(player) {
+                machine.in_use_by = None;
+            }
+        }
+    }
+    *mode = InteractionMode::Roaming;
+}
+
+/// Owns every path that changes cursor grab, in one system on purpose.
+///
+/// Escape has to mean "close the panel" when one is open and "let go of the
+/// cursor" when not. Split across two systems those race within a frame — the
+/// panel closes and the same keypress immediately frees the cursor.
+fn panel_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    cursor: Single<&mut CursorOptions>,
+    mut released: ResMut<CursorReleased>,
+    mut players: Query<(Entity, &mut InteractionMode), With<LocalPlayer>>,
+    mut machines: Query<&mut Machine>,
+) {
+    let escape = keys.just_pressed(KeyCode::Escape);
+    let mut panel_open = false;
+
+    for (player, mut mode) in &mut players {
+        if mode.is_roaming() {
+            // fall through to the roaming cursor handling below
+        } else if escape {
+            leave_machine(player, &mut mode, &mut machines);
+            released.0 = false;
+            continue;
+        } else {
+            panel_open = true;
+            continue;
+        }
+
+        if escape {
+            released.0 = true;
+        } else if mouse.just_pressed(MouseButton::Left) {
+            released.0 = false;
+        }
+    }
+
+    let want_free = panel_open || released.0;
+    let mut cursor = cursor.into_inner();
+    let is_free = cursor.grab_mode == CursorGrabMode::None;
+    if want_free != is_free {
+        cursor.visible = want_free;
+        cursor.grab_mode = if want_free {
+            CursorGrabMode::None
+        } else {
+            CursorGrabMode::Locked
+        };
     }
 }
 
@@ -80,6 +154,7 @@ fn update_focus(
     mut players: Query<&mut Focus>,
     interactables: Query<(), With<Interactable>>,
     screens: Query<(), With<MachineScreen>>,
+    held: Query<(), With<HeldBy>>,
 ) {
     for (camera_transform, child_of) in &cameras {
         let Ok(mut focus) = players.get_mut(child_of.parent()) else {
@@ -89,9 +164,10 @@ fn update_focus(
         let ray = Ray3d::new(camera_transform.translation(), camera_transform.forward());
         // Machine screens sit a hair proud of their casing, so without this
         // filter every machine would be permanently blocked by its own screen.
+        // A carried beaker rides in front of the camera and would do the same.
         // Everything else stays in the cast, so walls and benches still
         // occlude properly.
-        let filter = |entity: Entity| !screens.contains(entity);
+        let filter = |entity: Entity| !screens.contains(entity) && !held.contains(entity);
         let settings = MeshRayCastSettings::default().with_filter(&filter);
 
         focus.target = ray_cast

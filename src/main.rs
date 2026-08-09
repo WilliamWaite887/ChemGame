@@ -1,9 +1,12 @@
 //! ChemGame — a focused recreation of the Space Station 13/14 chemist.
 
+mod chem_data;
+mod containers;
 mod interaction;
 mod lab;
 mod machines;
 mod player;
+mod ui;
 
 use bevy::prelude::*;
 
@@ -18,40 +21,22 @@ fn main() {
         }))
         .init_state::<AppState>()
         .add_plugins((
+            chem_data::ChemDataPlugin,
             lab::LabPlugin,
             machines::MachinePlugin,
+            containers::ContainerPlugin,
             player::PlayerPlugin,
             interaction::InteractionPlugin,
+            ui::UiPlugin,
         ))
-        .add_systems(Startup, begin)
-        .add_systems(
-            Update,
-            log_interactions.run_if(in_state(AppState::Playing)),
-        )
         .run();
 }
 
 #[derive(States, Debug, Clone, Copy, Default, Eq, PartialEq, Hash)]
 pub enum AppState {
-    /// Waiting on chemistry data. M3 gives this something to do; for now it
-    /// exists so the transition into `Playing` is already in place.
+    /// Waiting on the chemistry data files. `ChemDataPlugin` moves us on once
+    /// they have parsed.
     #[default]
     Loading,
     Playing,
-}
-
-fn begin(mut next: ResMut<NextState<AppState>>) {
-    next.set(AppState::Playing);
-}
-
-/// Placeholder consumer of interaction requests until M3 opens real panels.
-fn log_interactions(
-    mut requests: MessageReader<interaction::InteractRequested>,
-    interactables: Query<&interaction::Interactable>,
-) {
-    for request in requests.read() {
-        if let Ok(interactable) = interactables.get(request.target) {
-            info!("used {}", interactable.label);
-        }
-    }
 }
