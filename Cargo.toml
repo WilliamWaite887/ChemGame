@@ -9,8 +9,13 @@ edition = "2021"
 [dependencies]
 chem_sim = { path = "crates/chem_sim" }
 ron = "0.8"
+bevy = "0.19"
 
-# Bevy arrives in M2. Keeping it out until then keeps the M1 test loop fast.
+[features]
+# Links bevy dynamically, which cuts iteration builds down a lot. Off by
+# default because it needs the shared library alongside the binary, so it is
+# not suitable for shipping: `cargo run --features fast-compile`.
+fast-compile = ["bevy/dynamic_linking"]
 
 # Bevy is unusably slow to iterate on without this: dependencies get optimised
 # even in debug builds, while our own crates stay fast to recompile.

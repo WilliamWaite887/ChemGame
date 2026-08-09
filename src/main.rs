@@ -1,54 +1,57 @@
-//! ChemGame.
-//!
-//! M2 replaces this with the bevy app. For now it exercises the chemistry
-//! simulation from the real data files so the core is demonstrably working.
+//! ChemGame — a focused recreation of the Space Station 13/14 chemist.
 
-use chem_sim::{resolve, ChemData, Solution, Units};
+mod interaction;
+mod lab;
+mod machines;
+mod player;
 
-const REAGENTS_RON: &str = include_str!("../assets/data/reagents.ron");
-const REACTIONS_RON: &str = include_str!("../assets/data/reactions.ron");
+use bevy::prelude::*;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let data = ChemData::from_ron(REAGENTS_RON, REACTIONS_RON)?;
-    println!(
-        "loaded {} reagents ({} dispensable) and {} reactions\n",
-        data.reagents.len(),
-        data.reagents.dispensable().count(),
-        data.reactions.len()
-    );
-
-    // The three-step chain, in one beaker: dylovene -> hyronalin -> arithrazine.
-    let mut beaker = Solution::new(Units::whole(300));
-    for (reagent, amount) in [
-        ("silicon", 15),
-        ("potassium", 15),
-        ("nitrogen", 15),
-        ("radium", 45),
-        ("hydrogen", 90),
-    ] {
-        let _ = beaker.add(data.reagent(reagent), Units::whole(amount));
-    }
-
-    println!("beaker in:  {}", describe(&data, &beaker));
-    let report = resolve(&mut beaker, &data.reactions);
-    println!("beaker out: {}", describe(&data, &beaker));
-
-    println!("\nreactions fired:");
-    for event in &report.events {
-        let reaction = data.reactions.get(event.reaction);
-        println!("  {:<14} at {}x", reaction.key, event.scale.as_f64());
-    }
-
-    Ok(())
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "ChemGame — Chemistry Lab".into(),
+                ..default()
+            }),
+            ..default()
+        }))
+        .init_state::<AppState>()
+        .add_plugins((
+            lab::LabPlugin,
+            machines::MachinePlugin,
+            player::PlayerPlugin,
+            interaction::InteractionPlugin,
+        ))
+        .add_systems(Startup, begin)
+        .add_systems(
+            Update,
+            log_interactions.run_if(in_state(AppState::Playing)),
+        )
+        .run();
 }
 
-fn describe(data: &ChemData, solution: &Solution) -> String {
-    if solution.is_empty() {
-        return "empty".to_string();
+#[derive(States, Debug, Clone, Copy, Default, Eq, PartialEq, Hash)]
+pub enum AppState {
+    /// Waiting on chemistry data. M3 gives this something to do; for now it
+    /// exists so the transition into `Playing` is already in place.
+    #[default]
+    Loading,
+    Playing,
+}
+
+fn begin(mut next: ResMut<NextState<AppState>>) {
+    next.set(AppState::Playing);
+}
+
+/// Placeholder consumer of interaction requests until M3 opens real panels.
+fn log_interactions(
+    mut requests: MessageReader<interaction::InteractRequested>,
+    interactables: Query<&interaction::Interactable>,
+) {
+    for request in requests.read() {
+        if let Ok(interactable) = interactables.get(request.target) {
+            info!("used {}", interactable.label);
+        }
     }
-    solution
-        .iter()
-        .map(|(id, qty)| format!("{} {}", qty, data.reagents.get(id).name))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
