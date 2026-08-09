@@ -6,13 +6,14 @@
 //! machine slot without any of those being a special case.
 
 use bevy::prelude::*;
-use bevy_replicon::prelude::Replicated;
+use bevy_replicon::prelude::*;
 use chem_sim::{resolve, ResolveReport, Solution, Units};
 use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
 use crate::interaction::{InteractRequested, Interactable};
-use crate::player::{LocalPlayer, PlayerCamera};
+use crate::machines::chemist_entity;
+use crate::player::{Chemist, LocalPlayer, PlayerCamera};
 use crate::AppState;
 
 /// Where a carried container sits in view: low and to the right, clear of the
@@ -23,10 +24,17 @@ pub struct ContainerPlugin;
 
 impl Plugin for ContainerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::Playing), spawn_starting_glassware)
+        app.add_client_message::<DropRequested>(Channel::Ordered)
+            .add_systems(
+                OnEnter(AppState::Playing),
+                spawn_starting_glassware.run_if(in_state(ClientState::Disconnected)),
+            )
             .add_systems(
                 Update,
-                (handle_pickup, handle_drop, update_liquid_visuals)
+                (
+                    (handle_pickup, handle_drop).run_if(in_state(ClientState::Disconnected)),
+                    (request_drop, carry_held_containers, update_liquid_visuals),
+                )
                     .run_if(in_state(AppState::Playing)),
             );
     }
@@ -214,52 +222,59 @@ fn spawn_starting_glassware(
     commands.insert_resource(assets);
 }
 
-/// Picking a container up parents it to the camera, so it rides along with
-/// the view without any per-frame follow logic.
+/// A chemist wants to put down whatever they are carrying.
+#[derive(Message, Serialize, Deserialize, Clone)]
+pub struct DropRequested;
+
+/// Server-side pickup. Only `HeldBy` changes here; how a carried beaker looks
+/// is the holder's own business, handled in [`carry_held_containers`].
 fn handle_pickup(
     mut commands: Commands,
-    mut requests: MessageReader<InteractRequested>,
+    mut requests: MessageReader<FromClient<InteractRequested>>,
     containers: Query<(), With<Container>>,
     held: Query<&HeldBy>,
-    cameras: Query<(Entity, &ChildOf), With<PlayerCamera>>,
+    chemists: Query<(Entity, &Chemist)>,
 ) {
     for request in requests.read() {
+        let Some(player) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
         if !containers.contains(request.target) || held.contains(request.target) {
             continue;
         }
         // One hand, one beaker. Anything else needs an inventory, which this
         // game does not want.
-        if held.iter().any(|holder| holder.0 == request.player) {
+        if held.iter().any(|holder| holder.0 == player) {
             continue;
         }
-        let Some((camera, _)) = cameras
-            .iter()
-            .find(|(_, child_of)| child_of.parent() == request.player)
-        else {
-            continue;
-        };
 
         commands
             .entity(request.target)
             .remove::<InSlot>()
-            .insert((
-                HeldBy(request.player),
-                ChildOf(camera),
-                Transform::from_translation(HOLD_OFFSET),
-            ));
+            .insert(HeldBy(player));
+    }
+}
+
+fn request_drop(keys: Res<ButtonInput<KeyCode>>, mut requests: MessageWriter<DropRequested>) {
+    if keys.just_pressed(KeyCode::KeyQ) {
+        requests.write(DropRequested);
     }
 }
 
 fn handle_drop(
     mut commands: Commands,
-    keys: Res<ButtonInput<KeyCode>>,
+    mut requests: MessageReader<FromClient<DropRequested>>,
     held: Query<(Entity, &HeldBy)>,
-    players: Query<(Entity, &Transform), With<LocalPlayer>>,
+    chemists: Query<(Entity, &Chemist)>,
+    transforms: Query<&Transform>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyQ) {
-        return;
-    }
-    for (player, transform) in &players {
+    for request in requests.read() {
+        let Some(player) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
+        let Ok(transform) = transforms.get(player) else {
+            continue;
+        };
         for (container, holder) in &held {
             if holder.0 != player {
                 continue;
@@ -268,10 +283,44 @@ fn handle_drop(
             commands
                 .entity(container)
                 .remove::<HeldBy>()
-                .remove::<ChildOf>()
                 .insert(Transform::from_translation(Vec3::new(
                     ahead.x, 0.08, ahead.z,
                 )));
+        }
+    }
+}
+
+/// Client-side carry visual.
+///
+/// The beaker you are holding rides on your camera so it tracks your view with
+/// no round trip. Someone else's beaker just sits at whatever position the
+/// server replicated, which is all anyone needs to see.
+fn carry_held_containers(
+    mut commands: Commands,
+    newly_held: Query<(Entity, &HeldBy), Added<HeldBy>>,
+    mut dropped: RemovedComponents<HeldBy>,
+    local: Query<Entity, With<LocalPlayer>>,
+    cameras: Query<(Entity, &PlayerCamera)>,
+) {
+    let Ok(me) = local.single() else {
+        return;
+    };
+    let Some((camera, _)) = cameras.iter().find(|(_, camera)| camera.chemist == me) else {
+        return;
+    };
+
+    for (container, holder) in &newly_held {
+        if holder.0 != me {
+            continue;
+        }
+        commands
+            .entity(container)
+            .insert((ChildOf(camera), Transform::from_translation(HOLD_OFFSET)));
+    }
+
+    for container in dropped.read() {
+        if let Ok(mut entity) = commands.get_entity(container) {
+            entity.remove::<ChildOf>();
         }
     }
 }

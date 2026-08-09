@@ -43,7 +43,10 @@ impl Plugin for KnowledgePlugin {
                 Update,
                 (learn_from_experiments, persist_knowledge)
                     .chain()
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(in_state(AppState::Playing))
+                    // The shared notebook belongs to the lab, so the server
+                    // owns it and only the server writes the save file.
+                    .run_if(in_state(bevy_replicon::prelude::ClientState::Disconnected)),
             );
     }
 }

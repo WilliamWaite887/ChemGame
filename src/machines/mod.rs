@@ -4,7 +4,9 @@
 //! systems here apply them, so co-op can replicate actions later without
 //! rewriting any UI.
 
+use bevy::ecs::entity::MapEntities;
 use bevy::prelude::*;
+use bevy_replicon::prelude::*;
 use chem_sim::{ReagentId, Solution, Units};
 use serde::{Deserialize, Serialize};
 
@@ -13,19 +15,23 @@ use crate::containers::{
     spawn_container, Container, ContainerAssets, ContainerKind, HeldBy, InSlot,
 };
 use crate::interaction::{InteractRequested, InteractionMode};
+use crate::player::Chemist;
 use crate::AppState;
 
 pub struct MachinePlugin;
 
 impl Plugin for MachinePlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<DispenseRequested>()
+        // Every action a chemist can take is a client message: the panel asks,
+        // the server decides. `ReactionsFired` stays local because it is a
+        // server-side consequence, not a request.
+        app.add_mapped_client_message::<DispenseRequested>(Channel::Ordered)
+            .add_mapped_client_message::<EjectRequested>(Channel::Ordered)
+            .add_mapped_client_message::<EmptyRequested>(Channel::Ordered)
+            .add_mapped_client_message::<BufferTransferRequested>(Channel::Ordered)
+            .add_mapped_client_message::<PackageRequested>(Channel::Ordered)
+            .add_mapped_client_message::<AnalyzeRequested>(Channel::Ordered)
             .add_message::<ReactionsFired>()
-            .add_message::<EjectRequested>()
-            .add_message::<EmptyRequested>()
-            .add_message::<BufferTransferRequested>()
-            .add_message::<PackageRequested>()
-            .add_message::<AnalyzeRequested>()
             .add_systems(
                 Update,
                 (
@@ -38,7 +44,9 @@ impl Plugin for MachinePlugin {
                     handle_empty,
                 )
                     .chain()
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(in_state(AppState::Playing))
+                    // Authority: server, listen server, or singleplayer.
+                    .run_if(in_state(ClientState::Disconnected)),
             );
     }
 }
@@ -139,8 +147,9 @@ impl Default for DispenseAmount {
 // Messages
 // ---------------------------------------------------------------------------
 
-#[derive(Message)]
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
 pub struct DispenseRequested {
+    #[entities]
     pub machine: Entity,
     pub reagent: ReagentId,
 }
@@ -155,40 +164,45 @@ pub struct ReactionsFired {
     pub reactions: Vec<chem_sim::ReactionId>,
 }
 
-#[derive(Message)]
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
 pub struct EjectRequested {
+    #[entities]
     pub machine: Entity,
 }
 
-#[derive(Message)]
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
 pub struct EmptyRequested {
+    #[entities]
     pub machine: Entity,
 }
 
 /// Which way reagent moves between the loaded container and the buffer.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum BufferDirection {
     ToBuffer,
     ToContainer,
 }
 
-#[derive(Message)]
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
 pub struct BufferTransferRequested {
+    #[entities]
     pub machine: Entity,
     pub reagent: ReagentId,
     pub amount: Units,
     pub direction: BufferDirection,
 }
 
-#[derive(Message)]
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
 pub struct PackageRequested {
+    #[entities]
     pub machine: Entity,
     pub kind: ContainerKind,
 }
 
 /// Run the loaded sample through the analyzer and work out how it was made.
-#[derive(Message)]
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
 pub struct AnalyzeRequested {
+    #[entities]
     pub machine: Entity,
 }
 
@@ -212,20 +226,27 @@ pub fn slotted_container(
 /// "insert" control.
 fn handle_machine_interact(
     mut commands: Commands,
-    mut requests: MessageReader<InteractRequested>,
+    mut requests: MessageReader<FromClient<InteractRequested>>,
     mut machines: Query<(&mut Machine, Option<&ContainerSlot>, &Transform)>,
     mut modes: Query<&mut InteractionMode>,
+    chemists: Query<(Entity, &Chemist)>,
     held: Query<(Entity, &HeldBy)>,
     slotted: Query<(Entity, &InSlot)>,
 ) {
     for request in requests.read() {
+        // The sender's identity comes from the connection, never from the
+        // message. A client that could name its own player entity could act as
+        // the other chemist.
+        let Some(player) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
         let Ok((mut machine, slot, transform)) = machines.get_mut(request.target) else {
             continue;
         };
 
         let carrying = held
             .iter()
-            .find(|(_, holder)| holder.0 == request.player)
+            .find(|(_, holder)| holder.0 == player)
             .map(|(entity, _)| entity);
 
         match (carrying, slot) {
@@ -238,11 +259,11 @@ fn handle_machine_interact(
                     .insert(Transform::from_translation(transform.translation + slot.offset));
             }
             _ => {
-                if !machine.available_to(request.player) {
+                if !machine.available_to(player) {
                     continue;
                 }
-                machine.in_use_by = Some(request.player);
-                if let Ok(mut mode) = modes.get_mut(request.player) {
+                machine.in_use_by = Some(player);
+                if let Ok(mut mode) = modes.get_mut(player) {
                     *mode = InteractionMode::UsingMachine(request.target);
                 }
             }
@@ -250,11 +271,19 @@ fn handle_machine_interact(
     }
 }
 
+/// Resolves a connection to the chemist it drives.
+pub fn chemist_entity(chemists: &Query<(Entity, &Chemist)>, client: ClientId) -> Option<Entity> {
+    chemists
+        .iter()
+        .find(|(_, chemist)| chemist.client == client)
+        .map(|(entity, _)| entity)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_dispense(
     mut commands: Commands,
     db: Res<ChemDb>,
-    mut requests: MessageReader<DispenseRequested>,
+    mut requests: MessageReader<FromClient<DispenseRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
     machines: Query<&DispenseAmount>,
     kinds: Query<&Machine>,
@@ -290,7 +319,7 @@ fn handle_dispense(
 
 fn handle_buffer_transfer(
     db: Res<ChemDb>,
-    mut requests: MessageReader<BufferTransferRequested>,
+    mut requests: MessageReader<FromClient<BufferTransferRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
     mut buffers: Query<&mut Buffer>,
     slotted: Query<(Entity, &InSlot)>,
@@ -344,7 +373,7 @@ fn handle_package(
     assets: Option<Res<ContainerAssets>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut requests: MessageReader<PackageRequested>,
+    mut requests: MessageReader<FromClient<PackageRequested>>,
     mut machines: Query<(&mut Buffer, &Transform)>,
 ) {
     let Some(assets) = assets else {
@@ -391,7 +420,7 @@ fn handle_package(
 
 fn handle_eject(
     mut commands: Commands,
-    mut requests: MessageReader<EjectRequested>,
+    mut requests: MessageReader<FromClient<EjectRequested>>,
     machines: Query<&Transform, With<Machine>>,
     slotted: Query<(Entity, &InSlot)>,
 ) {
@@ -413,7 +442,7 @@ fn handle_eject(
 
 fn handle_empty(
     mut commands: Commands,
-    mut requests: MessageReader<EmptyRequested>,
+    mut requests: MessageReader<FromClient<EmptyRequested>>,
     slotted: Query<(Entity, &InSlot)>,
     mut containers: Query<&mut Container>,
 ) {
@@ -438,7 +467,7 @@ fn handle_empty(
 /// an order for something unmakeable is never a dead end.
 fn handle_analyze(
     db: Res<ChemDb>,
-    mut requests: MessageReader<AnalyzeRequested>,
+    mut requests: MessageReader<FromClient<AnalyzeRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
     slotted: Query<(Entity, &InSlot)>,
     containers: Query<&Container>,
@@ -491,10 +520,10 @@ mod tests {
 
         let mut app = App::new();
         app.insert_resource(ChemDb(data))
-            .add_message::<DispenseRequested>()
+            .add_message::<FromClient<DispenseRequested>>()
             .add_message::<ReactionsFired>()
-            .add_message::<BufferTransferRequested>()
-            .add_message::<InteractRequested>()
+            .add_message::<FromClient<BufferTransferRequested>>()
+            .add_message::<FromClient<InteractRequested>>()
             .add_systems(
                 Update,
                 (
@@ -528,10 +557,10 @@ mod tests {
         // 15u each of oxygen, carbon and sugar — the inaprovaline recipe.
         for key in ["oxygen", "carbon", "sugar"] {
             let reagent = reagent(&app, key);
-            app.world_mut().write_message(DispenseRequested {
+            app.world_mut().write_message(FromClient { client_id: ClientId::Server, message: DispenseRequested {
                 machine: dispenser,
                 reagent,
-            });
+            }});
             app.update();
         }
 
@@ -563,10 +592,10 @@ mod tests {
         // first and the leftover carbon carries it on to bicaridine.
         for key in ["oxygen", "sugar", "carbon", "carbon"] {
             let reagent = reagent(&app, key);
-            app.world_mut().write_message(DispenseRequested {
+            app.world_mut().write_message(FromClient { client_id: ClientId::Server, message: DispenseRequested {
                 machine: dispenser,
                 reagent,
-            });
+            }});
             app.update();
         }
 
@@ -608,20 +637,26 @@ mod tests {
 
         for key in ["oxygen", "sugar"] {
             let reagent = reagent(&app, key);
-            app.world_mut().write_message(DispenseRequested {
-                machine: chemmaster,
-                reagent,
+            app.world_mut().write_message(FromClient {
+                client_id: ClientId::Server,
+                message: DispenseRequested {
+                    machine: chemmaster,
+                    reagent,
+                },
             });
             app.update();
         }
 
         let oxygen = reagent(&app, "oxygen");
         let sugar = reagent(&app, "sugar");
-        app.world_mut().write_message(BufferTransferRequested {
-            machine: chemmaster,
-            reagent: oxygen,
-            amount: Units::whole(20),
-            direction: BufferDirection::ToBuffer,
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: BufferTransferRequested {
+                machine: chemmaster,
+                reagent: oxygen,
+                amount: Units::whole(20),
+                direction: BufferDirection::ToBuffer,
+            },
         });
         app.update();
 
@@ -644,18 +679,37 @@ mod tests {
             .world_mut()
             .spawn((Machine::new(MachineKind::Dispenser), Transform::default()))
             .id();
-        let first = app.world_mut().spawn(InteractionMode::default()).id();
-        let second = app.world_mut().spawn(InteractionMode::default()).id();
+        // Two real connections, each driving their own chemist.
+        let first_client = ClientId::Client(app.world_mut().spawn_empty().id());
+        let second_client = ClientId::Client(app.world_mut().spawn_empty().id());
+        let first = app
+            .world_mut()
+            .spawn((
+                InteractionMode::default(),
+                Chemist {
+                    client: first_client,
+                },
+            ))
+            .id();
+        let second = app
+            .world_mut()
+            .spawn((
+                InteractionMode::default(),
+                Chemist {
+                    client: second_client,
+                },
+            ))
+            .id();
 
-        app.world_mut().write_message(InteractRequested {
-            player: first,
-            target: machine,
+        app.world_mut().write_message(FromClient {
+            client_id: first_client,
+            message: InteractRequested { target: machine },
         });
         app.update();
 
-        app.world_mut().write_message(InteractRequested {
-            player: second,
-            target: machine,
+        app.world_mut().write_message(FromClient {
+            client_id: second_client,
+            message: InteractRequested { target: machine },
         });
         app.update();
 

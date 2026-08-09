@@ -7,6 +7,7 @@ use std::collections::HashSet;
 
 use bevy::prelude::*;
 use bevy_common_assets::ron::RonAssetPlugin;
+use bevy_replicon::prelude::*;
 use chem_sim::{ReagentId, Solution, Units};
 use rand::prelude::*;
 use serde::Deserialize;
@@ -17,7 +18,8 @@ use crate::crew::{spawn_crew_member, CrewAssets, CrewDef, CrewMember, CrewPhase,
 use crate::interaction::{InteractRequested, Interactable};
 use crate::knowledge::{Knowledge, RESEARCH_PER_SUCCESS};
 use crate::lab::COUNTER_SPOT;
-use crate::machines::TestBenchStock;
+use crate::machines::{chemist_entity, TestBenchStock};
+use crate::player::Chemist;
 use crate::radio::{announce_request, channel_for, RadioEntry, RadioLog};
 use crate::AppState;
 
@@ -52,7 +54,10 @@ impl Plugin for OrderPlugin {
                 leave_sample_vials,
             )
                 .chain()
-                .run_if(in_state(AppState::Playing)),
+                .run_if(in_state(AppState::Playing))
+                // Orders, crew and grading are the server's business. A client
+                // sees the crew arrive through replication.
+                .run_if(in_state(ClientState::Disconnected)),
         );
     }
 }
@@ -393,21 +398,25 @@ fn expire_orders(
 fn handle_delivery(
     mut commands: Commands,
     db: Res<ChemDb>,
-    mut requests: MessageReader<InteractRequested>,
+    mut requests: MessageReader<FromClient<InteractRequested>>,
     mut shift: ResMut<Shift>,
     mut radio: ResMut<RadioLog>,
     mut resolved: MessageWriter<OrderResolved>,
     mut crew: Query<(&CrewMember, &Order, &mut CrewRoute)>,
     containers: Query<(Entity, &Container, &HeldBy, Has<TestBenchStock>)>,
+    chemists: Query<(Entity, &Chemist)>,
     mut knowledge: ResMut<Knowledge>,
 ) {
     for request in requests.read() {
+        let Some(player) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
         let Ok((member, order, mut route)) = crew.get_mut(request.target) else {
             continue;
         };
         let Some((container_entity, container, _, test_stock)) = containers
             .iter()
-            .find(|(_, _, holder, _)| holder.0 == request.player)
+            .find(|(_, _, holder, _)| holder.0 == player)
         else {
             continue;
         };

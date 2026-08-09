@@ -20,7 +20,14 @@ pub struct CrewPlugin;
 impl Plugin for CrewPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(AppState::Playing), load_crew_assets)
-            .add_systems(Update, walk_route.run_if(in_state(AppState::Playing)));
+            .add_systems(
+                Update,
+                walk_route
+                    .run_if(in_state(AppState::Playing))
+                    // The walk is simulated once, on the server; clients
+                    // receive the resulting Transform.
+                    .run_if(in_state(bevy_replicon::prelude::ClientState::Disconnected)),
+            );
     }
 }
 

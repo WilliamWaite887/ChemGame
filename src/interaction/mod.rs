@@ -5,8 +5,11 @@
 //! own the state apply it. That indirection is what lets co-op replicate
 //! actions later instead of rewriting every panel.
 
+use bevy::ecs::entity::MapEntities;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy_replicon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::containers::HeldBy;
 use crate::lab::MachineScreen;
@@ -21,7 +24,7 @@ pub struct InteractionPlugin;
 
 impl Plugin for InteractionPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<InteractRequested>()
+        app.add_mapped_client_message::<InteractRequested>(Channel::Ordered)
             .init_resource::<CursorReleased>()
             .add_systems(OnEnter(AppState::Playing), spawn_hud)
             .add_systems(
@@ -154,24 +157,28 @@ pub struct Focus {
     pub target: Option<Entity>,
 }
 
-/// A player pressed use on something. Handled in M3.
-#[derive(Message)]
+/// A chemist pressed use on something.
+///
+/// Deliberately carries no player field: the server takes the sender's
+/// identity from the connection. A message that named its own actor would let
+/// a client act as the other chemist.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
 pub struct InteractRequested {
-    pub player: Entity,
+    #[entities]
     pub target: Entity,
 }
 
 /// Casts a ray from each player's camera and records what it hits.
 fn update_focus(
     mut ray_cast: MeshRayCast,
-    cameras: Query<(&GlobalTransform, &ChildOf), With<PlayerCamera>>,
+    cameras: Query<(&GlobalTransform, &PlayerCamera)>,
     mut players: Query<&mut Focus>,
     interactables: Query<(), With<Interactable>>,
     screens: Query<(), With<MachineScreen>>,
     held: Query<(), With<HeldBy>>,
 ) {
-    for (camera_transform, child_of) in &cameras {
-        let Ok(mut focus) = players.get_mut(child_of.parent()) else {
+    for (camera_transform, camera) in &cameras {
+        let Ok(mut focus) = players.get_mut(camera.chemist) else {
             continue;
         };
 
@@ -200,12 +207,12 @@ fn request_interaction(
     if !keys.just_pressed(KeyCode::KeyE) {
         return;
     }
-    for (player, focus, mode) in &players {
+    for (_player, focus, mode) in &players {
         if !mode.is_roaming() {
             continue;
         }
         if let Some(target) = focus.target {
-            requests.write(InteractRequested { player, target });
+            requests.write(InteractRequested { target });
         }
     }
 }

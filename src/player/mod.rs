@@ -1,13 +1,17 @@
-//! First-person controller.
+//! Chemists: spawning, identity and the first-person controller.
 //!
-//! Note the split between [`Player`] and [`LocalPlayer`]: the first is anyone
-//! working the lab, the second is the one *this client* drives. Co-op adds
-//! more `Player` entities without touching movement, and nothing here assumes
-//! there is only one.
+//! Authority sits with the server. Clients send [`MoveInput`]; the server moves
+//! the body and replicates the result. Looking around is deliberately *not*
+//! routed through the server — the camera is a separate entity driven by local
+//! yaw and pitch, so turning your head never waits on a round trip. Only
+//! walking does, which is the tolerable half of the trade.
 
+use bevy::ecs::entity::MapEntities;
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy_replicon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::interaction::{Focus, InteractionMode};
 use crate::lab::{Solid, ROOM_HALF_X, ROOM_HALF_Z};
@@ -25,55 +29,138 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::Playing), (spawn_local_player, grab_cursor))
+        app.add_mapped_server_message::<YouAreChemist>(Channel::Ordered)
+            .add_client_message::<MoveInput>(Channel::Unreliable)
+            .add_systems(OnEnter(AppState::Playing), (grab_cursor, spawn_host_chemist))
             .add_systems(
                 Update,
-                (mouse_look, movement)
-                    .chain()
+                (
+                    // Authority: runs on a dedicated server, a listen server,
+                    // and in singleplayer — anywhere that is "not a remote
+                    // client".
+                    (spawn_joining_chemists, apply_move_input)
+                        .run_if(in_state(ClientState::Disconnected)),
+                    // Local presentation, runs everywhere.
+                    (adopt_my_chemist, mouse_look, send_move_input, follow_chemist).chain(),
+                )
                     .run_if(in_state(AppState::Playing)),
             );
     }
 }
 
-/// Anyone working the lab. In co-op there will be more than one.
-#[derive(Component)]
+/// Anyone working the lab.
+#[derive(Component, Serialize, Deserialize)]
 pub struct Player;
 
-/// The player this client controls. Cursor grab, HUD and panels key off this.
+/// Server-side link from a chemist back to the client driving them.
+///
+/// Not replicated: `ClientId` is not serialisable, and no client needs to know
+/// another client's connection identity.
+#[derive(Component)]
+pub struct Chemist {
+    pub client: ClientId,
+}
+
+/// The chemist this client controls.
 #[derive(Component)]
 pub struct LocalPlayer;
 
-/// The camera parented to a player's head.
+/// The camera. Not parented to the body, so head movement stays local.
 #[derive(Component)]
-pub struct PlayerCamera;
+pub struct PlayerCamera {
+    pub chemist: Entity,
+}
 
-/// Yaw lives on the body, pitch on the camera, so movement can use the body
-/// rotation directly without cancelling out the pitch.
+/// Yaw and pitch for the local view.
 #[derive(Component, Default)]
 pub struct Look {
     pub yaw: f32,
     pub pitch: f32,
 }
 
-fn spawn_local_player(mut commands: Commands) {
-    let player = commands
+/// Tells a client which chemist is theirs.
+///
+/// Sent rather than inferred: `ClientId` cannot cross the wire, and the entity
+/// id means nothing to the client until replicon maps it.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
+pub struct YouAreChemist {
+    #[entities]
+    pub chemist: Entity,
+}
+
+/// A client's movement intent for this frame.
+#[derive(Message, Serialize, Deserialize, Clone)]
+pub struct MoveInput {
+    /// Forward/strafe, already normalised.
+    pub direction: Vec2,
+    /// Which way the body faces.
+    pub yaw: f32,
+}
+
+/// Spawns the chemist for whoever is running the world: the singleplayer
+/// chemist, or the host of a listen server.
+fn spawn_host_chemist(
+    mut commands: Commands,
+    mut assign: MessageWriter<ToClients<YouAreChemist>>,
+    client_state: Res<State<ClientState>>,
+) {
+    if *client_state.get() != ClientState::Disconnected {
+        return;
+    }
+    let chemist = spawn_chemist(&mut commands, ClientId::Server, 0.0);
+    assign.write(ToClients {
+        targets: SendTargets::Single(ClientId::Server),
+        message: YouAreChemist { chemist },
+    });
+}
+
+/// Gives every newly connected client a chemist of their own.
+fn spawn_joining_chemists(
+    mut commands: Commands,
+    joined: Query<Entity, Added<ConnectedClient>>,
+    existing: Query<(), With<Player>>,
+    mut assign: MessageWriter<ToClients<YouAreChemist>>,
+) {
+    for client in &joined {
+        // Offset each arrival so two chemists never spawn inside each other.
+        let lane = existing.iter().count() as f32 * 0.9;
+        let id = ClientId::Client(client);
+        let chemist = spawn_chemist(&mut commands, id, lane);
+        assign.write(ToClients {
+            targets: SendTargets::Single(id),
+            message: YouAreChemist { chemist },
+        });
+        info!("a second chemist joined the lab");
+    }
+}
+
+fn spawn_chemist(commands: &mut Commands, client: ClientId, lane: f32) -> Entity {
+    commands
         .spawn((
             Player,
-            LocalPlayer,
+            Chemist { client },
             Look::default(),
             InteractionMode::default(),
             Focus::default(),
-            Transform::from_xyz(0.0, EYE_HEIGHT, 2.6),
+            Transform::from_xyz(lane, EYE_HEIGHT, 2.6),
             Visibility::default(),
+            Replicated,
         ))
-        .id();
+        .id()
+}
 
-    commands.spawn((
-        Camera3d::default(),
-        PlayerCamera,
-        Transform::IDENTITY,
-        ChildOf(player),
-    ));
+/// Attaches the camera once the server says which chemist is ours.
+fn adopt_my_chemist(mut commands: Commands, mut assigned: MessageReader<YouAreChemist>) {
+    for message in assigned.read() {
+        commands.entity(message.chemist).insert(LocalPlayer);
+        commands.spawn((
+            Camera3d::default(),
+            PlayerCamera {
+                chemist: message.chemist,
+            },
+            Transform::from_xyz(0.0, EYE_HEIGHT, 2.6),
+        ));
+    }
 }
 
 fn grab_cursor(mut cursor: Single<&mut CursorOptions>) {
@@ -84,69 +171,105 @@ fn grab_cursor(mut cursor: Single<&mut CursorOptions>) {
 fn mouse_look(
     mut motion: MessageReader<MouseMotion>,
     cursor: Single<&CursorOptions>,
-    mut players: Query<(&mut Look, &mut Transform, &InteractionMode), With<LocalPlayer>>,
-    mut cameras: Query<&mut Transform, (With<PlayerCamera>, Without<LocalPlayer>)>,
+    mut players: Query<(&mut Look, &InteractionMode), With<LocalPlayer>>,
 ) {
     let delta: Vec2 = motion.read().map(|m| m.delta).sum();
     if cursor.grab_mode == CursorGrabMode::None || delta == Vec2::ZERO {
         return;
     }
-
-    for (mut look, mut transform, mode) in &mut players {
-        // Looking around while a machine panel is open would be disorienting;
-        // routing it through the mode keeps camera and UI focus consistent.
+    for (mut look, mode) in &mut players {
         if !mode.is_roaming() {
             continue;
         }
         look.yaw -= delta.x * MOUSE_SENSITIVITY;
         look.pitch = (look.pitch - delta.y * MOUSE_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-        transform.rotation = Quat::from_rotation_y(look.yaw);
-
-        for mut camera in &mut cameras {
-            camera.rotation = Quat::from_rotation_x(look.pitch);
-        }
     }
 }
 
-fn movement(
-    time: Res<Time>,
+fn send_move_input(
     keys: Res<ButtonInput<KeyCode>>,
-    mut players: Query<(&mut Transform, &Look, &InteractionMode), With<Player>>,
-    solids: Query<(&Transform, &Solid), Without<Player>>,
+    players: Query<(&Look, &InteractionMode), With<LocalPlayer>>,
+    mut outgoing: MessageWriter<MoveInput>,
 ) {
-    let mut input = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) {
-        input.z -= 1.0;
-    }
-    if keys.pressed(KeyCode::KeyS) {
-        input.z += 1.0;
-    }
-    if keys.pressed(KeyCode::KeyA) {
-        input.x -= 1.0;
-    }
-    if keys.pressed(KeyCode::KeyD) {
-        input.x += 1.0;
+    let Ok((look, mode)) = players.single() else {
+        return;
+    };
+
+    let mut direction = Vec2::ZERO;
+    if mode.is_roaming() {
+        if keys.pressed(KeyCode::KeyW) {
+            direction.y -= 1.0;
+        }
+        if keys.pressed(KeyCode::KeyS) {
+            direction.y += 1.0;
+        }
+        if keys.pressed(KeyCode::KeyA) {
+            direction.x -= 1.0;
+        }
+        if keys.pressed(KeyCode::KeyD) {
+            direction.x += 1.0;
+        }
     }
 
-    for (mut transform, look, mode) in &mut players {
-        if !mode.is_roaming() || input == Vec3::ZERO {
+    outgoing.write(MoveInput {
+        direction: direction.normalize_or_zero(),
+        yaw: look.yaw,
+    });
+}
+
+/// Server-side movement. The only place a chemist's position changes.
+fn apply_move_input(
+    time: Res<Time>,
+    mut inputs: MessageReader<FromClient<MoveInput>>,
+    mut chemists: Query<(&mut Transform, &mut Look, &Chemist)>,
+    solids: Query<(&Transform, &Solid), Without<Chemist>>,
+) {
+    for input in inputs.read() {
+        let Some((mut transform, mut look, _)) = chemists
+            .iter_mut()
+            .find(|(_, _, chemist)| chemist.client == input.client_id)
+        else {
+            continue;
+        };
+
+        look.yaw = input.yaw;
+        transform.rotation = Quat::from_rotation_y(input.yaw);
+        if input.direction == Vec2::ZERO {
             continue;
         }
-        let direction = Quat::from_rotation_y(look.yaw) * input.normalize();
-        let mut position = transform.translation + direction * WALK_SPEED * time.delta_secs();
+
+        let local = Vec3::new(input.direction.x, 0.0, input.direction.y);
+        let step = Quat::from_rotation_y(input.yaw) * local;
+        let mut position = transform.translation + step * WALK_SPEED * time.delta_secs();
         position.y = EYE_HEIGHT;
 
         for (solid_transform, solid) in &solids {
             position = push_out(position, solid_transform.translation, solid.half_extents);
         }
-
-        // Backstop in case a gap opens between wall colliders.
         let limit_x = ROOM_HALF_X - PLAYER_RADIUS;
         let limit_z = ROOM_HALF_Z - PLAYER_RADIUS;
         position.x = position.x.clamp(-limit_x, limit_x);
         position.z = position.z.clamp(-limit_z, limit_z);
 
         transform.translation = position;
+    }
+}
+
+/// Keeps the camera on the chemist's shoulders, aimed by local yaw and pitch.
+type LocalChemists<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Transform, &'static Look),
+    (With<LocalPlayer>, Without<PlayerCamera>),
+>;
+
+fn follow_chemist(chemists: LocalChemists, mut cameras: Query<(&mut Transform, &PlayerCamera)>) {
+    for (mut camera, target) in &mut cameras {
+        let Ok((chemist, look)) = chemists.get(target.chemist) else {
+            continue;
+        };
+        camera.translation = chemist.translation;
+        camera.rotation = Quat::from_rotation_y(look.yaw) * Quat::from_rotation_x(look.pitch);
     }
 }
 
