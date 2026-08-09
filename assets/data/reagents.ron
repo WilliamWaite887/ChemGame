@@ -1,0 +1,90 @@
+// Reagents. `dispensable: true` means the base chemical dispenser produces it
+// directly; everything else has to be made.
+//
+// `overdose` is the dose above which the reagent harms rather than helps.
+// `treats` shows in the reference book even while a recipe is still locked —
+// a chemist knows what bicaridine is for even if they have forgotten how to
+// make it.
+[
+    // ---- Base reagents: straight from the dispenser -----------------------
+    (id: "aluminium",  name: "Aluminium",  color: (0.75, 0.76, 0.78), dispensable: true),
+    (id: "carbon",     name: "Carbon",     color: (0.12, 0.12, 0.13), dispensable: true),
+    (id: "chlorine",   name: "Chlorine",   color: (0.82, 0.90, 0.44), dispensable: true),
+    (id: "copper",     name: "Copper",     color: (0.72, 0.45, 0.20), dispensable: true),
+    (id: "ethanol",    name: "Ethanol",    color: (0.85, 0.85, 0.80), dispensable: true),
+    (id: "hydrogen",   name: "Hydrogen",   color: (0.90, 0.90, 0.95), dispensable: true),
+    (id: "iron",       name: "Iron",       color: (0.50, 0.28, 0.24), dispensable: true),
+    (id: "nitrogen",   name: "Nitrogen",   color: (0.62, 0.70, 0.86), dispensable: true),
+    (id: "oxygen",     name: "Oxygen",     color: (0.60, 0.80, 1.00), dispensable: true),
+    (id: "phosphorus", name: "Phosphorus", color: (0.94, 0.90, 0.66), dispensable: true),
+    (id: "plasma",     name: "Plasma",     color: (0.72, 0.24, 0.86), dispensable: true),
+    (id: "potassium",  name: "Potassium",  color: (0.86, 0.84, 0.72), dispensable: true),
+    (id: "radium",     name: "Radium",     color: (0.44, 0.90, 0.42), dispensable: true),
+    (id: "silicon",    name: "Silicon",    color: (0.66, 0.68, 0.72), dispensable: true),
+    (id: "sodium",     name: "Sodium",     color: (0.90, 0.88, 0.82), dispensable: true),
+    (id: "sugar",      name: "Sugar",      color: (0.98, 0.98, 0.96), dispensable: true),
+    (id: "sulfur",     name: "Sulfur",     color: (0.95, 0.90, 0.35), dispensable: true),
+    (id: "water",      name: "Water",      color: (0.55, 0.72, 0.90), dispensable: true),
+
+    // ---- Medicines --------------------------------------------------------
+    (
+        id: "inaprovaline",
+        name: "Inaprovaline",
+        color: (0.85, 0.85, 0.60),
+        treats: Some("Asphyxiation. Stabilises the critically injured."),
+    ),
+    (
+        id: "dylovene",
+        name: "Dylovene",
+        color: (0.42, 0.70, 0.36),
+        overdose: Some(20),
+        treats: Some("Poisoning and toxin damage."),
+    ),
+    (
+        id: "kelotane",
+        name: "Kelotane",
+        color: (0.80, 0.50, 0.20),
+        overdose: Some(15),
+        treats: Some("Burns."),
+    ),
+    (
+        id: "bicaridine",
+        name: "Bicaridine",
+        color: (0.85, 0.25, 0.25),
+        overdose: Some(15),
+        treats: Some("Brute force trauma."),
+    ),
+    (
+        id: "dermaline",
+        name: "Dermaline",
+        color: (0.95, 0.62, 0.20),
+        overdose: Some(10),
+        treats: Some("Severe burns. Stronger than kelotane."),
+    ),
+    (
+        id: "tricordrazine",
+        name: "Tricordrazine",
+        color: (0.30, 0.75, 0.65),
+        treats: Some("All basic damage types, slowly. A good all-rounder."),
+    ),
+    (
+        id: "dexalin",
+        name: "Dexalin",
+        color: (0.40, 0.65, 0.95),
+        overdose: Some(20),
+        treats: Some("Airloss and oxygen deprivation."),
+    ),
+    (
+        id: "hyronalin",
+        name: "Hyronalin",
+        color: (0.55, 0.80, 0.40),
+        overdose: Some(30),
+        treats: Some("Mild radiation exposure."),
+    ),
+    (
+        id: "arithrazine",
+        name: "Arithrazine",
+        color: (0.70, 0.90, 0.45),
+        treats: Some("Severe radiation poisoning."),
+    ),
+]

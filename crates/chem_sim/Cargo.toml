@@ -1,0 +1,11 @@
+[package]
+name = "chem_sim"
+version = "0.1.0"
+edition = "2021"
+
+# Deliberately no bevy dependency. This crate is the heart of the game: keeping
+# it engine-free means it is testable in milliseconds without spinning up an
+# App, and a dedicated server can run it with no renderer.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"

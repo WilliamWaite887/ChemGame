@@ -1,0 +1,120 @@
+// Reactions. Reactant and product amounts are *ratios*, not fixed quantities:
+// a 1:1:1 recipe producing 3 turns 15u of each input into 45u of output.
+//
+// `priority` decides who wins when two reactions compete for the same reagent.
+// The policy here: compound recipes (20) outrank the base recipes that feed
+// them (10), and kelotane sits lowest (5) because it competes with both
+// inaprovaline and dylovene for carbon and silicon — without that, dumping a
+// tricordrazine mix into one beaker would have kelotane eat the ingredients.
+//
+// `hints` are revealed progressively in the reference book while a recipe is
+// still locked, coarsest first. Ingredient *count* is derived automatically,
+// so hints should add something beyond it.
+[
+    // ---- Base recipes: the three the player starts knowing -----------------
+    (
+        id: "inaprovaline",
+        reactants: [("oxygen", 1), ("carbon", 1), ("sugar", 1)],
+        products: [("inaprovaline", 3)],
+        priority: 10,
+        hints: [
+            "Equal parts of three base reagents.",
+            "One of them is what you would put in a cup of tea.",
+        ],
+    ),
+    (
+        id: "dylovene",
+        reactants: [("silicon", 1), ("nitrogen", 1), ("potassium", 1)],
+        products: [("dylovene", 3)],
+        priority: 10,
+        hints: [
+            "Equal parts of three base reagents, none of them organic.",
+            "Silicon is involved.",
+        ],
+    ),
+    (
+        id: "kelotane",
+        reactants: [("silicon", 1), ("carbon", 1)],
+        products: [("kelotane", 2)],
+        priority: 5,
+        hints: [
+            "Two base reagents, equal parts.",
+            "Both are solids. One of them is carbon.",
+        ],
+    ),
+
+    // ---- One step up ------------------------------------------------------
+    (
+        id: "bicaridine",
+        reactants: [("inaprovaline", 1), ("carbon", 1)],
+        products: [("bicaridine", 2)],
+        priority: 20,
+        hints: [
+            "One ingredient is a compound you already know how to make.",
+            "The other is a single base reagent.",
+            "Add carbon to inaprovaline.",
+        ],
+    ),
+    (
+        id: "hyronalin",
+        reactants: [("dylovene", 1), ("radium", 1)],
+        products: [("hyronalin", 2)],
+        priority: 15,
+        hints: [
+            "One ingredient is a compound you already know how to make.",
+            "The other is radioactive.",
+            "Add radium to dylovene.",
+        ],
+    ),
+    (
+        id: "tricordrazine",
+        reactants: [("inaprovaline", 1), ("dylovene", 1)],
+        products: [("tricordrazine", 2)],
+        priority: 20,
+        hints: [
+            "No base reagents at all.",
+            "Both ingredients are compounds you already know how to make.",
+            "Equal parts inaprovaline and dylovene.",
+        ],
+    ),
+    (
+        id: "dermaline",
+        reactants: [("kelotane", 1), ("oxygen", 1), ("phosphorus", 1)],
+        products: [("dermaline", 3)],
+        priority: 20,
+        hints: [
+            "Three ingredients: one compound and two base reagents.",
+            "Start from the weaker burn treatment.",
+            "Equal parts kelotane, oxygen and phosphorus.",
+        ],
+    ),
+
+    // ---- Two steps up -----------------------------------------------------
+    (
+        id: "arithrazine",
+        reactants: [("hyronalin", 1), ("hydrogen", 1)],
+        products: [("arithrazine", 2)],
+        priority: 20,
+        hints: [
+            "Two ingredients. One is a compound two steps removed from base reagents.",
+            "Strengthen the milder radiation treatment.",
+            "Equal parts hyronalin and hydrogen.",
+        ],
+    ),
+
+    // ---- Catalysed --------------------------------------------------------
+    (
+        // Plasma is a catalyst: it must be present but is not consumed, and it
+        // does not limit the yield. A single unit will catalyse a whole beaker.
+        id: "dexalin",
+        reactants: [("oxygen", 2)],
+        catalysts: [("plasma", 1)],
+        products: [("dexalin", 1)],
+        priority: 12,
+        hints: [
+            "Only one ingredient is consumed, and you get back half what you put in.",
+            "Something else has to be present to make it happen, but survives untouched.",
+            "Oxygen, with plasma as a catalyst.",
+        ],
+    ),
+]
