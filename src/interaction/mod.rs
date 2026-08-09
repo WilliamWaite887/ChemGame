@@ -70,9 +70,19 @@ fn panel_input(
     mut machines: Query<&mut Machine>,
 ) {
     let escape = keys.just_pressed(KeyCode::Escape);
+    let book = keys.just_pressed(KeyCode::KeyB);
     let mut panel_open = false;
 
     for (player, mut mode) in &mut players {
+        // The book opens and closes on the same key from either direction.
+        if book && (mode.is_roaming() || *mode == InteractionMode::ReadingBook) {
+            *mode = if mode.is_roaming() {
+                InteractionMode::ReadingBook
+            } else {
+                InteractionMode::Roaming
+            };
+        }
+
         if mode.is_roaming() {
             // fall through to the roaming cursor handling below
         } else if escape {
@@ -112,6 +122,10 @@ pub enum InteractionMode {
     #[default]
     Roaming,
     UsingMachine(Entity),
+    /// Reading the reference book. Modelled as a mode rather than a separate
+    /// flag so it inherits the cursor and camera handling machines already
+    /// have — otherwise the view keeps turning while you read.
+    ReadingBook,
 }
 
 impl InteractionMode {

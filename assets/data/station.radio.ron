@@ -1,0 +1,48 @@
+// Radio chatter. `{name}`, `{role}` and `{reagent}` are substituted in.
+//
+// `role` restricts a line to one department; lines without it can be used by
+// anyone. Role-specific lines are preferred when one is available, so security
+// sounds like security.
+//
+// The delay is the point of the whole feature: the report arrives long after
+// the handover, so it reads as the station reacting rather than a score popup.
+(
+    delay_seconds: (12.0, 38.0),
+    lines: [
+        // ---- Success ------------------------------------------------------
+        (outcome: Success, text: "{name} here. That {reagent} did exactly what it said on the bottle. He's up and walking."),
+        (outcome: Success, text: "Chem lab, {name}. Clean batch of {reagent}. Whoever's on shift down there, good pour."),
+        (outcome: Success, text: "Patient's stable. The {reagent} took about a minute. Nice work, chemistry."),
+        (outcome: Success, role: Some("Security"), text: "Reyes to chem lab — that {reagent} got my officer back on the door inside ten minutes. Appreciated."),
+        (outcome: Success, role: Some("Medical"), text: "Medbay to chemistry. {reagent} was textbook. Send more when you can."),
+        (outcome: Success, role: Some("Engineering"), text: "Engineering — burns are dressed and he's back on the coolant line. That {reagent} was spot on."),
+
+        // ---- Short --------------------------------------------------------
+        (outcome: Short, text: "{name} again. That was nowhere near enough {reagent}. Had to ration it."),
+        (outcome: Short, text: "Chem lab, we ran dry halfway through. Need a proper measure of {reagent} next time."),
+        (outcome: Short, role: Some("Medical"), text: "Medbay. The {reagent} ran out mid-treatment. He'll live, but it was close."),
+
+        // ---- Impure -------------------------------------------------------
+        (outcome: Impure, text: "{name} here. There was something else swimming in that {reagent}. Worked, mostly. Mostly."),
+        (outcome: Impure, text: "Chem lab — this {reagent} is cloudy. Is it meant to be cloudy?"),
+        (outcome: Impure, role: Some("Medical"), text: "Medbay to chemistry. Your {reagent} had contaminants. Patient's fine, but run it through the ChemMaster next time."),
+        (outcome: Impure, role: Some("Security"), text: "Whatever was mixed in with that {reagent} gave him a rash. He's not pleased about it."),
+
+        // ---- Overdose -----------------------------------------------------
+        (outcome: Overdose, text: "MEDBAY — we have a reaction to that {reagent}! Who signed off on this dose?"),
+        (outcome: Overdose, text: "{name} to chem lab. That pill nearly finished the job the injury started. Check your thresholds."),
+        (outcome: Overdose, role: Some("Medical"), text: "Chemistry, this is medbay. That was well over the safe dose of {reagent}. We're treating the treatment now."),
+        (outcome: Overdose, role: Some("Security"), text: "Officer's convulsing. That {reagent} dose was far too strong. Someone's answering for this."),
+
+        // ---- Wrong --------------------------------------------------------
+        (outcome: Wrong, text: "{name} here. I asked for {reagent}. This is not {reagent}. I don't know what this is."),
+        (outcome: Wrong, text: "Chem lab — did anyone actually read my order? There's no {reagent} in this at all."),
+        (outcome: Wrong, role: Some("Security"), text: "Reyes to chemistry. Wrong chemical entirely. I'm logging this one."),
+        (outcome: Wrong, role: Some("Service"), text: "I don't think this is {reagent}. I think this is floor cleaner. Please advise."),
+
+        // ---- Expired ------------------------------------------------------
+        (outcome: Expired, text: "{name} to chem lab. Waited as long as I could for that {reagent}. Gone to find it elsewhere."),
+        (outcome: Expired, text: "Cancel the {reagent}. We sorted it ourselves. Took longer than it should have."),
+        (outcome: Expired, role: Some("Medical"), text: "Medbay. We needed that {reagent} twenty minutes ago. Had to improvise."),
+    ],
+)

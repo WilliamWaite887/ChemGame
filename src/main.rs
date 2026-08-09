@@ -4,10 +4,12 @@ mod chem_data;
 mod containers;
 mod crew;
 mod interaction;
+mod knowledge;
 mod lab;
 mod machines;
 mod orders;
 mod player;
+mod radio;
 mod ui;
 
 use bevy::prelude::*;
@@ -28,7 +30,9 @@ fn main() {
             machines::MachinePlugin,
             containers::ContainerPlugin,
             crew::CrewPlugin,
+            knowledge::KnowledgePlugin,
             orders::OrderPlugin,
+            radio::RadioPlugin,
             player::PlayerPlugin,
             interaction::InteractionPlugin,
             ui::UiPlugin,

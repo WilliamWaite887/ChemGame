@@ -18,13 +18,17 @@ use crate::machines::{
     slotted_container, Buffer, BufferDirection, BufferTransferRequested, DispenseAmount,
     DispenseRequested, EjectRequested, EmptyRequested, Machine, MachineKind, PackageRequested,
 };
+use crate::knowledge::Knowledge;
 use crate::orders::{Order, Shift};
 use crate::player::LocalPlayer;
+use crate::radio::RadioLog;
 use crate::AppState;
 
 /// How many orders the queue can show at once. Matches `max_active` in
 /// `station.orders.ron`.
 const ORDER_SLOTS: usize = 3;
+/// Radio lines on screen. Matches the log's own capacity.
+const RADIO_SLOTS: usize = 6;
 
 const PANEL_BG: Color = Color::srgba(0.07, 0.08, 0.10, 0.97);
 const SECTION_BG: Color = Color::srgba(0.12, 0.13, 0.16, 0.9);
@@ -38,18 +42,22 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::Playing), spawn_order_queue)
-            .add_systems(
-                Update,
-                (
-                    handle_panel_clicks,
-                    button_feedback,
-                    sync_panel,
-                    update_order_queue,
-                )
-                    .chain()
-                    .run_if(in_state(AppState::Playing)),
-            );
+        app.add_systems(
+            OnEnter(AppState::Playing),
+            (spawn_order_queue, spawn_radio_feed),
+        )
+        .add_systems(
+            Update,
+            (
+                handle_panel_clicks,
+                button_feedback,
+                sync_panel,
+                update_order_queue,
+                update_radio_feed,
+            )
+                .chain()
+                .run_if(in_state(AppState::Playing)),
+        );
     }
 }
 
@@ -82,13 +90,30 @@ enum PanelAction {
 /// buffer — and a missed signal shows the player stale contents, which in a
 /// chemistry game means dosing off numbers that are no longer true. The
 /// comparison is a few dozen integers; correctness is worth far more.
-#[derive(PartialEq, Default)]
+#[derive(PartialEq)]
 struct PanelSignature {
-    machine: Option<Entity>,
+    mode: InteractionMode,
     container: Option<Entity>,
     contents: Vec<(ReagentId, Units)>,
     buffer: Vec<(ReagentId, Units)>,
     amount: Option<Units>,
+    known_recipes: usize,
+}
+
+impl Default for PanelSignature {
+    fn default() -> Self {
+        PanelSignature {
+            // Deliberately not `Roaming`: the default must differ from any
+            // real state, or the first frame with no panel open would compare
+            // equal and skip the despawn of a panel left over from last frame.
+            mode: InteractionMode::ReadingBook,
+            container: None,
+            contents: Vec::new(),
+            buffer: Vec::new(),
+            amount: None,
+            known_recipes: usize::MAX,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -100,10 +125,12 @@ fn sync_panel(
     machines: Query<(&Machine, Option<&DispenseAmount>, Option<&Buffer>)>,
     slotted: Query<(Entity, &InSlot)>,
     containers: Query<&Container>,
+    knowledge: Res<Knowledge>,
     mut previous: Local<PanelSignature>,
 ) {
-    let open_machine = match modes.iter().next() {
-        Some(InteractionMode::UsingMachine(machine)) => Some(*machine),
+    let mode = modes.iter().next().copied().unwrap_or_default();
+    let open_machine = match mode {
+        InteractionMode::UsingMachine(machine) => Some(machine),
         _ => None,
     };
     let loaded_entity = open_machine.and_then(|machine| slotted_container(machine, &slotted));
@@ -111,7 +138,7 @@ fn sync_panel(
     let machine_parts = open_machine.and_then(|machine| machines.get(machine).ok());
 
     let signature = PanelSignature {
-        machine: open_machine,
+        mode,
         container: loaded_entity,
         contents: loaded
             .map(|container| container.solution.iter().collect())
@@ -121,6 +148,7 @@ fn sync_panel(
             .map(|buffer| buffer.0.iter().collect())
             .unwrap_or_default(),
         amount: machine_parts.and_then(|(_, amount, _)| amount).map(|a| a.0),
+        known_recipes: knowledge.known_count(),
     };
 
     if signature == *previous {
@@ -132,6 +160,10 @@ fn sync_panel(
         commands.entity(panel).despawn();
     }
 
+    if mode == InteractionMode::ReadingBook {
+        spawn_reference_book(&mut commands, &db, &knowledge);
+        return;
+    }
     if open_machine.is_none() {
         return;
     }
@@ -364,6 +396,134 @@ fn container_readout(
 }
 
 // ---------------------------------------------------------------------------
+// Reference book
+// ---------------------------------------------------------------------------
+
+/// The chemist's notes. Known recipes show the full method; locked ones show
+/// only what a chemist would plausibly remember — what it treats, how many
+/// ingredients, and whatever they have worked out so far.
+fn spawn_reference_book(commands: &mut Commands, db: &ChemDb, knowledge: &Knowledge) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                height: percent(100),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            PanelRoot,
+        ))
+        .with_children(|screen| {
+            screen
+                .spawn((
+                    Node {
+                        width: px(820),
+                        flex_direction: FlexDirection::Column,
+                        padding: UiRect::all(px(20)),
+                        row_gap: px(8),
+                        border_radius: BorderRadius::all(px(8)),
+                        ..default()
+                    },
+                    BackgroundColor(PANEL_BG),
+                ))
+                .with_children(|book| {
+                    book.spawn(row()).with_children(|header| {
+                        header.spawn(heading("Reference Book"));
+                    });
+                    book.spawn(label(
+                        format!(
+                            "{} of {} recipes recorded   ·   B or Esc to close",
+                            knowledge.known_count(),
+                            db.reactions.len()
+                        ),
+                        13.0,
+                        TEXT_DIM,
+                    ));
+
+                    for reaction in db.reactions.iter() {
+                        let known = knowledge.is_known(reaction.id);
+                        // Name the entry after what it makes, not the reaction
+                        // id — that is how the crew ask for it.
+                        let product = reaction
+                            .products
+                            .first()
+                            .map(|(id, _)| db.reagents.get(*id));
+                        let title = product
+                            .map(|p| p.name.clone())
+                            .unwrap_or_else(|| reaction.key.clone());
+
+                        book.spawn((section(), BackgroundColor(SECTION_BG)))
+                            .with_children(|entry| {
+                                entry.spawn(label(
+                                    if known {
+                                        title.clone()
+                                    } else {
+                                        format!("{title}   —   not yet worked out")
+                                    },
+                                    16.0,
+                                    if known { TEXT } else { TEXT_DIM },
+                                ));
+
+                                if let Some(treats) = product.and_then(|p| p.treats.as_ref()) {
+                                    entry.spawn(label(treats.clone(), 13.0, TEXT_DIM));
+                                }
+
+                                if known {
+                                    entry.spawn(label(recipe_line(db, reaction), 14.0, TEXT));
+                                    if let Some(overdose) =
+                                        product.and_then(|p| p.overdose)
+                                    {
+                                        entry.spawn(label(
+                                            format!("Overdoses above {overdose} in a single dose."),
+                                            13.0,
+                                            Color::srgb(0.90, 0.62, 0.45),
+                                        ));
+                                    }
+                                } else {
+                                    entry.spawn(label(
+                                        format!("{} ingredients.", reaction.reactants.len()),
+                                        13.0,
+                                        TEXT_DIM,
+                                    ));
+                                    for hint in knowledge.visible_hints(db, reaction.id) {
+                                        entry.spawn(label(
+                                            format!("· {hint}"),
+                                            13.0,
+                                            Color::srgb(0.70, 0.78, 0.62),
+                                        ));
+                                    }
+                                }
+                            });
+                    }
+                });
+        });
+}
+
+/// Renders a recipe as `1 Oxygen + 1 Carbon + 1 Sugar  →  3 Inaprovaline`.
+fn recipe_line(db: &ChemDb, reaction: &chem_sim::Reaction) -> String {
+    let part = |pairs: &[(ReagentId, Units)]| {
+        pairs
+            .iter()
+            .map(|(id, amount)| format!("{} {}", amount, db.reagents.get(*id).name))
+            .collect::<Vec<_>>()
+            .join(" + ")
+    };
+
+    let mut line = format!("{}  →  {}", part(&reaction.reactants), part(&reaction.products));
+    if !reaction.catalysts.is_empty() {
+        // Catalysts read as ingredients unless they are called out, and a
+        // player who consumes their only plasma has learned the wrong lesson.
+        line.push_str(&format!(
+            "     (catalyst: {}, not consumed)",
+            part(&reaction.catalysts)
+        ));
+    }
+    line
+}
+
+// ---------------------------------------------------------------------------
 // Order queue
 // ---------------------------------------------------------------------------
 
@@ -512,6 +672,74 @@ fn update_order_queue(
     let mut readout = readout.into_inner();
     if readout.0 != summary {
         readout.0 = summary;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Radio feed
+// ---------------------------------------------------------------------------
+
+#[derive(Component)]
+struct RadioSlot(usize);
+
+fn spawn_radio_feed(mut commands: Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: px(16),
+                left: px(16),
+                width: px(520),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(px(12)),
+                row_gap: px(4),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.05, 0.06, 0.08, 0.78)),
+        ))
+        .with_children(|feed| {
+            feed.spawn(label("STATION RADIO", 12.0, TEXT_DIM));
+            for index in 0..RADIO_SLOTS {
+                feed.spawn((
+                    Text::new(""),
+                    TextFont::from_font_size(13.0),
+                    TextColor(TEXT_DIM),
+                    RadioSlot(index),
+                ));
+            }
+        });
+}
+
+fn update_radio_feed(
+    log: Res<RadioLog>,
+    mut slots: Query<(&RadioSlot, &mut Text, &mut TextColor)>,
+) {
+    if !log.is_changed() {
+        return;
+    }
+    for (slot, mut text, mut color) in &mut slots {
+        let entry = log.entries.get(slot.0);
+        let line = entry
+            .map(|entry| format!("[{}] {}", entry.channel, entry.text))
+            .unwrap_or_default();
+
+        // Older lines fade, so the newest report is the one that catches the
+        // eye without needing an alert.
+        let age = log.entries.len().saturating_sub(slot.0 + 1);
+        let fade = 1.0 - (age as f32 * 0.13).min(0.55);
+        let base = match entry {
+            Some(entry) if entry.good => Color::srgb(0.62, 0.86, 0.62),
+            Some(_) => Color::srgb(0.86, 0.88, 0.92),
+            None => TEXT_DIM,
+        };
+        let wanted = base.with_alpha(fade);
+        if color.0 != wanted {
+            color.0 = wanted;
+        }
+        if text.0 != line {
+            text.0 = line;
+        }
     }
 }
 

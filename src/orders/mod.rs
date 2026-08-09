@@ -3,6 +3,8 @@
 //! Grading lives in [`grade`], a pure function with no ECS involvement, so the
 //! rules that decide whether a shift went well can be tested exhaustively.
 
+use std::collections::HashSet;
+
 use bevy::prelude::*;
 use bevy_common_assets::ron::RonAssetPlugin;
 use chem_sim::{ReagentId, Solution, Units};
@@ -13,7 +15,16 @@ use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, HeldBy};
 use crate::crew::{spawn_crew_member, CrewAssets, CrewDef, CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{InteractRequested, Interactable};
+use crate::knowledge::Knowledge;
+use crate::radio::{announce_request, RadioLog};
 use crate::AppState;
+
+/// How often the crew ask for something just past what the chemist knows.
+///
+/// Every order being makeable is a treadmill; every order being impossible is
+/// a wall. A minority of stretch requests is what sends the player to the
+/// bench to work something out.
+const STRETCH_ORDER_CHANCE: f64 = 0.25;
 
 pub struct OrderPlugin;
 
@@ -129,7 +140,7 @@ pub struct Order {
 }
 
 /// How a delivery went.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
 pub enum Outcome {
     Success,
     /// Right chemical, not enough of it.
@@ -226,8 +237,13 @@ fn generate_orders(
     assets: Option<Res<CrewAssets>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut spawner: Option<ResMut<OrderSpawner>>,
+    knowledge: Option<Res<Knowledge>>,
+    mut radio: ResMut<RadioLog>,
     active: Query<&CrewMember>,
 ) {
+    let Some(knowledge) = knowledge else {
+        return;
+    };
     let (Some(station), Some(assets), Some(spawner)) = (station, assets, spawner.as_mut()) else {
         return;
     };
@@ -248,7 +264,47 @@ fn generate_orders(
     let Some(crew_def) = station.crew.choose(&mut rng) else {
         return;
     };
-    let Some(request) = station.config.requests.choose(&mut rng) else {
+
+    // Only ask for things the chemist could plausibly produce. Without this
+    // the very first order can be a three-step chain the player has no way of
+    // knowing, which reads as the game being broken rather than hard.
+    let makeable = knowledge.available_reagents(&db);
+    let stretch: HashSet<ReagentId> = knowledge
+        .frontier(&db)
+        .into_iter()
+        .flat_map(|id| db.reactions.get(id).product_ids())
+        .collect();
+
+    let in_reach: Vec<&RequestDef> = station
+        .config
+        .requests
+        .iter()
+        .filter(|request| {
+            db.reagents
+                .id_of(&request.reagent)
+                .is_some_and(|id| makeable.contains(&id))
+        })
+        .collect();
+    let just_beyond: Vec<&RequestDef> = station
+        .config
+        .requests
+        .iter()
+        .filter(|request| {
+            db.reagents
+                .id_of(&request.reagent)
+                .is_some_and(|id| stretch.contains(&id))
+        })
+        .collect();
+
+    let pool = if !just_beyond.is_empty() && rng.random_bool(STRETCH_ORDER_CHANCE) {
+        &just_beyond
+    } else if !in_reach.is_empty() {
+        &in_reach
+    } else {
+        &just_beyond
+    };
+
+    let Some(request) = pool.choose(&mut rng).copied() else {
         return;
     };
     // A request naming a reagent that is not in the chemistry data is a
@@ -285,6 +341,10 @@ fn generate_orders(
             crew_def.name, amount, reagent_name
         )),
     ));
+
+    // The request goes out over the radio too, so the feed carries both halves
+    // of the conversation rather than only the verdict.
+    announce_request(&mut radio, &crew_def.name, &crew_def.role, &request.plea);
 
     info!(
         "{} ({}) wants {}u {}",

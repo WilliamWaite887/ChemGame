@@ -19,6 +19,7 @@ pub struct MachinePlugin;
 impl Plugin for MachinePlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<DispenseRequested>()
+            .add_message::<ReactionsFired>()
             .add_message::<EjectRequested>()
             .add_message::<EmptyRequested>()
             .add_message::<BufferTransferRequested>()
@@ -130,6 +131,16 @@ pub struct DispenseRequested {
     pub reagent: ReagentId,
 }
 
+/// Reactions that just took place in a container.
+///
+/// This is the hook recipe discovery hangs off: the resolver already reports
+/// which reactions fired, so learning is a matter of noticing, not of
+/// re-deriving anything.
+#[derive(Message)]
+pub struct ReactionsFired {
+    pub reactions: Vec<chem_sim::ReactionId>,
+}
+
 #[derive(Message)]
 pub struct EjectRequested {
     pub machine: Entity,
@@ -222,6 +233,7 @@ fn handle_machine_interact(
 fn handle_dispense(
     db: Res<ChemDb>,
     mut requests: MessageReader<DispenseRequested>,
+    mut fired: MessageWriter<ReactionsFired>,
     machines: Query<&DispenseAmount>,
     slotted: Query<(Entity, &InSlot)>,
     mut containers: Query<&mut Container>,
@@ -236,13 +248,20 @@ fn handle_dispense(
         let Ok(mut container) = containers.get_mut(target) else {
             continue;
         };
-        container.mutate(&db, |solution| solution.add(request.reagent, amount.0));
+        let (_, report) =
+            container.mutate(&db, |solution| solution.add(request.reagent, amount.0));
+        if report.reacted() {
+            fired.write(ReactionsFired {
+                reactions: report.fired_reactions(),
+            });
+        }
     }
 }
 
 fn handle_buffer_transfer(
     db: Res<ChemDb>,
     mut requests: MessageReader<BufferTransferRequested>,
+    mut fired: MessageWriter<ReactionsFired>,
     mut buffers: Query<&mut Buffer>,
     slotted: Query<(Entity, &InSlot)>,
     mut containers: Query<&mut Container>,
@@ -273,11 +292,16 @@ fn handle_buffer_transfer(
             }
             BufferDirection::ToContainer => {
                 let moved = buffer.0.remove(request.reagent, request.amount);
-                let (overflow, _) = container.mutate(&db, |solution| {
+                let (overflow, report) = container.mutate(&db, |solution| {
                     solution.add(request.reagent, moved)
                 });
                 if overflow.is_positive() {
                     let _ = buffer.0.add(request.reagent, overflow);
+                }
+                if report.reacted() {
+                    fired.write(ReactionsFired {
+                        reactions: report.fired_reactions(),
+                    });
                 }
             }
         }
@@ -392,6 +416,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(ChemDb(data))
             .add_message::<DispenseRequested>()
+            .add_message::<ReactionsFired>()
             .add_message::<BufferTransferRequested>()
             .add_message::<InteractRequested>()
             .add_systems(
@@ -442,6 +467,49 @@ mod tests {
             "reactions must run as part of dispensing, not only on demand"
         );
         assert_eq!(container.solution.len(), 1, "reagents should be consumed");
+    }
+
+    #[test]
+    fn causing_a_reaction_reports_which_recipe_fired() {
+        // Discovery is built on this: the resolver already names what fired,
+        // so learning is a matter of noticing rather than re-deriving.
+        let mut app = test_app();
+        let dispenser = app
+            .world_mut()
+            .spawn(DispenseAmount(Units::whole(15)))
+            .id();
+        app.world_mut().spawn((
+            Container::new(ContainerKind::LargeBeaker),
+            InSlot(dispenser),
+        ));
+
+        // Oxygen, sugar, then a double helping of carbon: inaprovaline forms
+        // first and the leftover carbon carries it on to bicaridine.
+        for key in ["oxygen", "sugar", "carbon", "carbon"] {
+            let reagent = reagent(&app, key);
+            app.world_mut().write_message(DispenseRequested {
+                machine: dispenser,
+                reagent,
+            });
+            app.update();
+        }
+
+        let fired = app.world().resource::<Messages<ReactionsFired>>();
+        let mut cursor = fired.get_cursor();
+        let reported: Vec<chem_sim::ReactionId> = cursor
+            .read(fired)
+            .flat_map(|event| event.reactions.clone())
+            .collect();
+
+        let db = app.world().resource::<ChemDb>();
+        let names: Vec<&str> = reported
+            .iter()
+            .map(|id| db.reactions.get(*id).key.as_str())
+            .collect();
+        assert!(
+            names.contains(&"inaprovaline") && names.contains(&"bicaridine"),
+            "both steps of the chain should be reported, got {names:?}"
+        );
     }
 
     #[test]
