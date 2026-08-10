@@ -332,7 +332,11 @@ fn spawn_machine(
         MachineKind::Analyzer => {
             commands.entity(body).insert(slot);
         }
-        MachineKind::DeliveryWindow => {}
+        MachineKind::DeliveryWindow => {
+            // A tray, not a machine: whatever is left here gets handed to the
+            // next crew member who asked for something in it.
+            commands.entity(body).insert(slot);
+        }
     }
 
     // The screen is a separate unparented entity rather than a child: children

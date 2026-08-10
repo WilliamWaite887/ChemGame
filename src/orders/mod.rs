@@ -13,12 +13,14 @@ use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
-use crate::containers::{spawn_container, Container, ContainerAssets, ContainerKind, HeldBy};
+use crate::containers::{
+    spawn_container, Container, ContainerAssets, ContainerKind, HeldBy, InSlot,
+};
 use crate::crew::{spawn_crew_member, CrewAssets, CrewDef, CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{InteractRequested, Interactable};
 use crate::knowledge::{Knowledge, RESEARCH_PER_SUCCESS};
 use crate::lab::COUNTER_SPOT;
-use crate::machines::{chemist_entity, TestBenchStock};
+use crate::machines::{chemist_entity, slotted_container, Machine, MachineKind, TestBenchStock};
 use crate::player::Chemist;
 use crate::radio::{announce_request, channel_for, RadioEntry, RadioLog};
 use crate::AppState;
@@ -55,6 +57,7 @@ impl Plugin for OrderPlugin {
                     generate_orders,
                     expire_orders,
                     handle_delivery,
+                    handle_window_delivery,
                     leave_sample_vials,
                     broadcast_shift,
                 )
@@ -461,44 +464,185 @@ fn handle_delivery(
             continue;
         }
 
-        let outcome = grade(
-            order.reagent,
-            order.amount,
-            &container.solution,
-            container.kind,
-            db.reagents.get(order.reagent).overdose,
+        complete_delivery(
+            &mut commands,
+            &db,
+            &mut shift,
+            &mut resolved,
+            &mut knowledge,
+            Handover {
+                crew: request.target,
+                member,
+                order,
+                route: &mut route,
+                container_entity,
+                container,
+            },
         );
+    }
+}
 
-        resolved.write(OrderResolved {
-            name: member.name.clone(),
-            role: member.role.clone(),
-            reagent: order.reagent,
-            outcome,
-        });
+/// One crew member, one order, one container being handed across.
+struct Handover<'a> {
+    crew: Entity,
+    member: &'a CrewMember,
+    order: &'a Order,
+    route: &'a mut CrewRoute,
+    container_entity: Entity,
+    container: &'a Container,
+}
 
-        if outcome.is_good() {
-            shift.succeeded += 1;
-            knowledge.award_research(RESEARCH_PER_SUCCESS);
-        } else {
-            shift.botched += 1;
+/// Grades a handover and closes the order out.
+///
+/// Shared by both delivery routes on purpose. The counter and the window have
+/// to agree exactly on what counts as a good delivery — two copies of this
+/// would drift, and the player would learn that where they stood mattered.
+fn complete_delivery(
+    commands: &mut Commands,
+    db: &ChemDb,
+    shift: &mut Shift,
+    resolved: &mut MessageWriter<OrderResolved>,
+    knowledge: &mut Knowledge,
+    handover: Handover,
+) -> Outcome {
+    let Handover {
+        crew,
+        member,
+        order,
+        route,
+        container_entity,
+        container,
+    } = handover;
+
+    let outcome = grade(
+        order.reagent,
+        order.amount,
+        &container.solution,
+        container.kind,
+        db.reagents.get(order.reagent).overdose,
+    );
+
+    resolved.write(OrderResolved {
+        name: member.name.clone(),
+        role: member.role.clone(),
+        reagent: order.reagent,
+        outcome,
+    });
+
+    if outcome.is_good() {
+        shift.succeeded += 1;
+        knowledge.award_research(RESEARCH_PER_SUCCESS);
+    } else {
+        shift.botched += 1;
+    }
+    shift.reputation += outcome.reputation_delta();
+
+    info!(
+        "{} took {} — {:?}",
+        member.name,
+        container.kind.label(),
+        outcome
+    );
+
+    // They walk off with the glassware. Getting it back is someone else's
+    // problem, which is also true in the original.
+    commands.entity(container_entity).despawn();
+    commands
+        .entity(crew)
+        .remove::<Order>()
+        .remove::<Interactable>();
+    route.leave();
+    outcome
+}
+
+/// Which order a container in the window should go to, if any.
+///
+/// Pulled out of the system so the matching rule can be tested directly. The
+/// rule is deliberately narrow: a container matches an order when it holds
+/// *any* of the reagent asked for. Whether it holds enough, whether it is
+/// clean, and whether the dose is safe are [`grade`]'s business — the window
+/// picks a recipient, it does not vet the delivery.
+///
+/// Ties go to whoever is closest to giving up, matching the order queue's own
+/// sort. A beaker that could satisfy two people should go to the one about to
+/// walk out.
+fn window_recipient<'a>(
+    contents: &Solution,
+    waiting: impl Iterator<Item = (Entity, &'a Order, &'a CrewRoute)>,
+) -> Option<Entity> {
+    waiting
+        .filter(|(_, _, route)| route.phase == CrewPhase::Waiting)
+        .filter(|(_, order, _)| contents.volume_of(order.reagent).is_positive())
+        .min_by(|a, b| {
+            a.1.timer
+                .remaining_secs()
+                .total_cmp(&b.1.timer.remaining_secs())
+        })
+        .map(|(entity, _, _)| entity)
+}
+
+/// Hands over whatever is sitting in the delivery window.
+///
+/// The window is a tray rather than a button: a container left in it goes to
+/// the first crew member at the counter who asked for something it holds. That
+/// means a batch can be finished and parked before its requester has even
+/// walked in, which is what makes the window a post one chemist can work while
+/// the other mixes.
+#[allow(clippy::too_many_arguments)]
+fn handle_window_delivery(
+    mut commands: Commands,
+    db: Res<ChemDb>,
+    mut shift: ResMut<Shift>,
+    mut resolved: MessageWriter<OrderResolved>,
+    mut knowledge: ResMut<Knowledge>,
+    windows: Query<(Entity, &Machine)>,
+    slotted: Query<(Entity, &InSlot)>,
+    containers: Query<(&Container, Has<TestBenchStock>)>,
+    mut crew: Query<(Entity, &CrewMember, &Order, &mut CrewRoute)>,
+) {
+    for (window, machine) in &windows {
+        if machine.kind != MachineKind::DeliveryWindow {
+            continue;
         }
-        shift.reputation += outcome.reputation_delta();
+        let Some(container_entity) = slotted_container(window, &slotted) else {
+            continue;
+        };
+        let Ok((container, test_stock)) = containers.get(container_entity) else {
+            continue;
+        };
+        // Practice stock is refused by every route, or the test bench would
+        // just be a dispenser that costs nothing. Refused quietly here rather
+        // than over the radio — the panel explains it, and a line every frame
+        // would bury the feed.
+        if test_stock {
+            continue;
+        }
 
-        info!(
-            "{} took {} — {:?}",
-            member.name,
-            container.kind.label(),
-            outcome
+        let candidates = crew
+            .iter()
+            .map(|(entity, _, order, route)| (entity, order, route));
+        let Some(recipient) = window_recipient(&container.solution, candidates) else {
+            continue;
+        };
+
+        let Ok((crew_entity, member, order, mut route)) = crew.get_mut(recipient) else {
+            continue;
+        };
+        complete_delivery(
+            &mut commands,
+            &db,
+            &mut shift,
+            &mut resolved,
+            &mut knowledge,
+            Handover {
+                crew: crew_entity,
+                member,
+                order,
+                route: &mut route,
+                container_entity,
+                container,
+            },
         );
-
-        // They walk off with the glassware. Getting it back is someone else's
-        // problem, which is also true in the original.
-        commands.entity(container_entity).despawn();
-        commands
-            .entity(request.target)
-            .remove::<Order>()
-            .remove::<Interactable>();
-        route.leave();
     }
 }
 
@@ -588,6 +732,183 @@ mod tests {
             let _ = solution.add(data.reagent(key), Units::whole(*amount));
         }
         solution
+    }
+
+    // -- delivery window ----------------------------------------------------
+
+    /// Just enough world to run the window: no renderer, no crew walking.
+    fn window_app() -> App {
+        let data = data();
+        let mut app = App::new();
+        app.insert_resource(Knowledge::new(&data))
+            .insert_resource(ChemDb(data))
+            .init_resource::<Shift>()
+            .add_message::<OrderResolved>()
+            .add_systems(Update, handle_window_delivery);
+        app
+    }
+
+    fn reagent_id(app: &App, key: &str) -> ReagentId {
+        app.world().resource::<ChemDb>().reagent(key)
+    }
+
+    /// A delivery window with `contents` sitting in its slot.
+    fn window_with(app: &mut App, contents: &[(&str, i32)], practice: bool) -> (Entity, Entity) {
+        let data = app.world().resource::<ChemDb>().0.clone();
+        let window = app
+            .world_mut()
+            .spawn(Machine::new(MachineKind::DeliveryWindow))
+            .id();
+
+        let mut container = Container::new(ContainerKind::LargeBeaker);
+        for (key, amount) in contents {
+            let _ = container
+                .solution
+                .add(data.reagent(key), Units::whole(*amount));
+        }
+        let mut entity = app.world_mut().spawn((container, InSlot(window)));
+        if practice {
+            entity.insert(TestBenchStock);
+        }
+        (window, entity.id())
+    }
+
+    /// A crew member at the counter, or still on their way in.
+    fn waiting_crew(
+        app: &mut App,
+        name: &str,
+        wants: &str,
+        amount: i32,
+        patience: f32,
+        arrived: bool,
+    ) -> Entity {
+        let reagent = reagent_id(app, wants);
+        let mut route = CrewRoute::arrival(0.0);
+        route.phase = if arrived {
+            CrewPhase::Waiting
+        } else {
+            CrewPhase::Arriving
+        };
+        app.world_mut()
+            .spawn((
+                CrewMember {
+                    name: name.to_string(),
+                    role: "Medical".to_string(),
+                },
+                Order {
+                    reagent,
+                    amount: Units::whole(amount),
+                    plea: String::new(),
+                    timer: Timer::from_seconds(patience, TimerMode::Once),
+                },
+                route,
+            ))
+            .id()
+    }
+
+    fn outcomes(app: &App) -> Vec<(String, Outcome)> {
+        let messages = app.world().resource::<Messages<OrderResolved>>();
+        let mut cursor = messages.get_cursor();
+        cursor
+            .read(messages)
+            .map(|report| (report.name.clone(), report.outcome))
+            .collect()
+    }
+
+    #[test]
+    fn the_window_hands_over_to_whoever_is_waiting_for_it() {
+        let mut app = window_app();
+        let (_, beaker) = window_with(&mut app, &[("dylovene", 30)], false);
+        let crew = waiting_crew(&mut app, "Dr. Vance", "dylovene", 30, 60.0, true);
+
+        app.update();
+
+        assert_eq!(outcomes(&app), vec![("Dr. Vance".to_string(), Outcome::Success)]);
+        assert!(
+            app.world().get_entity(beaker).is_err(),
+            "they walk off with the glassware"
+        );
+        assert!(
+            app.world().get::<Order>(crew).is_none(),
+            "the order should be closed out"
+        );
+        assert_eq!(app.world().resource::<Shift>().succeeded, 1);
+    }
+
+    #[test]
+    fn the_window_serves_the_most_urgent_matching_order() {
+        // A batch that could satisfy two people goes to whoever is closest to
+        // walking out, matching how the order queue itself is sorted.
+        let mut app = window_app();
+        window_with(&mut app, &[("dylovene", 30)], false);
+        waiting_crew(&mut app, "Patient", "dylovene", 30, 200.0, true);
+        waiting_crew(&mut app, "Desperate", "dylovene", 30, 12.0, true);
+
+        app.update();
+
+        assert_eq!(
+            outcomes(&app),
+            vec![("Desperate".to_string(), Outcome::Success)]
+        );
+    }
+
+    #[test]
+    fn the_window_waits_for_crew_who_have_not_reached_the_counter() {
+        // Handing a beaker through the window to someone still coming in the
+        // door would be nonsense; the tray just holds it until they arrive.
+        let mut app = window_app();
+        let (_, beaker) = window_with(&mut app, &[("dylovene", 30)], false);
+        waiting_crew(&mut app, "En route", "dylovene", 30, 60.0, false);
+
+        app.update();
+
+        assert!(outcomes(&app).is_empty());
+        assert!(
+            app.world().get_entity(beaker).is_ok(),
+            "the batch stays in the window until someone is there to take it"
+        );
+    }
+
+    #[test]
+    fn the_window_refuses_test_bench_stock() {
+        // Otherwise the bench is just a dispenser that costs nothing, and the
+        // window is the way round the refusal at the counter.
+        let mut app = window_app();
+        let (_, beaker) = window_with(&mut app, &[("dylovene", 30)], true);
+        waiting_crew(&mut app, "Dr. Vance", "dylovene", 30, 60.0, true);
+
+        app.update();
+
+        assert!(outcomes(&app).is_empty());
+        assert!(app.world().get_entity(beaker).is_ok());
+    }
+
+    #[test]
+    fn the_window_leaves_a_batch_nobody_asked_for() {
+        let mut app = window_app();
+        let (_, beaker) = window_with(&mut app, &[("kelotane", 30)], false);
+        waiting_crew(&mut app, "Dr. Vance", "dylovene", 30, 60.0, true);
+
+        app.update();
+
+        assert!(outcomes(&app).is_empty());
+        assert!(app.world().get_entity(beaker).is_ok());
+    }
+
+    #[test]
+    fn the_window_matches_on_the_reagent_but_still_grades_honestly() {
+        // The window picks a recipient; it does not vet the delivery. This is
+        // where ground produce gets caught — right chemical, plant fibre still
+        // in it — so putting a dirty batch in the tray is a real mistake and
+        // not silently prevented.
+        let mut app = window_app();
+        window_with(&mut app, &[("dylovene", 30), ("plant_fibre", 20)], false);
+        waiting_crew(&mut app, "Dr. Vance", "dylovene", 30, 60.0, true);
+
+        app.update();
+
+        assert_eq!(outcomes(&app), vec![("Dr. Vance".to_string(), Outcome::Impure)]);
+        assert_eq!(app.world().resource::<Shift>().botched, 1);
     }
 
     #[test]

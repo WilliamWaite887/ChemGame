@@ -18,7 +18,7 @@ use crate::knowledge::{Knowledge, RecipeDiscovered, HINT_COST};
 use crate::machines::{
     slotted_container, AnalyzeRequested, Buffer, BufferDirection, BufferTransferRequested,
     DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested, GrindRequested, Hopper,
-    Machine, MachineKind, PackageRequested,
+    Machine, MachineKind, PackageRequested, TestBenchStock,
 };
 use crate::orders::{Order, Shift};
 use crate::player::LocalPlayer;
@@ -104,6 +104,9 @@ struct PanelSignature {
     contents: Vec<(ReagentId, Units)>,
     buffer: Vec<(ReagentId, Units)>,
     hopper: Vec<ProduceId>,
+    /// The loaded container is practice stock. Tracked separately because the
+    /// delivery window has to explain why it will not take it.
+    test_stock: bool,
     amount: Option<Units>,
     known_recipes: usize,
 }
@@ -119,6 +122,7 @@ impl Default for PanelSignature {
             contents: Vec::new(),
             buffer: Vec::new(),
             hopper: Vec::new(),
+            test_stock: false,
             amount: None,
             known_recipes: usize::MAX,
         }
@@ -147,7 +151,7 @@ fn sync_panel(
     modes: Query<&InteractionMode, With<LocalPlayer>>,
     machines: MachineParts,
     slotted: Query<(Entity, &InSlot)>,
-    containers: Query<&Container>,
+    containers: Query<(&Container, Has<TestBenchStock>)>,
     knowledge: Res<Knowledge>,
     catalog: Option<Res<ProduceCatalog>>,
     mut previous: Local<PanelSignature>,
@@ -158,7 +162,9 @@ fn sync_panel(
         _ => None,
     };
     let loaded_entity = open_machine.and_then(|machine| slotted_container(machine, &slotted));
-    let loaded = loaded_entity.and_then(|entity| containers.get(entity).ok());
+    let slot_contents = loaded_entity.and_then(|entity| containers.get(entity).ok());
+    let loaded = slot_contents.map(|(container, _)| container);
+    let test_stock = slot_contents.is_some_and(|(_, practice)| practice);
     let machine_parts = open_machine.and_then(|machine| machines.get(machine).ok());
 
     let signature = PanelSignature {
@@ -175,6 +181,7 @@ fn sync_panel(
             .and_then(|(_, _, _, hopper)| hopper)
             .map(|hopper| hopper.0.clone())
             .unwrap_or_default(),
+        test_stock,
         amount: machine_parts
             .and_then(|(_, amount, _, _)| amount)
             .map(|a| a.0),
@@ -245,12 +252,8 @@ fn sync_panel(
                         MachineKind::Grinder => {
                             grinder_body(panel, &db, catalog.as_deref(), hopper, loaded);
                         }
-                        other => {
-                            panel.spawn(label(
-                                format!("{} is not installed yet.", other.label()),
-                                15.0,
-                                TEXT_DIM,
-                            ));
+                        MachineKind::DeliveryWindow => {
+                            delivery_window_body(panel, &db, loaded, test_stock);
                         }
                     }
 
@@ -519,6 +522,61 @@ fn grinder_body(
     });
 
     container_readout(panel, db, loaded, true);
+}
+
+/// The counter tray.
+///
+/// There are no buttons to hand anything over: the window matches on its own
+/// the moment somebody at the counter wants what is in it. So the panel's job
+/// is to say what will happen and, when nothing does, why not.
+fn delivery_window_body(
+    panel: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    loaded: Option<&Container>,
+    test_stock: bool,
+) {
+    panel.spawn(label(
+        "Anything left here goes to the next crew member at the counter who \
+         asked for something in it. No need to wait around for them.",
+        13.0,
+        TEXT_DIM,
+    ));
+
+    container_readout(panel, db, loaded, false);
+
+    let Some(container) = loaded else {
+        return;
+    };
+
+    // Worst news first, same order the grading runs in.
+    let (message, color) = if test_stock {
+        (
+            "Test bench stock. Nobody will take this — rinse it out and make \
+             the real thing."
+                .to_string(),
+            Color::srgb(0.95, 0.55, 0.45),
+        )
+    } else if container.solution.is_empty() {
+        (
+            "Empty. Put a finished batch in and it will go out on its own."
+                .to_string(),
+            TEXT_DIM,
+        )
+    } else {
+        (
+            format!(
+                "Waiting for someone who needs {}.",
+                container
+                    .solution
+                    .iter()
+                    .map(|(reagent, _)| db.reagents.get(reagent).name.clone())
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            ),
+            Color::srgb(0.70, 0.85, 0.60),
+        )
+    };
+    panel.spawn(label(message, 13.0, color));
 }
 
 /// Shared contents readout for whatever is sitting in the machine's slot.
