@@ -14,6 +14,7 @@ use crate::chem_data::ChemDb;
 use crate::interaction::{InteractRequested, Interactable};
 use crate::machines::chemist_entity;
 use crate::player::{Chemist, LocalPlayer, PlayerCamera};
+use crate::produce::Produce;
 use crate::AppState;
 
 /// Where a carried container sits in view: low and to the right, clear of the
@@ -226,12 +227,19 @@ fn spawn_starting_glassware(
 #[derive(Message, Serialize, Deserialize, Clone)]
 pub struct DropRequested;
 
+/// Everything a chemist can pick up off a bench.
+type Pickable<'w, 's> = Query<'w, 's, (), Or<(With<Container>, With<Produce>)>>;
+
 /// Server-side pickup. Only `HeldBy` changes here; how a carried beaker looks
 /// is the holder's own business, handled in [`carry_held_containers`].
+///
+/// Produce is pickable too. It is not a container — it holds no solution and
+/// must never be gradeable at the delivery window — but carrying is defined by
+/// `HeldBy` alone, so everything downstream of this treats the two alike.
 fn handle_pickup(
     mut commands: Commands,
     mut requests: MessageReader<FromClient<InteractRequested>>,
-    containers: Query<(), With<Container>>,
+    pickable: Pickable,
     held: Query<&HeldBy>,
     chemists: Query<(Entity, &Chemist)>,
 ) {
@@ -239,7 +247,7 @@ fn handle_pickup(
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
-        if !containers.contains(request.target) || held.contains(request.target) {
+        if !pickable.contains(request.target) || held.contains(request.target) {
             continue;
         }
         // One hand, one beaker. Anything else needs an inventory, which this

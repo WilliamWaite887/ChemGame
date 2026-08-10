@@ -474,9 +474,12 @@ fn seed_data_loads_completely() {
 fn every_medicine_is_reachable_from_the_dispenser() {
     // A recipe whose ingredients can never all be obtained is a dead end the
     // player can never solve. Cheaper to catch here than in playtesting.
+    //
+    // Seeded from `raw()` rather than `dispensable()`: grind-only reagents are
+    // roots of the graph too. They come out of produce instead of the
+    // dispenser, but they are still obtainable without a reaction.
     let data = data();
-    let mut reachable: HashSet<ReagentId> =
-        data.reagents.dispensable().map(|r| r.id).collect();
+    let mut reachable: HashSet<ReagentId> = data.reagents.raw().map(|r| r.id).collect();
 
     loop {
         let mut grew = false;
@@ -500,7 +503,8 @@ fn every_medicine_is_reachable_from_the_dispenser() {
     for reagent in data.reagents.iter() {
         assert!(
             reachable.contains(&reagent.id),
-            "'{}' can never be produced — dead end in the recipe graph",
+            "'{}' is neither obtainable raw nor produced by any reaction — \
+             dead end in the recipe graph",
             reagent.key
         );
     }
@@ -565,7 +569,10 @@ fn locked_recipes_stay_within_reach_of_what_the_player_knows() {
 fn medicines_carry_book_entries_and_base_reagents_do_not() {
     let data = data();
     for reagent in data.reagents.iter() {
-        if reagent.dispensable {
+        // Raw materials explain themselves: nobody needs telling what oxygen
+        // is for, or that plant fibre is the part of the plant you did not
+        // want. The entry is owed by anything a chemist has to *make*.
+        if reagent.dispensable || reagent.from_produce {
             continue;
         }
         assert!(

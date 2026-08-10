@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use chem_sim::{Solution, Units};
 
 use crate::interaction::Interactable;
-use crate::machines::{Buffer, ContainerSlot, DispenseAmount, Machine, MachineKind};
+use crate::machines::{Buffer, ContainerSlot, DispenseAmount, Hopper, Machine, MachineKind};
 use crate::AppState;
 
 /// Room interior runs from `-HALF` to `+HALF` on each axis.
@@ -324,7 +324,12 @@ fn spawn_machine(
                 .entity(body)
                 .insert((slot, Buffer(Solution::new(Units::whole(300)))));
         }
-        MachineKind::Grinder | MachineKind::Analyzer => {
+        MachineKind::Grinder => {
+            // Two loading points: produce goes in the hopper, the extract runs
+            // out into whatever beaker is in the slot.
+            commands.entity(body).insert((slot, Hopper::default()));
+        }
+        MachineKind::Analyzer => {
             commands.entity(body).insert(slot);
         }
         MachineKind::DeliveryWindow => {}

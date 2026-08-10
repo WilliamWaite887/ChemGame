@@ -41,6 +41,14 @@ pub struct ReagentDef {
     /// Whether the base chemical dispenser can produce it directly.
     #[serde(default)]
     pub dispensable: bool,
+    /// Whether it comes out of ground produce rather than the dispenser.
+    ///
+    /// The sibling of `dispensable`: both mean "obtainable without a
+    /// reaction", which is what stops the reachability guardrail flagging it
+    /// as a dead end in the recipe graph. What does the grinding is the game's
+    /// business, not this crate's.
+    #[serde(default)]
+    pub from_produce: bool,
     /// What this treats, shown in the reference book even while the recipe is
     /// still locked — a chemist knows what bicaridine is for even if they have
     /// forgotten how to make it.
@@ -57,6 +65,7 @@ pub struct Reagent {
     pub color: [f32; 3],
     pub overdose: Option<Units>,
     pub dispensable: bool,
+    pub from_produce: bool,
     pub treats: Option<String>,
 }
 
@@ -87,6 +96,7 @@ impl ReagentRegistry {
             color: def.color,
             overdose: def.overdose,
             dispensable: def.dispensable,
+            from_produce: def.from_produce,
             treats: def.treats,
         });
         id
@@ -115,5 +125,14 @@ impl ReagentRegistry {
     /// Everything the base dispenser can produce.
     pub fn dispensable(&self) -> impl Iterator<Item = &Reagent> {
         self.reagents.iter().filter(|r| r.dispensable)
+    }
+
+    /// Everything obtainable without running a reaction — the roots of the
+    /// recipe graph. Anything outside this set and not produced by some
+    /// reaction is unreachable.
+    pub fn raw(&self) -> impl Iterator<Item = &Reagent> {
+        self.reagents
+            .iter()
+            .filter(|r| r.dispensable || r.from_produce)
     }
 }

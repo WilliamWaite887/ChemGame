@@ -1,0 +1,38 @@
+// Botany produce and the courier who brings it.
+//
+// `yields` are absolute units per item, not ratios: grinding is extraction,
+// not a reaction, so the resolver is never involved in deciding the amounts.
+//
+// Every kind yields plant fibre alongside its extract, and that is the whole
+// design. A ground beaker always holds two reagents, which `grade` reports as
+// Impure — so the grinder is the fast route to a medicine, but never the last
+// step. Cleaning it up is what the ChemMaster is for.
+//
+// Poppy is the dirtiest because bicaridine is the most valuable thing here,
+// and the only one the chemist may not yet know how to make.
+(
+    courier: "Botanist Ivy",
+    first_delivery_delay: 70.0,
+    gap_seconds: (150.0, 240.0),
+    items_per_delivery: (3, 5),
+    kinds: [
+        (
+            id: "ambrosia",
+            name: "Ambrosia Vulgaris",
+            color: (0.35, 0.62, 0.30),
+            yields: [("dylovene", 12), ("plant_fibre", 8)],
+        ),
+        (
+            id: "aloe",
+            name: "Aloe",
+            color: (0.55, 0.74, 0.48),
+            yields: [("kelotane", 12), ("plant_fibre", 8)],
+        ),
+        (
+            id: "poppy",
+            name: "Poppy",
+            color: (0.78, 0.22, 0.24),
+            yields: [("bicaridine", 10), ("plant_fibre", 10)],
+        ),
+    ],
+)

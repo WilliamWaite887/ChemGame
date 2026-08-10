@@ -17,11 +17,12 @@ use crate::interaction::{leave_machine, InteractionMode};
 use crate::knowledge::{Knowledge, RecipeDiscovered, HINT_COST};
 use crate::machines::{
     slotted_container, AnalyzeRequested, Buffer, BufferDirection, BufferTransferRequested,
-    DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested, Machine, MachineKind,
-    PackageRequested,
+    DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested, GrindRequested, Hopper,
+    Machine, MachineKind, PackageRequested,
 };
 use crate::orders::{Order, Shift};
 use crate::player::LocalPlayer;
+use crate::produce::{ProduceCatalog, ProduceId};
 use crate::radio::RadioLog;
 use crate::AppState;
 
@@ -83,6 +84,7 @@ enum PanelAction {
     ToContainer(ReagentId, Units),
     Package(ContainerKind),
     Analyze,
+    Grind { all: bool },
     BuyHint(chem_sim::ReactionId),
     Close,
 }
@@ -101,6 +103,7 @@ struct PanelSignature {
     container: Option<Entity>,
     contents: Vec<(ReagentId, Units)>,
     buffer: Vec<(ReagentId, Units)>,
+    hopper: Vec<ProduceId>,
     amount: Option<Units>,
     known_recipes: usize,
 }
@@ -115,11 +118,26 @@ impl Default for PanelSignature {
             container: None,
             contents: Vec::new(),
             buffer: Vec::new(),
+            hopper: Vec::new(),
             amount: None,
             known_recipes: usize::MAX,
         }
     }
 }
+
+/// The optional fittings a panel draws from: not every machine has an amount
+/// dial, a buffer or a hopper, and the panel body decides what to do with the
+/// ones its machine happens to carry.
+type MachineParts<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Machine,
+        Option<&'static DispenseAmount>,
+        Option<&'static Buffer>,
+        Option<&'static Hopper>,
+    ),
+>;
 
 #[allow(clippy::too_many_arguments)]
 fn sync_panel(
@@ -127,10 +145,11 @@ fn sync_panel(
     db: Res<ChemDb>,
     existing: Query<Entity, With<PanelRoot>>,
     modes: Query<&InteractionMode, With<LocalPlayer>>,
-    machines: Query<(&Machine, Option<&DispenseAmount>, Option<&Buffer>)>,
+    machines: MachineParts,
     slotted: Query<(Entity, &InSlot)>,
     containers: Query<&Container>,
     knowledge: Res<Knowledge>,
+    catalog: Option<Res<ProduceCatalog>>,
     mut previous: Local<PanelSignature>,
 ) {
     let mode = modes.iter().next().copied().unwrap_or_default();
@@ -149,10 +168,16 @@ fn sync_panel(
             .map(|container| container.solution.iter().collect())
             .unwrap_or_default(),
         buffer: machine_parts
-            .and_then(|(_, _, buffer)| buffer)
+            .and_then(|(_, _, buffer, _)| buffer)
             .map(|buffer| buffer.0.iter().collect())
             .unwrap_or_default(),
-        amount: machine_parts.and_then(|(_, amount, _)| amount).map(|a| a.0),
+        hopper: machine_parts
+            .and_then(|(_, _, _, hopper)| hopper)
+            .map(|hopper| hopper.0.clone())
+            .unwrap_or_default(),
+        amount: machine_parts
+            .and_then(|(_, amount, _, _)| amount)
+            .map(|a| a.0),
         known_recipes: knowledge.known_count(),
     };
 
@@ -172,7 +197,7 @@ fn sync_panel(
     if open_machine.is_none() {
         return;
     }
-    let Some((machine, amount, buffer)) = machine_parts else {
+    let Some((machine, amount, buffer, hopper)) = machine_parts else {
         return;
     };
 
@@ -216,6 +241,9 @@ fn sync_panel(
                         }
                         MachineKind::Analyzer => {
                             analyzer_body(panel, &db, &knowledge, loaded);
+                        }
+                        MachineKind::Grinder => {
+                            grinder_body(panel, &db, catalog.as_deref(), hopper, loaded);
                         }
                         other => {
                             panel.spawn(label(
@@ -431,6 +459,66 @@ fn analyzer_body(
                 },
             ));
         });
+}
+
+fn grinder_body(
+    panel: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    catalog: Option<&ProduceCatalog>,
+    hopper: Option<&Hopper>,
+    loaded: Option<&Container>,
+) {
+    panel.spawn(label(
+        "Extracts produce straight into the beaker. Fast, and never clean — \
+         what comes out still has to go through the ChemMaster.",
+        13.0,
+        TEXT_DIM,
+    ));
+
+    panel.spawn(label("Hopper", 13.0, TEXT_DIM));
+    panel
+        .spawn((section(), BackgroundColor(SECTION_BG)))
+        .with_children(|section| {
+            let (Some(catalog), Some(hopper)) = (catalog, hopper) else {
+                return;
+            };
+            if hopper.0.is_empty() {
+                section.spawn(label(
+                    "Empty. Carry produce over from the counter and press E.",
+                    14.0,
+                    TEXT_DIM,
+                ));
+                return;
+            }
+
+            // Grouped by kind: five separate "Poppy" rows tell the player
+            // nothing a count does not.
+            for kind in catalog.iter() {
+                let count = hopper.0.iter().filter(|id| **id == kind.id).count();
+                if count == 0 {
+                    continue;
+                }
+                let yields = kind
+                    .yields
+                    .iter()
+                    .map(|(id, amount)| format!("{amount} {}", db.reagents.get(*id).name))
+                    .collect::<Vec<_>>()
+                    .join(" + ");
+                let [r, g, b] = kind.color;
+                section.spawn(label(
+                    format!("{count} × {:<20} → {yields}", kind.name),
+                    14.0,
+                    Color::srgb(0.45 + r * 0.55, 0.45 + g * 0.55, 0.45 + b * 0.55),
+                ));
+            }
+        });
+
+    panel.spawn(row()).with_children(|row| {
+        row.spawn(button("Grind one", PanelAction::Grind { all: false }));
+        row.spawn(button("Grind all", PanelAction::Grind { all: true }));
+    });
+
+    container_readout(panel, db, loaded, true);
 }
 
 /// Shared contents readout for whatever is sitting in the machine's slot.
@@ -1045,6 +1133,7 @@ fn handle_panel_clicks(
     mut transfer: MessageWriter<BufferTransferRequested>,
     mut package: MessageWriter<PackageRequested>,
     mut analyze: MessageWriter<AnalyzeRequested>,
+    mut grind: MessageWriter<GrindRequested>,
     mut knowledge: ResMut<Knowledge>,
     db: Res<ChemDb>,
 ) {
@@ -1120,6 +1209,9 @@ fn handle_panel_clicks(
             }
             PanelAction::Analyze => {
                 analyze.write(AnalyzeRequested { machine });
+            }
+            PanelAction::Grind { all } => {
+                grind.write(GrindRequested { machine, all: *all });
             }
             // Handled above, before the machine guard.
             PanelAction::BuyHint(_) | PanelAction::Close => {}

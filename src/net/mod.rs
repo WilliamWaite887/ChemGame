@@ -26,7 +26,8 @@ use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRe
 
 use crate::containers::{Container, HeldBy, InSlot};
 use crate::crew::CrewMember;
-use crate::machines::{Buffer, DispenseAmount, Machine};
+use crate::machines::{Buffer, DispenseAmount, Hopper, Machine};
+use crate::produce::Produce;
 
 /// Arbitrary; both ends must agree.
 const PROTOCOL_ID: u64 = 0x43_48_45_4d_00_00_00_01;
@@ -113,7 +114,9 @@ fn register_replication(app: &mut App) {
         .replicate::<InSlot>()
         .replicate::<Machine>()
         .replicate::<Buffer>()
+        .replicate::<Hopper>()
         .replicate::<DispenseAmount>()
+        .replicate::<Produce>()
         .replicate::<CrewMember>();
 }
 

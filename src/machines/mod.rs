@@ -16,6 +16,7 @@ use crate::containers::{
 };
 use crate::interaction::{InteractRequested, InteractionMode};
 use crate::player::Chemist;
+use crate::produce::{Produce, ProduceCatalog, ProduceId};
 use crate::AppState;
 
 pub struct MachinePlugin;
@@ -31,6 +32,7 @@ impl Plugin for MachinePlugin {
             .add_mapped_client_message::<BufferTransferRequested>(Channel::Ordered)
             .add_mapped_client_message::<PackageRequested>(Channel::Ordered)
             .add_mapped_client_message::<AnalyzeRequested>(Channel::Ordered)
+            .add_mapped_client_message::<GrindRequested>(Channel::Ordered)
             .add_message::<ReactionsFired>()
             .add_systems(
                 Update,
@@ -40,6 +42,7 @@ impl Plugin for MachinePlugin {
                     handle_buffer_transfer,
                     handle_package,
                     handle_analyze,
+                    handle_grind,
                     handle_eject,
                     handle_empty,
                 )
@@ -125,6 +128,14 @@ pub struct ContainerSlot {
 #[derive(Component, Serialize, Deserialize)]
 pub struct Buffer(pub Solution);
 
+/// Produce waiting to be ground.
+///
+/// Separate from the machine's [`ContainerSlot`], which holds the beaker the
+/// extract runs into: the grinder needs both loaded at once, and a single slot
+/// would mean swapping the beaker out for every plant.
+#[derive(Component, Default, Serialize, Deserialize)]
+pub struct Hopper(pub Vec<ProduceId>);
+
 /// How much a dispenser gives per press. Persists between visits.
 #[derive(Component, Serialize, Deserialize)]
 pub struct DispenseAmount(pub Units);
@@ -206,6 +217,15 @@ pub struct AnalyzeRequested {
     pub machine: Entity,
 }
 
+/// Break produce down into the loaded beaker.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
+pub struct GrindRequested {
+    #[entities]
+    pub machine: Entity,
+    /// Work through the whole hopper rather than one item.
+    pub all: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Systems
 // ---------------------------------------------------------------------------
@@ -224,13 +244,21 @@ pub fn slotted_container(
 /// Using a machine with a beaker in hand loads it; using one empty-handed
 /// opens the panel. That matches how SS13 plays and avoids a separate
 /// "insert" control.
+///
+/// Produce follows the same rule but only at the grinder. Loading keys off
+/// *what* is in hand rather than merely that something is, because a plant
+/// dropped into the dispenser's beaker slot would sit there doing nothing with
+/// no way to tell the player why.
+#[allow(clippy::too_many_arguments)]
 fn handle_machine_interact(
     mut commands: Commands,
     mut requests: MessageReader<FromClient<InteractRequested>>,
     mut machines: Query<(&mut Machine, Option<&ContainerSlot>, &Transform)>,
+    mut hoppers: Query<&mut Hopper>,
     mut modes: Query<&mut InteractionMode>,
     chemists: Query<(Entity, &Chemist)>,
     held: Query<(Entity, &HeldBy)>,
+    produce: Query<&Produce>,
     slotted: Query<(Entity, &InSlot)>,
 ) {
     for request in requests.read() {
@@ -249,7 +277,21 @@ fn handle_machine_interact(
             .find(|(_, holder)| holder.0 == player)
             .map(|(entity, _)| entity);
 
-        match (carrying, slot) {
+        // Produce into the hopper. The item is consumed on load rather than
+        // parked in the machine, so the hopper is a list of kinds and nothing
+        // has to track entities the player can no longer reach.
+        if let Some(item) = carrying {
+            if let Ok(kind) = produce.get(item) {
+                if let Ok(mut hopper) = hoppers.get_mut(request.target) {
+                    hopper.0.push(kind.0);
+                    commands.entity(item).despawn();
+                    continue;
+                }
+            }
+        }
+
+        let loading = carrying.filter(|item| !produce.contains(*item));
+        match (loading, slot) {
             (Some(container), Some(slot)) if slotted_container(request.target, &slotted).is_none() => {
                 commands
                     .entity(container)
@@ -501,6 +543,69 @@ fn handle_analyze(
     }
 }
 
+/// Breaks produce down into the loaded beaker.
+///
+/// Extraction, not chemistry: the yields are absolute quantities out of the
+/// data file and the resolver never decides them. It does run *afterwards*
+/// though, because the grind goes in through [`Container::mutate`] — so
+/// grinding ambrosia into a beaker of radium makes hyronalin, and that counts
+/// as a discovery like any other.
+fn handle_grind(
+    db: Res<ChemDb>,
+    catalog: Option<Res<ProduceCatalog>>,
+    mut requests: MessageReader<FromClient<GrindRequested>>,
+    mut fired: MessageWriter<ReactionsFired>,
+    mut hoppers: Query<&mut Hopper>,
+    slotted: Query<(Entity, &InSlot)>,
+    mut containers: Query<&mut Container>,
+) {
+    let Some(catalog) = catalog else {
+        return;
+    };
+
+    for request in requests.read() {
+        let Ok(mut hopper) = hoppers.get_mut(request.machine) else {
+            continue;
+        };
+        // No beaker means nothing to grind into. The hopper keeps its contents
+        // rather than the machine running dry and eating them.
+        let Some(target) = slotted_container(request.machine, &slotted) else {
+            continue;
+        };
+        let Ok(mut container) = containers.get_mut(target) else {
+            continue;
+        };
+
+        let passes = if request.all { hopper.0.len() } else { 1 };
+        let mut reactions = Vec::new();
+        for _ in 0..passes {
+            let Some(&next) = hopper.0.first() else {
+                break;
+            };
+            let kind = catalog.get(next);
+
+            // Checked before the item is consumed: a full beaker must refuse
+            // the plant rather than swallow it and drop the overflow, which is
+            // the same contract `Solution::add` holds callers to.
+            if container.solution.available_volume() < kind.total_yield() {
+                break;
+            }
+
+            hopper.0.remove(0);
+            let (_, report) = container.mutate(&db, |solution| {
+                for (reagent, amount) in &kind.yields {
+                    let _ = solution.add(*reagent, *amount);
+                }
+            });
+            reactions.extend(report.fired_reactions());
+        }
+
+        if !reactions.is_empty() {
+            fired.write(ReactionsFired { reactions });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Headless tests for the machine wiring: message in, state out, no
@@ -518,18 +623,27 @@ mod tests {
         )
         .expect("chemistry data should load");
 
+        let catalog = ProduceCatalog::from_config(
+            &ron::from_str(include_str!("../../assets/data/station.produce.ron"))
+                .expect("produce data should load"),
+            &data.reagents,
+        );
+
         let mut app = App::new();
         app.insert_resource(ChemDb(data))
+            .insert_resource(catalog)
             .add_message::<FromClient<DispenseRequested>>()
             .add_message::<ReactionsFired>()
             .add_message::<FromClient<BufferTransferRequested>>()
             .add_message::<FromClient<InteractRequested>>()
+            .add_message::<FromClient<GrindRequested>>()
             .add_systems(
                 Update,
                 (
                     handle_machine_interact,
                     handle_dispense,
                     handle_buffer_transfer,
+                    handle_grind,
                 ),
             );
         app
@@ -537,6 +651,54 @@ mod tests {
 
     fn reagent(app: &App, key: &str) -> ReagentId {
         app.world().resource::<ChemDb>().reagent(key)
+    }
+
+    /// The produce kind whose name starts with `prefix`, e.g. "Poppy".
+    fn produce(app: &App, prefix: &str) -> ProduceId {
+        app.world()
+            .resource::<ProduceCatalog>()
+            .iter()
+            .find(|kind| kind.name.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no produce kind named '{prefix}'"))
+            .id
+    }
+
+    /// A grinder with `hopper` loaded and, optionally, a beaker in the slot.
+    fn grinder(app: &mut App, hopper: &[ProduceId], beaker: Option<ContainerKind>) -> Entity {
+        let machine = app
+            .world_mut()
+            .spawn((
+                Machine::new(MachineKind::Grinder),
+                Hopper(hopper.to_vec()),
+                Transform::default(),
+            ))
+            .id();
+        if let Some(kind) = beaker {
+            app.world_mut()
+                .spawn((Container::new(kind), InSlot(machine)));
+        }
+        machine
+    }
+
+    fn grind(app: &mut App, machine: Entity, all: bool) {
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: GrindRequested { machine, all },
+        });
+        app.update();
+    }
+
+    fn hopper_of(app: &App, machine: Entity) -> &[ProduceId] {
+        &app.world().get::<Hopper>(machine).unwrap().0
+    }
+
+    fn slot_contents(app: &mut App, machine: Entity) -> Solution {
+        let mut query = app.world_mut().query::<(&Container, &InSlot)>();
+        query
+            .iter(app.world())
+            .find(|(_, slot)| slot.0 == machine)
+            .map(|(container, _)| container.solution.clone())
+            .expect("a container should be loaded")
     }
 
     #[test]
@@ -669,6 +831,220 @@ mod tests {
         let container = app.world().get::<Container>(beaker).unwrap();
         assert_eq!(container.solution.volume_of(oxygen), Units::ZERO);
         assert_eq!(container.solution.volume_of(sugar), Units::whole(20));
+    }
+
+    #[test]
+    fn grinding_produce_yields_its_extract_and_a_contaminant() {
+        let mut app = test_app();
+        let ambrosia = produce(&app, "Ambrosia");
+        let grinder = grinder(&mut app, &[ambrosia], Some(ContainerKind::LargeBeaker));
+
+        grind(&mut app, grinder, false);
+
+        let dylovene = reagent(&app, "dylovene");
+        let fibre = reagent(&app, "plant_fibre");
+        let contents = slot_contents(&mut app, grinder);
+        assert_eq!(contents.volume_of(dylovene), Units::whole(12));
+        assert_eq!(contents.volume_of(fibre), Units::whole(8));
+        assert!(hopper_of(&app, grinder).is_empty(), "the plant is consumed");
+    }
+
+    #[test]
+    fn ground_produce_is_impure_until_the_chemmaster_has_had_it() {
+        // The whole reason the grinder is worth having *and* worth cleaning up
+        // after. Fast to a useful chemical, never deliverable as it comes out.
+        use crate::orders::{grade, Outcome};
+
+        let mut app = test_app();
+        let ambrosia = produce(&app, "Ambrosia");
+        let grinder = grinder(
+            &mut app,
+            &[ambrosia, ambrosia],
+            Some(ContainerKind::LargeBeaker),
+        );
+        grind(&mut app, grinder, true);
+
+        let dylovene = reagent(&app, "dylovene");
+        let dirty = slot_contents(&mut app, grinder);
+        assert_eq!(
+            grade(
+                dylovene,
+                Units::whole(24),
+                &dirty,
+                ContainerKind::LargeBeaker,
+                None
+            ),
+            Outcome::Impure,
+            "plant fibre rides along, so a straight grind cannot be handed over"
+        );
+
+        // What the ChemMaster does: pull the one reagent out into clean glass.
+        let mut clean = Solution::new(ContainerKind::Beaker.capacity());
+        let _ = clean.add(dylovene, dirty.volume_of(dylovene));
+        assert_eq!(
+            grade(
+                dylovene,
+                Units::whole(24),
+                &clean,
+                ContainerKind::Beaker,
+                None
+            ),
+            Outcome::Success
+        );
+    }
+
+    #[test]
+    fn grinding_into_a_full_beaker_keeps_the_produce() {
+        // Refusing costs the player a click. Grinding anyway and dropping the
+        // overflow costs them a plant they cannot get back, and `Solution::add`
+        // holds every caller to that same rule.
+        let mut app = test_app();
+        let poppy = produce(&app, "Poppy");
+        let grinder = grinder(&mut app, &[poppy], Some(ContainerKind::Pill));
+
+        // A 20u pill cannot take a poppy's 20u of yield *and* what is already
+        // in it, so top it up first.
+        let water = reagent(&app, "water");
+        {
+            let mut query = app.world_mut().query::<&mut Container>();
+            let mut container = query.single_mut(app.world_mut()).unwrap();
+            let _ = container.solution.add(water, Units::whole(15));
+        }
+
+        grind(&mut app, grinder, true);
+
+        assert_eq!(
+            hopper_of(&app, grinder),
+            &[poppy],
+            "no room means the plant stays in the hopper"
+        );
+        let bicaridine = reagent(&app, "bicaridine");
+        assert_eq!(
+            slot_contents(&mut app, grinder).volume_of(bicaridine),
+            Units::ZERO
+        );
+    }
+
+    #[test]
+    fn grinding_with_no_beaker_loaded_keeps_the_produce() {
+        let mut app = test_app();
+        let aloe = produce(&app, "Aloe");
+        let grinder = grinder(&mut app, &[aloe], None);
+
+        grind(&mut app, grinder, true);
+
+        assert_eq!(
+            hopper_of(&app, grinder),
+            &[aloe],
+            "nothing to grind into means nothing is ground"
+        );
+    }
+
+    #[test]
+    fn grinding_into_a_loaded_beaker_can_set_off_a_reaction() {
+        // Grinding is extraction, not chemistry — but what it extracts lands in
+        // a beaker that may already hold something. Dylovene meeting radium is
+        // hyronalin, and that has to count as a discovery like any other.
+        let mut app = test_app();
+        let ambrosia = produce(&app, "Ambrosia");
+        let grinder = grinder(&mut app, &[ambrosia], Some(ContainerKind::LargeBeaker));
+
+        let radium = reagent(&app, "radium");
+        {
+            let mut query = app.world_mut().query::<&mut Container>();
+            let mut container = query.single_mut(app.world_mut()).unwrap();
+            let _ = container.solution.add(radium, Units::whole(12));
+        }
+
+        grind(&mut app, grinder, false);
+
+        let fired = app.world().resource::<Messages<ReactionsFired>>();
+        let mut cursor = fired.get_cursor();
+        let db = app.world().resource::<ChemDb>();
+        let names: Vec<&str> = cursor
+            .read(fired)
+            .flat_map(|event| event.reactions.iter())
+            .map(|id| db.reactions.get(*id).key.as_str())
+            .collect();
+        assert!(
+            names.contains(&"hyronalin"),
+            "the grind must go through Container::mutate so reactions resolve, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn produce_cannot_be_loaded_into_a_machine_that_is_not_the_grinder() {
+        // Without the guard, holding a plant and pressing E on the dispenser
+        // parks it in the beaker slot, where it does nothing and blocks the
+        // slot with no way to tell the player why.
+        let mut app = test_app();
+        let poppy = produce(&app, "Poppy");
+        let dispenser = app
+            .world_mut()
+            .spawn((
+                Machine::new(MachineKind::Dispenser),
+                ContainerSlot { offset: Vec3::ZERO },
+                Transform::default(),
+            ))
+            .id();
+
+        let client = ClientId::Client(app.world_mut().spawn_empty().id());
+        let chemist = app
+            .world_mut()
+            .spawn((InteractionMode::default(), Chemist { client }))
+            .id();
+        let item = app.world_mut().spawn((Produce(poppy), HeldBy(chemist))).id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: InteractRequested { target: dispenser },
+        });
+        app.update();
+
+        assert!(
+            app.world().get::<InSlot>(item).is_none(),
+            "produce must not end up in a beaker slot"
+        );
+        assert_eq!(
+            *app.world().get::<InteractionMode>(chemist).unwrap(),
+            InteractionMode::UsingMachine(dispenser),
+            "it should just open the panel instead"
+        );
+    }
+
+    #[test]
+    fn using_the_grinder_with_produce_in_hand_loads_the_hopper() {
+        let mut app = test_app();
+        let aloe = produce(&app, "Aloe");
+        let machine = grinder(&mut app, &[], None);
+        app.world_mut()
+            .entity_mut(machine)
+            .insert(ContainerSlot { offset: Vec3::ZERO });
+
+        let client = ClientId::Client(app.world_mut().spawn_empty().id());
+        let chemist = app
+            .world_mut()
+            .spawn((InteractionMode::default(), Chemist { client }))
+            .id();
+        let item = app.world_mut().spawn((Produce(aloe), HeldBy(chemist))).id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: InteractRequested { target: machine },
+        });
+        app.update();
+
+        assert_eq!(hopper_of(&app, machine), &[aloe]);
+        assert!(
+            app.world().get_entity(item).is_err(),
+            "the item is consumed on loading, so nothing tracks an entity the \
+             player can no longer reach"
+        );
+        assert_eq!(
+            *app.world().get::<InteractionMode>(chemist).unwrap(),
+            InteractionMode::Roaming,
+            "loading the hopper should not also open the panel"
+        );
     }
 
     #[test]

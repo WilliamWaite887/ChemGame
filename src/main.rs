@@ -10,6 +10,7 @@ mod machines;
 mod net;
 mod orders;
 mod player;
+mod produce;
 mod radio;
 mod ui;
 
@@ -34,6 +35,7 @@ fn main() {
             crew::CrewPlugin,
             knowledge::KnowledgePlugin,
             orders::OrderPlugin,
+            produce::ProducePlugin,
             radio::RadioPlugin,
             player::PlayerPlugin,
             interaction::InteractionPlugin,
