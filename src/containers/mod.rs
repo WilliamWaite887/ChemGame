@@ -69,7 +69,7 @@ impl ContainerKind {
     }
 
     /// Radius and height of the glassware, in metres.
-    fn dimensions(self) -> (f32, f32) {
+    pub fn dimensions(self) -> (f32, f32) {
         match self {
             ContainerKind::Beaker => (0.055, 0.13),
             ContainerKind::LargeBeaker => (0.07, 0.17),

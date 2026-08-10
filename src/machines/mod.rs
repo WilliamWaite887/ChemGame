@@ -65,6 +65,8 @@ pub enum MachineKind {
     /// Experimenting costs time, not materials.
     TestBench,
     DeliveryWindow,
+    /// Where the shift is started, signed off, and requisitioned against.
+    ShiftBoard,
 }
 
 impl MachineKind {
@@ -76,6 +78,7 @@ impl MachineKind {
             MachineKind::Analyzer => "Sample Analyzer",
             MachineKind::TestBench => "Test Bench",
             MachineKind::DeliveryWindow => "Delivery Window",
+            MachineKind::ShiftBoard => "Shift Board",
         }
     }
 
@@ -87,6 +90,7 @@ impl MachineKind {
             MachineKind::Analyzer => Color::srgb(0.85, 0.45, 0.95),
             MachineKind::TestBench => Color::srgb(0.95, 0.85, 0.35),
             MachineKind::DeliveryWindow => Color::srgb(0.95, 0.35, 0.35),
+            MachineKind::ShiftBoard => Color::srgb(0.95, 0.88, 0.45),
         }
     }
 

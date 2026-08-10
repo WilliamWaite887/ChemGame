@@ -12,6 +12,7 @@ mod orders;
 mod player;
 mod produce;
 mod radio;
+mod shift;
 mod ui;
 
 use bevy::prelude::*;
@@ -35,6 +36,13 @@ fn main() {
             crew::CrewPlugin,
             knowledge::KnowledgePlugin,
             orders::OrderPlugin,
+            // Nested so the outer tuple stays inside Bevy's 16-plugin limit.
+            // The phase machine, the supply it schedules, and its save file.
+            (
+                shift::ShiftPlugin,
+                shift::RestockPlugin,
+                shift::ProgressPlugin,
+            ),
             produce::ProducePlugin,
             radio::RadioPlugin,
             player::PlayerPlugin,

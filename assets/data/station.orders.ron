@@ -3,54 +3,148 @@
 // `amounts` are the quantities a requester might ask for, in units. Keep them
 // achievable with one or two beakers — an order nobody can physically carry is
 // just a guaranteed failure.
+//
+// The numbers below are shift 1. Everything in `ramp` tightens them shift by
+// shift; `ShiftRules::for_shift` is where that arithmetic lives, and
+// `shift_one_matches_the_base_config` guarantees the ramp is a no-op here.
 (
     first_order_delay: 8.0,
     gap_seconds: (32.0, 58.0),
     patience_seconds: (135.0, 230.0),
     max_active: 3,
+
+    // The two windows either side of the shift. The first prep of a session
+    // has no clock at all, so a new chemist can take the lab apart before
+    // anyone starts asking for anything.
+    windows: (
+        prep_seconds: 120.0,
+        debrief_seconds: 90.0,
+        first_shift_untimed: true,
+    ),
+
+    // How much harder each shift is than the one before. Every value is
+    // clamped: an unclamped ramp is only unplayable somewhere nobody tests.
+    ramp: (
+        quota_base: 5,
+        quota_per_shift: 1,
+        quota_cap: 10,
+        gap_scale: 0.92,
+        gap_floor: 18.0,
+        patience_scale: 0.95,
+        patience_floor: 80.0,
+        max_active_every: 2,
+        max_active_cap: 5,
+        stretch_base: 0.25,
+        stretch_step: 0.02,
+        stretch_cap: 0.4,
+        forecast_boost: 2.0,
+    ),
+
+    // Cargo tops the lab up to `glassware_target` during prep. Beakers leave
+    // with whoever they were handed to and nothing else makes them, so without
+    // this the lab runs dry after five deliveries.
+    supply: (
+        courier: "Miner Sato",
+        glassware_target: 6,
+        crate_max: 4,
+        large_every: 3,
+        requisition_glassware_bonus: 2,
+    ),
+
+    // What the station expects of a shift, briefed over the radio during prep.
+    // A forecast leans the request pool toward its themes — it never chooses
+    // for it, so a shift you are unprepared for is still a shift you can work.
+    forecasts: [
+        (
+            id: "hull_plate",
+            themes: ["burns"],
+            weight: 1.0,
+            briefing: "Engineering are cutting hull plate all shift. Expect burns.",
+        ),
+        (
+            id: "breach_drill",
+            themes: ["asphyxiation", "trauma"],
+            weight: 1.0,
+            briefing: "Breach drill on deck two. Asphyxiation cases, maybe worse.",
+        ),
+        (
+            id: "containment",
+            themes: ["radiation"],
+            weight: 0.8,
+            briefing: "Atmos flagged a leaking containment cell. Watch for rad exposure.",
+        ),
+        (
+            id: "bar_night",
+            themes: ["poison"],
+            weight: 1.0,
+            briefing: "Payday, and the bar is heaving. You know how that ends.",
+        ),
+        (
+            id: "sparring",
+            themes: ["trauma"],
+            weight: 0.9,
+            briefing: "Security are running takedown drills. Bruises and worse.",
+        ),
+        (
+            id: "quiet",
+            themes: [],
+            weight: 0.6,
+            briefing: "Nothing on the board. Should be a quiet one — use it.",
+        ),
+    ],
+
     requests: [
         (
             reagent: "bicaridine",
+            themes: ["trauma"],
             amounts: [20, 30, 40],
             plea: "Got a crewman bleeding badly down here. Bicaridine, quick as you can.",
         ),
         (
             reagent: "kelotane",
+            themes: ["burns"],
             amounts: [20, 30],
             plea: "Welder burn. Nothing dramatic. Some kelotane would sort it.",
         ),
         (
             reagent: "dermaline",
+            themes: ["burns"],
             amounts: [15, 20, 30],
             plea: "Plasma fire in engineering, burns are deep. Need dermaline.",
         ),
         (
             reagent: "dylovene",
+            themes: ["poison"],
             amounts: [20, 30],
             plea: "Someone's been poisoned in the bar. Dylovene, please.",
         ),
         (
             reagent: "inaprovaline",
+            themes: ["trauma"],
             amounts: [30, 45],
             plea: "This one's crashing. Inaprovaline to hold them steady.",
         ),
         (
             reagent: "tricordrazine",
+            themes: ["trauma", "poison"],
             amounts: [30, 40],
             plea: "Bit of everything wrong with this patient. Tricordrazine.",
         ),
         (
             reagent: "dexalin",
+            themes: ["asphyxiation"],
             amounts: [20, 30],
             plea: "Hull breach on deck two, we have asphyxiation cases. Dexalin.",
         ),
         (
             reagent: "hyronalin",
+            themes: ["radiation"],
             amounts: [20, 30],
             plea: "Walked past a leaking container. Mild dose. Hyronalin should do.",
         ),
         (
             reagent: "arithrazine",
+            themes: ["radiation"],
             amounts: [20, 30],
             plea: "Containment failure. This is a serious dose. Arithrazine, now.",
         ),

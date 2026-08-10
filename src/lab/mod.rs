@@ -227,6 +227,9 @@ fn spawn_equipment(
         (MachineKind::ChemMaster, -2.3),
         (MachineKind::Grinder, 0.0),
         (MachineKind::Analyzer, 2.3),
+        // Nearest the door, so it is the first thing you face walking in and
+        // the last thing you pass on the way out.
+        (MachineKind::ShiftBoard, 4.6),
     ];
     for (kind, x) in wall_machines {
         spawn_machine(
@@ -336,6 +339,11 @@ fn spawn_machine(
             // A tray, not a machine: whatever is left here gets handed to the
             // next crew member who asked for something in it.
             commands.entity(body).insert(slot);
+        }
+        MachineKind::ShiftBoard => {
+            // No slot, deliberately. Walking up holding a beaker would park it
+            // on the board instead of opening the panel, and the player would
+            // have no way of telling why the board had stopped responding.
         }
     }
 

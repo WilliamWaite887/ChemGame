@@ -184,8 +184,21 @@ pub struct ProduceAssets {
 struct PendingProduceData(Handle<ProduceConfig>);
 
 #[derive(Resource)]
-struct DeliverySchedule {
+pub struct DeliverySchedule {
     timer: Timer,
+}
+
+impl DeliverySchedule {
+    /// Brings the next haul forward.
+    ///
+    /// What a requisitioned produce crate buys: cargo lean on botany, and the
+    /// grinder has something to work with at the start of the shift rather than
+    /// somewhere in the middle of it.
+    pub fn expedite(&mut self, seconds: f32) {
+        if self.timer.remaining_secs() > seconds {
+            self.timer = Timer::from_seconds(seconds, TimerMode::Once);
+        }
+    }
 }
 
 fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {

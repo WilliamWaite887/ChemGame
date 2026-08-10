@@ -23,14 +23,8 @@ use crate::lab::COUNTER_SPOT;
 use crate::machines::{chemist_entity, slotted_container, Machine, MachineKind, TestBenchStock};
 use crate::player::Chemist;
 use crate::radio::{announce_request, channel_for, RadioEntry, RadioLog};
+use crate::shift::{count_resolved_orders, weighted_pick, ShiftClock, ShiftPhase};
 use crate::AppState;
-
-/// How often the crew ask for something just past what the chemist knows.
-///
-/// Every order being makeable is a treadmill; every order being impossible is
-/// a wall. A minority of stretch requests is what sends the player to the
-/// bench to work something out.
-const STRETCH_ORDER_CHANCE: f64 = 0.25;
 
 /// How often a clean delivery earns a sample vial of something unfamiliar.
 const SAMPLE_VIAL_CHANCE: f64 = 0.35;
@@ -54,11 +48,20 @@ impl Plugin for OrderPlugin {
                 // sees the crew arrive through replication.
                 (
                     promote_station_data,
-                    generate_orders,
+                    // Gated: nobody new walks in during prep or the debrief.
+                    // That window is the whole point — it is when the bench,
+                    // the grinder and the book are free to actually use.
+                    generate_orders.run_if(in_state(ShiftPhase::Service)),
+                    // Deliberately *not* gated. Gating these would freeze an
+                    // in-flight order's patience mid-countdown and strand the
+                    // crew member at the counter with no way to resolve.
                     expire_orders,
                     handle_delivery,
                     handle_window_delivery,
                     leave_sample_vials,
+                    // After all three resolution paths, so it sees this
+                    // frame's resolutions rather than next frame's.
+                    count_resolved_orders,
                     broadcast_shift,
                 )
                     .chain()
@@ -84,6 +87,18 @@ pub struct OrderConfig {
     pub gap_seconds: (f32, f32),
     pub patience_seconds: (f32, f32),
     pub max_active: usize,
+    /// How long the prep and debrief windows run for.
+    #[serde(default)]
+    pub windows: WindowDef,
+    /// How the numbers above tighten shift by shift.
+    #[serde(default)]
+    pub ramp: RampDef,
+    /// What cargo keeps the lab stocked with.
+    #[serde(default)]
+    pub supply: SupplyDef,
+    /// What the station expects of a shift, briefed during prep.
+    #[serde(default)]
+    pub forecasts: Vec<ForecastDef>,
     pub requests: Vec<RequestDef>,
 }
 
@@ -92,6 +107,122 @@ pub struct RequestDef {
     pub reagent: String,
     pub amounts: Vec<u32>,
     pub plea: String,
+    /// What kind of shift this request belongs to, so a forecast can lean on
+    /// it. An untagged request can never be forecast — see
+    /// `every_request_carries_a_theme`.
+    #[serde(default)]
+    pub themes: Vec<String>,
+}
+
+/// Lengths of the two windows that are not the shift itself.
+#[derive(Clone, Debug, Deserialize)]
+pub struct WindowDef {
+    pub prep_seconds: f32,
+    pub debrief_seconds: f32,
+    /// The first prep of a session has no clock, so a new chemist can take the
+    /// lab apart before anyone starts asking for anything.
+    pub first_shift_untimed: bool,
+}
+
+impl Default for WindowDef {
+    fn default() -> Self {
+        WindowDef {
+            prep_seconds: 120.0,
+            debrief_seconds: 90.0,
+            first_shift_untimed: true,
+        }
+    }
+}
+
+/// How each shift tightens on the one before it.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RampDef {
+    pub quota_base: u32,
+    pub quota_per_shift: u32,
+    pub quota_cap: u32,
+    /// Multiplied into the gap between orders, once per shift elapsed.
+    pub gap_scale: f32,
+    pub gap_floor: f32,
+    pub patience_scale: f32,
+    pub patience_floor: f32,
+    /// One more crew member at the counter every this many shifts.
+    pub max_active_every: u32,
+    pub max_active_cap: usize,
+    /// How often the crew ask for something just past what the chemist knows.
+    ///
+    /// Every order being makeable is a treadmill; every order being impossible
+    /// is a wall. A minority of stretch requests is what sends the player to
+    /// the bench to work something out, and that minority grows as they get
+    /// better at the job.
+    pub stretch_base: f64,
+    pub stretch_step: f64,
+    pub stretch_cap: f64,
+    /// How much harder a forecast leans on the requests it names. `2.0` makes a
+    /// themed request three times as likely as an untagged one.
+    pub forecast_boost: f64,
+}
+
+impl Default for RampDef {
+    fn default() -> Self {
+        RampDef {
+            quota_base: 5,
+            quota_per_shift: 1,
+            quota_cap: 10,
+            gap_scale: 0.92,
+            gap_floor: 18.0,
+            patience_scale: 0.95,
+            patience_floor: 80.0,
+            max_active_every: 2,
+            max_active_cap: 5,
+            stretch_base: 0.25,
+            stretch_step: 0.02,
+            stretch_cap: 0.4,
+            forecast_boost: 2.0,
+        }
+    }
+}
+
+/// What cargo brings, and how much of it.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SupplyDef {
+    /// Crew member who brings glassware, looked up in the roster by name.
+    pub courier: String,
+    /// How much beaker-class glassware the lab should have at the start of a
+    /// shift. Supply tops up to this rather than shipping a fixed crate, so the
+    /// lab can neither be starved nor flooded.
+    pub glassware_target: usize,
+    pub crate_max: usize,
+    /// One in this many pieces is a large beaker.
+    pub large_every: usize,
+    /// How far a requisition raises the target for one shift.
+    pub requisition_glassware_bonus: usize,
+}
+
+impl Default for SupplyDef {
+    fn default() -> Self {
+        SupplyDef {
+            courier: "Miner Sato".to_string(),
+            glassware_target: 6,
+            crate_max: 4,
+            large_every: 3,
+            requisition_glassware_bonus: 2,
+        }
+    }
+}
+
+/// A shift the station is expecting, and the requests it makes likelier.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ForecastDef {
+    pub id: String,
+    pub themes: Vec<String>,
+    #[serde(default = "unit_weight")]
+    pub weight: f64,
+    /// What comes over the radio at the start of prep.
+    pub briefing: String,
+}
+
+fn unit_weight() -> f64 {
+    1.0
 }
 
 #[derive(Resource)]
@@ -107,9 +238,14 @@ pub struct StationData {
     pub config: OrderConfig,
 }
 
+/// The clock between arrivals.
+///
+/// Visible to `shift` because it has to be re-armed when service opens: this
+/// timer is re-rolled *before* `generate_orders` checks `max_active`, so it is
+/// always left holding a partial random remainder when generation stops.
 #[derive(Resource)]
-struct OrderSpawner {
-    timer: Timer,
+pub struct OrderSpawner {
+    pub timer: Timer,
 }
 
 fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
@@ -278,6 +414,7 @@ fn generate_orders(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut spawner: Option<ResMut<OrderSpawner>>,
     knowledge: Option<Res<Knowledge>>,
+    clock: Res<ShiftClock>,
     mut radio: ResMut<RadioLog>,
     active: Query<&CrewMember>,
 ) {
@@ -288,16 +425,20 @@ fn generate_orders(
         return;
     };
 
+    // This shift's difficulty, frozen when service opened, rather than the
+    // base config — see `ShiftRules::for_shift`.
+    let rules = &clock.rules;
+
     if !spawner.timer.tick(time.delta()).just_finished() {
         return;
     }
 
     let waiting = active.iter().count();
     let mut rng = rand::rng();
-    let gap = rng.random_range(station.config.gap_seconds.0..=station.config.gap_seconds.1);
+    let gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
     spawner.timer = Timer::from_seconds(gap, TimerMode::Once);
 
-    if waiting >= station.config.max_active {
+    if waiting >= rules.max_active {
         return;
     }
 
@@ -336,7 +477,7 @@ fn generate_orders(
         })
         .collect();
 
-    let pool = if !just_beyond.is_empty() && rng.random_bool(STRETCH_ORDER_CHANCE) {
+    let pool = if !just_beyond.is_empty() && rng.random_bool(rules.stretch_chance) {
         &just_beyond
     } else if !in_reach.is_empty() {
         &in_reach
@@ -344,7 +485,15 @@ fn generate_orders(
         &just_beyond
     };
 
-    let Some(request) = pool.choose(&mut rng).copied() else {
+    // The forecast leans on whichever pool was chosen; it never chooses for it,
+    // so a shift briefed for burns still only asks for things the chemist can
+    // plausibly make.
+    let Some(request) = weighted_pick(
+        pool,
+        clock.forecast_themes(),
+        rules.forecast_boost,
+        rng.random::<f64>(),
+    ) else {
         return;
     };
     // A request naming a reagent that is not in the chemistry data is a
@@ -357,9 +506,8 @@ fn generate_orders(
         return;
     };
 
-    let patience = rng.random_range(
-        station.config.patience_seconds.0..=station.config.patience_seconds.1,
-    );
+    let patience =
+        rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
     let crew = spawn_crew_member(
         &mut commands,
         &mut materials,

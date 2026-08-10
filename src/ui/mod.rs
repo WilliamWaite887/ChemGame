@@ -24,11 +24,19 @@ use crate::orders::{Order, Shift};
 use crate::player::LocalPlayer;
 use crate::produce::{ProduceCatalog, ProduceId};
 use crate::radio::RadioLog;
+use crate::shift::{
+    can_afford, BeginShiftRequested, RequisitionKind, RequisitionRequested, ShiftClock, ShiftPhase,
+    ShiftReport, SignOffRequested,
+};
 use crate::AppState;
 
-/// How many orders the queue can show at once. Matches `max_active` in
-/// `station.orders.ron`.
-const ORDER_SLOTS: usize = 3;
+/// How many orders the queue can show at once.
+///
+/// Must be at least the highest `max_active` the difficulty ramp can reach, not
+/// the base value in `station.orders.ron` — a queue shorter than the ramp hides
+/// the order that is about to expire, which is the one the player most needs.
+/// `the_order_queue_has_a_slot_for_every_concurrent_order` holds the two together.
+pub(crate) const ORDER_SLOTS: usize = 5;
 /// Radio lines on screen. Matches the log's own capacity.
 const RADIO_SLOTS: usize = 6;
 
@@ -54,14 +62,21 @@ impl Plugin for UiPlugin {
                 handle_panel_clicks,
                 button_feedback,
                 sync_panel,
+                update_phase_banner,
                 update_order_queue,
                 update_radio_feed,
                 announce_discoveries,
+                // Presentation only, so unlike every other phase system this
+                // runs on both ends: a joined chemist needs to know the shift
+                // just started every bit as much as the host does.
+                announce_phase,
+                show_toasts,
                 expire_toasts,
             )
                 .chain()
                 .run_if(in_state(AppState::Playing)),
-        );
+        )
+        .add_message::<ShowToast>();
     }
 }
 
@@ -86,6 +101,9 @@ enum PanelAction {
     Analyze,
     Grind { all: bool },
     BuyHint(chem_sim::ReactionId),
+    BeginShift,
+    SignOff,
+    Requisition(RequisitionKind),
     Close,
 }
 
@@ -109,6 +127,16 @@ struct PanelSignature {
     test_stock: bool,
     amount: Option<Units>,
     known_recipes: usize,
+    /// The shift board draws entirely from these, so without them its panel
+    /// would freeze on whatever it happened to show first.
+    ///
+    /// The countdown is deliberately absent: it moves every frame, and this
+    /// comparison decides whether to despawn and rebuild the whole panel. The
+    /// clock belongs on the HUD banner, which writes into fixed slots.
+    phase: Option<ShiftPhase>,
+    resolved: u32,
+    reputation: i32,
+    research_points: u32,
 }
 
 impl Default for PanelSignature {
@@ -125,6 +153,10 @@ impl Default for PanelSignature {
             test_stock: false,
             amount: None,
             known_recipes: usize::MAX,
+            phase: None,
+            resolved: u32::MAX,
+            reputation: i32::MAX,
+            research_points: u32::MAX,
         }
     }
 }
@@ -154,6 +186,8 @@ fn sync_panel(
     containers: Query<(&Container, Has<TestBenchStock>)>,
     knowledge: Res<Knowledge>,
     catalog: Option<Res<ProduceCatalog>>,
+    clock: Res<ShiftClock>,
+    shift: Res<Shift>,
     mut previous: Local<PanelSignature>,
 ) {
     let mode = modes.iter().next().copied().unwrap_or_default();
@@ -186,6 +220,10 @@ fn sync_panel(
             .and_then(|(_, amount, _, _)| amount)
             .map(|a| a.0),
         known_recipes: knowledge.known_count(),
+        phase: Some(clock.phase),
+        resolved: clock.resolved,
+        reputation: shift.reputation,
+        research_points: knowledge.research_points,
     };
 
     if signature == *previous {
@@ -255,6 +293,9 @@ fn sync_panel(
                         MachineKind::DeliveryWindow => {
                             delivery_window_body(panel, &db, loaded, test_stock);
                         }
+                        MachineKind::ShiftBoard => {
+                            shift_board_body(panel, &clock, &shift);
+                        }
                     }
 
                     panel
@@ -264,6 +305,121 @@ fn sync_panel(
                         });
                 });
         });
+}
+
+/// The board, which is a different thing in each of the three phases.
+///
+/// One panel rather than three screens because `InteractionMode` is per-player:
+/// a modal debrief would have to be global, and would trap one chemist at a
+/// summary while the other was still working.
+fn shift_board_body(panel: &mut ChildSpawnerCommands, clock: &ShiftClock, shift: &Shift) {
+    panel.spawn(label(
+        format!("Shift {} · {}", clock.shift, clock.phase.label()),
+        13.0,
+        TEXT_DIM,
+    ));
+
+    match clock.phase {
+        ShiftPhase::Prep => {
+            panel.spawn(label(
+                match &clock.forecast {
+                    Some(pick) => pick.briefing.clone(),
+                    None => "No briefing yet.".to_string(),
+                },
+                15.0,
+                TEXT,
+            ));
+            panel.spawn(label(
+                "Nobody is asking for anything until you start. Stock up, run the \
+                 bench, work something out.",
+                13.0,
+                TEXT_DIM,
+            ));
+            panel.spawn(label(
+                format!(
+                    "This shift: {} orders, up to {} at the counter.",
+                    clock.rules.quota, clock.rules.max_active
+                ),
+                13.0,
+                TEXT_DIM,
+            ));
+            panel.spawn(row()).with_children(|row| {
+                row.spawn(button("Begin shift", PanelAction::BeginShift));
+            });
+        }
+
+        ShiftPhase::Service => {
+            panel.spawn(label(
+                format!(
+                    "{} of {} orders resolved.",
+                    clock.resolved, clock.rules.quota
+                ),
+                15.0,
+                TEXT,
+            ));
+            if let Some(pick) = &clock.forecast {
+                panel.spawn(label(pick.briefing.clone(), 13.0, TEXT_DIM));
+            }
+        }
+
+        ShiftPhase::Debrief => {
+            let report = ShiftReport::between(&clock.opening, &clock.closing);
+            panel.spawn(label(
+                format!(
+                    "Delivered {}   ·   botched {}   ·   standing {:+}",
+                    report.delivered, report.botched, report.reputation
+                ),
+                15.0,
+                TEXT,
+            ));
+            panel.spawn(label(
+                format!(
+                    "Research earned {}   ·   recipes recorded {}",
+                    report.research, report.recipes
+                ),
+                13.0,
+                TEXT_DIM,
+            ));
+
+            panel.spawn(label(
+                format!("Requisition — {} standing available", shift.reputation),
+                13.0,
+                TEXT_DIM,
+            ));
+            panel.spawn(wrap_row()).with_children(|row| {
+                for kind in RequisitionKind::ALL {
+                    // A produce crate is a flag, not a count: buying a second
+                    // one would charge again for something already ordered.
+                    let already = kind == RequisitionKind::ProduceCrate
+                        && clock.requisition.produce_crate;
+                    let available = can_afford(shift.reputation, kind) && !already;
+                    let caption = if already {
+                        format!("{} — ordered", kind.label())
+                    } else {
+                        format!("{} ({})", kind.label(), kind.cost())
+                    };
+                    let mut entity = row.spawn(button(caption, PanelAction::Requisition(kind)));
+                    // Drawn dead rather than drawn live and silently doing
+                    // nothing — a button that looks clickable but is refused
+                    // reads as the game being broken.
+                    if !available {
+                        entity.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
+                    }
+                }
+            });
+            for kind in RequisitionKind::ALL {
+                panel.spawn(label(
+                    format!("  {} — {}", kind.label(), kind.blurb()),
+                    12.0,
+                    TEXT_DIM,
+                ));
+            }
+
+            panel.spawn(row()).with_children(|row| {
+                row.spawn(button("Sign off", PanelAction::SignOff));
+            });
+        }
+    }
 }
 
 fn dispenser_body(
@@ -793,19 +949,44 @@ struct ShiftReadout;
 #[derive(Component)]
 struct PleaLine;
 
+/// Which phase the lab is in, and what ends it.
+#[derive(Component)]
+struct PhaseBanner;
+
 // The disjointness filters are noisy inline; naming them keeps the queue
 // system's signature readable.
 type ShiftText<'w, 's> = Single<
     'w,
     's,
     &'static mut Text,
-    (With<ShiftReadout>, Without<OrderSlot>, Without<PleaLine>),
+    (
+        With<ShiftReadout>,
+        Without<OrderSlot>,
+        Without<PleaLine>,
+        Without<PhaseBanner>,
+    ),
 >;
 type PleaText<'w, 's> = Single<
     'w,
     's,
     &'static mut Text,
-    (With<PleaLine>, Without<OrderSlot>, Without<ShiftReadout>),
+    (
+        With<PleaLine>,
+        Without<OrderSlot>,
+        Without<ShiftReadout>,
+        Without<PhaseBanner>,
+    ),
+>;
+type BannerText<'w, 's> = Single<
+    'w,
+    's,
+    &'static mut Text,
+    (
+        With<PhaseBanner>,
+        Without<OrderSlot>,
+        Without<ShiftReadout>,
+        Without<PleaLine>,
+    ),
 >;
 
 /// Fixed slots, filled in each frame.
@@ -830,6 +1011,12 @@ fn spawn_order_queue(mut commands: Commands) {
             BackgroundColor(Color::srgba(0.06, 0.07, 0.09, 0.82)),
         ))
         .with_children(|queue| {
+            queue.spawn((
+                Text::new(""),
+                TextFont::from_font_size(13.0),
+                TextColor(Color::srgb(0.95, 0.88, 0.45)),
+                PhaseBanner,
+            ));
             queue.spawn(label("ORDERS", 13.0, TEXT_DIM));
             for index in 0..ORDER_SLOTS {
                 queue.spawn((
@@ -852,6 +1039,45 @@ fn spawn_order_queue(mut commands: Commands) {
                 ShiftReadout,
             ));
         });
+}
+
+/// The one line that tells the player what the lab is doing and what ends it.
+///
+/// Pure so the wording of every phase can be checked at once — this is the only
+/// place the untimed first prep explains itself, and a player who cannot tell
+/// why nobody is arriving will read the feature as the game being broken.
+fn phase_banner_line(clock: &ShiftClock) -> String {
+    let shift = clock.shift;
+    match clock.phase {
+        ShiftPhase::Prep => match clock.remaining {
+            Some(left) => format!("PREP · SHIFT {shift} — service in {}", mmss(left)),
+            None => format!("PREP · SHIFT {shift} — begin at the shift board when you're ready"),
+        },
+        ShiftPhase::Service => format!(
+            "SERVICE · SHIFT {shift} — {} of {} resolved",
+            clock.resolved, clock.rules.quota
+        ),
+        ShiftPhase::Debrief => match clock.remaining {
+            Some(left) => format!(
+                "DEBRIEF · SHIFT {shift} — sign off at the board · {}",
+                mmss(left)
+            ),
+            None => format!("DEBRIEF · SHIFT {shift} — sign off at the board"),
+        },
+    }
+}
+
+fn mmss(seconds: f32) -> String {
+    let whole = seconds.max(0.0) as u32;
+    format!("{}:{:02}", whole / 60, whole % 60)
+}
+
+fn update_phase_banner(clock: Res<ShiftClock>, banner: BannerText) {
+    let line = phase_banner_line(&clock);
+    let mut banner = banner.into_inner();
+    if banner.0 != line {
+        banner.0 = line;
+    }
 }
 
 fn update_order_queue(
@@ -936,7 +1162,89 @@ fn update_order_queue(
 // ---------------------------------------------------------------------------
 
 #[derive(Component)]
-struct DiscoveryToast(Timer);
+struct Toast(Timer);
+
+/// Something worth interrupting for.
+///
+/// A message rather than a direct spawn so that [`show_toasts`] is the only
+/// thing that ever puts one on screen. Despawning through `Commands` is
+/// deferred, so two spawners in the same frame — a recipe discovered as the
+/// shift ends, or a reaction cascade discovering two at once — would each see a
+/// stale "no toasts exist" and stack their cards at the same position.
+#[derive(Message)]
+struct ShowToast {
+    kicker: &'static str,
+    title: String,
+    subtitle: String,
+    background: Color,
+}
+
+/// Puts up at most one card per frame.
+///
+/// One at a time on purpose: two moments worth interrupting for that land
+/// together are still one interruption, and stacked cards would cover the room.
+/// The newest wins, because it is the one describing what just happened.
+fn show_toasts(
+    mut commands: Commands,
+    mut requests: MessageReader<ShowToast>,
+    existing: Query<Entity, With<Toast>>,
+) {
+    let Some(request) = requests.read().last() else {
+        return;
+    };
+    for toast in &existing {
+        commands.entity(toast).despawn();
+    }
+    spawn_toast(
+        &mut commands,
+        request.kicker,
+        request.title.clone(),
+        request.subtitle.clone(),
+        request.background,
+    );
+}
+
+fn spawn_toast(
+    commands: &mut Commands,
+    kicker: &'static str,
+    title: String,
+    subtitle: String,
+    background: Color,
+) {
+    let kicker_text = kicker.to_string();
+    let kicker_color = Color::srgb(0.95, 0.88, 0.45);
+
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: percent(22),
+                width: percent(100),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            Toast(Timer::from_seconds(4.5, TimerMode::Once)),
+        ))
+        .with_children(|toast| {
+            toast
+                .spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        padding: UiRect::axes(px(22), px(12)),
+                        row_gap: px(3),
+                        border_radius: BorderRadius::all(px(6)),
+                        ..default()
+                    },
+                    BackgroundColor(background),
+                ))
+                .with_children(|card| {
+                    card.spawn(label(kicker_text, 12.0, kicker_color));
+                    card.spawn(label(title, 20.0, TEXT));
+                    card.spawn(label(subtitle, 12.0, TEXT_DIM));
+                });
+        });
+}
 
 /// A brief banner when a recipe is worked out.
 ///
@@ -944,52 +1252,77 @@ struct DiscoveryToast(Timer);
 /// away from — and discovering a recipe is the one moment that deserves to
 /// interrupt.
 fn announce_discoveries(
-    mut commands: Commands,
     mut discovered: MessageReader<RecipeDiscovered>,
-    existing: Query<Entity, With<DiscoveryToast>>,
+    mut toasts: MessageWriter<ShowToast>,
 ) {
     for event in discovered.read() {
-        for toast in &existing {
-            commands.entity(toast).despawn();
-        }
-        commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: percent(22),
-                    width: percent(100),
-                    justify_content: JustifyContent::Center,
-                    ..default()
-                },
-                DiscoveryToast(Timer::from_seconds(4.5, TimerMode::Once)),
-            ))
-            .with_children(|toast| {
-                toast
-                    .spawn((
-                        Node {
-                            flex_direction: FlexDirection::Column,
-                            align_items: AlignItems::Center,
-                            padding: UiRect::axes(px(22), px(12)),
-                            row_gap: px(3),
-                            border_radius: BorderRadius::all(px(6)),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgba(0.10, 0.20, 0.13, 0.94)),
-                    ))
-                    .with_children(|card| {
-                        card.spawn(label("RECIPE RECORDED", 12.0, Color::srgb(0.62, 0.86, 0.62)));
-                        card.spawn(label(event.name.clone(), 20.0, TEXT));
-                        card.spawn(label("Added to your reference book (B)", 12.0, TEXT_DIM));
-                    });
-            });
+        toasts.write(ShowToast {
+            kicker: "RECIPE RECORDED",
+            title: event.name.clone(),
+            subtitle: "Added to your reference book (B)".to_string(),
+            background: Color::srgba(0.10, 0.20, 0.13, 0.94),
+        });
     }
 }
 
-fn expire_toasts(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut toasts: Query<(Entity, &mut DiscoveryToast)>,
+/// Says out loud what just changed about the lab.
+///
+/// Watches the clock from `Update` rather than hanging off `OnEnter`, because
+/// what it has to say is filled in *by* the phase-entry systems — the shift's
+/// quota, the report, the briefing. Read on the transition it would show the
+/// previous shift's numbers, or none at all on the first prep of a session,
+/// where the forecast is not drawn until the data files land.
+fn announce_phase(
+    clock: Res<ShiftClock>,
+    mut announced: Local<Option<(ShiftPhase, u32)>>,
+    mut toasts: MessageWriter<ShowToast>,
 ) {
+    // Prep on the first frame is not yet open: it has no briefing to give.
+    if clock.pending_open {
+        return;
+    }
+    let current = (clock.phase, clock.shift);
+    if *announced == Some(current) {
+        return;
+    }
+    *announced = Some(current);
+
+    let (kicker, subtitle, background) = match clock.phase {
+        ShiftPhase::Prep => (
+            "PREP",
+            match &clock.forecast {
+                Some(pick) => pick.briefing.clone(),
+                None => "Nobody is asking for anything yet.".to_string(),
+            },
+            Color::srgba(0.10, 0.14, 0.22, 0.94),
+        ),
+        ShiftPhase::Service => (
+            "SHIFT STARTED",
+            format!("{} orders to work through", clock.rules.quota),
+            Color::srgba(0.18, 0.15, 0.09, 0.94),
+        ),
+        ShiftPhase::Debrief => {
+            let report = ShiftReport::between(&clock.opening, &clock.closing);
+            (
+                "SHIFT OVER",
+                format!(
+                    "{} delivered, {} botched, {:+} standing",
+                    report.delivered, report.botched, report.reputation
+                ),
+                Color::srgba(0.10, 0.20, 0.13, 0.94),
+            )
+        }
+    };
+
+    toasts.write(ShowToast {
+        kicker,
+        title: format!("Shift {}", clock.shift),
+        subtitle,
+        background,
+    });
+}
+
+fn expire_toasts(mut commands: Commands, time: Res<Time>, mut toasts: Query<(Entity, &mut Toast)>) {
     for (entity, mut toast) in &mut toasts {
         if toast.0.tick(time.delta()).just_finished() {
             commands.entity(entity).despawn();
@@ -1192,6 +1525,9 @@ fn handle_panel_clicks(
     mut package: MessageWriter<PackageRequested>,
     mut analyze: MessageWriter<AnalyzeRequested>,
     mut grind: MessageWriter<GrindRequested>,
+    mut begin_shift: MessageWriter<BeginShiftRequested>,
+    mut sign_off: MessageWriter<SignOffRequested>,
+    mut requisition: MessageWriter<RequisitionRequested>,
     mut knowledge: ResMut<Knowledge>,
     db: Res<ChemDb>,
 ) {
@@ -1271,8 +1607,79 @@ fn handle_panel_clicks(
             PanelAction::Grind { all } => {
                 grind.write(GrindRequested { machine, all: *all });
             }
+            // The board's three. Requests, not writes: the server owns the
+            // phase and the standing, and a client that moved either locally
+            // would be corrected out from under the player a frame later.
+            PanelAction::BeginShift => {
+                begin_shift.write(BeginShiftRequested { board: machine });
+            }
+            PanelAction::SignOff => {
+                sign_off.write(SignOffRequested { board: machine });
+            }
+            PanelAction::Requisition(kind) => {
+                requisition.write(RequisitionRequested {
+                    board: machine,
+                    kind: *kind,
+                });
+            }
             // Handled above, before the machine guard.
             PanelAction::BuyHint(_) | PanelAction::Close => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clock(phase: ShiftPhase, remaining: Option<f32>) -> ShiftClock {
+        ShiftClock {
+            shift: 3,
+            phase,
+            remaining,
+            ..default()
+        }
+    }
+
+    #[test]
+    fn an_untimed_prep_says_how_it_ends() {
+        // The one case with nothing on screen counting down. Without this line
+        // an empty room reads as the game having stopped working.
+        let line = phase_banner_line(&clock(ShiftPhase::Prep, None));
+        assert!(line.contains("PREP"), "{line}");
+        assert!(line.contains("shift board"), "{line}");
+        assert!(!line.contains(':'), "an untimed prep should show no clock: {line}");
+    }
+
+    #[test]
+    fn a_timed_prep_shows_the_countdown() {
+        let line = phase_banner_line(&clock(ShiftPhase::Prep, Some(107.0)));
+        assert!(line.contains("1:47"), "{line}");
+    }
+
+    #[test]
+    fn service_shows_progress_against_the_quota() {
+        let mut clock = clock(ShiftPhase::Service, None);
+        clock.resolved = 2;
+        clock.rules.quota = 7;
+        let line = phase_banner_line(&clock);
+        assert!(line.contains("SERVICE"), "{line}");
+        assert!(line.contains("2 of 7"), "{line}");
+    }
+
+    #[test]
+    fn the_debrief_points_at_the_board() {
+        let line = phase_banner_line(&clock(ShiftPhase::Debrief, Some(41.0)));
+        assert!(line.contains("sign off"), "{line}");
+        assert!(line.contains("0:41"), "{line}");
+    }
+
+    #[test]
+    fn the_clock_reads_as_minutes_and_seconds() {
+        assert_eq!(mmss(0.0), "0:00");
+        assert_eq!(mmss(9.6), "0:09");
+        assert_eq!(mmss(120.0), "2:00");
+        // A countdown that has run past zero must not render as a negative.
+        assert_eq!(mmss(-5.0), "0:00");
     }
 }
