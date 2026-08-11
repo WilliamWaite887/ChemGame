@@ -17,8 +17,9 @@
     incidents: [
         (
             id: "rad_leak",
-            // Roughly where the radium stock sits, on the dispenser side.
-            origin: (-4.6, 0.0, -3.6),
+            // Roughly where the radium stock sits, on the dispenser side of the
+            // mixing hall.
+            origin: (-4.0, 0.0, -4.2),
             radius: 4.5,
             duration: 40.0,
             warning: "Radiation alarm on the chem lab sensor. Dose up or clear the area.",
@@ -31,7 +32,11 @@
         ),
         (
             id: "coolant_vent",
-            origin: (-7.0, 0.0, -1.6),
+            // In the reaction bay, by the chamber. The bay's walls do not stop
+            // the radius — it is a sphere, not a room — but the chamber is far
+            // enough into its own room that the hall stays clear, so a vent is
+            // now a reason to leave the bay rather than to leave the lab.
+            origin: (-12.9, 0.0, -3.5),
             radius: 3.5,
             duration: 30.0,
             warning: "Atmos here — we've got a coolant line weeping near your chamber.",

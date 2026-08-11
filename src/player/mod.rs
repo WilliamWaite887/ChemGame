@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::body::{Bloodstream, Body};
 use crate::interaction::{Focus, InteractionMode};
-use crate::lab::{Solid, ROOM_HALF_X, ROOM_HALF_Z};
+use crate::lab::{self, Solid};
 use crate::net::is_authority;
 use crate::AppState;
 
@@ -166,7 +166,11 @@ fn spawn_chemist(commands: &mut Commands, client: ClientId, lane: f32) -> Entity
             // how the other is doing without asking.
             Body::default(),
             Bloodstream::default(),
-            Transform::from_xyz(lane, EYE_HEIGHT, 2.6),
+            Transform::from_xyz(
+                lab::SPAWN_SPOT.x + lane,
+                EYE_HEIGHT,
+                lab::SPAWN_SPOT.z,
+            ),
             Visibility::default(),
             Replicated,
         ))
@@ -416,10 +420,12 @@ fn apply_move_input(
         for (solid_transform, solid) in &solids {
             position = push_out(position, solid_transform.translation, solid.half_extents);
         }
-        let limit_x = ROOM_HALF_X - PLAYER_RADIUS;
-        let limit_z = ROOM_HALF_Z - PLAYER_RADIUS;
-        position.x = position.x.clamp(-limit_x, limit_x);
-        position.z = position.z.clamp(-limit_z, limit_z);
+        // Backstop behind the walls, for corners and the seams where two wall
+        // runs meet. It used to be a clamp to one rectangle, which was only ever
+        // correct while the lab was a single room: against the five-room suite
+        // it would have snapped anyone who stepped through a doorway straight
+        // back into the hall.
+        position = lab::contain(position, PLAYER_RADIUS);
 
         transform.translation = position;
     }

@@ -831,10 +831,15 @@ fn leave_sample_vials(
             continue;
         };
 
+        let (_, height) = ContainerKind::Bottle.dimensions();
         let vial = spawn_container(
             &mut commands,
             ContainerKind::Bottle,
-            Vec3::new(COUNTER_SPOT.x, 1.22, 2.9),
+            Vec3::new(
+                COUNTER_SPOT.x,
+                crate::lab::COUNTER_TOP + height * 0.5,
+                crate::lab::COUNTER_DROP_Z,
+            ),
         );
         let amount = ContainerKind::Bottle.capacity();
         commands.queue(move |world: &mut World| {

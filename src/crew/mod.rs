@@ -95,8 +95,10 @@ fn door_x() -> f32 {
     (DOOR_MIN_X + DOOR_MAX_X) * 0.5
 }
 
+/// Far enough beyond the lobby's south wall to be out of sight, so crew are
+/// never seen popping into existence.
 fn spawn_z() -> f32 {
-    7.2
+    crate::lab::ROOMS[crate::lab::LOBBY].max_z + 2.5
 }
 
 /// Shared meshes for crew bodies.

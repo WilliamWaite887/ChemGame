@@ -484,11 +484,7 @@ fn run_medbay_retrieval(
         *blood = Bloodstream::default();
 
         // Left by the door, which is where medical would have dragged them.
-        transform.translation = Vec3::new(
-            crate::lab::DOOR_MIN_X + 0.4,
-            crate::player::EYE_HEIGHT,
-            crate::lab::ROOM_HALF_Z - 0.8,
-        );
+        transform.translation = crate::lab::MEDBAY_DROP.with_y(crate::player::EYE_HEIGHT);
         commands.entity(player).remove::<MedbayRetrieval>();
         radio.push(crate::radio::RadioEntry {
             channel: "MED".to_string(),

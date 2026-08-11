@@ -59,7 +59,12 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             OnEnter(AppState::Playing),
-            (spawn_order_queue, spawn_radio_feed, spawn_vitals_panel),
+            (
+                spawn_order_queue,
+                spawn_radio_feed,
+                spawn_vitals_panel,
+                spawn_room_label,
+            ),
         )
         .add_systems(
             Update,
@@ -70,6 +75,7 @@ impl Plugin for UiPlugin {
                 update_phase_banner,
                 update_order_queue,
                 update_vitals_panel,
+                update_room_label,
                 update_radio_feed,
                 scroll_reference_book,
                 announce_discoveries,
@@ -1873,6 +1879,59 @@ fn update_vitals_panel(
 // ---------------------------------------------------------------------------
 // Radio feed
 // ---------------------------------------------------------------------------
+
+/// Which room the chemist is standing in.
+///
+/// Worth a line of screen for the same reason the rooms are tinted: the lab is
+/// five rooms now, and a player who has walked through two doorways looking for
+/// the grinder should not have to work out where they ended up from the wall
+/// colour. Top-left is the one free corner — orders sit top-right, the radio
+/// bottom-left and vitals bottom-right.
+#[derive(Component)]
+struct RoomLabel;
+
+fn spawn_room_label(mut commands: Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: px(16),
+                left: px(16),
+                padding: UiRect::axes(px(10), px(6)),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.05, 0.06, 0.08, 0.70)),
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new(""),
+                TextFont::from_font_size(13.0),
+                TextColor(TEXT_DIM),
+                RoomLabel,
+            ));
+        });
+}
+
+fn update_room_label(
+    chemists: Query<&Transform, With<LocalPlayer>>,
+    mut labels: Query<&mut Text, With<RoomLabel>>,
+) {
+    let Ok(chemist) = chemists.single() else {
+        return;
+    };
+    // Doorways fall outside every room rectangle, so mid-stride there is no
+    // room to name. Holding the last one beats blinking the label off and on
+    // every time the player crosses a threshold.
+    let Some(room) = crate::lab::room_at(chemist.translation) else {
+        return;
+    };
+    for mut text in &mut labels {
+        if text.0 != room.name {
+            text.0 = room.name.to_string();
+        }
+    }
+}
 
 #[derive(Component)]
 struct RadioSlot(usize);

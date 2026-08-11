@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::chem_data::ChemDb;
 use crate::crew::{spawn_crew_member, CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::Interactable;
-use crate::lab::COUNTER_SPOT;
+use crate::lab::{COUNTER_DROP_Z, COUNTER_SPOT, COUNTER_TOP};
 use crate::net::is_authority;
 use crate::orders::StationData;
 use crate::radio::{channel_for, RadioEntry, RadioLog};
@@ -28,8 +28,6 @@ use crate::AppState;
 
 /// Radius of a produce item, in metres.
 const ITEM_RADIUS: f32 = 0.07;
-/// Height of the delivery counter's top surface.
-const COUNTER_TOP: f32 = 1.15;
 /// Gap between items laid out on the counter.
 const ITEM_SPACING: f32 = 0.26;
 
@@ -394,7 +392,7 @@ fn unload_produce(
             spawn_produce(
                 &mut commands,
                 *kind,
-                Vec3::new(x, COUNTER_TOP + ITEM_RADIUS, COUNTER_SPOT.z - 1.0),
+                Vec3::new(x, COUNTER_TOP + ITEM_RADIUS, COUNTER_DROP_Z),
             );
         }
 

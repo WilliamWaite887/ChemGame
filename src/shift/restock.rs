@@ -14,7 +14,7 @@ use bevy::prelude::*;
 
 use crate::containers::{spawn_container, Container, ContainerKind};
 use crate::crew::{spawn_crew_member, CrewMember, CrewPhase, CrewRoute};
-use crate::lab::COUNTER_SPOT;
+use crate::lab::{COUNTER_DROP_Z, COUNTER_SPOT, COUNTER_TOP};
 use crate::net::is_authority;
 use crate::orders::StationData;
 use crate::produce::DeliverySchedule;
@@ -22,8 +22,6 @@ use crate::radio::{channel_for, RadioEntry, RadioLog};
 use crate::shift::{crate_contents, restock_order, PrepOpened, ShiftClock};
 use crate::AppState;
 
-/// Height of the delivery counter's top surface, matching `produce`.
-const COUNTER_TOP: f32 = 1.15;
 /// Gap between pieces laid out on the counter.
 const ITEM_SPACING: f32 = 0.3;
 /// Kept clear of the sample-vial drop at x = `COUNTER_SPOT.x`, so a crate never
@@ -226,7 +224,7 @@ fn unload_glassware(
             spawn_container(
                 &mut commands,
                 kind,
-                Vec3::new(x, COUNTER_TOP + height * 0.5, COUNTER_SPOT.z - 1.0),
+                Vec3::new(x, COUNTER_TOP + height * 0.5, COUNTER_DROP_Z),
             );
         }
 
