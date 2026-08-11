@@ -14,6 +14,7 @@ use crate::body::Body;
 use crate::chem_data::ChemDb;
 use crate::interaction::{InteractRequested, Interactable};
 use crate::machines::chemist_entity;
+use crate::net::is_authority;
 use crate::player::{Chemist, LocalPlayer, PlayerCamera};
 use crate::produce::Produce;
 use crate::AppState;
@@ -29,13 +30,28 @@ impl Plugin for ContainerPlugin {
         app.add_client_message::<DropRequested>(Channel::Ordered)
             .add_systems(
                 OnEnter(AppState::Playing),
-                spawn_starting_glassware.run_if(in_state(ClientState::Disconnected)),
+                (
+                    // Both ends need the glass material to draw with; only the
+                    // authority decides what glassware exists.
+                    load_container_assets,
+                    spawn_starting_glassware.run_if(is_authority),
+                )
+                    .chain(),
             )
             .add_systems(
                 Update,
                 (
-                    (handle_pickup, handle_drop).run_if(in_state(ClientState::Disconnected)),
-                    (request_drop, carry_held_containers, update_liquid_visuals),
+                    (handle_pickup, handle_drop).run_if(is_authority),
+                    (
+                        request_drop,
+                        // Runs everywhere: a replicated beaker arrives as
+                        // contents and a position, and each end builds the
+                        // glass for it.
+                        dress_containers,
+                        carry_held_containers,
+                        update_liquid_visuals,
+                    )
+                        .chain(),
                 )
                     .run_if(in_state(AppState::Playing)),
             );
@@ -153,55 +169,26 @@ pub struct ContainerAssets {
     glass_material: Handle<StandardMaterial>,
 }
 
-/// Spawns a container in the world and returns its entity.
-pub fn spawn_container(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    assets: &ContainerAssets,
-    kind: ContainerKind,
-    position: Vec3,
-) -> Entity {
-    let (radius, height) = kind.dimensions();
-
-    let container = commands
+/// Puts a container in the world and returns its entity.
+///
+/// Deliberately spawns no mesh. What a beaker *is* — its kind and its
+/// contents — is shared lab state and replicates; how it is drawn is each
+/// end's own business, and [`dress_containers`] handles that on both.
+pub fn spawn_container(commands: &mut Commands, kind: ContainerKind, position: Vec3) -> Entity {
+    commands
         .spawn((
             Container::new(kind),
-            Mesh3d(meshes.add(Cylinder::new(radius, height))),
-            MeshMaterial3d(assets.glass_material.clone()),
             Transform::from_translation(position),
-            Interactable::new(kind.label()),
-            // Glassware and its contents are shared lab state; the mesh and
-            // material are not, and each client builds those itself.
             Replicated,
         ))
-        .id();
-
-    // The liquid is a child cylinder, scaled down as the container empties.
-    // It starts invisible because a fresh container is empty.
-    let liquid_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.5, 0.5, 0.5),
-        perceptual_roughness: 0.25,
-        ..default()
-    });
-    commands.spawn((
-        Mesh3d(meshes.add(Cylinder::new(radius * 0.86, height * 0.92))),
-        MeshMaterial3d(liquid_material),
-        Transform::default(),
-        Visibility::Hidden,
-        LiquidVisual { container },
-        ChildOf(container),
-    ));
-
-    container
+        .id()
 }
 
-fn spawn_starting_glassware(
+pub(crate) fn load_container_assets(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let assets = ContainerAssets {
+    commands.insert_resource(ContainerAssets {
         glass_material: materials.add(StandardMaterial {
             base_color: Color::srgba(0.82, 0.90, 0.95, 0.28),
             alpha_mode: AlphaMode::Blend,
@@ -209,8 +196,55 @@ fn spawn_starting_glassware(
             metallic: 0.0,
             ..default()
         }),
+    });
+}
+
+/// Builds the glass for every container that has appeared, however it got here.
+///
+/// Keyed on `Added<Container>`, so one code path covers a beaker spawned
+/// locally by the authority and one that arrived over the wire. Dimensions
+/// come from the kind, which is replicated, so the two ends always agree.
+pub(crate) fn dress_containers(
+    mut commands: Commands,
+    assets: Option<Res<ContainerAssets>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    containers: Query<(Entity, &Container), Added<Container>>,
+) {
+    let Some(assets) = assets else {
+        return;
     };
 
+    for (entity, container) in &containers {
+        let kind = container.kind;
+        let (radius, height) = kind.dimensions();
+
+        commands.entity(entity).insert((
+            Mesh3d(meshes.add(Cylinder::new(radius, height))),
+            MeshMaterial3d(assets.glass_material.clone()),
+            Interactable::new(kind.label()),
+        ));
+
+        // The liquid is a child cylinder, scaled down as the container empties.
+        // It starts invisible because a fresh container is empty; the first
+        // run of `update_liquid_visuals` corrects a full one.
+        let liquid_material = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.5, 0.5, 0.5),
+            perceptual_roughness: 0.25,
+            ..default()
+        });
+        commands.spawn((
+            Mesh3d(meshes.add(Cylinder::new(radius * 0.86, height * 0.92))),
+            MeshMaterial3d(liquid_material),
+            Transform::default(),
+            Visibility::Hidden,
+            LiquidVisual { container: entity },
+            ChildOf(entity),
+        ));
+    }
+}
+
+fn spawn_starting_glassware(mut commands: Commands) {
     // Glassware waiting on the benches at the start of a shift.
     let bench_top = 0.9 + 0.065;
     for (index, x) in [-1.6f32, -1.15, -0.7].into_iter().enumerate() {
@@ -219,21 +253,11 @@ fn spawn_starting_glassware(
         } else {
             ContainerKind::Beaker
         };
-        spawn_container(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &assets,
-            kind,
-            Vec3::new(x, bench_top, 0.9),
-        );
+        spawn_container(&mut commands, kind, Vec3::new(x, bench_top, 0.9));
     }
     for x in [-1.6f32, -1.15] {
         spawn_container(
             &mut commands,
-            &mut meshes,
-            &mut materials,
-            &assets,
             ContainerKind::LargeBeaker,
             Vec3::new(x, bench_top, -1.2),
         );
@@ -244,14 +268,9 @@ fn spawn_starting_glassware(
     // until the player makes another.
     spawn_container(
         &mut commands,
-        &mut meshes,
-        &mut materials,
-        &assets,
         ContainerKind::Syringe,
         Vec3::new(-0.7, bench_top, -1.2),
     );
-
-    commands.insert_resource(assets);
 }
 
 /// A chemist wants to put down whatever they are carrying.
@@ -408,5 +427,84 @@ fn update_liquid_visuals(
             let [r, g, b] = container.solution.color(&db.reagents);
             material.base_color = Color::srgb(r, g, b);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_beaker_that_arrives_over_the_wire_gets_its_glass() {
+        // Replication carries the kind and the contents; the mesh is built
+        // from the kind at each end. Before the split, glassware was given its
+        // mesh at spawn time on the server only — so a joining chemist walked
+        // into a lab whose beakers were all invisible, and picked them up by
+        // aiming at nothing.
+        let mut app = App::new();
+        app.add_plugins(AssetPlugin::default())
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .add_systems(Startup, load_container_assets)
+            .add_systems(Update, dress_containers);
+
+        let arrived = app
+            .world_mut()
+            .spawn(Container::new(ContainerKind::LargeBeaker))
+            .id();
+
+        app.update();
+
+        assert!(
+            app.world().get::<Mesh3d>(arrived).is_some(),
+            "an undressed beaker is an invisible one"
+        );
+        assert!(
+            app.world().get::<Interactable>(arrived).is_some(),
+            "and an unpickable one"
+        );
+
+        let mut liquids = app.world_mut().query::<&LiquidVisual>();
+        let owners: Vec<Entity> = liquids
+            .iter(app.world())
+            .map(|liquid| liquid.container)
+            .collect();
+        assert_eq!(
+            owners,
+            vec![arrived],
+            "the liquid child is what shows the other chemist what is in the beaker"
+        );
+    }
+
+    #[test]
+    fn dressing_happens_once_per_container() {
+        // `Added` fires on arrival, not on every contents change — a beaker
+        // being filled at the dispenser changes `Container` constantly, and
+        // re-dressing would pile up a new liquid child each time.
+        let mut app = App::new();
+        app.add_plugins(AssetPlugin::default())
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .add_systems(Startup, load_container_assets)
+            .add_systems(Update, dress_containers);
+
+        let beaker = app
+            .world_mut()
+            .spawn(Container::new(ContainerKind::Beaker))
+            .id();
+        app.update();
+
+        // Something changes the contents, as the dispenser would.
+        let _ = app
+            .world_mut()
+            .get_mut::<Container>(beaker)
+            .expect("beaker exists")
+            .solution
+            .add(chem_sim::ReagentId(0), Units::whole(10));
+        app.update();
+        app.update();
+
+        let mut liquids = app.world_mut().query::<&LiquidVisual>();
+        assert_eq!(liquids.iter(app.world()).count(), 1);
     }
 }

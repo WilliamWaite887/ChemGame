@@ -171,7 +171,10 @@ fn transfer_is_limited_by_destination_capacity() {
     let mut source = beaker(&data, 100, &[("oxygen", 60)]);
     let mut dest = Solution::new(Units::whole(25));
 
-    assert_eq!(source.transfer_to(&mut dest, Units::whole(60)), Units::whole(25));
+    assert_eq!(
+        source.transfer_to(&mut dest, Units::whole(60)),
+        Units::whole(25)
+    );
     assert_eq!(source.total_volume(), Units::whole(35));
     assert_eq!(dest.total_volume(), Units::whole(25));
 }
@@ -305,7 +308,11 @@ fn arithrazine_resolves_a_three_step_chain() {
     let report = resolve(&mut solution, &data.reactions);
 
     assert_contents(&data, &solution, &[("arithrazine", 180)]);
-    assert_eq!(report.fired_reactions().len(), 3, "three distinct reactions");
+    assert_eq!(
+        report.fired_reactions().len(),
+        3,
+        "three distinct reactions"
+    );
 }
 
 #[test]
@@ -502,7 +509,11 @@ fn phlogiston_batch(data: &ChemData, each: i32) -> (chem_sim::Kelvin, bool) {
     let mut beaker = beaker(
         data,
         100,
-        &[("plasma", each), ("sulphuric_acid", each), ("phosphorus", each)],
+        &[
+            ("plasma", each),
+            ("sulphuric_acid", each),
+            ("phosphorus", each),
+        ],
     );
     beaker.temperature = chem_sim::Kelvin(374.5);
     let report = resolve(&mut beaker, &data.reactions);
@@ -667,7 +678,12 @@ fn locked_recipes_stay_within_reach_of_what_the_player_knows() {
     let data = data();
     let known_products: HashSet<ReagentId> = STARTING_RECIPES
         .iter()
-        .flat_map(|key| data.reactions.find(key).expect("starting recipe").product_ids())
+        .flat_map(|key| {
+            data.reactions
+                .find(key)
+                .expect("starting recipe")
+                .product_ids()
+        })
         .collect();
     let base: HashSet<ReagentId> = data.reagents.dispensable().map(|r| r.id).collect();
 
@@ -682,7 +698,10 @@ fn locked_recipes_stay_within_reach_of_what_the_player_knows() {
 
     while !undiscovered.is_empty() {
         depth += 1;
-        assert!(depth <= 3, "recipes still unreachable after 3 steps: {undiscovered:?}");
+        assert!(
+            depth <= 3,
+            "recipes still unreachable after 3 steps: {undiscovered:?}"
+        );
 
         let mut newly_available = Vec::new();
         undiscovered.retain(|key| {

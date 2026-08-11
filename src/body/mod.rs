@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, HeldBy};
 use crate::machines::chemist_entity;
+use crate::net::is_authority;
 use crate::player::Chemist;
 use crate::AppState;
 
@@ -62,7 +63,7 @@ impl Plugin for BodyPlugin {
             .add_mapped_client_message::<ApplyHeldRequested>(Channel::Ordered)
             .add_systems(
                 OnEnter(crate::shift::ShiftPhase::Prep),
-                clear_bodies_at_prep.run_if(in_state(ClientState::Disconnected)),
+                clear_bodies_at_prep.run_if(is_authority),
             )
             .add_systems(
                 Update,
@@ -75,8 +76,8 @@ impl Plugin for BodyPlugin {
                         run_medbay_retrieval,
                     )
                         .chain()
-                        .run_if(in_state(ClientState::Disconnected)),
-                    (request_consume, request_apply_held),
+                        .run_if(is_authority),
+                    (request_consume, request_apply_held, close_panel_on_collapse),
                 )
                     .run_if(in_state(AppState::Playing)),
             );
@@ -162,7 +163,13 @@ fn request_consume(
 /// whether you meant to load the syringe or inject the machine.
 fn request_apply_held(
     keys: Res<ButtonInput<KeyCode>>,
-    players: Query<(&crate::interaction::Focus, &crate::interaction::InteractionMode), With<crate::player::LocalPlayer>>,
+    players: Query<
+        (
+            &crate::interaction::Focus,
+            &crate::interaction::InteractionMode,
+        ),
+        With<crate::player::LocalPlayer>,
+    >,
     mut requests: MessageWriter<ApplyHeldRequested>,
 ) {
     if !keys.just_pressed(KeyCode::KeyF) {
@@ -230,9 +237,7 @@ fn handle_apply_held(
                 let Ok(mut source) = containers.get_mut(source_entity) else {
                     continue;
                 };
-                source
-                    .mutate(&db, |solution| solution.split(space))
-                    .0
+                source.mutate(&db, |solution| solution.split(space)).0
             };
             if let Ok(mut syringe) = containers.get_mut(syringe_entity) {
                 syringe.mutate(&db, |solution| {
@@ -356,6 +361,25 @@ pub struct MedbayRetrieval(pub f32);
 
 /// Everything that happens the moment a chemist goes down.
 ///
+/// Takes the panel off the screen of a chemist who has just gone down.
+///
+/// The server released their claim in [`handle_collapse`]; this is the other
+/// half, and it has to be local because `InteractionMode` is. Runs everywhere
+/// rather than under authority, so a collapsed client is not left reading the
+/// dispenser from the floor.
+fn close_panel_on_collapse(
+    mut players: Query<
+        (&Body, &mut crate::interaction::InteractionMode),
+        With<crate::player::LocalPlayer>,
+    >,
+) {
+    for (body, mut mode) in &mut players {
+        if body.0.collapsed && !mode.is_roaming() {
+            *mode = crate::interaction::InteractionMode::Roaming;
+        }
+    }
+}
+
 /// Split from the metabolism tick because a body can also collapse from a
 /// blast, and both paths must let go of the machine and the beaker. Keyed off
 /// `Added` rather than the tick report so there is exactly one place that
@@ -394,7 +418,7 @@ fn handle_collapse(
         // And of whatever machine they had open, or it stays claimed forever
         // and the other chemist can never use it.
         if let Ok(mut mode) = modes.get_mut(player) {
-            crate::interaction::leave_machine(player, &mut mode, &mut machines);
+            crate::interaction::release_claim(player, &mut mode, &mut machines);
         }
 
         commands
@@ -526,7 +550,12 @@ mod tests {
     }
 
     /// A chemist holding `kind` filled with `amount` of `reagent`.
-    fn chemist_holding(app: &mut App, kind: ContainerKind, reagent: &str, amount: i32) -> (Entity, Entity) {
+    fn chemist_holding(
+        app: &mut App,
+        kind: ContainerKind,
+        reagent: &str,
+        amount: i32,
+    ) -> (Entity, Entity) {
         let id = app.world().resource::<ChemDb>().reagent(reagent);
         let player = app
             .world_mut()
@@ -571,11 +600,12 @@ mod tests {
 
         let mut entity = app.world_mut().entity_mut(player);
         let mut vitals = entity.get::<Body>().unwrap().0;
-        entity
-            .get_mut::<Bloodstream>()
-            .unwrap()
-            .0
-            .receive(&mut dose, Route::Injected, &mut vitals, &db);
+        entity.get_mut::<Bloodstream>().unwrap().0.receive(
+            &mut dose,
+            Route::Injected,
+            &mut vitals,
+            &db,
+        );
         entity.get_mut::<Body>().unwrap().0 = vitals;
     }
 
@@ -599,7 +629,10 @@ mod tests {
         );
         // 60% of a 5u sip lands, and it lands in the stomach rather than the
         // blood — that delay is the whole difference from a syringe.
-        assert_eq!(blood_of(&app, player).stomach.volume_of(dylovene), Units::whole(3));
+        assert_eq!(
+            blood_of(&app, player).stomach.volume_of(dylovene),
+            Units::whole(3)
+        );
         assert!(blood_of(&app, player).blood.is_empty());
     }
 
@@ -707,7 +740,9 @@ mod tests {
             // `add` returns what did not fit. Ignoring it makes a fixture that
             // overflows its beaker look like it worked, and then the test that
             // reads it fails somewhere far less obvious.
-            let overflow = container.solution.add(db.reagent(key), Units::whole(*amount));
+            let overflow = container
+                .solution
+                .add(db.reagent(key), Units::whole(*amount));
             assert!(overflow.is_zero(), "{key} overflowed the test beaker");
         }
         app.world_mut().spawn(container).id()
@@ -778,7 +813,10 @@ mod tests {
 
         apply(&mut app, None);
 
-        assert!(contents_of(&app, syringe).is_empty(), "the syringe is spent");
+        assert!(
+            contents_of(&app, syringe).is_empty(),
+            "the syringe is spent"
+        );
         // Injection bypasses the stomach entirely: all 15u, immediately, which
         // is exactly what drinking does not do.
         assert_eq!(

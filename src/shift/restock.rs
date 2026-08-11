@@ -11,11 +11,11 @@
 //! wholesale from [`crate::produce`], which already solved this shape.
 
 use bevy::prelude::*;
-use bevy_replicon::prelude::*;
 
-use crate::containers::{spawn_container, Container, ContainerAssets, ContainerKind};
-use crate::crew::{spawn_crew_member, CrewAssets, CrewMember, CrewPhase, CrewRoute};
+use crate::containers::{spawn_container, Container, ContainerKind};
+use crate::crew::{spawn_crew_member, CrewMember, CrewPhase, CrewRoute};
 use crate::lab::COUNTER_SPOT;
+use crate::net::is_authority;
 use crate::orders::StationData;
 use crate::produce::DeliverySchedule;
 use crate::radio::{channel_for, RadioEntry, RadioLog};
@@ -53,7 +53,7 @@ impl Plugin for RestockPlugin {
             )
                 .chain()
                 .run_if(in_state(AppState::Playing))
-                .run_if(in_state(ClientState::Disconnected)),
+                .run_if(is_authority),
         );
     }
 }
@@ -139,14 +139,12 @@ fn dispatch_glassware(
     mut commands: Commands,
     mut pending: ResMut<PendingRestock>,
     station: Option<Res<StationData>>,
-    assets: Option<Res<CrewAssets>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     present: Query<&CrewMember>,
 ) {
     let Some(needed) = pending.0 else {
         return;
     };
-    let (Some(station), Some(assets)) = (station, assets) else {
+    let Some(station) = station else {
         return;
     };
     let supply = &station.config.supply;
@@ -173,7 +171,7 @@ fn dispatch_glassware(
 
     let (beakers, large) = crate_contents(needed, supply.large_every);
     // His own lane at the counter, clear of whoever is queuing for an order.
-    let courier = spawn_crew_member(&mut commands, &mut materials, &assets, def, -1.1);
+    let courier = spawn_crew_member(&mut commands, def, -1.1);
     commands
         .entity(courier)
         .insert(GlasswareDelivery { beakers, large });
@@ -210,35 +208,23 @@ fn expedite_requisitioned_produce(
 /// Puts the crate down once he reaches the counter, then sends him out.
 fn unload_glassware(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    assets: Option<Res<ContainerAssets>>,
     mut radio: ResMut<RadioLog>,
     mut couriers: Query<(Entity, &CrewMember, &GlasswareDelivery, &mut CrewRoute)>,
 ) {
-    let Some(assets) = assets else {
-        return;
-    };
-
     for (entity, member, delivery, mut route) in &mut couriers {
         if route.phase != CrewPhase::Waiting {
             continue;
         }
 
-        let kinds = std::iter::repeat_n(ContainerKind::Beaker, delivery.beakers)
-            .chain(std::iter::repeat_n(
-                ContainerKind::LargeBeaker,
-                delivery.large,
-            ));
+        let kinds = std::iter::repeat_n(ContainerKind::Beaker, delivery.beakers).chain(
+            std::iter::repeat_n(ContainerKind::LargeBeaker, delivery.large),
+        );
         let span = (delivery.total() as f32 - 1.0) * ITEM_SPACING;
         for (index, kind) in kinds.enumerate() {
             let x = COUNTER_SPOT.x + CRATE_X_OFFSET - span * 0.5 + index as f32 * ITEM_SPACING;
             let (_, height) = kind.dimensions();
             spawn_container(
                 &mut commands,
-                &mut meshes,
-                &mut materials,
-                &assets,
                 kind,
                 Vec3::new(x, COUNTER_TOP + height * 0.5, COUNTER_SPOT.z - 1.0),
             );

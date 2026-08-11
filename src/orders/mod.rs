@@ -13,14 +13,13 @@ use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
-use crate::containers::{
-    spawn_container, Container, ContainerAssets, ContainerKind, HeldBy, InSlot,
-};
-use crate::crew::{spawn_crew_member, CrewAssets, CrewDef, CrewMember, CrewPhase, CrewRoute};
+use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlot};
+use crate::crew::{spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{InteractRequested, Interactable};
 use crate::knowledge::{Knowledge, RESEARCH_PER_SUCCESS};
 use crate::lab::COUNTER_SPOT;
 use crate::machines::{chemist_entity, slotted_container, Machine, MachineKind, TestBenchStock};
+use crate::net::is_authority;
 use crate::player::Chemist;
 use crate::radio::{announce_request, channel_for, RadioEntry, RadioLog};
 use crate::shift::{count_resolved_orders, weighted_pick, ShiftClock, ShiftPhase};
@@ -46,8 +45,11 @@ impl Plugin for OrderPlugin {
             (
                 // Orders, crew and grading are the server's business. A client
                 // sees the crew arrive through replication.
+                // The crew roster is not server state: both ends need it to
+                // know what a crew member looks like at the counter, so it is
+                // promoted everywhere, exactly like the produce catalog.
+                promote_station_data,
                 (
-                    promote_station_data,
                     // Gated: nobody new walks in during prep or the debrief.
                     // That window is the whole point — it is when the bench,
                     // the grinder and the book are free to actually use.
@@ -65,7 +67,7 @@ impl Plugin for OrderPlugin {
                     broadcast_shift,
                 )
                     .chain()
-                    .run_if(in_state(ClientState::Disconnected)),
+                    .run_if(is_authority),
                 apply_shift.run_if(in_state(ClientState::Connected)),
             )
                 .run_if(in_state(AppState::Playing)),
@@ -410,8 +412,6 @@ fn generate_orders(
     time: Res<Time>,
     db: Res<ChemDb>,
     station: Option<Res<StationData>>,
-    assets: Option<Res<CrewAssets>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut spawner: Option<ResMut<OrderSpawner>>,
     knowledge: Option<Res<Knowledge>>,
     clock: Res<ShiftClock>,
@@ -421,7 +421,7 @@ fn generate_orders(
     let Some(knowledge) = knowledge else {
         return;
     };
-    let (Some(station), Some(assets), Some(spawner)) = (station, assets, spawner.as_mut()) else {
+    let (Some(station), Some(spawner)) = (station, spawner.as_mut()) else {
         return;
     };
 
@@ -506,15 +506,8 @@ fn generate_orders(
         return;
     };
 
-    let patience =
-        rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
-    let crew = spawn_crew_member(
-        &mut commands,
-        &mut materials,
-        &assets,
-        crew_def,
-        waiting as f32 * 0.95,
-    );
+    let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
+    let crew = spawn_crew_member(&mut commands, crew_def, waiting as f32 * 0.95);
 
     let reagent_name = db.reagents.get(reagent).name.clone();
     commands.entity(crew).insert((
@@ -804,16 +797,9 @@ fn leave_sample_vials(
     mut commands: Commands,
     db: Res<ChemDb>,
     knowledge: Res<Knowledge>,
-    assets: Option<Res<ContainerAssets>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut resolved: MessageReader<OrderResolved>,
     mut radio: ResMut<RadioLog>,
 ) {
-    let Some(assets) = assets else {
-        resolved.clear();
-        return;
-    };
     let mut rng = rand::rng();
 
     for report in resolved.read() {
@@ -847,9 +833,6 @@ fn leave_sample_vials(
 
         let vial = spawn_container(
             &mut commands,
-            &mut meshes,
-            &mut materials,
-            &assets,
             ContainerKind::Bottle,
             Vec3::new(COUNTER_SPOT.x, 1.22, 2.9),
         );
@@ -983,7 +966,10 @@ mod tests {
 
         app.update();
 
-        assert_eq!(outcomes(&app), vec![("Dr. Vance".to_string(), Outcome::Success)]);
+        assert_eq!(
+            outcomes(&app),
+            vec![("Dr. Vance".to_string(), Outcome::Success)]
+        );
         assert!(
             app.world().get_entity(beaker).is_err(),
             "they walk off with the glassware"
@@ -1067,7 +1053,10 @@ mod tests {
 
         app.update();
 
-        assert_eq!(outcomes(&app), vec![("Dr. Vance".to_string(), Outcome::Impure)]);
+        assert_eq!(
+            outcomes(&app),
+            vec![("Dr. Vance".to_string(), Outcome::Impure)]
+        );
         assert_eq!(app.world().resource::<Shift>().botched, 1);
     }
 

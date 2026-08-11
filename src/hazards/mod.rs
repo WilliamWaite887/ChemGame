@@ -17,6 +17,7 @@ use chem_sim::{ReactionEffect, Route, Solution, Units};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::net::is_authority;
 use crate::shift::ShiftPhase;
 
 use crate::body::{Bloodstream, Body, MetabolismClock};
@@ -56,13 +57,13 @@ impl Plugin for HazardPlugin {
                 (
                     (spawn_hazards, expose_to_smoke, fade_smoke)
                         .chain()
-                        .run_if(in_state(ClientState::Disconnected)),
+                        .run_if(is_authority),
                     // Incidents only happen while the lab is open for business.
                     // Prep is meant to be the safe window, the same reason
                     // `generate_orders` is gated out of it.
                     (schedule_incidents, run_incidents)
                         .chain()
-                        .run_if(in_state(ClientState::Disconnected))
+                        .run_if(is_authority)
                         .run_if(in_state(ShiftPhase::Service)),
                     build_smoke_visuals,
                 )
@@ -217,7 +218,10 @@ fn run_incidents(
     clock: Res<MetabolismClock>,
     mut felt: MessageWriter<ToClients<HazardFelt>>,
     mut hazards: Query<(Entity, &mut ActiveHazard, &Transform)>,
-    mut bodies: Query<(&Transform, &mut Bloodstream, &crate::player::Chemist), Without<ActiveHazard>>,
+    mut bodies: Query<
+        (&Transform, &mut Bloodstream, &crate::player::Chemist),
+        Without<ActiveHazard>,
+    >,
 ) {
     let dt = time.delta_secs();
     for (entity, mut hazard, hazard_transform) in &mut hazards {
@@ -233,7 +237,11 @@ fn run_incidents(
         }
 
         for (body_transform, mut blood, chemist) in &mut bodies {
-            if body_transform.translation.distance(hazard_transform.translation) > hazard.radius {
+            if body_transform
+                .translation
+                .distance(hazard_transform.translation)
+                > hazard.radius
+            {
                 continue;
             }
             // Topped up while you stand in it and decaying once you leave, so
@@ -418,7 +426,12 @@ fn expose_to_smoke(
     clock: Res<MetabolismClock>,
     mut felt: MessageWriter<ToClients<HazardFelt>>,
     mut clouds: Query<(&SmokeCloud, &Transform, &mut SmokePayload)>,
-    mut bodies: Query<(&Transform, &mut Body, &mut Bloodstream, &crate::player::Chemist)>,
+    mut bodies: Query<(
+        &Transform,
+        &mut Body,
+        &mut Bloodstream,
+        &crate::player::Chemist,
+    )>,
 ) {
     // The clock is ticked by `run_metabolism`, which is chained after this;
     // reading `just_finished` here means exposure lands on the same beat.
@@ -535,7 +548,9 @@ mod tests {
         let db = app.world().resource::<ChemDb>().0.clone();
         let mut container = Container::new(ContainerKind::LargeBeaker);
         for (key, amount) in contents {
-            let overflow = container.solution.add(db.reagent(key), Units::whole(*amount));
+            let overflow = container
+                .solution
+                .add(db.reagent(key), Units::whole(*amount));
             assert!(overflow.is_zero(), "{key} overflowed the test beaker");
         }
         app.world_mut()
@@ -656,7 +671,11 @@ mod tests {
             "standing in it should get you a dose"
         );
         assert!(
-            app.world().get::<Bloodstream>(outside).unwrap().0.is_empty(),
+            app.world()
+                .get::<Bloodstream>(outside)
+                .unwrap()
+                .0
+                .is_empty(),
             "and standing clear of it should not"
         );
     }
@@ -745,7 +764,10 @@ mod tests {
                 .expect("station.hazards.ron should parse");
 
         assert!(!script.incidents.is_empty());
-        assert!(script.warning_seconds > 0.0, "a hazard with no warning is a gotcha");
+        assert!(
+            script.warning_seconds > 0.0,
+            "a hazard with no warning is a gotcha"
+        );
         assert!(script.gap_seconds.0 <= script.gap_seconds.1);
         for incident in &script.incidents {
             assert!(incident.radius > 0.0, "'{}' reaches nobody", incident.id);

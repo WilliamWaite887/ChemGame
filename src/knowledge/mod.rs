@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
 use crate::machines::ReactionsFired;
+use crate::net::is_authority;
 use crate::radio::{RadioEntry, RadioLog};
 use crate::AppState;
 
@@ -46,9 +47,13 @@ impl Plugin for KnowledgePlugin {
                 (
                     // The shared notebook belongs to the lab, so the server
                     // owns it and only the server writes the save file.
-                    (learn_from_experiments, persist_knowledge, broadcast_knowledge)
+                    (
+                        learn_from_experiments,
+                        persist_knowledge,
+                        broadcast_knowledge,
+                    )
                         .chain()
-                        .run_if(in_state(ClientState::Disconnected)),
+                        .run_if(is_authority),
                     apply_knowledge.run_if(in_state(ClientState::Connected)),
                 )
                     .run_if(in_state(AppState::Playing)),
@@ -153,8 +158,7 @@ impl Knowledge {
     /// Every reagent the chemist can currently produce, plus the base reagents
     /// they can dispense.
     pub fn available_reagents(&self, data: &ChemData) -> HashSet<ReagentId> {
-        let mut available: HashSet<ReagentId> =
-            data.reagents.dispensable().map(|r| r.id).collect();
+        let mut available: HashSet<ReagentId> = data.reagents.dispensable().map(|r| r.id).collect();
 
         // Known recipes feed each other, so keep going until nothing new
         // appears rather than making a single pass.

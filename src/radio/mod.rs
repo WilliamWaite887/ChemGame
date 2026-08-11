@@ -14,7 +14,8 @@ use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
-use crate::orders::{Outcome, OrderResolved};
+use crate::net::is_authority;
+use crate::orders::{OrderResolved, Outcome};
 use crate::AppState;
 
 /// Lines kept in the feed before the oldest scrolls off.
@@ -41,7 +42,7 @@ impl Plugin for RadioPlugin {
                         broadcast_radio,
                     )
                         .chain()
-                        .run_if(in_state(ClientState::Disconnected)),
+                        .run_if(is_authority),
                     apply_radio.run_if(in_state(ClientState::Connected)),
                 )
                     .run_if(in_state(AppState::Playing)),

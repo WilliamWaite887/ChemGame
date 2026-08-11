@@ -20,9 +20,7 @@ pub const DEFAULT_METABOLISM: Units = Units::from_raw(40);
 /// Serialisable because solutions cross the wire in co-op. The id is a
 /// position in the loaded reagent list, so both ends must agree on the data
 /// files — which is enforced by replicon's protocol hash, not by us.
-#[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct ReagentId(pub u32);
 
 impl ReagentId {

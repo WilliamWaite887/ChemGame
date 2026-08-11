@@ -21,6 +21,7 @@ use crate::crew::{CrewMember, CrewRoute};
 use crate::interaction::Interactable;
 use crate::knowledge::Knowledge;
 use crate::machines::{Machine, MachineKind};
+use crate::net::is_authority;
 use crate::orders::{
     ForecastDef, Order, OrderConfig, OrderResolved, OrderSpawner, RampDef, RequestDef, Shift,
     StationData, SupplyDef, WindowDef,
@@ -46,23 +47,20 @@ impl Plugin for ShiftPlugin {
             .add_message::<PrepOpened>()
             // Which phase the lab is in is the server's call, exactly like the
             // orders it gates. A client mirrors what it is told.
-            .add_systems(
-                OnEnter(ShiftPhase::Prep),
-                enter_prep.run_if(in_state(ClientState::Disconnected)),
-            )
+            .add_systems(OnEnter(ShiftPhase::Prep), enter_prep.run_if(is_authority))
             .add_systems(
                 OnEnter(ShiftPhase::Service),
-                open_service.run_if(in_state(ClientState::Disconnected)),
+                open_service.run_if(is_authority),
             )
             .add_systems(
                 OnEnter(ShiftPhase::Debrief),
                 (close_shift, dismiss_outstanding_orders)
                     .chain()
-                    .run_if(in_state(ClientState::Disconnected)),
+                    .run_if(is_authority),
             )
             .add_systems(
                 OnExit(ShiftPhase::Debrief),
-                advance_shift.run_if(in_state(ClientState::Disconnected)),
+                advance_shift.run_if(is_authority),
             )
             .add_server_message::<ShiftClockSync>(Channel::Ordered)
             // Working the board is a request like every other player action:
@@ -82,7 +80,7 @@ impl Plugin for ShiftPlugin {
                         broadcast_shift_clock,
                     )
                         .chain()
-                        .run_if(in_state(ClientState::Disconnected)),
+                        .run_if(is_authority),
                     // A client is told the phase and mirrors it. It never
                     // decides one.
                     (apply_shift_clock, tick_local_clock, mirror_phase_state)
@@ -101,9 +99,7 @@ impl Plugin for ShiftPlugin {
 /// sending the crew home, picking the forecast — and `OnEnter`/`OnExit` give
 /// exactly-once for free. Hand-rolled edge detection would have to be right in
 /// six places at once.
-#[derive(
-    Debug, Clone, Copy, Default, Eq, PartialEq, Hash, SubStates, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Hash, SubStates, Serialize, Deserialize)]
 #[source(AppState = AppState::Playing)]
 #[states(scoped_entities)]
 pub enum ShiftPhase {
@@ -246,7 +242,9 @@ impl ShiftReport {
             delivered: closing.succeeded.saturating_sub(opening.succeeded),
             botched: closing.botched.saturating_sub(opening.botched),
             reputation: closing.reputation - opening.reputation,
-            research: closing.research_points.saturating_sub(opening.research_points),
+            research: closing
+                .research_points
+                .saturating_sub(opening.research_points),
             recipes: closing.known_recipes.saturating_sub(opening.known_recipes),
         }
     }
@@ -750,13 +748,13 @@ impl Plugin for ProgressPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             OnEnter(AppState::Playing),
-            load_progress.run_if(in_state(ClientState::Disconnected)),
+            load_progress.run_if(is_authority),
         )
         .add_systems(
             Update,
             persist_progress
                 .run_if(in_state(AppState::Playing))
-                .run_if(in_state(ClientState::Disconnected)),
+                .run_if(is_authority),
         );
     }
 }
@@ -927,7 +925,10 @@ pub fn count_resolved_orders(
 /// Weighted so a quiet shift can be made rarer than a busy one without having
 /// to write it out several times in the data file.
 pub fn draw_forecast(forecasts: &[ForecastDef], roll: f64) -> Option<&ForecastDef> {
-    let total: f64 = forecasts.iter().map(|forecast| forecast.weight.max(0.0)).sum();
+    let total: f64 = forecasts
+        .iter()
+        .map(|forecast| forecast.weight.max(0.0))
+        .sum();
     if total <= 0.0 {
         return None;
     }
@@ -1353,7 +1354,10 @@ mod tests {
         // Every counter hand-off despawns the container and nothing else makes
         // beakers, so any deficit at all has to draw a delivery.
         for live in 0..6 {
-            assert!(restock_order(live, 6, 4) >= 1, "no delivery with {live} left");
+            assert!(
+                restock_order(live, 6, 4) >= 1,
+                "no delivery with {live} left"
+            );
         }
     }
 

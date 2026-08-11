@@ -104,7 +104,10 @@ fn a_declared_metabolism_rate_overrides_the_default() {
     for _ in 0..5 {
         metabolise(&mut vitals, &mut blood, &data);
     }
-    assert!(blood.blood.is_empty(), "a fast reagent should clear in five ticks");
+    assert!(
+        blood.blood.is_empty(),
+        "a fast reagent should clear in five ticks"
+    );
 }
 
 #[test]
@@ -134,7 +137,10 @@ fn a_remainder_smaller_than_the_rate_still_gets_one_full_tick() {
 fn injecting_delivers_the_whole_dose_to_the_blood() {
     let data = fixture();
     let (_, blood) = injected(&data, "inert", 10);
-    assert_eq!(blood.blood.volume_of(data.reagent("inert")), Units::whole(10));
+    assert_eq!(
+        blood.blood.volume_of(data.reagent("inert")),
+        Units::whole(10)
+    );
     assert!(blood.stomach.is_empty(), "injection bypasses the stomach");
 }
 
@@ -233,7 +239,10 @@ fn collapse_trips_at_the_threshold_and_does_not_clear_until_recovery() {
     // the line flickers between states every tick.
     vitals.heal(Damage::of(DamageKind::Brute, Units::whole(15)));
     assert_eq!(vitals.total(), Units::whole(85));
-    assert!(vitals.collapsed, "85 is above the recovery line, still down");
+    assert!(
+        vitals.collapsed,
+        "85 is above the recovery line, still down"
+    );
 
     vitals.heal(Damage::of(DamageKind::Brute, Units::whole(10)));
     assert!(vitals.total() < RECOVER);
@@ -309,7 +318,11 @@ fn overdose_tiers_stack_rather_than_replace() {
     let tick_toxin = |amount: i32| {
         let (mut vitals, mut blood) = injected(&data, "tiered", amount);
         let report = metabolise(&mut vitals, &mut blood, &data);
-        (report.harmed.toxin, report.healed.brute, report.overdosing.len())
+        (
+            report.harmed.toxin,
+            report.healed.brute,
+            report.overdosing.len(),
+        )
     };
 
     // Under the threshold: the medicine works and nothing else happens.

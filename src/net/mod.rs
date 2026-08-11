@@ -10,7 +10,7 @@
 //! machine occupancy, and the crew at the counter. That is what two chemists
 //! need to see the same version of.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::SystemTime;
 
 use bevy::prelude::*;
@@ -29,6 +29,7 @@ use crate::containers::{Container, HeldBy, InSlot};
 use crate::crew::CrewMember;
 use crate::hazards::{ActiveHazard, SmokeCloud, SmokePayload};
 use crate::machines::{Buffer, DispenseAmount, Hopper, Machine, Thermostat};
+use crate::player::Player;
 use crate::produce::Produce;
 
 /// Arbitrary; both ends must agree.
@@ -59,7 +60,7 @@ impl LaunchMode {
                     let address = iter
                         .next()
                         .and_then(|value| parse_address(value))
-                        .unwrap_or_else(local_address);
+                        .unwrap_or_else(loopback_address);
                     return LaunchMode::Join(address);
                 }
                 _ => {}
@@ -73,12 +74,65 @@ fn parse_address(value: &str) -> Option<SocketAddr> {
     value
         .parse::<SocketAddr>()
         .ok()
-        // Bare host or IP: fall back to the default port rather than refusing.
-        .or_else(|| value.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, DEFAULT_PORT)))
+        // Bare IP: fall back to the default port rather than refusing.
+        .or_else(|| {
+            value
+                .parse::<IpAddr>()
+                .ok()
+                .map(|ip| SocketAddr::new(ip, DEFAULT_PORT))
+        })
+        // A name, with or without a port. Worth resolving because on a home
+        // network the other machine usually has one and its address is a
+        // DHCP lease that changes.
+        .or_else(|| resolve(value))
+        .or_else(|| resolve(&format!("{value}:{DEFAULT_PORT}")))
 }
 
-fn local_address() -> SocketAddr {
+/// First IPv4 address a name resolves to.
+///
+/// IPv4 only, deliberately: the host binds an IPv4 socket, and netcode will
+/// not match a v6 client address against it, which fails as a silent timeout
+/// rather than an error.
+fn resolve(value: &str) -> Option<SocketAddr> {
+    value
+        .to_socket_addrs()
+        .ok()?
+        .find(|address| address.is_ipv4())
+}
+
+fn loopback_address() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT)
+}
+
+/// The address other machines on this network should dial.
+///
+/// Found by asking the OS which interface it would route out of. This costs
+/// nothing and sends no traffic — connecting a UDP socket only fixes the peer
+/// address locally — and it beats enumerating interfaces, which picks the
+/// wrong one as soon as there is a VPN or a container bridge in the list.
+fn lan_address() -> Option<SocketAddr> {
+    let probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    // Any routable address will do; nothing is sent to it.
+    probe.connect((Ipv4Addr::new(203, 0, 113, 1), 9)).ok()?;
+    let address = probe.local_addr().ok()?;
+    Some(SocketAddr::new(address.ip(), DEFAULT_PORT))
+}
+
+/// Run condition: this process owns the simulation.
+///
+/// True for singleplayer, and for a host — which is why those two are one code
+/// path rather than a special case. False only when launched with `--join`.
+///
+/// Deliberately taken from the launch mode rather than replicon's
+/// `ClientState`. A joining client reads `Disconnected` for the second or two
+/// it spends handshaking, and the lab is built on entering `Playing`, so a
+/// `ClientState` test loses that race whenever assets finish loading first:
+/// the client builds its own glassware and machines, then receives the
+/// server's on top of them.
+/// Absent resource reads as authority: that is a headless test driving the
+/// simulation directly, which is exactly the singleplayer case.
+pub fn is_authority(mode: Option<Res<LaunchMode>>) -> bool {
+    !matches!(mode.as_deref(), Some(LaunchMode::Join(_)))
 }
 
 pub struct NetPlugin;
@@ -90,6 +144,7 @@ impl Plugin for NetPlugin {
             .add_plugins((RepliconPlugins, RepliconRenetPlugins));
 
         register_replication(app);
+        app.add_systems(Update, resync_on_join.run_if(is_authority));
 
         match mode {
             LaunchMode::Singleplayer => {}
@@ -100,6 +155,41 @@ impl Plugin for NetPlugin {
                 app.add_systems(Startup, start_joining);
             }
         }
+    }
+}
+
+/// Pushes the shared resources again whenever a chemist joins.
+///
+/// `Knowledge`, `Shift` and `RadioLog` are resources, which replicon does not
+/// replicate, so each is broadcast as a whole snapshot when it changes. That
+/// is right in steady state and wrong at the moment of joining: a client that
+/// arrives between two discoveries would keep running on whatever its *own*
+/// `save.ron` held until the host next changed something. Two chemists reading
+/// different books is the worst kind of this bug, because nothing about it
+/// looks broken — the second player simply cannot make a recipe the first one
+/// can see, and neither of them can tell why.
+///
+/// Marking them changed rather than sending directly reuses the existing
+/// broadcasts, so there is one place that knows how to serialise each.
+fn resync_on_join(
+    joined: Query<(), Added<AuthorizedClient>>,
+    knowledge: Option<ResMut<crate::knowledge::Knowledge>>,
+    shift: Option<ResMut<crate::orders::Shift>>,
+    radio: Option<ResMut<crate::radio::RadioLog>>,
+) {
+    if joined.is_empty() {
+        return;
+    }
+    // A client can authorise before the lab has finished loading, so none of
+    // these are guaranteed to exist yet.
+    if let Some(mut knowledge) = knowledge {
+        knowledge.set_changed();
+    }
+    if let Some(mut shift) = shift {
+        shift.set_changed();
+    }
+    if let Some(mut radio) = radio {
+        radio.set_changed();
     }
 }
 
@@ -120,6 +210,9 @@ fn register_replication(app: &mut App) {
         .replicate::<DispenseAmount>()
         .replicate::<Produce>()
         .replicate::<CrewMember>()
+        // The marker itself, so a client can tell a chemist from any other
+        // replicated entity and give them a body to look at.
+        .replicate::<Player>()
         // What the chamber is set to. Without this the second chemist to walk
         // up cannot see it is running and cooks the batch.
         .replicate::<Thermostat>()
@@ -136,17 +229,25 @@ fn register_replication(app: &mut App) {
 }
 
 fn start_hosting(mut commands: Commands, channels: Res<RepliconChannels>) {
-    let address = local_address();
-    let Ok(socket) = UdpSocket::bind(address) else {
-        error!("could not bind {address}; staying singleplayer");
-        return;
-    };
-    let Ok(public) = socket.local_addr() else {
+    // Bind every interface, not loopback. Binding 127.0.0.1 accepts a second
+    // window on this machine and nothing else on the network, which is the
+    // failure that looks exactly like a firewall problem.
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT);
+    let Ok(socket) = UdpSocket::bind(bind) else {
+        error!("could not bind {bind}; staying singleplayer");
         return;
     };
     let Ok(since_epoch) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) else {
         return;
     };
+
+    // Netcode matches the address the client dialled against this list, so
+    // both routes to this host have to be on it: the LAN address for the
+    // other machine, loopback for a second window here.
+    let lan = lan_address();
+    let mut public = Vec::new();
+    public.extend(lan);
+    public.push(loopback_address());
 
     let server = RenetServer::new(ConnectionConfig {
         server_channels_config: channels.server_configs(),
@@ -157,7 +258,7 @@ fn start_hosting(mut commands: Commands, channels: Res<RepliconChannels>) {
         current_time: since_epoch,
         max_clients: 4,
         protocol_id: PROTOCOL_ID,
-        public_addresses: vec![public],
+        public_addresses: public,
         authentication: ServerAuthentication::Unsecure,
     };
     let Ok(transport) = NetcodeServerTransport::new(config, socket) else {
@@ -167,7 +268,16 @@ fn start_hosting(mut commands: Commands, channels: Res<RepliconChannels>) {
 
     commands.insert_resource(server);
     commands.insert_resource(transport);
-    info!("hosting the lab on {public}");
+
+    match lan {
+        Some(address) => info!("lab open — the other chemist runs: chemgame --join {address}"),
+        // Not fatal: a second window on this machine still works, and this is
+        // the normal reading when there is no network at all.
+        None => warn!(
+            "lab open on {DEFAULT_PORT}, but no network address was found — \
+             only this machine can join, via --join 127.0.0.1:{DEFAULT_PORT}"
+        ),
+    }
 }
 
 fn start_joining(mut commands: Commands, channels: Res<RepliconChannels>, mode: Res<LaunchMode>) {
@@ -213,7 +323,11 @@ mod tests {
     use crate::containers::ContainerKind;
 
     /// Two apps wired together in memory, with no sockets and no renderer.
-    fn connected_pair() -> (App, App) {
+    ///
+    /// `dress` decides whether each end can also *build* what it is sent.
+    /// Plugins have to go on before `finish`, which is why this is one builder
+    /// rather than a pair that gets extended afterwards.
+    fn connected_pair_inner(dress: bool) -> (App, App) {
         let mut server = App::new();
         let mut client = App::new();
         for app in [&mut server, &mut client] {
@@ -223,10 +337,111 @@ mod tests {
                 RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
             ));
             register_replication(app);
+            if dress {
+                app.add_plugins(AssetPlugin::default())
+                    .init_asset::<Mesh>()
+                    .init_asset::<StandardMaterial>()
+                    .add_systems(
+                        Startup,
+                        (
+                            crate::lab::load_machine_assets,
+                            crate::containers::load_container_assets,
+                            crate::player::load_chemist_assets,
+                        ),
+                    )
+                    .add_systems(
+                        Update,
+                        (
+                            crate::lab::dress_machines,
+                            crate::containers::dress_containers,
+                            crate::player::dress_chemists,
+                        ),
+                    );
+            }
             app.finish();
         }
         server.connect_client(&mut client);
         (server, client)
+    }
+
+    fn connected_pair() -> (App, App) {
+        connected_pair_inner(false)
+    }
+
+    /// A pair where each end can build what it is sent.
+    ///
+    /// This is the two-windows check made automatic: the server spawns lab
+    /// state carrying no presentation at all, and the client has to arrive at
+    /// a room it can see and use from the replicated components alone.
+    fn connected_pair_with_visuals() -> (App, App) {
+        connected_pair_inner(true)
+    }
+
+    /// Runs enough frames for a spawn to reach the client and be built out.
+    fn settle(server: &mut App, client: &mut App) {
+        for _ in 0..3 {
+            server.update();
+            server.exchange_with_client(client);
+            client.update();
+        }
+    }
+
+    #[test]
+    fn a_joining_client_ends_up_with_a_lab_it_can_see_and_use() {
+        // The bug this pins is the one that made co-op look finished and play
+        // as an empty room: everything the server spawned got its mesh at
+        // spawn time, and meshes do not replicate. The client connected fine,
+        // was assigned a chemist, and stood in a lab with no machines, no
+        // glassware and nobody else in it.
+        let (mut server, mut client) = connected_pair_with_visuals();
+
+        let machine = server
+            .world_mut()
+            .spawn((
+                Replicated,
+                Machine::new(crate::machines::MachineKind::Dispenser),
+            ))
+            .id();
+        let beaker = server
+            .world_mut()
+            .spawn((Replicated, Container::new(ContainerKind::LargeBeaker)))
+            .id();
+        let chemist = server
+            .world_mut()
+            .spawn((Replicated, Player, Transform::default()))
+            .id();
+
+        settle(&mut server, &mut client);
+
+        // Each has to be found by what it *is*, because the client's entity
+        // ids are its own.
+        let mut machines = client.world_mut().query::<(&Machine, &Mesh3d)>();
+        assert_eq!(
+            machines.iter(client.world()).count(),
+            1,
+            "the dispenser must arrive and be built: {machine} on the server"
+        );
+
+        let mut beakers = client.world_mut().query::<(&Container, &Mesh3d)>();
+        assert_eq!(
+            beakers.iter(client.world()).count(),
+            1,
+            "the beaker must arrive and be built: {beaker} on the server"
+        );
+
+        let mut chemists = client.world_mut().query::<(&Player, &Visibility)>();
+        assert_eq!(
+            chemists.iter(client.world()).count(),
+            1,
+            "the other chemist must arrive and be drawable: {chemist} on the server"
+        );
+
+        let mut parts = client.world_mut().query::<&crate::player::ChemistBody>();
+        assert_eq!(
+            parts.iter(client.world()).count(),
+            2,
+            "a body and a head, or the other chemist is an invisible pair of hands"
+        );
     }
 
     #[test]
@@ -310,5 +525,116 @@ mod tests {
         // Nothing on the command line must mean a normal single-chemist shift;
         // networking is opt-in.
         assert_eq!(LaunchMode::default(), LaunchMode::Singleplayer);
+    }
+
+    /// Runs `is_authority` for a given mode the way a run condition would.
+    fn authority_for(mode: Option<LaunchMode>) -> bool {
+        let mut world = World::new();
+        if let Some(mode) = mode {
+            world.insert_resource(mode);
+        }
+        world
+            .run_system_cached(is_authority)
+            .expect("run condition")
+    }
+
+    #[test]
+    fn only_a_joining_process_gives_up_authority() {
+        // The whole simulation hangs off this: singleplayer and a host both
+        // run the lab, a joining client never does. Getting it from the launch
+        // mode rather than the connection state is what stops a client that is
+        // still handshaking from building its own copy of the room and then
+        // receiving the server's on top.
+        assert!(authority_for(Some(LaunchMode::Singleplayer)));
+        assert!(authority_for(Some(LaunchMode::Host)));
+        assert!(!authority_for(Some(LaunchMode::Join(loopback_address()))));
+        assert!(
+            authority_for(None),
+            "a headless test with no launch mode is driving the simulation itself"
+        );
+    }
+
+    /// Records whether a reader saw the shared state change this frame, which
+    /// is what the real broadcasts key off.
+    #[derive(Resource, Default)]
+    struct SawChange(bool);
+
+    fn watch_shift(shift: Res<crate::orders::Shift>, mut saw: ResMut<SawChange>) {
+        if shift.is_changed() {
+            saw.0 = true;
+        }
+    }
+
+    #[test]
+    fn a_joining_chemist_is_sent_the_shared_state_again() {
+        // The three snapshot broadcasts only fire on change. Without this the
+        // second chemist runs on their own `save.ron` until the host happens
+        // to discover something — so the two of them read different books,
+        // and the only symptom is a recipe one can make and the other cannot.
+        let mut app = App::new();
+        app.init_resource::<crate::orders::Shift>()
+            .init_resource::<SawChange>()
+            .add_systems(Update, (resync_on_join, watch_shift).chain());
+
+        // First frame: inserting the resource counts as a change on its own.
+        app.update();
+        app.world_mut().resource_mut::<SawChange>().0 = false;
+
+        app.update();
+        assert!(
+            !app.world().resource::<SawChange>().0,
+            "a quiet frame with nobody joining must not resend anything"
+        );
+
+        app.world_mut().spawn(AuthorizedClient);
+        app.update();
+        assert!(
+            app.world().resource::<SawChange>().0,
+            "a chemist joining must trigger a fresh snapshot"
+        );
+    }
+
+    #[test]
+    fn a_bare_address_picks_up_the_default_port() {
+        // What someone actually types when the host reads their IP out loud.
+        assert_eq!(
+            parse_address("192.168.1.40"),
+            Some(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 40)),
+                DEFAULT_PORT
+            ))
+        );
+        // An explicit port still wins.
+        assert_eq!(
+            parse_address("192.168.1.40:9999"),
+            Some(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 40)),
+                9999
+            ))
+        );
+        assert_eq!(parse_address("not an address at all"), None);
+    }
+
+    #[test]
+    fn the_host_never_advertises_only_loopback() {
+        // Binding or advertising loopback alone is the bug that looks exactly
+        // like a firewall problem: a second window on this machine works, and
+        // nothing else on the network can get in.
+        let mut public = Vec::new();
+        public.extend(lan_address());
+        public.push(loopback_address());
+
+        assert!(
+            public.contains(&loopback_address()),
+            "a second window on this machine must still be able to join"
+        );
+        if let Some(lan) = lan_address() {
+            assert_ne!(
+                lan.ip(),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                "the routable address must not be loopback"
+            );
+            assert_eq!(lan.port(), DEFAULT_PORT);
+        }
     }
 }

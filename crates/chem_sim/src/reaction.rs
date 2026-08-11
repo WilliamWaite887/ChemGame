@@ -170,20 +170,20 @@ impl ReactionSet {
         def: ReactionDef,
         reagents: &ReagentRegistry,
     ) -> Result<ReactionId, ChemDataError> {
-        let resolve = |pairs: &[(String, Units)]| -> Result<Vec<(ReagentId, Units)>, ChemDataError> {
-            pairs
-                .iter()
-                .map(|(name, amount)| {
-                    reagents
-                        .id_of(name)
-                        .map(|id| (id, *amount))
-                        .ok_or_else(|| ChemDataError::UnknownReagent {
-                            reaction: def.id.clone(),
-                            reagent: name.clone(),
+        let resolve =
+            |pairs: &[(String, Units)]| -> Result<Vec<(ReagentId, Units)>, ChemDataError> {
+                pairs
+                    .iter()
+                    .map(|(name, amount)| {
+                        reagents.id_of(name).map(|id| (id, *amount)).ok_or_else(|| {
+                            ChemDataError::UnknownReagent {
+                                reaction: def.id.clone(),
+                                reagent: name.clone(),
+                            }
                         })
-                })
-                .collect()
-        };
+                    })
+                    .collect()
+            };
 
         let reactants = resolve(&def.reactants)?;
         let catalysts = resolve(&def.catalysts)?;
@@ -247,7 +247,10 @@ impl std::fmt::Display for ChemDataError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ChemDataError::UnknownReagent { reaction, reagent } => {
-                write!(f, "reaction '{reaction}' refers to unknown reagent '{reagent}'")
+                write!(
+                    f,
+                    "reaction '{reaction}' refers to unknown reagent '{reagent}'"
+                )
             }
             ChemDataError::NoReactants { reaction } => {
                 write!(f, "reaction '{reaction}' has no reactants")

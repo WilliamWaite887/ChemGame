@@ -64,7 +64,12 @@ pub fn resolve(solution: &mut Solution, reactions: &ReactionSet) -> ResolveRepor
             return report;
         };
         let overheated = reaction.is_overheated(solution.temperature);
-        apply(solution, reaction, scale, reaction.yield_factor(solution.temperature));
+        apply(
+            solution,
+            reaction,
+            scale,
+            reaction.yield_factor(solution.temperature),
+        );
         report.events.push(ReactionEvent {
             reaction: reaction.id,
             scale,
@@ -144,7 +149,9 @@ fn apply(solution: &mut Solution, reaction: &Reaction, scale: Units, yield_facto
     // Reactants are removed first, so products are never rejected for want of
     // space the reaction itself just freed.
     for &(id, produced) in &reaction.products {
-        let amount = produced.scaled(scale, Units::ONE).scaled(yield_factor, Units::ONE);
+        let amount = produced
+            .scaled(scale, Units::ONE)
+            .scaled(yield_factor, Units::ONE);
         let _overflow = solution.add(id, amount);
     }
 }

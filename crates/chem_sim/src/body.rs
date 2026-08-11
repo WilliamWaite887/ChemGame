@@ -323,8 +323,7 @@ pub fn metabolise(vitals: &mut Vitals, blood: &mut Bloodstream, data: &ChemData)
         let reagent = data.reagents.get(*id);
 
         let overdosing = matches!(reagent.overdose, Some(threshold) if *volume > threshold);
-        let critical =
-            matches!(reagent.critical_overdose, Some(threshold) if *volume > threshold);
+        let critical = matches!(reagent.critical_overdose, Some(threshold) if *volume > threshold);
         if overdosing {
             report.overdosing.push(*id);
         }

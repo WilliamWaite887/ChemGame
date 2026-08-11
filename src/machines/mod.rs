@@ -12,10 +12,11 @@ use chem_sim::{Kelvin, ReagentId, Solution, Units};
 use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
-use crate::containers::{
-    spawn_container, Container, ContainerAssets, ContainerKind, HeldBy, InSlot,
+use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlot};
+use crate::interaction::{
+    InteractRequested, InteractionMode, LeaveMachineRequested, MachineOpened,
 };
-use crate::interaction::{InteractRequested, InteractionMode};
+use crate::net::is_authority;
 use crate::player::Chemist;
 use crate::produce::{Produce, ProduceCatalog, ProduceId};
 use crate::AppState;
@@ -41,6 +42,7 @@ impl Plugin for MachinePlugin {
                 Update,
                 (
                     handle_machine_interact,
+                    handle_leave_machine,
                     handle_dispense,
                     handle_buffer_transfer,
                     handle_package,
@@ -55,7 +57,7 @@ impl Plugin for MachinePlugin {
                     .chain()
                     .run_if(in_state(AppState::Playing))
                     // Authority: server, listen server, or singleplayer.
-                    .run_if(in_state(ClientState::Disconnected)),
+                    .run_if(is_authority),
             );
     }
 }
@@ -81,6 +83,20 @@ pub enum MachineKind {
 }
 
 impl MachineKind {
+    /// Every kind, which is also every machine: the lab holds exactly one of
+    /// each. Both the spawner and the client's fit-out iterate this, so a new
+    /// machine cannot be added to one and forgotten in the other.
+    pub const ALL: [MachineKind; 8] = [
+        MachineKind::Dispenser,
+        MachineKind::ChemMaster,
+        MachineKind::Grinder,
+        MachineKind::Analyzer,
+        MachineKind::TestBench,
+        MachineKind::DeliveryWindow,
+        MachineKind::ShiftBoard,
+        MachineKind::ReactionChamber,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             MachineKind::Dispenser => "Chemical Dispenser",
@@ -331,10 +347,7 @@ pub struct SetHeaterPower {
 // ---------------------------------------------------------------------------
 
 /// Finds the container loaded into `machine`, if any.
-pub fn slotted_container(
-    machine: Entity,
-    slotted: &Query<(Entity, &InSlot)>,
-) -> Option<Entity> {
+pub fn slotted_container(machine: Entity, slotted: &Query<(Entity, &InSlot)>) -> Option<Entity> {
     slotted
         .iter()
         .find(|(_, slot)| slot.0 == machine)
@@ -361,6 +374,7 @@ fn handle_machine_interact(
     produce: Query<&Produce>,
     slotted: Query<(Entity, &InSlot)>,
     bodies: Query<&crate::body::Body>,
+    mut opened: MessageWriter<ToClients<MachineOpened>>,
 ) {
     for request in requests.read() {
         // The sender's identity comes from the connection, never from the
@@ -398,13 +412,17 @@ fn handle_machine_interact(
 
         let loading = carrying.filter(|item| !produce.contains(*item));
         match (loading, slot) {
-            (Some(container), Some(slot)) if slotted_container(request.target, &slotted).is_none() => {
+            (Some(container), Some(slot))
+                if slotted_container(request.target, &slotted).is_none() =>
+            {
                 commands
                     .entity(container)
                     .remove::<HeldBy>()
                     .remove::<ChildOf>()
                     .insert(InSlot(request.target))
-                    .insert(Transform::from_translation(transform.translation + slot.offset));
+                    .insert(Transform::from_translation(
+                        transform.translation + slot.offset,
+                    ));
             }
             _ => {
                 if !machine.available_to(player) {
@@ -414,8 +432,46 @@ fn handle_machine_interact(
                 if let Ok(mut mode) = modes.get_mut(player) {
                     *mode = InteractionMode::UsingMachine(request.target);
                 }
+                // The claim is granted here but the panel lives on the asking
+                // client, and `InteractionMode` is deliberately local. Telling
+                // them is what actually opens it.
+                opened.write(ToClients {
+                    targets: SendTargets::Single(request.client_id),
+                    message: MachineOpened {
+                        machine: request.target,
+                    },
+                });
             }
         }
+    }
+}
+
+/// Releases a chemist's claim when they close their panel.
+///
+/// The server's own copy of `InteractionMode` is cleared alongside the
+/// machine: leaving them to disagree would mean a chemist the server still
+/// believes is at the dispenser, unable to open anything else.
+fn handle_leave_machine(
+    mut requests: MessageReader<FromClient<LeaveMachineRequested>>,
+    mut machines: Query<&mut Machine>,
+    mut modes: Query<&mut InteractionMode>,
+    chemists: Query<(Entity, &Chemist)>,
+) {
+    for request in requests.read() {
+        let Some(player) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
+        let Ok(mut mode) = modes.get_mut(player) else {
+            continue;
+        };
+        if let InteractionMode::UsingMachine(machine) = *mode {
+            if let Ok(mut machine) = machines.get_mut(machine) {
+                if machine.in_use_by == Some(player) {
+                    machine.in_use_by = None;
+                }
+            }
+        }
+        *mode = InteractionMode::Roaming;
     }
 }
 
@@ -473,7 +529,7 @@ fn apply_thermostats(
 
         let (_, report) = container.mutate(&db, |solution| solution.temperature = next);
         if let Some(message) = ReactionsFired::from_report(target, &report) {
-                fired.write(message);
+            fired.write(message);
         }
     }
 }
@@ -545,10 +601,9 @@ fn handle_dispense(
         let Ok(mut container) = containers.get_mut(target) else {
             continue;
         };
-        let (_, report) =
-            container.mutate(&db, |solution| solution.add(request.reagent, amount.0));
+        let (_, report) = container.mutate(&db, |solution| solution.add(request.reagent, amount.0));
         if let Some(message) = ReactionsFired::from_report(target, &report) {
-                fired.write(message);
+            fired.write(message);
         }
 
         // Anything drawn from the test bench is practice stock. Marking the
@@ -584,9 +639,7 @@ fn handle_buffer_transfer(
                 // Pulling a single named reagent out of a mixture is the whole
                 // point of the ChemMaster: it is how a contaminated batch gets
                 // cleaned up before it goes in a pill.
-                let moved = container
-                    .solution
-                    .remove(request.reagent, request.amount);
+                let moved = container.solution.remove(request.reagent, request.amount);
                 let overflow = buffer.0.add(request.reagent, moved);
                 if overflow.is_positive() {
                     let _ = container.solution.add(request.reagent, overflow);
@@ -594,33 +647,24 @@ fn handle_buffer_transfer(
             }
             BufferDirection::ToContainer => {
                 let moved = buffer.0.remove(request.reagent, request.amount);
-                let (overflow, report) = container.mutate(&db, |solution| {
-                    solution.add(request.reagent, moved)
-                });
+                let (overflow, report) =
+                    container.mutate(&db, |solution| solution.add(request.reagent, moved));
                 if overflow.is_positive() {
                     let _ = buffer.0.add(request.reagent, overflow);
                 }
                 if let Some(message) = ReactionsFired::from_report(target, &report) {
-                        fired.write(message);
-        }
+                    fired.write(message);
+                }
             }
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn handle_package(
     mut commands: Commands,
-    assets: Option<Res<ContainerAssets>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut requests: MessageReader<FromClient<PackageRequested>>,
     mut machines: Query<(&mut Buffer, &Transform)>,
 ) {
-    let Some(assets) = assets else {
-        return;
-    };
-
     for request in requests.read() {
         let Ok((mut buffer, transform)) = machines.get_mut(request.machine) else {
             continue;
@@ -637,14 +681,7 @@ fn handle_package(
         }
 
         let drop_at = transform.translation + Vec3::new(0.0, 0.95, 0.45);
-        let package = spawn_container(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &assets,
-            request.kind,
-            drop_at,
-        );
+        let package = spawn_container(&mut commands, request.kind, drop_at);
 
         // The container was only just queued for spawn, so its `Container`
         // component is not readable yet; fill it in on the command queue.
@@ -851,6 +888,10 @@ mod tests {
             .add_message::<FromClient<GrindRequested>>()
             .add_message::<FromClient<SetTargetTemperature>>()
             .add_message::<FromClient<SetHeaterPower>>()
+            // What the server tells a client when it grants them a machine.
+            // Headless there is nobody to tell, but the writer still has to
+            // exist for the system to run.
+            .add_message::<ToClients<MachineOpened>>()
             .init_resource::<Time>()
             .add_systems(
                 Update,
@@ -923,10 +964,7 @@ mod tests {
     #[test]
     fn dispensing_the_right_ratio_produces_medicine() {
         let mut app = test_app();
-        let dispenser = app
-            .world_mut()
-            .spawn(DispenseAmount(Units::whole(15)))
-            .id();
+        let dispenser = app.world_mut().spawn(DispenseAmount(Units::whole(15))).id();
         let beaker = app
             .world_mut()
             .spawn((
@@ -938,10 +976,13 @@ mod tests {
         // 15u each of oxygen, carbon and sugar — the inaprovaline recipe.
         for key in ["oxygen", "carbon", "sugar"] {
             let reagent = reagent(&app, key);
-            app.world_mut().write_message(FromClient { client_id: ClientId::Server, message: DispenseRequested {
-                machine: dispenser,
-                reagent,
-            }});
+            app.world_mut().write_message(FromClient {
+                client_id: ClientId::Server,
+                message: DispenseRequested {
+                    machine: dispenser,
+                    reagent,
+                },
+            });
             app.update();
         }
 
@@ -960,10 +1001,7 @@ mod tests {
         // Discovery is built on this: the resolver already names what fired,
         // so learning is a matter of noticing rather than re-deriving.
         let mut app = test_app();
-        let dispenser = app
-            .world_mut()
-            .spawn(DispenseAmount(Units::whole(15)))
-            .id();
+        let dispenser = app.world_mut().spawn(DispenseAmount(Units::whole(15))).id();
         app.world_mut().spawn((
             Container::new(ContainerKind::LargeBeaker),
             InSlot(dispenser),
@@ -973,10 +1011,13 @@ mod tests {
         // first and the leftover carbon carries it on to bicaridine.
         for key in ["oxygen", "sugar", "carbon", "carbon"] {
             let reagent = reagent(&app, key);
-            app.world_mut().write_message(FromClient { client_id: ClientId::Server, message: DispenseRequested {
-                machine: dispenser,
-                reagent,
-            }});
+            app.world_mut().write_message(FromClient {
+                client_id: ClientId::Server,
+                message: DispenseRequested {
+                    machine: dispenser,
+                    reagent,
+                },
+            });
             app.update();
         }
 
@@ -1212,7 +1253,10 @@ mod tests {
             .world_mut()
             .spawn((InteractionMode::default(), Chemist { client }))
             .id();
-        let item = app.world_mut().spawn((Produce(poppy), HeldBy(chemist))).id();
+        let item = app
+            .world_mut()
+            .spawn((Produce(poppy), HeldBy(chemist)))
+            .id();
 
         app.world_mut().write_message(FromClient {
             client_id: client,

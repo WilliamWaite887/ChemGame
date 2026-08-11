@@ -18,9 +18,10 @@ use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
-use crate::crew::{spawn_crew_member, CrewAssets, CrewMember, CrewPhase, CrewRoute};
+use crate::crew::{spawn_crew_member, CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::Interactable;
 use crate::lab::COUNTER_SPOT;
+use crate::net::is_authority;
 use crate::orders::StationData;
 use crate::radio::{channel_for, RadioEntry, RadioLog};
 use crate::AppState;
@@ -47,7 +48,9 @@ impl Plugin for ProducePlugin {
                     // Who turns up and when is the server's business.
                     (deliver_produce, unload_produce)
                         .chain()
-                        .run_if(in_state(ClientState::Disconnected)),
+                        .run_if(is_authority),
+                    // Drawing what turned up is everyone's.
+                    dress_produce,
                 )
                     .chain()
                     .run_if(in_state(AppState::Playing)),
@@ -84,9 +87,7 @@ pub struct ProduceDef {
 ///
 /// A plain index keeps replication to a `u32`. Both ends load the same data
 /// file, which replicon's protocol hash already enforces.
-#[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct ProduceId(pub u32);
 
 impl ProduceId {
@@ -202,9 +203,7 @@ impl DeliverySchedule {
 }
 
 fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(PendingProduceData(
-        assets.load("data/station.produce.ron"),
-    ));
+    commands.insert_resource(PendingProduceData(assets.load("data/station.produce.ron")));
 }
 
 /// Turns the loaded RON into a catalog once the chemistry data is available.
@@ -262,25 +261,41 @@ fn promote_produce_data(
 pub struct Produce(pub ProduceId);
 
 /// Puts a produce item in the world and returns its entity.
-pub fn spawn_produce(
-    commands: &mut Commands,
-    catalog: &ProduceCatalog,
-    assets: &ProduceAssets,
-    kind: ProduceId,
-    position: Vec3,
-) -> Entity {
+///
+/// Which plants are on the counter is shared lab state; the mesh and material
+/// are not, and each end builds those itself in [`dress_produce`].
+pub fn spawn_produce(commands: &mut Commands, kind: ProduceId, position: Vec3) -> Entity {
     commands
         .spawn((
             Produce(kind),
-            Mesh3d(assets.mesh.clone()),
-            MeshMaterial3d(assets.materials[kind.index()].clone()),
             Transform::from_translation(position),
-            Interactable::new(catalog.get(kind).name.clone()),
-            // Which plants are on the counter is shared lab state; the mesh
-            // and material are not, and each client builds those itself.
             Replicated,
         ))
         .id()
+}
+
+/// Gives every produce item its mesh and its name.
+///
+/// Both come from the catalog, which both ends load from the same file, so
+/// nothing about appearance has to cross the wire.
+fn dress_produce(
+    mut commands: Commands,
+    catalog: Option<Res<ProduceCatalog>>,
+    assets: Option<Res<ProduceAssets>>,
+    items: Query<(Entity, &Produce), Added<Produce>>,
+) {
+    let (Some(catalog), Some(assets)) = (catalog, assets) else {
+        return;
+    };
+
+    for (entity, produce) in &items {
+        let kind = produce.0;
+        commands.entity(entity).insert((
+            Mesh3d(assets.mesh.clone()),
+            MeshMaterial3d(assets.materials[kind.index()].clone()),
+            Interactable::new(catalog.get(kind).name.clone()),
+        ));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -300,13 +315,10 @@ fn deliver_produce(
     time: Res<Time>,
     catalog: Option<Res<ProduceCatalog>>,
     station: Option<Res<StationData>>,
-    assets: Option<Res<CrewAssets>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut schedule: Option<ResMut<DeliverySchedule>>,
     present: Query<&CrewMember>,
 ) {
-    let (Some(catalog), Some(station), Some(assets), Some(schedule)) =
-        (catalog, station, assets, schedule.as_mut())
+    let (Some(catalog), Some(station), Some(schedule)) = (catalog, station, schedule.as_mut())
     else {
         return;
     };
@@ -350,7 +362,7 @@ fn deliver_produce(
     }
 
     // Her own lane at the counter, clear of whoever is queuing for an order.
-    let courier = spawn_crew_member(&mut commands, &mut materials, &assets, def, -1.1);
+    let courier = spawn_crew_member(&mut commands, def, -1.1);
     commands.entity(courier).insert(ProduceDelivery { items });
 }
 
@@ -360,12 +372,13 @@ fn deliver_produce(
 /// never competes with a crew member waiting on an order.
 fn unload_produce(
     mut commands: Commands,
+    // Still needed, but only to name the haul over the radio — the items
+    // themselves are dressed from the catalog on each end.
     catalog: Option<Res<ProduceCatalog>>,
-    assets: Option<Res<ProduceAssets>>,
     mut radio: ResMut<RadioLog>,
     mut couriers: Query<(Entity, &CrewMember, &ProduceDelivery, &mut CrewRoute)>,
 ) {
-    let (Some(catalog), Some(assets)) = (catalog, assets) else {
+    let Some(catalog) = catalog else {
         return;
     };
 
@@ -380,8 +393,6 @@ fn unload_produce(
             let x = COUNTER_SPOT.x - span * 0.5 + index as f32 * ITEM_SPACING;
             spawn_produce(
                 &mut commands,
-                &catalog,
-                &assets,
                 *kind,
                 Vec3::new(x, COUNTER_TOP + ITEM_RADIUS, COUNTER_SPOT.z - 1.0),
             );

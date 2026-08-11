@@ -15,7 +15,7 @@ use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, InSlot};
 use crate::crew::{CrewMember, CrewPhase, CrewRoute};
-use crate::interaction::{leave_machine, InteractionMode};
+use crate::interaction::{leave_machine, InteractionMode, LeaveMachineRequested};
 use crate::knowledge::{Knowledge, RecipeDiscovered, HINT_COST};
 use crate::machines::{
     slotted_container, AnalyzeRequested, Buffer, BufferDirection, BufferTransferRequested,
@@ -337,11 +337,9 @@ fn sync_panel(
                         }
                     }
 
-                    panel
-                        .spawn(row())
-                        .with_children(|row| {
-                            row.spawn(button("Close  (Esc)", PanelAction::Close));
-                        });
+                    panel.spawn(row()).with_children(|row| {
+                        row.spawn(button("Close  (Esc)", PanelAction::Close));
+                    });
                 });
         });
 }
@@ -429,8 +427,8 @@ fn shift_board_body(panel: &mut ChildSpawnerCommands, clock: &ShiftClock, shift:
                 for kind in RequisitionKind::ALL {
                     // A produce crate is a flag, not a count: buying a second
                     // one would charge again for something already ordered.
-                    let already = kind == RequisitionKind::ProduceCrate
-                        && clock.requisition.produce_crate;
+                    let already =
+                        kind == RequisitionKind::ProduceCrate && clock.requisition.produce_crate;
                     let available = can_afford(shift.reputation, kind) && !already;
                     let caption = if already {
                         format!("{} — ordered", kind.label())
@@ -607,10 +605,7 @@ fn chemmaster_body(
                             PanelAction::ToBuffer(reagent, units),
                         ));
                     }
-                    row.spawn(button(
-                        "▸All",
-                        PanelAction::ToBuffer(reagent, quantity),
-                    ));
+                    row.spawn(button("▸All", PanelAction::ToBuffer(reagent, quantity)));
                 });
             }
         });
@@ -629,10 +624,7 @@ fn chemmaster_body(
             for (reagent, quantity) in buffer.0.iter() {
                 section.spawn(row()).with_children(|row| {
                     row.spawn(reagent_name(db, reagent, quantity));
-                    row.spawn(button(
-                        "◂All",
-                        PanelAction::ToContainer(reagent, quantity),
-                    ));
+                    row.spawn(button("◂All", PanelAction::ToContainer(reagent, quantity)));
                 });
             }
         });
@@ -832,8 +824,7 @@ fn delivery_window_body(
         )
     } else if container.solution.is_empty() {
         (
-            "Empty. Put a finished batch in and it will go out on its own."
-                .to_string(),
+            "Empty. Put a finished batch in and it will go out on its own.".to_string(),
             TEXT_DIM,
         )
     } else {
@@ -1092,7 +1083,11 @@ fn recipe_line(db: &ChemDb, reaction: &chem_sim::Reaction) -> String {
             .join(" + ")
     };
 
-    let mut line = format!("{}  →  {}", part(&reaction.reactants), part(&reaction.products));
+    let mut line = format!(
+        "{}  →  {}",
+        part(&reaction.reactants),
+        part(&reaction.products)
+    );
     if !reaction.catalysts.is_empty() {
         // Catalysts read as ingredients unless they are called out, and a
         // player who consumes their only plasma has learned the wrong lesson.
@@ -1270,7 +1265,10 @@ fn update_order_queue(
             let reagent = &db.reagents.get(order.reagent).name;
             match route.phase {
                 CrewPhase::Arriving => {
-                    format!("{}\n  {} {}  ·  on the way", member.name, order.amount, reagent)
+                    format!(
+                        "{}\n  {} {}  ·  on the way",
+                        member.name, order.amount, reagent
+                    )
                 }
                 _ => {
                     let remaining = order.timer.remaining_secs().max(0.0) as u32;
@@ -1815,7 +1813,11 @@ fn reagent_name(db: &ChemDb, reagent: ReagentId, quantity: Units) -> impl Bundle
     let definition = db.reagents.get(reagent);
     let [r, g, b] = definition.color;
     (
-        Text::new(format!("{:<16} {:>8}", definition.name, quantity.to_string())),
+        Text::new(format!(
+            "{:<16} {:>8}",
+            definition.name,
+            quantity.to_string()
+        )),
         TextFont::from_font_size(14.0),
         // Tinting toward the reagent's own colour makes a mixed beaker
         // scannable at a glance instead of a wall of identical text.
@@ -1887,7 +1889,11 @@ fn button(text: impl Into<String>, action: PanelAction) -> impl Bundle {
 type ChangedButtons<'w, 's> = Query<
     'w,
     's,
-    (&'static Interaction, &'static mut BackgroundColor, Has<Selected>),
+    (
+        &'static Interaction,
+        &'static mut BackgroundColor,
+        Has<Selected>,
+    ),
     (Changed<Interaction>, With<Button>),
 >;
 
@@ -1925,6 +1931,7 @@ struct PanelMessages<'w> {
     begin_shift: MessageWriter<'w, BeginShiftRequested>,
     sign_off: MessageWriter<'w, SignOffRequested>,
     requisition: MessageWriter<'w, RequisitionRequested>,
+    leave_machine: MessageWriter<'w, LeaveMachineRequested>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1959,7 +1966,7 @@ fn handle_panel_clicks(
                 continue;
             }
             PanelAction::Close => {
-                leave_machine(player, &mut mode, &mut machines);
+                leave_machine(player, &mut mode, &mut machines, &mut out.leave_machine);
                 return;
             }
             _ => {}
@@ -2032,7 +2039,8 @@ fn handle_panel_clicks(
             // phase and the standing, and a client that moved either locally
             // would be corrected out from under the player a frame later.
             PanelAction::BeginShift => {
-                out.begin_shift.write(BeginShiftRequested { board: machine });
+                out.begin_shift
+                    .write(BeginShiftRequested { board: machine });
             }
             PanelAction::SignOff => {
                 out.sign_off.write(SignOffRequested { board: machine });
@@ -2069,7 +2077,10 @@ mod tests {
         let line = phase_banner_line(&clock(ShiftPhase::Prep, None));
         assert!(line.contains("PREP"), "{line}");
         assert!(line.contains("shift board"), "{line}");
-        assert!(!line.contains(':'), "an untimed prep should show no clock: {line}");
+        assert!(
+            !line.contains(':'),
+            "an untimed prep should show no clock: {line}"
+        );
     }
 
     #[test]

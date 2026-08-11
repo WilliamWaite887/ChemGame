@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::lab::{COUNTER_SPOT, DOOR_MAX_X, DOOR_MIN_X};
+use crate::net::is_authority;
 use crate::AppState;
 
 /// Walking pace, metres per second.
@@ -22,11 +23,17 @@ impl Plugin for CrewPlugin {
         app.add_systems(OnEnter(AppState::Playing), load_crew_assets)
             .add_systems(
                 Update,
-                walk_route
-                    .run_if(in_state(AppState::Playing))
-                    // The walk is simulated once, on the server; clients
-                    // receive the resulting Transform.
-                    .run_if(in_state(bevy_replicon::prelude::ClientState::Disconnected)),
+                (
+                    walk_route
+                        // The walk is simulated once, on the server; clients
+                        // receive the resulting Transform.
+                        .run_if(is_authority),
+                    // Runs everywhere: a crew member who arrived by
+                    // replication needs a body drawing just as much as one
+                    // spawned locally.
+                    dress_crew,
+                )
+                    .run_if(in_state(AppState::Playing)),
             );
     }
 }
@@ -117,44 +124,73 @@ fn load_crew_assets(
 }
 
 /// Spawns a crew member outside the door, walking in.
-pub fn spawn_crew_member(
-    commands: &mut Commands,
-    materials: &mut Assets<StandardMaterial>,
-    assets: &CrewAssets,
-    def: &CrewDef,
-    lane: f32,
-) -> Entity {
-    let [r, g, b] = def.color;
-    let uniform = materials.add(StandardMaterial {
-        base_color: Color::srgb(r, g, b),
-        perceptual_roughness: 0.75,
-        ..default()
-    });
-
+///
+/// No mesh: who is visiting is shared state and replicates, what they look
+/// like is derived from the roster both ends already loaded. See
+/// [`dress_crew`].
+pub fn spawn_crew_member(commands: &mut Commands, def: &CrewDef, lane: f32) -> Entity {
     let position = Vec3::new(door_x(), 0.93, spawn_z());
-    let crew = commands
+    commands
         .spawn((
             CrewMember {
                 name: def.name.clone(),
                 role: def.role.clone(),
             },
             CrewRoute::arrival(lane),
-            Mesh3d(assets.body.clone()),
-            MeshMaterial3d(uniform),
             Transform::from_translation(position),
             // The route stays server-side; clients see the resulting Transform.
             bevy_replicon::prelude::Replicated,
         ))
-        .id();
+        .id()
+}
 
-    commands.spawn((
-        Mesh3d(assets.head.clone()),
-        MeshMaterial3d(assets.skin.clone()),
-        Transform::from_xyz(0.0, 0.62, 0.0),
-        ChildOf(crew),
-    ));
+/// Gives a crew member their body, head and uniform.
+///
+/// The uniform colour is looked up from the roster by name rather than sent,
+/// because both ends load `station.crew.ron` anyway. A visitor whose name is
+/// not in the roster still gets a body, in grey — an unrecognised name should
+/// read as an oddity at the counter, not an invisible person holding an order.
+fn dress_crew(
+    mut commands: Commands,
+    assets: Option<Res<CrewAssets>>,
+    station: Option<Res<crate::orders::StationData>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    crew: Query<(Entity, &CrewMember), Added<CrewMember>>,
+) {
+    let Some(assets) = assets else {
+        return;
+    };
 
-    crew
+    for (entity, member) in &crew {
+        let color = station
+            .as_ref()
+            .and_then(|station| {
+                station
+                    .crew
+                    .iter()
+                    .find(|def| def.name == member.name)
+                    .map(|def| def.color)
+            })
+            .unwrap_or([0.55, 0.55, 0.58]);
+
+        let [r, g, b] = color;
+        let uniform = materials.add(StandardMaterial {
+            base_color: Color::srgb(r, g, b),
+            perceptual_roughness: 0.75,
+            ..default()
+        });
+
+        commands
+            .entity(entity)
+            .insert((Mesh3d(assets.body.clone()), MeshMaterial3d(uniform)));
+
+        commands.spawn((
+            Mesh3d(assets.head.clone()),
+            MeshMaterial3d(assets.skin.clone()),
+            Transform::from_xyz(0.0, 0.62, 0.0),
+            ChildOf(entity),
+        ));
+    }
 }
 
 /// Advances each crew member along their waypoints, and despawns them once

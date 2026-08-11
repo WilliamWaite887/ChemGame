@@ -26,11 +26,21 @@ pub struct InteractionPlugin;
 impl Plugin for InteractionPlugin {
     fn build(&self, app: &mut App) {
         app.add_mapped_client_message::<InteractRequested>(Channel::Ordered)
+            .add_client_message::<LeaveMachineRequested>(Channel::Ordered)
+            .add_mapped_server_message::<MachineOpened>(Channel::Ordered)
             .init_resource::<CursorReleased>()
             .add_systems(OnEnter(AppState::Playing), spawn_hud)
             .add_systems(
                 Update,
-                (panel_input, update_focus, request_interaction, update_prompt)
+                (
+                    // Before `panel_input`, so a panel the server has just
+                    // granted is open for this frame's Escape to close.
+                    apply_machine_opened,
+                    panel_input,
+                    update_focus,
+                    request_interaction,
+                    update_prompt,
+                )
                     .chain()
                     .run_if(in_state(AppState::Playing)),
             );
@@ -45,7 +55,33 @@ struct CursorReleased(bool);
 ///
 /// Shared by the Escape key and the panel's own Close button so the two can
 /// never drift apart and strand a machine marked in-use forever.
+///
+/// Closes the panel locally *and* tells the server. The local half keeps the
+/// UI instant; the message is what actually frees the machine, because on a
+/// client the claim lives in the server's copy of `Machine` and clearing the
+/// replicated one here is only a prediction. Without it a client walking away
+/// from the dispenser would lock it against the other chemist for the rest of
+/// the shift.
 pub fn leave_machine(
+    player: Entity,
+    mode: &mut InteractionMode,
+    machines: &mut Query<&mut Machine>,
+    leaving: &mut MessageWriter<LeaveMachineRequested>,
+) {
+    if matches!(*mode, InteractionMode::UsingMachine(_)) {
+        leaving.write(LeaveMachineRequested);
+    }
+    release_claim(player, mode, machines);
+}
+
+/// The local half of leaving: close the panel, let go of the machine.
+///
+/// Separate from [`leave_machine`] because the server also has to do this to
+/// somebody — a collapsed chemist drops their claim whether they asked to or
+/// not — and there it must *not* send a client message. A message has no
+/// sender but the connection it came in on, so the server writing one on a
+/// remote chemist's behalf would release the host's claim instead of theirs.
+pub fn release_claim(
     player: Entity,
     mode: &mut InteractionMode,
     machines: &mut Query<&mut Machine>,
@@ -60,6 +96,37 @@ pub fn leave_machine(
     *mode = InteractionMode::Roaming;
 }
 
+/// A chemist has closed their panel and is done with the machine.
+///
+/// Carries no machine id: the server already knows which one it granted, and
+/// a client naming one could release the other chemist's claim.
+#[derive(Message, Serialize, Deserialize, Clone)]
+pub struct LeaveMachineRequested;
+
+/// The server granting a machine to the client that asked for it.
+///
+/// The claim is the server's to give, so the panel opens on its say-so rather
+/// than optimistically. Replicon re-emits a message addressed to
+/// `ClientId::Server` locally, so the host and singleplayer take this exact
+/// path too — there is no second code path to keep in step.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
+pub struct MachineOpened {
+    #[entities]
+    pub machine: Entity,
+}
+
+/// Opens the panel the server has just granted.
+fn apply_machine_opened(
+    mut opened: MessageReader<MachineOpened>,
+    mut players: Query<&mut InteractionMode, With<LocalPlayer>>,
+) {
+    for message in opened.read() {
+        for mut mode in &mut players {
+            *mode = InteractionMode::UsingMachine(message.machine);
+        }
+    }
+}
+
 /// Owns every path that changes cursor grab, in one system on purpose.
 ///
 /// Escape has to mean "close the panel" when one is open and "let go of the
@@ -72,6 +139,7 @@ fn panel_input(
     mut released: ResMut<CursorReleased>,
     mut players: Query<(Entity, &mut InteractionMode), With<LocalPlayer>>,
     mut machines: Query<&mut Machine>,
+    mut leaving: MessageWriter<LeaveMachineRequested>,
 ) {
     let escape = keys.just_pressed(KeyCode::Escape);
     let book = keys.just_pressed(KeyCode::KeyB);
@@ -90,7 +158,7 @@ fn panel_input(
         if mode.is_roaming() {
             // fall through to the roaming cursor handling below
         } else if escape {
-            leave_machine(player, &mut mode, &mut machines);
+            leave_machine(player, &mut mode, &mut machines, &mut leaving);
             released.0 = false;
             continue;
         } else {
@@ -286,25 +354,25 @@ fn update_prompt(
             // What is in your hand is worth saying too. Taking a chemical is a
             // keypress with no button and no panel behind it, so without this
             // the whole mechanic is invisible.
-            let carrying = held
-                .iter()
-                .find(|(holder, _)| holder.0 == player)
-                .and_then(|(_, container)| {
-                    let empty = container.solution.total_volume().is_zero();
-                    match (container.kind, empty) {
-                        (ContainerKind::Syringe, true) => {
-                            // Only useful pointed at something worth drawing
-                            // from, so only offered then.
-                            focus.target.map(|_| "[F]  draw".to_string())
+            let carrying =
+                held.iter()
+                    .find(|(holder, _)| holder.0 == player)
+                    .and_then(|(_, container)| {
+                        let empty = container.solution.total_volume().is_zero();
+                        match (container.kind, empty) {
+                            (ContainerKind::Syringe, true) => {
+                                // Only useful pointed at something worth drawing
+                                // from, so only offered then.
+                                focus.target.map(|_| "[F]  draw".to_string())
+                            }
+                            (ContainerKind::Syringe, false) => Some("[F]  inject".to_string()),
+                            (_, true) => None,
+                            (ContainerKind::Pill, false) => Some("[R]  swallow".to_string()),
+                            (kind, false) => {
+                                format!("[R]  drink from {}", kind.label().to_lowercase()).into()
+                            }
                         }
-                        (ContainerKind::Syringe, false) => Some("[F]  inject".to_string()),
-                        (_, true) => None,
-                        (ContainerKind::Pill, false) => Some("[R]  swallow".to_string()),
-                        (kind, false) => {
-                            format!("[R]  drink from {}", kind.label().to_lowercase()).into()
-                        }
-                    }
-                });
+                    });
 
             match (looking_at, carrying) {
                 (Some(target), Some(hand)) => Some(format!("{target}      {hand}")),
