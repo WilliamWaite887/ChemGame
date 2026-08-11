@@ -86,6 +86,12 @@
             briefing: "Security are running takedown drills. Bruises and worse.",
         ),
         (
+            id: "takedown_drills",
+            themes: ["concussion", "trauma"],
+            weight: 0.8,
+            briefing: "Security are running headgear-optional takedown drills. Expect heads to be rung.",
+        ),
+        (
             id: "quiet",
             themes: [],
             weight: 0.6,
@@ -147,6 +153,27 @@
             themes: ["radiation"],
             amounts: [20, 30],
             plea: "Containment failure. This is a serious dose. Arithrazine, now.",
+        ),
+        (
+            // The one order that comes in large. Saline-glucose overdoses at
+            // 60u where bicaridine does at 15, so medbay ask for a bag of it
+            // rather than a dose.
+            reagent: "saline_glucose",
+            themes: ["trauma", "burns"],
+            amounts: [40, 50],
+            plea: "Two walking wounded and no beds. Send saline-glucose, as much as you can spare.",
+        ),
+        (
+            reagent: "potassium_iodide",
+            themes: ["radiation"],
+            amounts: [20, 30],
+            plea: "Atmos are going into the containment bay. Potassium iodide, before they do.",
+        ),
+        (
+            reagent: "mannitol",
+            themes: ["concussion"],
+            amounts: [15, 20],
+            plea: "Took a baton to the head and can't hold a thought. Mannitol should clear it.",
         ),
     ],
 )

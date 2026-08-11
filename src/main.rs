@@ -9,27 +9,34 @@ mod interaction;
 mod knowledge;
 mod lab;
 mod machines;
+mod menu;
 mod net;
 mod orders;
 mod player;
 mod produce;
 mod radio;
+mod saves;
 mod shift;
 mod ui;
 
 use bevy::prelude::*;
 
 fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "ChemGame — Chemistry Lab".into(),
-                ..default()
-            }),
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "ChemGame — Chemistry Lab".into(),
             ..default()
-        }))
-        .init_state::<AppState>()
-        .add_plugins((
+        }),
+        ..default()
+    }))
+    .init_state::<AppState>();
+
+    // Before the plugins, so `NetPlugin` sees a mode already chosen and the
+    // loader knows whether there is a menu to show.
+    net::apply_command_line(&mut app);
+
+    app.add_plugins((
             net::NetPlugin,
             chem_data::ChemDataPlugin,
             lab::LabPlugin,
@@ -55,7 +62,7 @@ fn main() {
                 body::BodyPlugin,
                 hazards::HazardPlugin,
             ),
-            ui::UiPlugin,
+            (ui::UiPlugin, menu::MenuPlugin),
         ))
         .run();
 }
@@ -66,5 +73,8 @@ pub enum AppState {
     /// they have parsed.
     #[default]
     Loading,
+    /// Picking how to play and which save. Skipped when the command line
+    /// already said.
+    MainMenu,
     Playing,
 }

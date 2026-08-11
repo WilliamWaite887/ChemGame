@@ -10,7 +10,7 @@ use std::path::Path;
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
-use chem_sim::{ChemData, ReactionId, ReagentId};
+use chem_sim::{Category, ChemData, ReactionId, ReagentId};
 use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
@@ -33,7 +33,7 @@ pub const HINT_COST: u32 = 1;
 /// Points earned for a clean delivery.
 pub const RESEARCH_PER_SUCCESS: u32 = 1;
 
-const SAVE_PATH: &str = "save.ron";
+use crate::saves::SaveSlot;
 
 pub struct KnowledgePlugin;
 
@@ -275,8 +275,11 @@ struct SaveData {
     research_points: u32,
 }
 
-fn initialise_knowledge(mut commands: Commands, db: Res<ChemDb>) {
-    let knowledge = match load_save(&db) {
+fn initialise_knowledge(mut commands: Commands, db: Res<ChemDb>, slot: Option<Res<SaveSlot>>) {
+    // No slot is a guest: their notebook arrives from the host, and reading a
+    // local save first would show them recipes this lab has not discovered.
+    let loaded = slot.and_then(|slot| load_save(&db, &slot.knowledge_path()));
+    let knowledge = match loaded {
         Some(loaded) => {
             info!(
                 "resumed: {} of {} recipes, {} research",
@@ -299,35 +302,50 @@ fn initialise_knowledge(mut commands: Commands, db: Res<ChemDb>) {
     commands.insert_resource(knowledge);
 }
 
-fn load_save(db: &ChemDb) -> Option<Knowledge> {
-    if !Path::new(SAVE_PATH).exists() {
+fn load_save(db: &ChemDb, path: &Path) -> Option<Knowledge> {
+    read_save(path).map(|save| Knowledge::from_save(db, save))
+}
+
+/// The notebook on disk, or `None` if there is not a readable one.
+fn read_save(path: &Path) -> Option<SaveData> {
+    if !path.exists() {
         return None;
     }
     // A corrupt save should cost the player their progress, not the session.
-    match std::fs::read_to_string(SAVE_PATH).map(|text| ron::from_str::<SaveData>(&text)) {
-        Ok(Ok(save)) => Some(Knowledge::from_save(db, save)),
+    match std::fs::read_to_string(path).map(|text| ron::from_str::<SaveData>(&text)) {
+        Ok(Ok(save)) => Some(save),
         Ok(Err(error)) => {
-            warn!("ignoring unreadable {SAVE_PATH}: {error}");
+            warn!("ignoring unreadable {}: {error}", path.display());
             None
         }
         Err(error) => {
-            warn!("could not read {SAVE_PATH}: {error}");
+            warn!("could not read {}: {error}", path.display());
             None
         }
     }
 }
 
-fn persist_knowledge(db: Res<ChemDb>, knowledge: Res<Knowledge>) {
+/// How many recipes a save holds, for the menu's load list.
+///
+/// Reads the file rather than the live resource because the menu is listing
+/// saves it has not opened — and it goes through the owning module so the
+/// format stays in one place.
+pub fn known_count_in(path: &Path) -> Option<usize> {
+    Some(read_save(path)?.known.len())
+}
+
+fn persist_knowledge(db: Res<ChemDb>, knowledge: Res<Knowledge>, slot: Option<Res<SaveSlot>>) {
     if !knowledge.is_changed() {
         return;
     }
+    let Some(slot) = slot else {
+        return;
+    };
     let save = knowledge.to_save(&db);
     let Ok(text) = ron::ser::to_string_pretty(&save, default_ron_config()) else {
         return;
     };
-    if let Err(error) = std::fs::write(SAVE_PATH, text) {
-        warn!("could not write {SAVE_PATH}: {error}");
-    }
+    slot.write_knowledge(&text);
 }
 
 fn default_ron_config() -> ron::ser::PrettyConfig {
@@ -407,6 +425,21 @@ pub fn product_name(db: &ChemDb, reaction: ReactionId) -> String {
         .unwrap_or_else(|| recipe.key.clone())
 }
 
+/// The headings a recipe files under in the reference book.
+///
+/// Same rule as [`product_name`]: a recipe *is* the thing it makes, so it is
+/// filed wherever that reagent says it belongs. A reagent may name several —
+/// tricordrazine appears under all four medical headings — and
+/// `every_reaction_files_under_a_heading` guarantees this is never empty.
+pub fn reaction_categories(db: &ChemDb, reaction: ReactionId) -> &[Category] {
+    db.reactions
+        .get(reaction)
+        .products
+        .first()
+        .map(|(id, _)| db.reagents.get(*id).categories.as_slice())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,20 +481,35 @@ mod tests {
         // Arithrazine is two steps out and must NOT appear until hyronalin is
         // learned. Phlogiston likewise, because it needs sulphuric acid first —
         // which is the check that matters most here, since it is the one recipe
-        // that can hurt you.
+        // that can hurt you. Of the recipes added since, `smoke_powder` is the
+        // one to watch: it is one catalyst away from `smoke` and must wait for
+        // stabilizing agent.
         assert_eq!(
             frontier,
             vec![
+                "ammonia",
                 "bicaridine",
                 "chloral_hydrate",
+                "chlorine_trifluoride",
                 "dermaline",
                 "dexalin",
+                "flash_powder",
                 "hooch",
+                "hydrogen_peroxide",
                 "hyperzine",
                 "hyronalin",
+                "ice",
+                "mannitol",
+                "oil",
+                "potassium_iodide",
+                "smoke",
+                "sodium_chloride",
+                "stabilizing_agent",
                 "sulphuric_acid",
                 "synaptizine",
-                "tricordrazine"
+                "thermite",
+                "tricordrazine",
+                "unstable_mutagen",
             ]
         );
     }

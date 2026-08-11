@@ -9,14 +9,14 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use chem_sim::{DamageKind, Kelvin, ReagentId, Units};
+use chem_sim::{Category, DamageKind, Kelvin, ReagentId, Units};
 
 use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, InSlot};
 use crate::crew::{CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{leave_machine, InteractionMode, LeaveMachineRequested};
-use crate::knowledge::{Knowledge, RecipeDiscovered, HINT_COST};
+use crate::knowledge::{reaction_categories, Knowledge, RecipeDiscovered, HINT_COST};
 use crate::machines::{
     slotted_container, AnalyzeRequested, Buffer, BufferDirection, BufferTransferRequested,
     DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested, GrindRequested, Hopper,
@@ -43,11 +43,13 @@ pub(crate) const ORDER_SLOTS: usize = 5;
 /// Radio lines on screen. Matches the log's own capacity.
 const RADIO_SLOTS: usize = 6;
 
-const PANEL_BG: Color = Color::srgba(0.07, 0.08, 0.10, 0.97);
-const SECTION_BG: Color = Color::srgba(0.12, 0.13, 0.16, 0.9);
-const TEXT: Color = Color::srgb(0.88, 0.90, 0.94);
-const TEXT_DIM: Color = Color::srgb(0.55, 0.59, 0.66);
-const BUTTON_IDLE: Color = Color::srgb(0.17, 0.19, 0.23);
+// Shared with the main menu, so the first screen the player sees and every
+// panel afterwards are visibly the same game.
+pub(crate) const PANEL_BG: Color = Color::srgba(0.07, 0.08, 0.10, 0.97);
+pub(crate) const SECTION_BG: Color = Color::srgba(0.12, 0.13, 0.16, 0.9);
+pub(crate) const TEXT: Color = Color::srgb(0.88, 0.90, 0.94);
+pub(crate) const TEXT_DIM: Color = Color::srgb(0.55, 0.59, 0.66);
+pub(crate) const BUTTON_IDLE: Color = Color::srgb(0.17, 0.19, 0.23);
 const BUTTON_HOVER: Color = Color::srgb(0.25, 0.29, 0.35);
 const BUTTON_ACTIVE: Color = Color::srgb(0.20, 0.45, 0.62);
 
@@ -81,6 +83,7 @@ impl Plugin for UiPlugin {
                 .chain()
                 .run_if(in_state(AppState::Playing)),
         )
+        .init_resource::<BookView>()
         .add_message::<ShowToast>();
     }
 }
@@ -90,8 +93,11 @@ impl Plugin for UiPlugin {
 struct PanelRoot;
 
 /// Marks the currently chosen option in a group of buttons.
+///
+/// `pub(crate)` only because it is part of `button_feedback`'s query, which the
+/// menu runs too; nothing outside this module adds it.
 #[derive(Component)]
-struct Selected;
+pub(crate) struct Selected;
 
 /// What a button does when clicked.
 #[derive(Component, Clone)]
@@ -108,10 +114,21 @@ enum PanelAction {
     SetTarget(Kelvin),
     TogglePower,
     BuyHint(chem_sim::ReactionId),
+    ShowCategory(Option<Category>),
     BeginShift,
     SignOff,
     Requisition(RequisitionKind),
     Close,
+}
+
+/// Which heading the reference book is open at. `None` is the "All" tab.
+///
+/// Local presentation state: it is neither replicated nor saved, because which
+/// page a chemist happens to have open is nobody else's business and is not
+/// worth a line in `save.ron`.
+#[derive(Resource, Default)]
+struct BookView {
+    category: Option<Category>,
 }
 
 /// Everything the open panel displays, flattened for comparison.
@@ -134,6 +151,10 @@ struct PanelSignature {
     test_stock: bool,
     amount: Option<Units>,
     known_recipes: usize,
+    /// The book's open heading. Here rather than tracked separately because
+    /// switching tab is exactly the same kind of change as any other: it
+    /// alters what the panel shows, so it rebuilds the panel.
+    book_category: Option<Category>,
     /// The shift board draws entirely from these, so without them its panel
     /// would freeze on whatever it happened to show first.
     ///
@@ -168,6 +189,7 @@ impl Default for PanelSignature {
             test_stock: false,
             amount: None,
             known_recipes: usize::MAX,
+            book_category: None,
             phase: None,
             resolved: u32::MAX,
             reputation: i32::MAX,
@@ -209,6 +231,7 @@ fn sync_panel(
     slotted: Query<(Entity, &InSlot)>,
     containers: Query<(&Container, Has<TestBenchStock>)>,
     knowledge: Res<Knowledge>,
+    book: Res<BookView>,
     catalog: Option<Res<ProduceCatalog>>,
     clock: Res<ShiftClock>,
     shift: Res<Shift>,
@@ -244,6 +267,7 @@ fn sync_panel(
             .and_then(|(_, amount, _, _, _)| amount)
             .map(|a| a.0),
         known_recipes: knowledge.known_count(),
+        book_category: book.category,
         phase: Some(clock.phase),
         resolved: clock.resolved,
         reputation: shift.reputation,
@@ -272,7 +296,7 @@ fn sync_panel(
     }
 
     if mode == InteractionMode::ReadingBook {
-        spawn_reference_book(&mut commands, &db, &knowledge);
+        spawn_reference_book(&mut commands, &db, &knowledge, book.category);
         return;
     }
     if open_machine.is_none() {
@@ -899,7 +923,17 @@ fn container_readout(
 /// The chemist's notes. Known recipes show the full method; locked ones show
 /// only what a chemist would plausibly remember — what it treats, how many
 /// ingredients, and whatever they have worked out so far.
-fn spawn_reference_book(commands: &mut Commands, db: &ChemDb, knowledge: &Knowledge) {
+///
+/// Laid out as a sidebar of headings beside a scrolling pane. The single
+/// column this replaced was written when there were nine recipes; there are
+/// thirty-five now, and a chemist hunting for a burn treatment should not have
+/// to scroll past the explosives to find it.
+fn spawn_reference_book(
+    commands: &mut Commands,
+    db: &ChemDb,
+    knowledge: &Knowledge,
+    selected: Option<Category>,
+) {
     commands
         .spawn((
             Node {
@@ -916,7 +950,7 @@ fn spawn_reference_book(commands: &mut Commands, db: &ChemDb, knowledge: &Knowle
             screen
                 .spawn((
                     Node {
-                        width: px(820),
+                        width: px(1040),
                         flex_direction: FlexDirection::Column,
                         padding: UiRect::all(px(20)),
                         row_gap: px(8),
@@ -941,104 +975,219 @@ fn spawn_reference_book(commands: &mut Commands, db: &ChemDb, knowledge: &Knowle
                         TEXT_DIM,
                     ));
 
-                    // The entry list scrolls; the header above it does not.
-                    // The book was built when there were nine recipes and they
-                    // fitted one screen. There are more than that now, and an
-                    // entry that runs off the bottom is one the player cannot
-                    // read at all.
-                    book.spawn((
-                        Node {
-                            flex_direction: FlexDirection::Column,
-                            row_gap: px(8),
-                            max_height: vh(70),
-                            overflow: Overflow::scroll_y(),
-                            ..default()
-                        },
-                        ScrollPosition::default(),
-                        BookScroll,
-                    ))
-                    .with_children(|book| {
-                    for reaction in db.reactions.iter() {
-                        let known = knowledge.is_known(reaction.id);
-                        // Name the entry after what it makes, not the reaction
-                        // id — that is how the crew ask for it.
-                        let product = reaction
-                            .products
-                            .first()
-                            .map(|(id, _)| db.reagents.get(*id));
-                        let title = product
-                            .map(|p| p.name.clone())
-                            .unwrap_or_else(|| reaction.key.clone());
-
-                        book.spawn((section(), BackgroundColor(SECTION_BG)))
-                            .with_children(|entry| {
-                                entry.spawn(label(
-                                    if known {
-                                        title.clone()
-                                    } else {
-                                        format!("{title}   —   not yet worked out")
-                                    },
-                                    16.0,
-                                    if known { TEXT } else { TEXT_DIM },
-                                ));
-
-                                if let Some(treats) = product.and_then(|p| p.treats.as_ref()) {
-                                    entry.spawn(label(treats.clone(), 13.0, TEXT_DIM));
-                                }
-
-                                if known {
-                                    entry.spawn(label(recipe_line(db, reaction), 14.0, TEXT));
-                                    if let Some(overdose) =
-                                        product.and_then(|p| p.overdose)
-                                    {
-                                        entry.spawn(label(
-                                            format!("Overdoses above {overdose} in a single dose."),
-                                            13.0,
-                                            Color::srgb(0.90, 0.62, 0.45),
-                                        ));
-                                    }
-                                } else {
-                                    entry.spawn(label(
-                                        format!("{} ingredients.", reaction.reactants.len()),
-                                        13.0,
-                                        TEXT_DIM,
-                                    ));
-                                    for hint in knowledge.visible_hints(db, reaction.id) {
-                                        entry.spawn(label(
-                                            format!("· {hint}"),
-                                            13.0,
-                                            Color::srgb(0.70, 0.78, 0.62),
-                                        ));
-                                    }
-                                    // Only offer the purchase when it can
-                                    // actually go through; a button that
-                                    // silently does nothing is worse than none.
-                                    if knowledge.hint_available(db, reaction.id) {
-                                        let affordable =
-                                            knowledge.research_points >= HINT_COST;
-                                        entry.spawn(row()).with_children(|row| {
-                                            if affordable {
-                                                row.spawn(button(
-                                                    format!("Study further  ({HINT_COST} research)"),
-                                                    PanelAction::BuyHint(reaction.id),
-                                                ));
-                                            } else {
-                                                row.spawn(label(
-                                                    format!(
-                                                        "Needs {HINT_COST} research to study further."
-                                                    ),
-                                                    12.0,
-                                                    TEXT_DIM,
-                                                ));
-                                            }
-                                        });
-                                    }
-                                }
-                            });
-                    }
+                    book.spawn(Node {
+                        column_gap: px(16),
+                        align_items: AlignItems::Start,
+                        ..default()
+                    })
+                    .with_children(|columns| {
+                        book_sidebar(columns, db, knowledge, selected);
+                        book_entries(columns, db, knowledge, selected);
                     });
                 });
         });
+}
+
+/// The column of headings, each with how much of it the chemist has recorded.
+fn book_sidebar(
+    columns: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    knowledge: &Knowledge,
+    selected: Option<Category>,
+) {
+    columns
+        .spawn(Node {
+            width: px(240),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(4),
+            flex_shrink: 0.0,
+            ..default()
+        })
+        .with_children(|sidebar| {
+            // "All" first, and it is what a fresh book opens on.
+            let tabs = std::iter::once(None).chain(Category::ALL.map(Some));
+            for tab in tabs {
+                let (known, total) = category_counts(db, knowledge, tab);
+                let name = match tab {
+                    Some(category) => category.label(),
+                    None => "All recipes",
+                };
+                let mut entity = sidebar.spawn(button(
+                    format!("{name}   {known}/{total}"),
+                    PanelAction::ShowCategory(tab),
+                ));
+                // Same marker the dispense-amount row uses, so `button_feedback`
+                // colours the open tab with no extra code.
+                if tab == selected {
+                    entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
+                }
+            }
+        });
+}
+
+/// The scrolling pane of entries for whichever heading is open.
+fn book_entries(
+    columns: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    knowledge: &Knowledge,
+    selected: Option<Category>,
+) {
+    let heading_text = selected.map(|category| (category.label(), category.blurb()));
+    let visible = recipes_in(db, knowledge, selected);
+
+    columns
+        .spawn((
+            Node {
+                flex_grow: 1.0,
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8),
+                max_height: vh(66),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+            ScrollPosition::default(),
+            BookScroll,
+        ))
+        .with_children(|pane| {
+            if let Some((name, blurb)) = heading_text {
+                pane.spawn(label(name.to_string(), 15.0, TEXT));
+                pane.spawn(label(blurb.to_string(), 13.0, TEXT_DIM));
+            }
+
+            if visible.is_empty() {
+                pane.spawn(label(
+                    "Nothing under this heading yet.".to_string(),
+                    13.0,
+                    TEXT_DIM,
+                ));
+                return;
+            }
+
+            for reaction in visible {
+                book_entry(pane, db, knowledge, reaction);
+            }
+        });
+}
+
+/// One recipe, as much of it as the chemist has worked out.
+fn book_entry(
+    pane: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    knowledge: &Knowledge,
+    reaction: &chem_sim::Reaction,
+) {
+    let known = knowledge.is_known(reaction.id);
+    // Name the entry after what it makes, not the reaction id — that is how
+    // the crew ask for it.
+    let product = reaction
+        .products
+        .first()
+        .map(|(id, _)| db.reagents.get(*id));
+    let title = product
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| reaction.key.clone());
+
+    pane.spawn((section(), BackgroundColor(SECTION_BG)))
+        .with_children(|entry| {
+            entry.spawn(label(
+                if known {
+                    title
+                } else {
+                    format!("{title}   —   not yet worked out")
+                },
+                16.0,
+                if known { TEXT } else { TEXT_DIM },
+            ));
+
+            if let Some(treats) = product.and_then(|p| p.treats.as_ref()) {
+                entry.spawn(label(treats.clone(), 13.0, TEXT_DIM));
+            }
+
+            if known {
+                entry.spawn(label(recipe_line(db, reaction), 14.0, TEXT));
+                if let Some(overdose) = product.and_then(|p| p.overdose) {
+                    entry.spawn(label(
+                        format!("Overdoses above {overdose} in a single dose."),
+                        13.0,
+                        Color::srgb(0.90, 0.62, 0.45),
+                    ));
+                }
+                return;
+            }
+
+            entry.spawn(label(
+                format!("{} ingredients.", reaction.reactants.len()),
+                13.0,
+                TEXT_DIM,
+            ));
+            for hint in knowledge.visible_hints(db, reaction.id) {
+                entry.spawn(label(
+                    format!("· {hint}"),
+                    13.0,
+                    Color::srgb(0.70, 0.78, 0.62),
+                ));
+            }
+            // Only offer the purchase when it can actually go through; a button
+            // that silently does nothing is worse than none.
+            if knowledge.hint_available(db, reaction.id) {
+                let affordable = knowledge.research_points >= HINT_COST;
+                entry.spawn(row()).with_children(|row| {
+                    if affordable {
+                        row.spawn(button(
+                            format!("Study further  ({HINT_COST} research)"),
+                            PanelAction::BuyHint(reaction.id),
+                        ));
+                    } else {
+                        row.spawn(label(
+                            format!("Needs {HINT_COST} research to study further."),
+                            12.0,
+                            TEXT_DIM,
+                        ));
+                    }
+                });
+            }
+        });
+}
+
+/// The recipes filed under a heading, or every recipe when none is chosen.
+///
+/// Recorded ones come first, then alphabetically: what you can actually make
+/// belongs at the top of the page, and within that the list has to be somewhere
+/// findable rather than in data-file order.
+fn recipes_in<'a>(
+    db: &'a ChemDb,
+    knowledge: &Knowledge,
+    category: Option<Category>,
+) -> Vec<&'a chem_sim::Reaction> {
+    let mut recipes: Vec<&chem_sim::Reaction> = db
+        .reactions
+        .iter()
+        .filter(|reaction| match category {
+            Some(category) => reaction_categories(db, reaction.id).contains(&category),
+            None => true,
+        })
+        .collect();
+    recipes.sort_by_key(|reaction| {
+        (
+            !knowledge.is_known(reaction.id),
+            crate::knowledge::product_name(db, reaction.id),
+        )
+    });
+    recipes
+}
+
+/// How much of a heading the chemist has written up, for the sidebar.
+fn category_counts(
+    db: &ChemDb,
+    knowledge: &Knowledge,
+    category: Option<Category>,
+) -> (usize, usize) {
+    let recipes = recipes_in(db, knowledge, category);
+    let known = recipes
+        .iter()
+        .filter(|reaction| knowledge.is_known(reaction.id))
+        .count();
+    (known, recipes.len())
 }
 
 /// The scrolling entry list inside the reference book.
@@ -1793,7 +1942,7 @@ fn update_radio_feed(
 // Widgets
 // ---------------------------------------------------------------------------
 
-fn heading(text: impl Into<String>) -> impl Bundle {
+pub(crate) fn heading(text: impl Into<String>) -> impl Bundle {
     (
         Text::new(text.into()),
         TextFont::from_font_size(22.0),
@@ -1801,7 +1950,7 @@ fn heading(text: impl Into<String>) -> impl Bundle {
     )
 }
 
-fn label(text: impl Into<String>, size: f32, color: Color) -> impl Bundle {
+pub(crate) fn label(text: impl Into<String>, size: f32, color: Color) -> impl Bundle {
     (
         Text::new(text.into()),
         TextFont::from_font_size(size),
@@ -1833,7 +1982,7 @@ fn reagent_name(db: &ChemDb, reagent: ReagentId, quantity: Units) -> impl Bundle
     )
 }
 
-fn row() -> impl Bundle {
+pub(crate) fn row() -> impl Bundle {
     Node {
         flex_direction: FlexDirection::Row,
         align_items: AlignItems::Center,
@@ -1861,7 +2010,10 @@ fn section() -> Node {
     }
 }
 
-fn button(text: impl Into<String>, action: PanelAction) -> impl Bundle {
+/// Generic over the action so the menu's buttons look like the lab's without
+/// the two sharing an action enum — a panel button dispenses a reagent, a menu
+/// button opens a save, and neither wants the other's variants.
+pub(crate) fn button<A: Component>(text: impl Into<String>, action: A) -> impl Bundle {
     (
         Button,
         Node {
@@ -1886,7 +2038,7 @@ fn button(text: impl Into<String>, action: PanelAction) -> impl Bundle {
 // Input
 // ---------------------------------------------------------------------------
 
-type ChangedButtons<'w, 's> = Query<
+pub(crate) type ChangedButtons<'w, 's> = Query<
     'w,
     's,
     (
@@ -1897,7 +2049,7 @@ type ChangedButtons<'w, 's> = Query<
     (Changed<Interaction>, With<Button>),
 >;
 
-fn button_feedback(mut buttons: ChangedButtons) {
+pub(crate) fn button_feedback(mut buttons: ChangedButtons) {
     for (interaction, mut background, selected) in &mut buttons {
         background.0 = match interaction {
             Interaction::Pressed => BUTTON_ACTIVE,
@@ -1943,6 +2095,7 @@ fn handle_panel_clicks(
     mut out: PanelMessages,
     thermostats: Query<&Thermostat>,
     mut knowledge: ResMut<Knowledge>,
+    mut book: ResMut<BookView>,
     db: Res<ChemDb>,
 ) {
     let Some((player, mut mode)) = modes.iter_mut().next() else {
@@ -1963,6 +2116,10 @@ fn handle_panel_clicks(
         match action {
             PanelAction::BuyHint(reaction) => {
                 knowledge.buy_hint(&db, *reaction);
+                continue;
+            }
+            PanelAction::ShowCategory(category) => {
+                book.category = *category;
                 continue;
             }
             PanelAction::Close => {
@@ -2052,7 +2209,7 @@ fn handle_panel_clicks(
                 });
             }
             // Handled above, before the machine guard.
-            PanelAction::BuyHint(_) | PanelAction::Close => {}
+            PanelAction::BuyHint(_) | PanelAction::ShowCategory(_) | PanelAction::Close => {}
         }
     }
 }
@@ -2113,5 +2270,69 @@ mod tests {
         assert_eq!(mmss(120.0), "2:00");
         // A countdown that has run past zero must not render as a negative.
         assert_eq!(mmss(-5.0), "0:00");
+    }
+
+    // -- the reference book's grouping --------------------------------------
+
+    fn book_fixture() -> (ChemDb, Knowledge) {
+        let data = chem_sim::ChemData::from_ron(
+            include_str!("../../assets/data/chem.reagents.ron"),
+            include_str!("../../assets/data/chem.reactions.ron"),
+        )
+        .expect("chemistry data should load");
+        let knowledge = Knowledge::new(&data);
+        (ChemDb(data), knowledge)
+    }
+
+    #[test]
+    fn every_recipe_is_reachable_from_some_tab() {
+        // The "All" tab is a convenience, not the only way in. A recipe that
+        // appears under no heading is one a player browsing by ailment can
+        // never find, and nothing on screen would say so.
+        let (db, knowledge) = book_fixture();
+        let mut filed: Vec<&str> = Vec::new();
+        for category in Category::ALL {
+            for reaction in recipes_in(&db, &knowledge, Some(category)) {
+                filed.push(&reaction.key);
+            }
+        }
+
+        for reaction in db.reactions.iter() {
+            assert!(
+                filed.contains(&reaction.key.as_str()),
+                "'{}' appears under no heading",
+                reaction.key
+            );
+        }
+    }
+
+    #[test]
+    fn a_tab_leads_with_what_the_chemist_can_already_make() {
+        // Recorded first, then alphabetical. A fresh chemist knows kelotane and
+        // not dermaline, so Burns must open on kelotane.
+        let (db, knowledge) = book_fixture();
+        let burns = recipes_in(&db, &knowledge, Some(Category::Burns));
+        let keys: Vec<&str> = burns.iter().map(|r| r.key.as_str()).collect();
+
+        assert_eq!(keys.first(), Some(&"kelotane"), "{keys:?}");
+        assert!(keys.contains(&"dermaline"), "{keys:?}");
+        // Tricordrazine treats all four types, so it is filed here as well as
+        // under trauma — the count columns deliberately overlap.
+        assert!(keys.contains(&"tricordrazine"), "{keys:?}");
+
+        let (known, total) = category_counts(&db, &knowledge, Some(Category::Burns));
+        assert_eq!(known, 1, "only kelotane is known at the start");
+        assert_eq!(total, keys.len());
+    }
+
+    #[test]
+    fn the_all_tab_counts_every_recipe_exactly_once() {
+        // The header line reads "N of M recorded" off `Knowledge`, and the All
+        // tab has to agree with it or one of the two is lying.
+        let (db, knowledge) = book_fixture();
+        let (known, total) = category_counts(&db, &knowledge, None);
+
+        assert_eq!(total, db.reactions.len());
+        assert_eq!(known, knowledge.known_count());
     }
 }

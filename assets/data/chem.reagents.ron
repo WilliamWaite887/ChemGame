@@ -6,6 +6,11 @@
 // a chemist knows what bicaridine is for even if they have forgotten how to
 // make it.
 //
+// `categories` decides which heading in the book a recipe files under, and a
+// reagent may name several: tricordrazine really does treat all four damage
+// types. Raw materials leave it empty because they never get an entry;
+// anything craftable must name at least one, which a test enforces.
+//
 // `effects` is what the reagent does per metabolism tick to whoever takes it,
 // and `overdose_effects` stack on top of those past the threshold rather than
 // replacing them: an overdose is the medicine still working while it also
@@ -113,6 +118,22 @@
         effects: [Status(kind: Unsteady, seconds: 4.0, intensity: 1.0)],
     ),
     (
+        id: "iodine",
+        name: "Iodine",
+        color: (0.34, 0.24, 0.42),
+        dispensable: true,
+        effects: [Harm(Toxin, 0.5)],
+    ),
+    (
+        id: "welding_fuel",
+        name: "Welding Fuel",
+        color: (0.58, 0.44, 0.18),
+        dispensable: true,
+        // Drinkable in the sense that a mouthful will not kill you outright.
+        // It is still the worst decision available at the dispenser.
+        effects: [Harm(Toxin, 1)],
+    ),
+    (
         id: "mercury",
         name: "Mercury",
         color: (0.60, 0.62, 0.66),
@@ -144,6 +165,7 @@
         name: "Inaprovaline",
         color: (0.85, 0.85, 0.60),
         treats: Some("Asphyxiation. Stabilises the critically injured."),
+        categories: [Airloss],
         // Weak on purpose: it is the thing you take to stop getting worse, not
         // the thing that fixes you.
         effects: [Heal(Oxygen, 0.5)],
@@ -154,6 +176,7 @@
         color: (0.42, 0.70, 0.36),
         overdose: Some(20),
         treats: Some("Poisoning and toxin damage."),
+        categories: [Antitoxins],
         effects: [Heal(Toxin, 2)],
         overdose_effects: [Harm(Toxin, 1)],
     ),
@@ -163,6 +186,7 @@
         color: (0.80, 0.50, 0.20),
         overdose: Some(15),
         treats: Some("Burns."),
+        categories: [Burns],
         effects: [Heal(Burn, 2)],
         overdose_effects: [Harm(Toxin, 1)],
     ),
@@ -172,6 +196,7 @@
         color: (0.85, 0.25, 0.25),
         overdose: Some(15),
         treats: Some("Brute force trauma."),
+        categories: [Trauma],
         effects: [Heal(Brute, 2)],
         overdose_effects: [Harm(Toxin, 1)],
     ),
@@ -181,6 +206,7 @@
         color: (0.95, 0.62, 0.20),
         overdose: Some(10),
         treats: Some("Severe burns. Stronger than kelotane."),
+        categories: [Burns],
         // Heals harder than kelotane and overdoses sooner. That trade is the
         // entire reason to keep both on the shelf.
         effects: [Heal(Burn, 3)],
@@ -191,6 +217,8 @@
         name: "Tricordrazine",
         color: (0.30, 0.75, 0.65),
         treats: Some("All basic damage types, slowly. A good all-rounder."),
+        // The one reagent that earns a place under every medical heading.
+        categories: [Trauma, Burns, Antitoxins, Airloss],
         effects: [Heal(Brute, 1), Heal(Burn, 1), Heal(Toxin, 1), Heal(Oxygen, 1)],
     ),
     (
@@ -199,6 +227,7 @@
         color: (0.40, 0.65, 0.95),
         overdose: Some(20),
         treats: Some("Airloss and oxygen deprivation."),
+        categories: [Airloss],
         effects: [Heal(Oxygen, 3)],
         overdose_effects: [Harm(Toxin, 1)],
     ),
@@ -208,6 +237,7 @@
         color: (0.55, 0.80, 0.40),
         overdose: Some(30),
         treats: Some("Mild radiation exposure."),
+        categories: [Radiation],
         effects: [Heal(Toxin, 1), Counter(kind: Irradiated, seconds: 2.0, intensity: 1.0)],
         overdose_effects: [Harm(Toxin, 1)],
     ),
@@ -216,6 +246,7 @@
         name: "Arithrazine",
         color: (0.70, 0.90, 0.45),
         treats: Some("Severe radiation poisoning."),
+        categories: [Radiation],
         // Strips radiation three times faster than hyronalin and takes a
         // little skin off doing it. No overdose threshold: the brute cost is
         // already the limiter.
@@ -224,6 +255,47 @@
             Counter(kind: Irradiated, seconds: 2.0, intensity: 3.0),
             Harm(Brute, 0.5),
         ],
+    ),
+    (
+        id: "potassium_iodide",
+        name: "Potassium Iodide",
+        color: (0.72, 0.66, 0.86),
+        overdose: Some(30),
+        treats: Some("Radiation, before you get it rather than after."),
+        categories: [Radiation],
+        // Weaker than hyronalin at stripping a dose already taken, but it is
+        // two base reagents and nothing else, so it is what you can have ready
+        // in a bottle before the alarm goes off.
+        effects: [Heal(Toxin, 0.5), Counter(kind: Irradiated, seconds: 2.0, intensity: 2.0)],
+        overdose_effects: [Harm(Toxin, 1)],
+    ),
+    (
+        id: "mannitol",
+        name: "Mannitol",
+        color: (0.86, 0.90, 0.94),
+        overdose: Some(15),
+        treats: Some("Concussion. Clears a rung head."),
+        categories: [Stimulants],
+        // Synaptizine does the same job harder and poisons you for it. This
+        // does not, and overdoses at fifteen instead.
+        effects: [
+            Counter(kind: Blurred, seconds: 4.0, intensity: 2.0),
+            Counter(kind: Unsteady, seconds: 4.0, intensity: 2.0),
+        ],
+        overdose_effects: [Harm(Toxin, 2)],
+    ),
+    (
+        id: "saline_glucose",
+        name: "Saline-Glucose Solution",
+        color: (0.90, 0.93, 0.88),
+        // Four times bicaridine's threshold. That is the whole point of it:
+        // half the healing rate, but a dose you can hand over without doing
+        // arithmetic first.
+        overdose: Some(60),
+        treats: Some("Trauma and burns together, slowly. Safe in bulk."),
+        categories: [Trauma, Burns],
+        effects: [Heal(Brute, 0.5), Heal(Burn, 0.5)],
+        overdose_effects: [Harm(Brute, 1), Harm(Burn, 1)],
     ),
 
     // ---- Toxins -----------------------------------------------------------
@@ -237,6 +309,7 @@
         name: "Sulphuric Acid",
         color: (0.86, 0.82, 0.30),
         treats: Some("Nothing. It dissolves things, including you."),
+        categories: [Poisons],
         // The only reagent whose route really matters: a needle drives it past
         // the skin that a mouthful mostly does not.
         effects: [Harm(Toxin, 1), Contact(Burn, 2)],
@@ -247,6 +320,7 @@
         color: (0.92, 0.94, 0.88),
         overdose: Some(15),
         treats: Some("Puts people out. Past 15u it does rather more than that."),
+        categories: [Stimulants],
         effects: [
             Status(kind: Sluggish, seconds: 6.0, intensity: 1.0),
             Status(kind: Blurred, seconds: 6.0, intensity: 1.0),
@@ -258,7 +332,27 @@
         name: "Phlogiston",
         color: (0.98, 0.42, 0.18),
         treats: Some("Nothing. It burns, and it does not stop."),
+        categories: [Pyrotechnics],
         effects: [Harm(Burn, 2), Contact(Burn, 6)],
+    ),
+    (
+        id: "unstable_mutagen",
+        name: "Unstable Mutagen",
+        color: (0.36, 0.86, 0.30),
+        treats: Some("Nothing. It rewrites you, and it is not careful about it."),
+        categories: [Poisons],
+        effects: [Harm(Toxin, 2), Status(kind: Irradiated, seconds: 4.0, intensity: 1.5)],
+    ),
+    (
+        id: "cyanide",
+        name: "Cyanide",
+        color: (0.30, 0.34, 0.30),
+        treats: Some("Nothing. It stops you breathing from the inside."),
+        categories: [Poisons],
+        // The only reagent in the game that does oxygen damage directly, which
+        // makes dexalin the one thing that will not save you from it — the
+        // debt comes back faster than dexalin clears it.
+        effects: [Harm(Oxygen, 4), Harm(Toxin, 1)],
     ),
 
     // ---- Stimulants -------------------------------------------------------
@@ -268,6 +362,7 @@
         color: (0.95, 0.35, 0.62),
         overdose: Some(10),
         treats: Some("Nothing at all, but you will move like it does."),
+        categories: [Stimulants],
         effects: [Status(kind: Hastened, seconds: 4.0, intensity: 1.0)],
         overdose_effects: [Harm(Toxin, 1)],
     ),
@@ -277,6 +372,7 @@
         color: (0.68, 0.42, 0.78),
         overdose: Some(5),
         treats: Some("Clears your head. Takes a little out of you every time."),
+        categories: [Stimulants],
         // The antidote to your own bad decisions, at a price. Note the low
         // overdose threshold: five units is not much of a margin.
         effects: [
@@ -294,7 +390,143 @@
         color: (0.62, 0.42, 0.20),
         overdose: Some(30),
         treats: Some("Nothing good. Cheap, nasty, and strong."),
+        categories: [Utility],
         effects: [Status(kind: Drunk, seconds: 4.0, intensity: 1.6), Harm(Toxin, 0.3)],
         overdose_effects: [Harm(Toxin, 1)],
+    ),
+
+    // ---- Precursors -------------------------------------------------------
+    //
+    // The industrial tier: nothing here is worth making for its own sake, and
+    // three of them are the only use the dispenser's duller reagents have ever
+    // had. Sodium, aluminium and welding fuel were dead content before this.
+    (
+        id: "ammonia",
+        name: "Ammonia",
+        color: (0.72, 0.86, 0.78),
+        treats: Some("Nothing. A fertiliser, and the way in to three other recipes."),
+        categories: [Precursors],
+        effects: [Harm(Toxin, 1)],
+    ),
+    (
+        id: "sodium_chloride",
+        name: "Table Salt",
+        color: (0.96, 0.96, 0.94),
+        treats: Some("Nothing. Salt. The first thing sodium has ever been good for."),
+        categories: [Precursors],
+    ),
+    (
+        id: "saltwater",
+        name: "Saltwater",
+        color: (0.68, 0.80, 0.90),
+        treats: Some("Nothing on its own. Half of a saline drip."),
+        categories: [Precursors],
+    ),
+    (
+        id: "ice",
+        name: "Ice",
+        color: (0.80, 0.92, 0.98),
+        treats: Some("Nothing. Water that had a hard time. Keeps its cool."),
+        categories: [Precursors],
+        effects: [Status(kind: Sluggish, seconds: 3.0, intensity: 0.8)],
+    ),
+    (
+        id: "stabilizing_agent",
+        name: "Stabilizing Agent",
+        color: (0.62, 0.64, 0.60),
+        treats: Some("Nothing. Present at a reaction, it stops the reaction going off."),
+        categories: [Precursors],
+    ),
+    (
+        id: "oil",
+        name: "Oil",
+        color: (0.20, 0.18, 0.16),
+        treats: Some("Nothing. Flammable, and the base of two worse things."),
+        categories: [Precursors],
+        effects: [Harm(Toxin, 0.5)],
+    ),
+    (
+        id: "hydrogen_peroxide",
+        name: "Hydrogen Peroxide",
+        color: (0.88, 0.94, 0.98),
+        treats: Some("Nothing. It bleaches whatever it lands on, skin included."),
+        // Files under both: it is a precursor by intent and corrosive by
+        // accident, and a chemist looking under either heading should find it.
+        categories: [Poisons, Precursors],
+        effects: [Harm(Toxin, 0.5), Contact(Burn, 2)],
+    ),
+
+    // ---- Pyrotechnics -----------------------------------------------------
+    //
+    // Nothing here treats anything. They exist because a chemist who has never
+    // set the lab on fire has not finished learning the job.
+    (
+        id: "thermite",
+        name: "Thermite",
+        color: (0.52, 0.36, 0.22),
+        treats: Some("Nothing. It burns through a bulkhead, and through you."),
+        categories: [Pyrotechnics],
+        effects: [Harm(Burn, 2), Contact(Burn, 3)],
+    ),
+    (
+        id: "flash_powder",
+        name: "Flash Powder",
+        color: (0.94, 0.94, 0.86),
+        treats: Some("Nothing. A bright, blinding nuisance."),
+        categories: [Pyrotechnics],
+        effects: [Status(kind: Blurred, seconds: 6.0, intensity: 2.0), Contact(Burn, 1)],
+    ),
+    (
+        id: "smoke",
+        name: "Smoke",
+        color: (0.60, 0.60, 0.62),
+        treats: Some("Nothing. It fills the room the instant it is made."),
+        categories: [Pyrotechnics],
+        effects: [Harm(Toxin, 0.5), Status(kind: Blurred, seconds: 4.0, intensity: 1.0)],
+    ),
+    (
+        id: "smoke_powder",
+        name: "Smoke Powder",
+        color: (0.72, 0.70, 0.66),
+        treats: Some("Nothing. The same cloud, held in the beaker until you want it."),
+        categories: [Pyrotechnics],
+        effects: [Harm(Toxin, 0.3), Status(kind: Blurred, seconds: 2.0, intensity: 0.5)],
+    ),
+    (
+        id: "chlorine_trifluoride",
+        name: "Chlorine Trifluoride",
+        color: (0.94, 0.78, 0.30),
+        treats: Some("Nothing. It sets fire to things that have already burned."),
+        categories: [Pyrotechnics, Poisons],
+        // Metabolises out ten times faster than anything else, which is the
+        // only reason a dose is survivable at all.
+        metabolism: Some(4.0),
+        effects: [Harm(Burn, 6), Contact(Burn, 8)],
+    ),
+    (
+        id: "cryostylane",
+        name: "Cryostylane",
+        color: (0.62, 0.86, 0.96),
+        treats: Some("Nothing. Cold enough to slow a body down and keep it that way."),
+        categories: [Pyrotechnics],
+        effects: [Status(kind: Sluggish, seconds: 6.0, intensity: 2.0), Harm(Brute, 0.5)],
+    ),
+    (
+        id: "napalm",
+        name: "Napalm",
+        color: (0.68, 0.30, 0.12),
+        treats: Some("Nothing. It burns slowly, and it sticks."),
+        categories: [Pyrotechnics],
+        effects: [Harm(Burn, 1), Contact(Burn, 4)],
+    ),
+
+    // ---- Utility ----------------------------------------------------------
+    (
+        id: "space_cleaner",
+        name: "Space Cleaner",
+        color: (0.56, 0.82, 0.76),
+        treats: Some("Nothing. The janitor will thank you. Do not drink it."),
+        categories: [Utility],
+        effects: [Harm(Toxin, 1)],
     ),
 ]

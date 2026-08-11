@@ -39,7 +39,7 @@ pub use body::{
 };
 pub use effect::{Damage, DamageKind, ReagentEffect, Route, StatusKind};
 pub use reaction::{ChemDataError, Reaction, ReactionDef, ReactionEffect, ReactionId, ReactionSet};
-pub use reagent::{Reagent, ReagentDef, ReagentId, ReagentRegistry, DEFAULT_METABOLISM};
+pub use reagent::{Category, Reagent, ReagentDef, ReagentId, ReagentRegistry, DEFAULT_METABOLISM};
 pub use resolver::{resolve, ReactionEvent, ResolveReport, MAX_ITERATIONS};
 pub use solution::Solution;
 pub use thermal::{approach, boil_off, Overheat};

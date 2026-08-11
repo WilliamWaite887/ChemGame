@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use chem_sim::{resolve, ChemData, ReagentId, Solution, Units};
+use chem_sim::{resolve, Category, ChemData, Kelvin, ReactionEffect, ReagentId, Solution, Units};
 
 const REAGENTS_RON: &str = include_str!("../../../assets/data/chem.reagents.ron");
 const REACTIONS_RON: &str = include_str!("../../../assets/data/chem.reactions.ron");
@@ -588,6 +588,84 @@ fn a_recipe_that_never_names_an_overheat_is_unaffected_by_temperature() {
 }
 
 #[test]
+fn a_stabilised_batch_makes_powder_instead_of_a_cloud() {
+    // Identical reactants; one unit of stabilizing agent decides which recipe
+    // wins. This is the pair that teaches catalysts and priority at once, so
+    // the two outcomes are pinned against each other rather than separately.
+    let data = data();
+    let ingredients = [("phosphorus", 10), ("potassium", 10), ("sugar", 10)];
+
+    let mut loose = beaker(&data, 100, &ingredients);
+    let report = resolve(&mut loose, &data.reactions);
+    assert!(
+        report
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, ReactionEffect::Smoke(_))),
+        "unstabilised, it should vent into the room"
+    );
+    assert_contents(&data, &loose, &[("smoke", 30)]);
+
+    let mut stabilised = beaker(&data, 100, &ingredients);
+    // One unit, and it survives: a catalyst is not consumed and does not limit
+    // the yield, so 30u of powder comes off a single unit of agent.
+    let overflow = stabilised.add(data.reagent("stabilizing_agent"), Units::whole(1));
+    assert!(overflow.is_zero());
+
+    let report = resolve(&mut stabilised, &data.reactions);
+    assert!(
+        !report
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, ReactionEffect::Smoke(_))),
+        "stabilised, the cloud should stay in the beaker"
+    );
+    assert_contents(
+        &data,
+        &stabilised,
+        &[("smoke_powder", 30), ("stabilizing_agent", 1)],
+    );
+}
+
+#[test]
+fn a_cold_reaction_only_runs_when_the_chamber_is_cold() {
+    // Every temperature-gated recipe before ice wanted heat, which left the
+    // chamber's lowest preset doing nothing at all.
+    let data = data();
+
+    let mut warm = beaker(&data, 100, &[("water", 20)]);
+    resolve(&mut warm, &data.reactions);
+    assert_contents(&data, &warm, &[("water", 20)]);
+
+    let mut chilled = beaker(&data, 100, &[("water", 20)]);
+    chilled.temperature = Kelvin(270.0);
+    resolve(&mut chilled, &data.reactions);
+    assert_contents(&data, &chilled, &[("ice", 20)]);
+}
+
+#[test]
+fn an_endothermic_reaction_cools_its_own_beaker() {
+    // `Heat` is plain addition in the resolver, so a negative value cools. The
+    // bound worth pinning is the one nothing clamps: a full beaker must not be
+    // able to drive the temperature through absolute zero.
+    let data = data();
+    let mut beaker = beaker(&data, 100, &[("ice", 33), ("plasma", 33), ("nitrogen", 33)]);
+    resolve(&mut beaker, &data.reactions);
+
+    assert_contents(&data, &beaker, &[("cryostylane", 99)]);
+    assert!(
+        beaker.temperature < Kelvin::AMBIENT,
+        "a batch should end colder than the room, got {}",
+        beaker.temperature
+    );
+    assert!(
+        beaker.temperature > Kelvin(0.0),
+        "no batch may cool past absolute zero, got {}",
+        beaker.temperature
+    );
+}
+
+#[test]
 fn cyclic_recipes_terminate_at_the_iteration_cap() {
     // A makes B, B makes A. Without the cap this hangs the game.
     let reagents = r#"[
@@ -623,8 +701,8 @@ fn unknown_reagents_in_reactions_are_rejected() {
 #[test]
 fn seed_data_loads_completely() {
     let data = data();
-    assert_eq!(data.reagents.dispensable().count(), 21);
-    assert_eq!(data.reactions.len(), 15);
+    assert_eq!(data.reagents.dispensable().count(), 23);
+    assert_eq!(data.reactions.len(), 35);
     for recipe in STARTING_RECIPES {
         assert!(data.reactions.find(recipe).is_some(), "missing {recipe}");
     }
@@ -747,6 +825,50 @@ fn medicines_carry_book_entries_and_base_reagents_do_not() {
             reagent.treats.is_some(),
             "'{}' is craftable but has no book entry explaining what it treats",
             reagent.key
+        );
+        assert!(
+            !reagent.categories.is_empty(),
+            "'{}' is craftable but names no category, so the book has nowhere \
+             to file it",
+            reagent.key
+        );
+    }
+}
+
+#[test]
+fn every_reaction_files_under_a_heading() {
+    // The book groups reactions by the categories of what they make. A recipe
+    // whose product names none is invisible in every tab but "All" — which is
+    // exactly the failure a reader would never notice, so it is checked here.
+    let data = data();
+    for reaction in data.reactions.iter() {
+        let (product, _) = reaction.products.first().expect("reactions have products");
+        let reagent = data.reagents.get(*product);
+        assert!(
+            !reagent.categories.is_empty(),
+            "reaction '{}' makes '{}', which names no category",
+            reaction.key,
+            reagent.key
+        );
+    }
+}
+
+#[test]
+fn every_category_has_at_least_one_recipe() {
+    // A heading with nothing under it is a dead tab in the sidebar.
+    let data = data();
+    let used: HashSet<Category> = data
+        .reactions
+        .iter()
+        .filter_map(|reaction| reaction.products.first())
+        .flat_map(|(product, _)| data.reagents.get(*product).categories.clone())
+        .collect();
+
+    for category in Category::ALL {
+        assert!(
+            used.contains(&category),
+            "nothing in the book files under '{}'",
+            category.label()
         );
     }
 }

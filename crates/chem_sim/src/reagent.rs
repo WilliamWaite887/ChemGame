@@ -15,6 +15,80 @@ use crate::units::{Kelvin, Units};
 /// against.
 pub const DEFAULT_METABOLISM: Units = Units::from_raw(40);
 
+/// What a reagent is *for*.
+///
+/// The reference book is organised by this, and a reagent may sit under more
+/// than one heading: tricordrazine genuinely does treat all four damage types,
+/// and a book that files it under one of them is lying to the player.
+///
+/// Deliberately declared in the data rather than derived from `effects`.
+/// Derivation looks tempting and breaks immediately — hyronalin's radiation
+/// work is a `Counter` rather than a `Heal`, a precursor has no effects at all,
+/// and by effect alone thermite is indistinguishable from a medicine that has
+/// gone wrong.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+pub enum Category {
+    Trauma,
+    Burns,
+    Antitoxins,
+    Airloss,
+    Radiation,
+    Stimulants,
+    Poisons,
+    Pyrotechnics,
+    Precursors,
+    Utility,
+}
+
+impl Category {
+    /// Every heading, in the order the book lists them: the four damage types
+    /// first, then what a chemist reaches for less often, then the things that
+    /// are not medicine at all.
+    pub const ALL: [Category; 10] = [
+        Category::Trauma,
+        Category::Burns,
+        Category::Antitoxins,
+        Category::Airloss,
+        Category::Radiation,
+        Category::Stimulants,
+        Category::Poisons,
+        Category::Pyrotechnics,
+        Category::Precursors,
+        Category::Utility,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Category::Trauma => "Trauma",
+            Category::Burns => "Burns",
+            Category::Antitoxins => "Antitoxins",
+            Category::Airloss => "Airloss",
+            Category::Radiation => "Radiation",
+            Category::Stimulants => "Stimulants & Sedatives",
+            Category::Poisons => "Poisons",
+            Category::Pyrotechnics => "Pyrotechnics",
+            Category::Precursors => "Precursors",
+            Category::Utility => "Utility",
+        }
+    }
+
+    /// The line under the heading, telling a chemist what they are looking at.
+    pub fn blurb(self) -> &'static str {
+        match self {
+            Category::Trauma => "Physical injury. Bleeding, breaks, and what security leave behind.",
+            Category::Burns => "Heat, plasma fires and welding accidents.",
+            Category::Antitoxins => "Poisoning, and getting it back out again.",
+            Category::Airloss => "Suffocation, breaches, and holding a crashing patient steady.",
+            Category::Radiation => "Containment leaks. The one thing that keeps hurting you.",
+            Category::Stimulants => "Nothing is healed. Everything is felt differently.",
+            Category::Poisons => "Nobody will ever order these. Handle them anyway.",
+            Category::Pyrotechnics => "Fire, smoke and pressure. Not for people.",
+            Category::Precursors => "Nothing on its own. Everything downstream needs it.",
+            Category::Utility => "Neither medicine nor weapon.",
+        }
+    }
+}
+
 /// An interned reagent handle. Cheap to copy, compare and sort.
 ///
 /// Serialisable because solutions cross the wire in co-op. The id is a
@@ -58,6 +132,11 @@ pub struct ReagentDef {
     /// forgotten how to make it.
     #[serde(default)]
     pub treats: Option<String>,
+    /// Which headings this files under in the reference book. Empty for raw
+    /// materials, which never get an entry; required for anything craftable,
+    /// which `every_reaction_files_under_a_heading` enforces.
+    #[serde(default)]
+    pub categories: Vec<Category>,
 
     // ---- Body effects -----------------------------------------------------
     //
@@ -101,6 +180,7 @@ pub struct Reagent {
     pub dispensable: bool,
     pub from_produce: bool,
     pub treats: Option<String>,
+    pub categories: Vec<Category>,
     pub metabolism: Option<Units>,
     pub effects: Vec<ReagentEffect>,
     pub overdose_effects: Vec<ReagentEffect>,
@@ -159,6 +239,7 @@ impl ReagentRegistry {
             dispensable: def.dispensable,
             from_produce: def.from_produce,
             treats: def.treats,
+            categories: def.categories,
             metabolism: def.metabolism,
             effects: def.effects,
             overdose_effects: def.overdose_effects,

@@ -219,4 +219,268 @@
             "Three parts ethanol to one each of sugar and water.",
         ],
     ),
+
+    // ---- Precursors -------------------------------------------------------
+    //
+    // The industrial tier from /tg/station's guide. Priority 10 puts them level
+    // with the base medicines and below the compounds, so a beaker being built
+    // up toward tricordrazine never loses its water to saltwater on the way.
+    (
+        id: "ammonia",
+        reactants: [("hydrogen", 3), ("nitrogen", 1)],
+        products: [("ammonia", 3)],
+        priority: 10,
+        hints: [
+            "Two base gases in unequal parts, and you get back less than you put in.",
+            "Three parts of the lightest thing in the lab.",
+            "Three parts hydrogen to one of nitrogen.",
+        ],
+    ),
+    (
+        id: "sodium_chloride",
+        reactants: [("sodium", 1), ("chlorine", 1)],
+        products: [("sodium_chloride", 2)],
+        priority: 10,
+        hints: [
+            "Two base reagents, equal parts. You already know what it makes.",
+            "One of them has never been used for anything else.",
+            "Sodium and chlorine.",
+        ],
+    ),
+    (
+        id: "saltwater",
+        reactants: [("sodium_chloride", 1), ("water", 1)],
+        products: [("saltwater", 2)],
+        priority: 10,
+        hints: [
+            "One compound and one base reagent, and the answer is in the name.",
+            "Dissolve the salt.",
+            "Equal parts table salt and water.",
+        ],
+    ),
+    (
+        // The first recipe in the game that needs the chamber turned *down*.
+        // Every temperature-gated recipe before this one wanted heat, which
+        // left the 273K preset doing nothing at all.
+        //
+        // No melting reaction on the way back: its product would be water, and
+        // the book names entries after what they make, so it would appear as a
+        // recipe called "Water". Ice made is ice kept.
+        id: "ice",
+        reactants: [("water", 1)],
+        products: [("ice", 1)],
+        max_temp: Some((273.0)),
+        priority: 10,
+        hints: [
+            "One ingredient, and no amount of mixing will do it.",
+            "The chamber dial goes down as well as up.",
+            "Water, held below 273K.",
+        ],
+    ),
+    (
+        id: "stabilizing_agent",
+        reactants: [("iron", 1), ("oxygen", 1), ("hydrogen", 1)],
+        products: [("stabilizing_agent", 3)],
+        priority: 10,
+        hints: [
+            "Three base reagents, equal parts, and it treats nothing.",
+            "Built on the one metal that helps rather than harms.",
+            "Equal parts iron, oxygen and hydrogen.",
+        ],
+    ),
+    (
+        id: "oil",
+        reactants: [("welding_fuel", 1), ("carbon", 1), ("hydrogen", 1)],
+        products: [("oil", 3)],
+        priority: 10,
+        hints: [
+            "Three base reagents, equal parts. Nobody drinks the first one.",
+            "Thicken the welding fuel.",
+            "Equal parts welding fuel, carbon and hydrogen.",
+        ],
+    ),
+    (
+        id: "hydrogen_peroxide",
+        reactants: [("chlorine", 1), ("oxygen", 1), ("water", 1)],
+        products: [("hydrogen_peroxide", 3)],
+        priority: 8,
+        hints: [
+            "Three base reagents, equal parts. It bleaches what it lands on.",
+            "Water and oxygen, with something that stings.",
+            "Equal parts chlorine, oxygen and water.",
+        ],
+    ),
+
+    // ---- New medicines ----------------------------------------------------
+    (
+        id: "potassium_iodide",
+        reactants: [("potassium", 1), ("iodine", 1)],
+        products: [("potassium_iodide", 2)],
+        priority: 20,
+        hints: [
+            "Two base reagents, equal parts, and the name gives both away.",
+            "For radiation, but taken before rather than after.",
+            "Equal parts potassium and iodine.",
+        ],
+    ),
+    (
+        id: "mannitol",
+        reactants: [("hydrogen", 2), ("water", 2), ("sugar", 2)],
+        products: [("mannitol", 3)],
+        priority: 20,
+        hints: [
+            "Three base reagents in equal parts, and you get back half.",
+            "Sugar water, with something lighter than air.",
+            "Equal parts hydrogen, water and sugar.",
+        ],
+    ),
+    (
+        id: "saline_glucose",
+        reactants: [("saltwater", 2), ("water", 1), ("sugar", 1)],
+        products: [("saline_glucose", 4)],
+        priority: 20,
+        hints: [
+            "One compound and two base reagents, and the compound is doubled.",
+            "Salt water and sugar water, in the same bag.",
+            "Two parts saltwater to one each of water and sugar.",
+        ],
+    ),
+
+    // ---- Pyrotechnics -----------------------------------------------------
+    //
+    // Priority 6-8 so a mixed beaker never turns into one of these by accident.
+    // The exception is chlorine trifluoride, which is gated behind 424K and so
+    // can only ever be made on purpose.
+    (
+        id: "thermite",
+        reactants: [("aluminium", 1), ("iron", 1), ("oxygen", 1)],
+        products: [("thermite", 3)],
+        priority: 8,
+        hints: [
+            "Three base reagents, equal parts. Two of them are metals.",
+            "The metal nothing else in the book has ever wanted.",
+            "Equal parts aluminium, iron and oxygen.",
+        ],
+    ),
+    (
+        id: "flash_powder",
+        reactants: [("aluminium", 1), ("potassium", 1), ("sulfur", 1)],
+        products: [("flash_powder", 3)],
+        effects: [Smoke(1.2)],
+        priority: 8,
+        hints: [
+            "Three base reagents, equal parts, and it goes off as it forms.",
+            "Aluminium again, with the yellow one.",
+            "Equal parts aluminium, potassium and sulfur.",
+        ],
+    ),
+    (
+        // Paired deliberately with `smoke_powder` below: identical reactants,
+        // and a single unit of stabilizing agent decides which one you get.
+        // Priority 6 loses to the stabilised version at 14 whenever the
+        // catalyst is present, which is the entire lesson.
+        id: "smoke",
+        reactants: [("phosphorus", 1), ("potassium", 1), ("sugar", 1)],
+        products: [("smoke", 3)],
+        effects: [Smoke(3.0)],
+        priority: 6,
+        hints: [
+            "Three base reagents, equal parts. You will know when it works.",
+            "It vents into the room the moment it comes together.",
+            "Equal parts phosphorus, potassium and sugar.",
+        ],
+    ),
+    (
+        id: "smoke_powder",
+        reactants: [("phosphorus", 1), ("potassium", 1), ("sugar", 1)],
+        catalysts: [("stabilizing_agent", 1)],
+        products: [("smoke_powder", 3)],
+        priority: 14,
+        hints: [
+            "The same three reagents as something you may already have made.",
+            "One more thing in the beaker, and the cloud stays in the beaker.",
+            "Phosphorus, potassium and sugar, over stabilizing agent.",
+        ],
+    ),
+    (
+        id: "chlorine_trifluoride",
+        reactants: [("fluorine", 3), ("chlorine", 1)],
+        products: [("chlorine_trifluoride", 3)],
+        min_temp: Some((424.0)),
+        overheat_temp: Some((500.0)),
+        overheat: Detonate(power: 4.0),
+        // Hotter per unit than phlogiston, and with a narrower window: 424K to
+        // start, 500K to detonate. A large batch closes that gap on its own.
+        effects: [Heat(3.0)],
+        priority: 25,
+        hints: [
+            "Two base reagents, and the chamber has to be very hot indeed.",
+            "Three parts of one halogen to one of another. It heats itself.",
+            "Three parts fluorine to one of chlorine, above 424K.",
+        ],
+    ),
+    (
+        // The only endothermic reaction in the game. `Heat` is plain addition
+        // in the resolver, so a negative value cools the beaker — a batch of
+        // this ends up colder than the room it was made in.
+        id: "cryostylane",
+        reactants: [("ice", 1), ("plasma", 1), ("nitrogen", 1)],
+        products: [("cryostylane", 3)],
+        effects: [Heat(-1.5)],
+        priority: 8,
+        hints: [
+            "One compound and two base reagents. The compound is not a liquid.",
+            "It takes heat out of the beaker rather than putting it in.",
+            "Equal parts ice, plasma and nitrogen.",
+        ],
+    ),
+    (
+        id: "napalm",
+        reactants: [("oil", 1), ("welding_fuel", 1), ("ethanol", 1)],
+        products: [("napalm", 3)],
+        priority: 8,
+        hints: [
+            "One compound and two base reagents, all three of them flammable.",
+            "Thickened welding fuel, and then more welding fuel.",
+            "Equal parts oil, welding fuel and ethanol.",
+        ],
+    ),
+
+    // ---- More toxins ------------------------------------------------------
+    (
+        id: "unstable_mutagen",
+        reactants: [("chlorine", 1), ("phosphorus", 1), ("radium", 1)],
+        products: [("unstable_mutagen", 3)],
+        priority: 8,
+        hints: [
+            "Three base reagents, equal parts, one of them radioactive.",
+            "Radium, and two things that were never meant to meet it.",
+            "Equal parts chlorine, phosphorus and radium.",
+        ],
+    ),
+    (
+        id: "cyanide",
+        reactants: [("oil", 1), ("ammonia", 1), ("oxygen", 1)],
+        products: [("cyanide", 3)],
+        min_temp: Some((380.0)),
+        priority: 8,
+        hints: [
+            "Two compounds and a base reagent, and the chamber has to be hot.",
+            "Both compounds are things you made for something else.",
+            "Equal parts oil, ammonia and oxygen, above 380K.",
+        ],
+    ),
+
+    // ---- Utility ----------------------------------------------------------
+    (
+        id: "space_cleaner",
+        reactants: [("ammonia", 1), ("water", 1)],
+        products: [("space_cleaner", 2)],
+        priority: 8,
+        hints: [
+            "One compound and one base reagent. It is not medicine.",
+            "Dilute the fertiliser.",
+            "Equal parts ammonia and water.",
+        ],
+    ),
 ]

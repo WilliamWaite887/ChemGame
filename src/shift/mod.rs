@@ -22,6 +22,7 @@ use crate::interaction::Interactable;
 use crate::knowledge::Knowledge;
 use crate::machines::{Machine, MachineKind};
 use crate::net::is_authority;
+use crate::saves::SaveSlot;
 use crate::orders::{
     ForecastDef, Order, OrderConfig, OrderResolved, OrderSpawner, RampDef, RequestDef, Shift,
     StationData, SupplyDef, WindowDef,
@@ -728,13 +729,11 @@ fn handle_sign_off(
 // Persistence
 // ---------------------------------------------------------------------------
 
-/// Kept apart from `save.ron`, which `KnowledgePlugin` owns.
-///
-/// `SaveData` is deliberately both the disk format *and* the `KnowledgeSync`
-/// payload, built from `Knowledge` alone. Threading the shift tally through it
-/// would either couple knowledge to orders or make the sync carry data it does
-/// not want.
-const PROGRESS_PATH: &str = "progress.ron";
+// The career lives in its own file inside the save, apart from the notebook
+// that `KnowledgePlugin` owns. `SaveData` is deliberately both the notebook's
+// disk format *and* the `KnowledgeSync` payload, built from `Knowledge` alone.
+// Threading the shift tally through it would either couple knowledge to orders
+// or make the sync carry data it does not want.
 
 /// Reading and writing `progress.ron`.
 ///
@@ -778,23 +777,15 @@ struct ProgressSave {
 /// requisition are all deliberately absent: resuming always drops you into prep
 /// of the next shift. Restoring a half-finished service would put the player in
 /// an empty room with a partly-met quota and a forecast they never heard.
-fn load_progress(mut clock: ResMut<ShiftClock>, mut shift: ResMut<Shift>) {
-    if !std::path::Path::new(PROGRESS_PATH).exists() {
+fn load_progress(
+    mut clock: ResMut<ShiftClock>,
+    mut shift: ResMut<Shift>,
+    slot: Option<Res<SaveSlot>>,
+) {
+    // No slot means a new game with nothing to restore, or a guest whose career
+    // is the host's and arrives replicated.
+    let Some(save) = slot.and_then(|slot| read_progress(&slot.progress_path())) else {
         return;
-    }
-    // A corrupt save should cost the player their progress, not the session.
-    let save = match std::fs::read_to_string(PROGRESS_PATH)
-        .map(|text| ron::from_str::<ProgressSave>(&text))
-    {
-        Ok(Ok(save)) => save,
-        Ok(Err(error)) => {
-            warn!("ignoring unreadable {PROGRESS_PATH}: {error}");
-            return;
-        }
-        Err(error) => {
-            warn!("could not read {PROGRESS_PATH}: {error}");
-            return;
-        }
     };
 
     clock.shift = save.shift.max(1);
@@ -807,11 +798,43 @@ fn load_progress(mut clock: ResMut<ShiftClock>, mut shift: ResMut<Shift>) {
     );
 }
 
+/// The career on disk, or `None` if there is not a readable one.
+fn read_progress(path: &std::path::Path) -> Option<ProgressSave> {
+    if !path.exists() {
+        return None;
+    }
+    // A corrupt save should cost the player their progress, not the session.
+    match std::fs::read_to_string(path).map(|text| ron::from_str::<ProgressSave>(&text)) {
+        Ok(Ok(save)) => Some(save),
+        Ok(Err(error)) => {
+            warn!("ignoring unreadable {}: {error}", path.display());
+            None
+        }
+        Err(error) => {
+            warn!("could not read {}: {error}", path.display());
+            None
+        }
+    }
+}
+
+/// The shift and standing a save resumes at, for the menu's load list.
+///
+/// Read through the owning module rather than by parsing the file in the menu,
+/// so `ProgressSave` stays the one description of this format.
+pub fn progress_summary(path: &std::path::Path) -> Option<(u32, i32)> {
+    let save = read_progress(path)?;
+    Some((save.shift.max(1), save.reputation))
+}
+
 fn persist_progress(
     clock: Res<ShiftClock>,
     shift: Res<Shift>,
+    slot: Option<Res<SaveSlot>>,
     mut written: Local<Option<ProgressSave>>,
 ) {
+    let Some(slot) = slot else {
+        return;
+    };
     let save = ProgressSave {
         shift: clock.shift,
         reputation: shift.reputation,
@@ -829,9 +852,7 @@ fn persist_progress(
         return;
     };
     *written = Some(save);
-    if let Err(error) = std::fs::write(PROGRESS_PATH, text) {
-        warn!("could not write {PROGRESS_PATH}: {error}");
-    }
+    slot.write_progress(&text);
 }
 
 // ---------------------------------------------------------------------------

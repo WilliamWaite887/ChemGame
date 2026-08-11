@@ -57,6 +57,7 @@ fn finish_loading(
     mut reagent_lists: ResMut<Assets<ReagentList>>,
     mut reaction_lists: ResMut<Assets<ReactionList>>,
     mut next: ResMut<NextState<AppState>>,
+    from_args: Option<Res<crate::net::LaunchedFromArgs>>,
 ) {
     let (Some(reagents), Some(reactions)) = (
         reagent_lists.remove(&pending.reagents),
@@ -75,7 +76,13 @@ fn finish_loading(
             );
             commands.insert_resource(ChemDb(data));
             commands.remove_resource::<PendingChemData>();
-            next.set(AppState::Playing);
+            // The menu needs the chemistry loaded before it can show a save's
+            // recipe count, so it opens here rather than at startup.
+            next.set(if from_args.is_some() {
+                AppState::Playing
+            } else {
+                AppState::MainMenu
+            });
         }
         Err(error) => {
             // Bad data is a content bug, not something to limp along with:

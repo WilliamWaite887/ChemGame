@@ -31,6 +31,7 @@ use crate::hazards::{ActiveHazard, SmokeCloud, SmokePayload};
 use crate::machines::{Buffer, DispenseAmount, Hopper, Machine, Thermostat};
 use crate::player::Player;
 use crate::produce::Produce;
+use crate::AppState;
 
 /// Arbitrary; both ends must agree.
 const PROTOCOL_ID: u64 = 0x43_48_45_4d_00_00_00_01;
@@ -49,28 +50,56 @@ pub enum LaunchMode {
 }
 
 impl LaunchMode {
-    /// Reads `--host`, `--join [addr]` from the command line.
-    pub fn from_args() -> Self {
+    /// Reads `--solo`, `--host` or `--join [addr]` from the command line.
+    ///
+    /// `None` means the command line said nothing, which is the signal to show
+    /// the menu instead of guessing.
+    pub fn from_args() -> Option<Self> {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut iter = args.iter();
         while let Some(arg) = iter.next() {
             match arg.as_str() {
-                "--host" => return LaunchMode::Host,
+                "--solo" => return Some(LaunchMode::Singleplayer),
+                "--host" => return Some(LaunchMode::Host),
                 "--join" => {
                     let address = iter
                         .next()
                         .and_then(|value| parse_address(value))
                         .unwrap_or_else(loopback_address);
-                    return LaunchMode::Join(address);
+                    return Some(LaunchMode::Join(address));
                 }
                 _ => {}
             }
         }
-        LaunchMode::Singleplayer
+        None
     }
 }
 
-fn parse_address(value: &str) -> Option<SocketAddr> {
+/// Present when the command line already chose, so the menu is skipped.
+///
+/// Keeping the flags is what makes testing co-op bearable: two windows from one
+/// terminal, no clicking through a menu twice on every rebuild.
+#[derive(Resource)]
+pub struct LaunchedFromArgs;
+
+/// Applies whatever the command line asked for, before any plugin builds.
+///
+/// Also picks the save, because `--host` and `--solo` have no menu to pick one
+/// in and would otherwise start a brand new career on every launch. A `--join`
+/// gets no slot: the guest reads the host's notebook and career.
+pub fn apply_command_line(app: &mut App) {
+    let Some(mode) = LaunchMode::from_args() else {
+        return;
+    };
+    app.insert_resource(mode).insert_resource(LaunchedFromArgs);
+    if !matches!(mode, LaunchMode::Join(_)) {
+        crate::saves::migrate_legacy_saves();
+        app.insert_resource(crate::saves::SaveSlot::default_slot());
+    }
+}
+
+/// Parses what someone reads out loud: an IP, an IP and port, or a hostname.
+pub fn parse_address(value: &str) -> Option<SocketAddr> {
     value
         .parse::<SocketAddr>()
         .ok()
@@ -135,26 +164,38 @@ pub fn is_authority(mode: Option<Res<LaunchMode>>) -> bool {
     !matches!(mode.as_deref(), Some(LaunchMode::Join(_)))
 }
 
+/// Run condition: this process is opening its lab to others.
+fn hosting(mode: Option<Res<LaunchMode>>) -> bool {
+    matches!(mode.as_deref(), Some(LaunchMode::Host))
+}
+
+/// Run condition: this process is dialling someone else's lab.
+fn joining(mode: Option<Res<LaunchMode>>) -> bool {
+    matches!(mode.as_deref(), Some(LaunchMode::Join(_)))
+}
+
 pub struct NetPlugin;
 
 impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
-        let mode = LaunchMode::from_args();
-        app.insert_resource(mode)
+        // Only if the command line has not already inserted one: the mode is
+        // now a menu decision, and singleplayer is the right thing to assume
+        // for anything that never reaches the menu, such as a test.
+        app.init_resource::<LaunchMode>()
             .add_plugins((RepliconPlugins, RepliconRenetPlugins));
 
         register_replication(app);
-        app.add_systems(Update, resync_on_join.run_if(is_authority));
-
-        match mode {
-            LaunchMode::Singleplayer => {}
-            LaunchMode::Host => {
-                app.add_systems(Startup, start_hosting);
-            }
-            LaunchMode::Join(_) => {
-                app.add_systems(Startup, start_joining);
-            }
-        }
+        app.add_systems(Update, resync_on_join.run_if(is_authority))
+            // Sockets open on the way into the lab rather than at startup,
+            // because until the menu is done with, this process does not yet
+            // know whether it is hosting, joining or neither.
+            .add_systems(
+                OnEnter(AppState::Playing),
+                (
+                    start_hosting.run_if(hosting),
+                    start_joining.run_if(joining),
+                ),
+            );
     }
 }
 
@@ -310,6 +351,10 @@ fn start_joining(mut commands: Commands, channels: Res<RepliconChannels>, mode: 
 
     commands.insert_resource(client);
     commands.insert_resource(transport);
+    // Offered back as the prefilled address next time. Remembered here rather
+    // than when it was typed so only one that got as far as a socket is kept,
+    // and stored resolved so the port is visible in the field.
+    crate::saves::remember_host(&address.to_string());
     info!("joining the lab at {address}");
 }
 
