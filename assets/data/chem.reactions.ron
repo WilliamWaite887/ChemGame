@@ -117,4 +117,106 @@
             "Oxygen, with plasma as a catalyst.",
         ],
     ),
+
+    // ---- Toxins -----------------------------------------------------------
+    //
+    // Nobody ever orders these — `station.orders.ron` does not list them — but
+    // they sit in the book as locked entries, and finding one by accident is
+    // the point. Priority 8 keeps them below the medicine chain so a beaker
+    // meant for inaprovaline does not turn into acid.
+    (
+        id: "sulphuric_acid",
+        reactants: [("sulfur", 1), ("hydrogen", 1), ("oxygen", 2)],
+        products: [("sulphuric_acid", 3)],
+        priority: 8,
+        hints: [
+            "Three base reagents, one of them at double.",
+            "Starts with the yellow one nobody has found a use for.",
+            "Sulfur and hydrogen, with twice as much oxygen.",
+        ],
+    ),
+    (
+        id: "chloral_hydrate",
+        reactants: [("chlorine", 3), ("ethanol", 1), ("water", 1)],
+        products: [("chloral_hydrate", 1)],
+        priority: 8,
+        hints: [
+            "Three base reagents in unequal parts, and you get very little back.",
+            "Mostly chlorine.",
+            "Three parts chlorine to one each of ethanol and water.",
+        ],
+    ),
+    (
+        // The showpiece, and the reason the reaction chamber exists.
+        //
+        // It will not start below 374K, it heats itself as it runs, and past
+        // 420K it detonates. Left alone in a chamber dialled too high it will
+        // cook itself into a blast without any further help from the chemist —
+        // which is exactly the SS13 experience being recreated.
+        id: "phlogiston",
+        reactants: [("plasma", 1), ("sulphuric_acid", 1), ("phosphorus", 1)],
+        products: [("phlogiston", 3)],
+        min_temp: Some((374.0)),
+        overheat_temp: Some((420.0)),
+        overheat: Detonate(power: 3.0),
+        // 2.5K per unit of reaction, and the resolver runs the whole batch in
+        // one pass — so the heat released scales with how much you made. That
+        // is what turns batch size into the decision:
+        //
+        //   50u beaker, at most 16u of each  ->  ~416K, safe at any fill
+        //   100u beaker, under 19u of each   ->  under 420K, safe
+        //   100u beaker, 20u of each or more ->  past 420K, detonates
+        //
+        // Tuned deliberately. At the original 1.2 a full large beaker peaked at
+        // 414K and the reaction could never detonate at all, which made the
+        // overheat rule dead data.
+        effects: [Heat(2.5)],
+        priority: 25,
+        hints: [
+            "Will not start at room temperature.",
+            "Three ingredients, one of them a compound. It gives off heat as it runs.",
+            "Plasma, phosphorus and sulphuric acid, held above 374K.",
+        ],
+    ),
+
+    // ---- Stimulants -------------------------------------------------------
+    (
+        id: "hyperzine",
+        reactants: [("sugar", 1), ("phosphorus", 1), ("sulfur", 1)],
+        products: [("hyperzine", 3)],
+        priority: 8,
+        hints: [
+            "Three base reagents, equal parts.",
+            "One of them is the sweet one.",
+            "Sugar, phosphorus and sulfur.",
+        ],
+    ),
+    (
+        id: "synaptizine",
+        reactants: [("lithium", 1), ("sugar", 1), ("water", 1)],
+        products: [("synaptizine", 3)],
+        priority: 8,
+        hints: [
+            "Three base reagents, equal parts. One of them is a metal.",
+            "Lithium is involved, which on its own makes you unsteady.",
+            "Lithium, sugar and water.",
+        ],
+    ),
+
+    // ---- Drink ------------------------------------------------------------
+    (
+        // Smokes when it comes together, which is the only reaction in the game
+        // that vents into the room. A cheap way to learn what a cloud does
+        // before phlogiston teaches you what a blast does.
+        id: "hooch",
+        reactants: [("ethanol", 3), ("sugar", 1), ("water", 1)],
+        products: [("hooch", 5)],
+        effects: [Smoke(2.2)],
+        priority: 8,
+        hints: [
+            "Three base reagents. Mostly the one you should not be drinking.",
+            "It fumes when it comes together — stand back.",
+            "Three parts ethanol to one each of sugar and water.",
+        ],
+    ),
 ]

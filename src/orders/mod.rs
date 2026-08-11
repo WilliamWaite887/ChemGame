@@ -385,9 +385,9 @@ pub fn grade(
     }
 
     // Only single-dose forms can overdose. A beaker is bulk supply that gets
-    // measured out later; a pill is swallowed whole.
-    let single_dose = matches!(kind, ContainerKind::Pill | ContainerKind::Bottle);
-    if single_dose {
+    // measured out later; a pill is swallowed whole and a syringe goes straight
+    // in, which makes it the least forgiving of the three.
+    if kind.is_single_dose() {
         if let Some(threshold) = overdose_threshold {
             if supplied > threshold {
                 return Outcome::Overdose;
@@ -821,10 +821,22 @@ fn leave_sample_vials(
             continue;
         }
 
+        // Unknown, and safe to hand somebody unasked.
+        //
+        // The second half matters now that the book holds toxins: a grateful
+        // crew member leaving you thirty units of sulphuric acid "in case it's
+        // useful" is a funny idea and a miserable one to be on the end of,
+        // especially since the obvious thing to do with a mystery vial is
+        // analyse it — and the second most obvious is drink it.
         let unknown: Vec<_> = db
             .reactions
             .iter()
             .filter(|reaction| !knowledge.is_known(reaction.id))
+            .filter(|reaction| {
+                reaction
+                    .product_ids()
+                    .all(|product| !db.reagents.get(product).is_harmful())
+            })
             .collect();
         let Some(recipe) = unknown.choose(&mut rng) else {
             continue;

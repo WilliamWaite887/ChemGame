@@ -1,0 +1,42 @@
+// Things that go wrong in the lab on their own, without the chemist's help.
+//
+// These exist so the medicine cabinet has a reason to be stocked before it is
+// needed. Without them the only way to get hurt is to make a mistake, and a
+// careful player would never touch a medicine they made.
+//
+// `first_shift_safe` keeps shift 1 clear: the opening shift is where a player
+// learns the loop, and a radiation alarm during it reads as the game being
+// broken rather than as a hazard.
+(
+    first_shift_safe: true,
+    // Only during service, and never twice at once.
+    gap_seconds: (95.0, 190.0),
+    // Seconds of radio warning before it starts. Long enough to dose up, short
+    // enough to be a scramble.
+    warning_seconds: 15.0,
+    incidents: [
+        (
+            id: "rad_leak",
+            // Roughly where the radium stock sits, on the dispenser side.
+            origin: (-4.6, 0.0, -3.6),
+            radius: 4.5,
+            duration: 40.0,
+            warning: "Radiation alarm on the chem lab sensor. Dose up or clear the area.",
+            onset: "The counter by the dispenser starts clicking.",
+            // Intensity of the Irradiated status applied per metabolism tick to
+            // anyone inside the radius. Hyronalin counters 1.0 per tick and
+            // arithrazine 3.0, so standing in it costs you a steady drip of one
+            // or the other.
+            intensity: 2.0,
+        ),
+        (
+            id: "coolant_vent",
+            origin: (-7.0, 0.0, -1.6),
+            radius: 3.5,
+            duration: 30.0,
+            warning: "Atmos here — we've got a coolant line weeping near your chamber.",
+            onset: "The air by the reaction chamber turns sharp and cold.",
+            intensity: 1.0,
+        ),
+    ],
+)

@@ -7,9 +7,11 @@
 //! patching individual nodes. At this size that is far simpler to keep correct,
 //! and it only happens on user action.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use chem_sim::{ReagentId, Units};
+use chem_sim::{DamageKind, Kelvin, ReagentId, Units};
 
+use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, InSlot};
 use crate::crew::{CrewMember, CrewPhase, CrewRoute};
@@ -18,7 +20,8 @@ use crate::knowledge::{Knowledge, RecipeDiscovered, HINT_COST};
 use crate::machines::{
     slotted_container, AnalyzeRequested, Buffer, BufferDirection, BufferTransferRequested,
     DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested, GrindRequested, Hopper,
-    Machine, MachineKind, PackageRequested, TestBenchStock,
+    Machine, MachineKind, PackageRequested, SetHeaterPower, SetTargetTemperature, TestBenchStock,
+    Thermostat, TEMPERATURE_PRESETS,
 };
 use crate::orders::{Order, Shift};
 use crate::player::LocalPlayer;
@@ -54,7 +57,7 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             OnEnter(AppState::Playing),
-            (spawn_order_queue, spawn_radio_feed),
+            (spawn_order_queue, spawn_radio_feed, spawn_vitals_panel),
         )
         .add_systems(
             Update,
@@ -64,7 +67,9 @@ impl Plugin for UiPlugin {
                 sync_panel,
                 update_phase_banner,
                 update_order_queue,
+                update_vitals_panel,
                 update_radio_feed,
+                scroll_reference_book,
                 announce_discoveries,
                 // Presentation only, so unlike every other phase system this
                 // runs on both ends: a joined chemist needs to know the shift
@@ -100,6 +105,8 @@ enum PanelAction {
     Package(ContainerKind),
     Analyze,
     Grind { all: bool },
+    SetTarget(Kelvin),
+    TogglePower,
     BuyHint(chem_sim::ReactionId),
     BeginShift,
     SignOff,
@@ -137,6 +144,14 @@ struct PanelSignature {
     resolved: u32,
     reputation: i32,
     research_points: u32,
+    /// Chamber state. The sample's temperature is **rounded to 5K** for exactly
+    /// the reason the countdown above is absent: while a chamber runs it moves
+    /// every frame, and comparing the raw value would rebuild the panel every
+    /// frame with it. Five kelvin is fine enough to watch a batch climb and
+    /// coarse enough to cost one rebuild every second or so.
+    temperature: Option<i32>,
+    target: Option<i32>,
+    powered: bool,
 }
 
 impl Default for PanelSignature {
@@ -157,8 +172,16 @@ impl Default for PanelSignature {
             resolved: u32::MAX,
             reputation: i32::MAX,
             research_points: u32::MAX,
+            temperature: Some(i32::MAX),
+            target: Some(i32::MAX),
+            powered: true,
         }
     }
+}
+
+/// Rounds a temperature to the granularity [`PanelSignature`] compares at.
+fn panel_temperature(kelvin: Kelvin) -> i32 {
+    (kelvin.0 / 5.0).round() as i32
 }
 
 /// The optional fittings a panel draws from: not every machine has an amount
@@ -172,6 +195,7 @@ type MachineParts<'w, 's> = Query<
         Option<&'static DispenseAmount>,
         Option<&'static Buffer>,
         Option<&'static Hopper>,
+        Option<&'static Thermostat>,
     ),
 >;
 
@@ -208,22 +232,34 @@ fn sync_panel(
             .map(|container| container.solution.iter().collect())
             .unwrap_or_default(),
         buffer: machine_parts
-            .and_then(|(_, _, buffer, _)| buffer)
+            .and_then(|(_, _, buffer, _, _)| buffer)
             .map(|buffer| buffer.0.iter().collect())
             .unwrap_or_default(),
         hopper: machine_parts
-            .and_then(|(_, _, _, hopper)| hopper)
+            .and_then(|(_, _, _, hopper, _)| hopper)
             .map(|hopper| hopper.0.clone())
             .unwrap_or_default(),
         test_stock,
         amount: machine_parts
-            .and_then(|(_, amount, _, _)| amount)
+            .and_then(|(_, amount, _, _, _)| amount)
             .map(|a| a.0),
         known_recipes: knowledge.known_count(),
         phase: Some(clock.phase),
         resolved: clock.resolved,
         reputation: shift.reputation,
         research_points: knowledge.research_points,
+        // Only tracked while a chamber panel is open, so no other machine pays
+        // for the extra comparison.
+        temperature: machine_parts
+            .filter(|(machine, ..)| machine.kind == MachineKind::ReactionChamber)
+            .and(loaded)
+            .map(|container| panel_temperature(container.solution.temperature)),
+        target: machine_parts
+            .and_then(|(_, _, _, _, thermostat)| thermostat)
+            .map(|thermostat| panel_temperature(thermostat.target)),
+        powered: machine_parts
+            .and_then(|(_, _, _, _, thermostat)| thermostat)
+            .is_some_and(|thermostat| thermostat.powered),
     };
 
     if signature == *previous {
@@ -242,7 +278,7 @@ fn sync_panel(
     if open_machine.is_none() {
         return;
     }
-    let Some((machine, amount, buffer, hopper)) = machine_parts else {
+    let Some((machine, amount, buffer, hopper, thermostat)) = machine_parts else {
         return;
     };
 
@@ -295,6 +331,9 @@ fn sync_panel(
                         }
                         MachineKind::ShiftBoard => {
                             shift_board_body(panel, &clock, &shift);
+                        }
+                        MachineKind::ReactionChamber => {
+                            heater_body(panel, &db, thermostat, loaded);
                         }
                     }
 
@@ -463,6 +502,79 @@ fn dispenser_body(
     container_readout(panel, db, loaded, true);
 }
 
+/// The reaction chamber: a dial, a switch, and a thermometer.
+///
+/// Deliberately spare. The machine does nothing on its own — everything
+/// interesting happens because the chemistry noticed the temperature changed —
+/// so the panel's whole job is telling you where you are and where you are
+/// headed.
+fn heater_body(
+    panel: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    thermostat: Option<&Thermostat>,
+    loaded: Option<&Container>,
+) {
+    let thermostat = thermostat.copied().unwrap_or_default();
+
+    panel.spawn(label(
+        "Heats and cools whatever is loaded. Some reactions will not start until \
+         it is hot enough; some come apart if it gets hotter still.",
+        13.0,
+        TEXT_DIM,
+    ));
+
+    let current = loaded.map(|container| container.solution.temperature);
+    panel.spawn(label(
+        match current {
+            Some(temperature) => format!(
+                "Sample  {temperature}          Target  {}          {}",
+                thermostat.target,
+                if thermostat.powered { "RUNNING" } else { "OFF" }
+            ),
+            None => "No container loaded. Carry a beaker over and press E.".to_string(),
+        },
+        15.0,
+        // Warm as it climbs, so a chamber running away is visible without
+        // reading the number.
+        match current {
+            Some(t) if t.0 >= 420.0 => Color::srgb(0.98, 0.45, 0.30),
+            Some(t) if t.0 >= 350.0 => Color::srgb(0.95, 0.78, 0.40),
+            _ => TEXT,
+        },
+    ));
+
+    panel.spawn(label("Target temperature", 13.0, TEXT_DIM));
+    panel.spawn(row()).with_children(|row| {
+        for kelvin in TEMPERATURE_PRESETS {
+            let target = Kelvin(kelvin);
+            let mut entity = row.spawn(button(
+                format!("{kelvin:.0}K"),
+                PanelAction::SetTarget(target),
+            ));
+            if (thermostat.target.0 - kelvin).abs() < 0.5 {
+                entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
+            }
+        }
+    });
+
+    panel.spawn(row()).with_children(|row| {
+        let mut entity = row.spawn(button(
+            if thermostat.powered {
+                "Stop"
+            } else {
+                "Start heating"
+            },
+            PanelAction::TogglePower,
+        ));
+        if thermostat.powered {
+            entity.insert(BackgroundColor(BUTTON_ACTIVE));
+        }
+        row.spawn(button("Eject container", PanelAction::Eject));
+    });
+
+    container_readout(panel, db, loaded, false);
+}
+
 fn chemmaster_body(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
@@ -534,6 +646,12 @@ fn chemmaster_body(
         row.spawn(button(
             format!("Bottle  ({})", ContainerKind::Bottle.capacity()),
             PanelAction::Package(ContainerKind::Bottle),
+        ));
+        // The only source of syringes in the lab. Cargo does not stock them,
+        // so a chemist who wants one makes it.
+        row.spawn(button(
+            format!("Syringe  ({})", ContainerKind::Syringe.capacity()),
+            PanelAction::Package(ContainerKind::Syringe),
         ));
     });
 
@@ -822,7 +940,8 @@ fn spawn_reference_book(commands: &mut Commands, db: &ChemDb, knowledge: &Knowle
                     });
                     book.spawn(label(
                         format!(
-                            "{} of {} recipes recorded   ·   {} research   ·   B or Esc to close",
+                            "{} of {} recipes recorded   ·   {} research   ·   \
+                             scroll to read   ·   B or Esc to close",
                             knowledge.known_count(),
                             db.reactions.len(),
                             knowledge.research_points
@@ -831,6 +950,23 @@ fn spawn_reference_book(commands: &mut Commands, db: &ChemDb, knowledge: &Knowle
                         TEXT_DIM,
                     ));
 
+                    // The entry list scrolls; the header above it does not.
+                    // The book was built when there were nine recipes and they
+                    // fitted one screen. There are more than that now, and an
+                    // entry that runs off the bottom is one the player cannot
+                    // read at all.
+                    book.spawn((
+                        Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: px(8),
+                            max_height: vh(70),
+                            overflow: Overflow::scroll_y(),
+                            ..default()
+                        },
+                        ScrollPosition::default(),
+                        BookScroll,
+                    ))
+                    .with_children(|book| {
                     for reaction in db.reactions.iter() {
                         let known = knowledge.is_known(reaction.id);
                         // Name the entry after what it makes, not the reaction
@@ -909,8 +1045,41 @@ fn spawn_reference_book(commands: &mut Commands, db: &ChemDb, knowledge: &Knowle
                                 }
                             });
                     }
+                    });
                 });
         });
+}
+
+/// The scrolling entry list inside the reference book.
+#[derive(Component)]
+struct BookScroll;
+
+/// Mouse wheel scrolls the book.
+///
+/// Written straight onto the one scrollable node rather than through Bevy's
+/// pointer-hover scroll events: the cursor is grabbed and invisible while the
+/// book is open, so there is no hover target to route through, and the book is
+/// the only thing on screen that can scroll.
+fn scroll_reference_book(
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    mut book: Query<(&mut ScrollPosition, &ComputedNode), With<BookScroll>>,
+) {
+    let scrolled: f32 = wheel
+        .read()
+        .map(|event| match event.unit {
+            bevy::input::mouse::MouseScrollUnit::Line => event.y * 24.0,
+            bevy::input::mouse::MouseScrollUnit::Pixel => event.y,
+        })
+        .sum();
+    if scrolled == 0.0 {
+        return;
+    }
+
+    for (mut position, computed) in &mut book {
+        // Content taller than the box is exactly how far it can travel.
+        let limit = (computed.content_size().y - computed.size().y).max(0.0);
+        position.y = (position.y - scrolled).clamp(0.0, limit);
+    }
 }
 
 /// Renders a recipe as `1 Oxygen + 1 Carbon + 1 Sugar  →  3 Inaprovaline`.
@@ -1331,6 +1500,230 @@ fn expire_toasts(mut commands: Commands, time: Res<Time>, mut toasts: Query<(Ent
 }
 
 // ---------------------------------------------------------------------------
+// Vitals
+// ---------------------------------------------------------------------------
+
+/// Reagents listed in the bloodstream readout before it starts summarising.
+const BLOOD_SLOTS: usize = 6;
+
+/// Every piece of text in the vitals panel, tagged by what it says.
+///
+/// One marker with variants rather than five separate marker components: the
+/// order queue needed a `Without<>` chain per marker to keep its queries
+/// disjoint, and that grows quadratically. This panel writes all of its text
+/// through a single query.
+#[derive(Component, PartialEq)]
+enum VitalsText {
+    Damage(DamageKind),
+    Blood(usize),
+    Status,
+    Collapse,
+}
+
+/// The coloured fill inside a damage bar.
+#[derive(Component)]
+struct DamageBar(DamageKind);
+
+/// A damage type's colour is the colour of the medicine that treats it, taken
+/// straight from `chem.reagents.ron`.
+///
+/// Brute is bicaridine red, burn is dermaline orange, toxin is dylovene green,
+/// oxygen is dexalin blue. A player who has made those four learns the mapping
+/// from the bars without a word of tutorial text.
+fn damage_color(kind: DamageKind) -> Color {
+    match kind {
+        DamageKind::Brute => Color::srgb(0.85, 0.25, 0.25),
+        DamageKind::Burn => Color::srgb(0.95, 0.62, 0.20),
+        DamageKind::Toxin => Color::srgb(0.42, 0.70, 0.36),
+        DamageKind::Oxygen => Color::srgb(0.40, 0.65, 0.95),
+    }
+}
+
+/// Fixed slots, filled in each frame — the same pattern as the order queue and
+/// for the same reason. Four bars that decay every tick would otherwise force a
+/// full despawn-and-rebuild of the panel every frame.
+fn spawn_vitals_panel(mut commands: Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: px(16),
+                right: px(16),
+                width: px(280),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(px(12)),
+                row_gap: px(5),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.06, 0.07, 0.09, 0.82)),
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new(""),
+                TextFont::from_font_size(13.0),
+                TextColor(Color::srgb(0.95, 0.45, 0.45)),
+                VitalsText::Collapse,
+            ));
+            panel.spawn(label("CONDITION", 12.0, TEXT_DIM));
+
+            for kind in DamageKind::ALL {
+                panel.spawn(row()).with_children(|line| {
+                    line.spawn((
+                        Text::new(kind.label()),
+                        TextFont::from_font_size(12.0),
+                        TextColor(damage_color(kind)),
+                        Node {
+                            min_width: px(46),
+                            ..default()
+                        },
+                    ));
+                    // Track, with the fill as a child. The fill's width is the
+                    // only thing the update touches.
+                    line.spawn((
+                        Node {
+                            width: px(150),
+                            height: px(9),
+                            border_radius: BorderRadius::all(px(4)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.16, 0.17, 0.20, 0.9)),
+                        children![(
+                            Node {
+                                width: percent(0),
+                                height: percent(100),
+                                border_radius: BorderRadius::all(px(4)),
+                                ..default()
+                            },
+                            BackgroundColor(damage_color(kind)),
+                            DamageBar(kind),
+                        )],
+                    ));
+                    line.spawn((
+                        Text::new(""),
+                        TextFont::from_font_size(12.0),
+                        TextColor(TEXT_DIM),
+                        VitalsText::Damage(kind),
+                    ));
+                });
+            }
+
+            panel.spawn((
+                Text::new(""),
+                TextFont::from_font_size(12.0),
+                TextColor(Color::srgb(0.80, 0.72, 0.95)),
+                VitalsText::Status,
+            ));
+            panel.spawn(label("BLOODSTREAM", 12.0, TEXT_DIM));
+            for index in 0..BLOOD_SLOTS {
+                panel.spawn((
+                    Text::new(""),
+                    TextFont::from_font_size(13.0),
+                    TextColor(TEXT),
+                    VitalsText::Blood(index),
+                ));
+            }
+        });
+}
+
+/// One bloodstream row: what it is, how much is left, and whether it is past
+/// its overdose threshold.
+///
+/// Pure so the overdose wording can be tested without a running app.
+fn blood_line(db: &ChemDb, reagent: ReagentId, quantity: Units) -> (String, Color) {
+    let definition = db.reagents.get(reagent);
+    let overdosing = matches!(definition.overdose, Some(threshold) if quantity > threshold);
+    let line = if overdosing {
+        format!("{:<15}{:>7}  OD", definition.name, quantity.to_string())
+    } else {
+        format!("{:<15}{:>7}", definition.name, quantity.to_string())
+    };
+
+    let [r, g, b] = definition.color;
+    let color = if overdosing {
+        // The book's own warning colour, so an overdose reads the same
+        // everywhere it appears.
+        Color::srgb(0.90, 0.62, 0.45)
+    } else {
+        Color::srgb(0.45 + r * 0.55, 0.45 + g * 0.55, 0.45 + b * 0.55)
+    };
+    (line, color)
+}
+
+fn update_vitals_panel(
+    db: Res<ChemDb>,
+    me: Query<(&Body, &Bloodstream), With<LocalPlayer>>,
+    mut bars: Query<(&DamageBar, &mut Node)>,
+    mut texts: Query<(&VitalsText, &mut Text, &mut TextColor)>,
+) {
+    let Ok((body, blood)) = me.single() else {
+        return;
+    };
+    let contents = blood.0.contents();
+
+    for (bar, mut node) in &mut bars {
+        let wanted = percent(body.0.fraction(bar.0) * 100.0);
+        if node.width != wanted {
+            node.width = wanted;
+        }
+    }
+
+    let statuses: Vec<&str> = blood
+        .0
+        .active_statuses()
+        .map(|(kind, _)| kind.label())
+        .collect();
+
+    for (slot, mut text, mut color) in &mut texts {
+        let (line, wanted) = match slot {
+            VitalsText::Damage(kind) => {
+                let amount = body.0.damage.get(*kind);
+                let line = if amount.is_positive() {
+                    format!("{amount}")
+                } else {
+                    String::new()
+                };
+                (line, TEXT_DIM)
+            }
+            VitalsText::Blood(index) => match contents.get(*index) {
+                // The last slot summarises the overflow rather than silently
+                // hiding it — a chemist needs to know there is more in them
+                // than the panel has room for.
+                Some(_) if *index == BLOOD_SLOTS - 1 && contents.len() > BLOOD_SLOTS => (
+                    format!("+{} more", contents.len() - (BLOOD_SLOTS - 1)),
+                    TEXT_DIM,
+                ),
+                Some((reagent, quantity)) => blood_line(&db, *reagent, *quantity),
+                None => (String::new(), TEXT),
+            },
+            VitalsText::Status => {
+                let line = if statuses.is_empty() {
+                    String::new()
+                } else {
+                    statuses.join(" · ")
+                };
+                (line, Color::srgb(0.80, 0.72, 0.95))
+            }
+            VitalsText::Collapse => {
+                let line = if body.0.collapsed {
+                    "COLLAPSED".to_string()
+                } else {
+                    String::new()
+                };
+                (line, Color::srgb(0.95, 0.45, 0.45))
+            }
+        };
+
+        if text.0 != line {
+            text.0 = line;
+        }
+        if color.0 != wanted {
+            color.0 = wanted;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Radio feed
 // ---------------------------------------------------------------------------
 
@@ -1513,21 +1906,35 @@ fn button_feedback(mut buttons: ChangedButtons) {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Every message a panel button can send.
+///
+/// Bundled into one `SystemParam` because Bevy caps a system at sixteen
+/// parameters and the panel is the one place that can emit all of them. Adding
+/// a machine means adding a writer here, not widening the system signature.
+#[derive(SystemParam)]
+struct PanelMessages<'w> {
+    dispense: MessageWriter<'w, DispenseRequested>,
+    eject: MessageWriter<'w, EjectRequested>,
+    empty: MessageWriter<'w, EmptyRequested>,
+    transfer: MessageWriter<'w, BufferTransferRequested>,
+    package: MessageWriter<'w, PackageRequested>,
+    analyze: MessageWriter<'w, AnalyzeRequested>,
+    grind: MessageWriter<'w, GrindRequested>,
+    set_target: MessageWriter<'w, SetTargetTemperature>,
+    set_power: MessageWriter<'w, SetHeaterPower>,
+    begin_shift: MessageWriter<'w, BeginShiftRequested>,
+    sign_off: MessageWriter<'w, SignOffRequested>,
+    requisition: MessageWriter<'w, RequisitionRequested>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn handle_panel_clicks(
     buttons: Query<(&Interaction, &PanelAction), Changed<Interaction>>,
     mut modes: Query<(Entity, &mut InteractionMode), With<LocalPlayer>>,
     mut machines: Query<&mut Machine>,
     mut amounts: Query<&mut DispenseAmount>,
-    mut dispense: MessageWriter<DispenseRequested>,
-    mut eject: MessageWriter<EjectRequested>,
-    mut empty: MessageWriter<EmptyRequested>,
-    mut transfer: MessageWriter<BufferTransferRequested>,
-    mut package: MessageWriter<PackageRequested>,
-    mut analyze: MessageWriter<AnalyzeRequested>,
-    mut grind: MessageWriter<GrindRequested>,
-    mut begin_shift: MessageWriter<BeginShiftRequested>,
-    mut sign_off: MessageWriter<SignOffRequested>,
-    mut requisition: MessageWriter<RequisitionRequested>,
+    mut out: PanelMessages,
+    thermostats: Query<&Thermostat>,
     mut knowledge: ResMut<Knowledge>,
     db: Res<ChemDb>,
 ) {
@@ -1568,19 +1975,19 @@ fn handle_panel_clicks(
                 }
             }
             PanelAction::Dispense(reagent) => {
-                dispense.write(DispenseRequested {
+                out.dispense.write(DispenseRequested {
                     machine,
                     reagent: *reagent,
                 });
             }
             PanelAction::Eject => {
-                eject.write(EjectRequested { machine });
+                out.eject.write(EjectRequested { machine });
             }
             PanelAction::Empty => {
-                empty.write(EmptyRequested { machine });
+                out.empty.write(EmptyRequested { machine });
             }
             PanelAction::ToBuffer(reagent, amount) => {
-                transfer.write(BufferTransferRequested {
+                out.transfer.write(BufferTransferRequested {
                     machine,
                     reagent: *reagent,
                     amount: *amount,
@@ -1588,7 +1995,7 @@ fn handle_panel_clicks(
                 });
             }
             PanelAction::ToContainer(reagent, amount) => {
-                transfer.write(BufferTransferRequested {
+                out.transfer.write(BufferTransferRequested {
                     machine,
                     reagent: *reagent,
                     amount: *amount,
@@ -1596,28 +2003,42 @@ fn handle_panel_clicks(
                 });
             }
             PanelAction::Package(kind) => {
-                package.write(PackageRequested {
+                out.package.write(PackageRequested {
                     machine,
                     kind: *kind,
                 });
             }
             PanelAction::Analyze => {
-                analyze.write(AnalyzeRequested { machine });
+                out.analyze.write(AnalyzeRequested { machine });
             }
             PanelAction::Grind { all } => {
-                grind.write(GrindRequested { machine, all: *all });
+                out.grind.write(GrindRequested { machine, all: *all });
+            }
+            // Requests, not writes: the server owns the temperature, and a
+            // client that set it locally would be corrected a frame later.
+            PanelAction::SetTarget(target) => {
+                out.set_target.write(SetTargetTemperature {
+                    machine,
+                    target: *target,
+                });
+            }
+            PanelAction::TogglePower => {
+                let on = thermostats
+                    .get(machine)
+                    .is_ok_and(|thermostat| !thermostat.powered);
+                out.set_power.write(SetHeaterPower { machine, on });
             }
             // The board's three. Requests, not writes: the server owns the
             // phase and the standing, and a client that moved either locally
             // would be corrected out from under the player a frame later.
             PanelAction::BeginShift => {
-                begin_shift.write(BeginShiftRequested { board: machine });
+                out.begin_shift.write(BeginShiftRequested { board: machine });
             }
             PanelAction::SignOff => {
-                sign_off.write(SignOffRequested { board: machine });
+                out.sign_off.write(SignOffRequested { board: machine });
             }
             PanelAction::Requisition(kind) => {
-                requisition.write(RequisitionRequested {
+                out.requisition.write(RequisitionRequested {
                     board: machine,
                     kind: *kind,
                 });

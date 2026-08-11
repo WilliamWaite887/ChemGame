@@ -427,6 +427,155 @@ fn temperature_gates_reactions() {
     assert_eq!(hot.volume_of(b), Units::whole(10), "should react when hot");
 }
 
+/// The overheat data used by the three tests below: a reaction that still runs
+/// past 420K but wastes the batch doing it.
+fn overheating_data(overheat: &str) -> ChemData {
+    let reagents = r#"[
+        (id: "a", name: "A", color: (1.0, 0.0, 0.0), dispensable: true),
+        (id: "b", name: "B", color: (0.0, 1.0, 0.0)),
+    ]"#;
+    let reactions = format!(
+        r#"[
+            (id: "cook", reactants: [("a", 1)], products: [("b", 1)],
+             overheat_temp: Some((420.0)), overheat: {overheat}, hints: ["Hot."]),
+        ]"#
+    );
+    ChemData::from_ron(reagents, &reactions).unwrap()
+}
+
+#[test]
+fn an_overheated_reaction_consumes_everything_and_yields_less() {
+    let data = overheating_data("ReducedYield(over: 60.0)");
+    let (a, b) = (data.reagent("a"), data.reagent("b"));
+
+    let mut solution = Solution::new(Units::whole(100));
+    let _ = solution.add(a, Units::whole(10));
+    // Halfway through the falloff.
+    solution.temperature = chem_sim::Kelvin(450.0);
+    let report = resolve(&mut solution, &data.reactions);
+
+    assert_eq!(
+        solution.volume_of(a),
+        Units::ZERO,
+        "the reactants are gone regardless — that is what overheating costs"
+    );
+    assert_eq!(solution.volume_of(b), Units::whole(5), "at half yield");
+    assert_eq!(
+        report.overheated.len(),
+        1,
+        "and the chemist gets told, because they cannot see it in the beaker"
+    );
+}
+
+#[test]
+fn a_reaction_run_far_too_hot_yields_nothing_at_all() {
+    let data = overheating_data("ReducedYield(over: 60.0)");
+    let mut solution = Solution::new(Units::whole(100));
+    let _ = solution.add(data.reagent("a"), Units::whole(10));
+    solution.temperature = chem_sim::Kelvin(600.0);
+    resolve(&mut solution, &data.reactions);
+
+    assert!(solution.is_empty(), "everything in, nothing out");
+}
+
+#[test]
+fn a_detonating_reaction_reports_a_blast_and_leaves_an_empty_beaker() {
+    let data = overheating_data("Detonate(power: 3.0)");
+    let mut solution = Solution::new(Units::whole(100));
+    let _ = solution.add(data.reagent("a"), Units::whole(10));
+    solution.temperature = chem_sim::Kelvin(450.0);
+    let report = resolve(&mut solution, &data.reactions);
+
+    assert!(
+        report
+            .effects
+            .contains(&chem_sim::ReactionEffect::Explosion(3.0)),
+        "the game layer learns about the blast through the report: {:?}",
+        report.effects
+    );
+    assert!(solution.is_empty(), "and there is nothing left to salvage");
+}
+
+/// Makes phlogiston from `each` units of all three reactants, held just over
+/// its 374K ignition point, and reports whether it went off.
+fn phlogiston_batch(data: &ChemData, each: i32) -> (chem_sim::Kelvin, bool) {
+    let mut beaker = beaker(
+        data,
+        100,
+        &[("plasma", each), ("sulphuric_acid", each), ("phosphorus", each)],
+    );
+    beaker.temperature = chem_sim::Kelvin(374.5);
+    let report = resolve(&mut beaker, &data.reactions);
+    let detonated = report
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, chem_sim::ReactionEffect::Explosion(_)));
+    (beaker.temperature, detonated)
+}
+
+/// The showpiece has to actually go off, and only when the batch is big.
+///
+/// This exists because it did not. The resolver runs a whole batch in one pass,
+/// so the heat released is `Heat` × scale — and at the original 1.2 a *full*
+/// 100u beaker peaked at 414K against a 420K threshold. The reaction could
+/// never detonate at any fill, in any glassware, which made the whole overheat
+/// rule dead data that read as though it worked.
+#[test]
+fn a_big_batch_of_phlogiston_cooks_itself_into_a_blast() {
+    let data = data();
+
+    let (small_temp, small_boom) = phlogiston_batch(&data, 15);
+    assert!(
+        !small_boom,
+        "a modest batch has to be safe, or the recipe is unusable ({small_temp})"
+    );
+    assert!(small_temp.0 < 420.0);
+
+    let (big_temp, big_boom) = phlogiston_batch(&data, 20);
+    assert!(
+        big_boom,
+        "20u of each should run away; it only reached {big_temp}"
+    );
+}
+
+/// A 50u beaker cannot hold enough to reach the threshold, whatever you do.
+///
+/// Worth pinning as a rule the player can rely on: if you want phlogiston and
+/// not a blast, make it in a small beaker.
+#[test]
+fn a_small_beaker_of_phlogiston_can_never_detonate() {
+    let data = data();
+    // Sixteen of each is 48u — as much as a 50u beaker will take.
+    let mut beaker = beaker(
+        &data,
+        50,
+        &[("plasma", 16), ("sulphuric_acid", 16), ("phosphorus", 16)],
+    );
+    beaker.temperature = chem_sim::Kelvin(374.5);
+    let report = resolve(&mut beaker, &data.reactions);
+
+    assert!(
+        !report
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, chem_sim::ReactionEffect::Explosion(_))),
+        "a full small beaker reached {} and should not have gone off",
+        beaker.temperature
+    );
+}
+
+#[test]
+fn a_recipe_that_never_names_an_overheat_is_unaffected_by_temperature() {
+    // The guarantee that let this land without touching a line of the existing
+    // reaction data.
+    let data = data();
+    let mut hot = beaker(&data, 100, &[("oxygen", 15), ("carbon", 15), ("sugar", 15)]);
+    hot.temperature = chem_sim::Kelvin(900.0);
+    resolve(&mut hot, &data.reactions);
+
+    assert_contents(&data, &hot, &[("inaprovaline", 45)]);
+}
+
 #[test]
 fn cyclic_recipes_terminate_at_the_iteration_cap() {
     // A makes B, B makes A. Without the cap this hangs the game.
@@ -463,8 +612,8 @@ fn unknown_reagents_in_reactions_are_rejected() {
 #[test]
 fn seed_data_loads_completely() {
     let data = data();
-    assert_eq!(data.reagents.dispensable().count(), 18);
-    assert_eq!(data.reactions.len(), 9);
+    assert_eq!(data.reagents.dispensable().count(), 21);
+    assert_eq!(data.reactions.len(), 15);
     for recipe in STARTING_RECIPES {
         assert!(data.reactions.find(recipe).is_some(), "missing {recipe}");
     }

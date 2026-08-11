@@ -5,26 +5,127 @@
 // `treats` shows in the reference book even while a recipe is still locked —
 // a chemist knows what bicaridine is for even if they have forgotten how to
 // make it.
+//
+// `effects` is what the reagent does per metabolism tick to whoever takes it,
+// and `overdose_effects` stack on top of those past the threshold rather than
+// replacing them: an overdose is the medicine still working while it also
+// hurts you. Numbers follow /tg/station where it has an opinion.
+//
+// A note for editors: RON will not coerce an integer into the `f32` inside
+// `boils_at`. Write `Some((323.15))`, never `Some((323))`.
 [
     // ---- Base reagents: straight from the dispenser -----------------------
+    //
+    // Most of these do nothing at all in a body, which is canon and also
+    // useful: a chemist who drinks the oxygen supply learns something cheap.
     (id: "aluminium",  name: "Aluminium",  color: (0.75, 0.76, 0.78), dispensable: true),
     (id: "carbon",     name: "Carbon",     color: (0.12, 0.12, 0.13), dispensable: true),
-    (id: "chlorine",   name: "Chlorine",   color: (0.82, 0.90, 0.44), dispensable: true),
+    (
+        id: "chlorine",
+        name: "Chlorine",
+        color: (0.82, 0.90, 0.44),
+        dispensable: true,
+        effects: [Harm(Brute, 1)],
+    ),
     (id: "copper",     name: "Copper",     color: (0.72, 0.45, 0.20), dispensable: true),
-    (id: "ethanol",    name: "Ethanol",    color: (0.85, 0.85, 0.80), dispensable: true),
+    (
+        id: "ethanol",
+        name: "Ethanol",
+        color: (0.85, 0.85, 0.80),
+        dispensable: true,
+        // Lingers: half the usual rate, which is what makes one drink a
+        // problem for the next twenty minutes of a shift.
+        metabolism: Some(0.2),
+        effects: [Status(kind: Drunk, seconds: 2.0, intensity: 0.65)],
+    ),
     (id: "hydrogen",   name: "Hydrogen",   color: (0.90, 0.90, 0.95), dispensable: true),
-    (id: "iron",       name: "Iron",       color: (0.50, 0.28, 0.24), dispensable: true),
+    (
+        id: "iron",
+        name: "Iron",
+        color: (0.50, 0.28, 0.24),
+        dispensable: true,
+        // Iron restores blood in SS13, and blood loss is what oxygen damage
+        // represents here.
+        effects: [Heal(Oxygen, 1)],
+    ),
     (id: "nitrogen",   name: "Nitrogen",   color: (0.62, 0.70, 0.86), dispensable: true),
     (id: "oxygen",     name: "Oxygen",     color: (0.60, 0.80, 1.00), dispensable: true),
     (id: "phosphorus", name: "Phosphorus", color: (0.94, 0.90, 0.66), dispensable: true),
-    (id: "plasma",     name: "Plasma",     color: (0.72, 0.24, 0.86), dispensable: true),
+    (
+        id: "plasma",
+        name: "Plasma",
+        color: (0.72, 0.24, 0.86),
+        dispensable: true,
+        // The most poisonous thing the dispenser will hand you, and it boils
+        // off at 50°C — so heating a beaker to run a hot recipe can quietly
+        // cost you the catalyst that recipe needed.
+        boils_at: Some((323.15)),
+        effects: [Harm(Toxin, 3)],
+    ),
     (id: "potassium",  name: "Potassium",  color: (0.86, 0.84, 0.72), dispensable: true),
-    (id: "radium",     name: "Radium",     color: (0.44, 0.90, 0.42), dispensable: true),
+    (
+        id: "radium",
+        name: "Radium",
+        color: (0.44, 0.90, 0.42),
+        dispensable: true,
+        effects: [Harm(Toxin, 2)],
+    ),
     (id: "silicon",    name: "Silicon",    color: (0.66, 0.68, 0.72), dispensable: true),
     (id: "sodium",     name: "Sodium",     color: (0.90, 0.88, 0.82), dispensable: true),
-    (id: "sugar",      name: "Sugar",      color: (0.98, 0.98, 0.96), dispensable: true),
-    (id: "sulfur",     name: "Sulfur",     color: (0.95, 0.90, 0.35), dispensable: true),
-    (id: "water",      name: "Water",      color: (0.55, 0.72, 0.90), dispensable: true),
+    (
+        id: "sugar",
+        name: "Sugar",
+        color: (0.98, 0.98, 0.96),
+        dispensable: true,
+        // Burns off fast and takes an absurd amount to hurt you, which is the
+        // joke: the safest thing in the lab still has a threshold.
+        metabolism: Some(2.0),
+        overdose: Some(120),
+        overdose_effects: [Harm(Toxin, 2)],
+    ),
+    (
+        id: "sulfur",
+        name: "Sulfur",
+        color: (0.95, 0.90, 0.35),
+        dispensable: true,
+        effects: [Harm(Toxin, 0.5)],
+    ),
+    (
+        id: "water",
+        name: "Water",
+        color: (0.55, 0.72, 0.90),
+        dispensable: true,
+        // The only thing in the lab that sobers you up.
+        effects: [Counter(kind: Drunk, seconds: 2.0, intensity: 0.25)],
+    ),
+    (
+        id: "fluorine",
+        name: "Fluorine",
+        color: (0.78, 0.92, 0.72),
+        dispensable: true,
+        effects: [Harm(Toxin, 1)],
+    ),
+    (
+        id: "lithium",
+        name: "Lithium",
+        color: (0.66, 0.68, 0.74),
+        dispensable: true,
+        effects: [Status(kind: Unsteady, seconds: 4.0, intensity: 1.0)],
+    ),
+    (
+        id: "mercury",
+        name: "Mercury",
+        color: (0.60, 0.62, 0.66),
+        dispensable: true,
+        // SS13's mercury does brain damage. There is no brain pool here, so it
+        // maps onto toxin plus the twitching and the blurred vision that come
+        // with it — the symptoms a chemist would actually notice.
+        effects: [
+            Harm(Toxin, 0.5),
+            Status(kind: Unsteady, seconds: 6.0, intensity: 1.5),
+            Status(kind: Blurred, seconds: 6.0, intensity: 1.0),
+        ],
+    ),
 
     // ---- Grind-only: what is left of a plant once the extract is out -------
     //
@@ -35,11 +136,17 @@
     (id: "plant_fibre", name: "Plant Fibre", color: (0.42, 0.50, 0.32), from_produce: true),
 
     // ---- Medicines --------------------------------------------------------
+    //
+    // Each one owns a damage type, which is what the HUD's bar colours teach
+    // without a word of tutorial text.
     (
         id: "inaprovaline",
         name: "Inaprovaline",
         color: (0.85, 0.85, 0.60),
         treats: Some("Asphyxiation. Stabilises the critically injured."),
+        // Weak on purpose: it is the thing you take to stop getting worse, not
+        // the thing that fixes you.
+        effects: [Heal(Oxygen, 0.5)],
     ),
     (
         id: "dylovene",
@@ -47,6 +154,8 @@
         color: (0.42, 0.70, 0.36),
         overdose: Some(20),
         treats: Some("Poisoning and toxin damage."),
+        effects: [Heal(Toxin, 2)],
+        overdose_effects: [Harm(Toxin, 1)],
     ),
     (
         id: "kelotane",
@@ -54,6 +163,8 @@
         color: (0.80, 0.50, 0.20),
         overdose: Some(15),
         treats: Some("Burns."),
+        effects: [Heal(Burn, 2)],
+        overdose_effects: [Harm(Toxin, 1)],
     ),
     (
         id: "bicaridine",
@@ -61,6 +172,8 @@
         color: (0.85, 0.25, 0.25),
         overdose: Some(15),
         treats: Some("Brute force trauma."),
+        effects: [Heal(Brute, 2)],
+        overdose_effects: [Harm(Toxin, 1)],
     ),
     (
         id: "dermaline",
@@ -68,12 +181,17 @@
         color: (0.95, 0.62, 0.20),
         overdose: Some(10),
         treats: Some("Severe burns. Stronger than kelotane."),
+        // Heals harder than kelotane and overdoses sooner. That trade is the
+        // entire reason to keep both on the shelf.
+        effects: [Heal(Burn, 3)],
+        overdose_effects: [Harm(Toxin, 2)],
     ),
     (
         id: "tricordrazine",
         name: "Tricordrazine",
         color: (0.30, 0.75, 0.65),
         treats: Some("All basic damage types, slowly. A good all-rounder."),
+        effects: [Heal(Brute, 1), Heal(Burn, 1), Heal(Toxin, 1), Heal(Oxygen, 1)],
     ),
     (
         id: "dexalin",
@@ -81,6 +199,8 @@
         color: (0.40, 0.65, 0.95),
         overdose: Some(20),
         treats: Some("Airloss and oxygen deprivation."),
+        effects: [Heal(Oxygen, 3)],
+        overdose_effects: [Harm(Toxin, 1)],
     ),
     (
         id: "hyronalin",
@@ -88,11 +208,93 @@
         color: (0.55, 0.80, 0.40),
         overdose: Some(30),
         treats: Some("Mild radiation exposure."),
+        effects: [Heal(Toxin, 1), Counter(kind: Irradiated, seconds: 2.0, intensity: 1.0)],
+        overdose_effects: [Harm(Toxin, 1)],
     ),
     (
         id: "arithrazine",
         name: "Arithrazine",
         color: (0.70, 0.90, 0.45),
         treats: Some("Severe radiation poisoning."),
+        // Strips radiation three times faster than hyronalin and takes a
+        // little skin off doing it. No overdose threshold: the brute cost is
+        // already the limiter.
+        effects: [
+            Heal(Toxin, 2),
+            Counter(kind: Irradiated, seconds: 2.0, intensity: 3.0),
+            Harm(Brute, 0.5),
+        ],
+    ),
+
+    // ---- Toxins -----------------------------------------------------------
+    //
+    // Nobody orders these. They exist as locked book entries, as things to
+    // discover by accident, and as the reason the reaction chamber is dangerous.
+    // `treats` still carries their book line — it is the entry text, whatever
+    // its polarity.
+    (
+        id: "sulphuric_acid",
+        name: "Sulphuric Acid",
+        color: (0.86, 0.82, 0.30),
+        treats: Some("Nothing. It dissolves things, including you."),
+        // The only reagent whose route really matters: a needle drives it past
+        // the skin that a mouthful mostly does not.
+        effects: [Harm(Toxin, 1), Contact(Burn, 2)],
+    ),
+    (
+        id: "chloral_hydrate",
+        name: "Chloral Hydrate",
+        color: (0.92, 0.94, 0.88),
+        overdose: Some(15),
+        treats: Some("Puts people out. Past 15u it does rather more than that."),
+        effects: [
+            Status(kind: Sluggish, seconds: 6.0, intensity: 1.0),
+            Status(kind: Blurred, seconds: 6.0, intensity: 1.0),
+        ],
+        overdose_effects: [Harm(Toxin, 2)],
+    ),
+    (
+        id: "phlogiston",
+        name: "Phlogiston",
+        color: (0.98, 0.42, 0.18),
+        treats: Some("Nothing. It burns, and it does not stop."),
+        effects: [Harm(Burn, 2), Contact(Burn, 6)],
+    ),
+
+    // ---- Stimulants -------------------------------------------------------
+    (
+        id: "hyperzine",
+        name: "Hyperzine",
+        color: (0.95, 0.35, 0.62),
+        overdose: Some(10),
+        treats: Some("Nothing at all, but you will move like it does."),
+        effects: [Status(kind: Hastened, seconds: 4.0, intensity: 1.0)],
+        overdose_effects: [Harm(Toxin, 1)],
+    ),
+    (
+        id: "synaptizine",
+        name: "Synaptizine",
+        color: (0.68, 0.42, 0.78),
+        overdose: Some(5),
+        treats: Some("Clears your head. Takes a little out of you every time."),
+        // The antidote to your own bad decisions, at a price. Note the low
+        // overdose threshold: five units is not much of a margin.
+        effects: [
+            Counter(kind: Blurred, seconds: 4.0, intensity: 2.0),
+            Counter(kind: Unsteady, seconds: 4.0, intensity: 2.0),
+            Harm(Toxin, 0.5),
+        ],
+        overdose_effects: [Harm(Toxin, 2)],
+    ),
+
+    // ---- Drink ------------------------------------------------------------
+    (
+        id: "hooch",
+        name: "Hooch",
+        color: (0.62, 0.42, 0.20),
+        overdose: Some(30),
+        treats: Some("Nothing good. Cheap, nasty, and strong."),
+        effects: [Status(kind: Drunk, seconds: 4.0, intensity: 1.6), Harm(Toxin, 0.3)],
+        overdose_effects: [Harm(Toxin, 1)],
     ),
 ]

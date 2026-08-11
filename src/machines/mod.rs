@@ -7,7 +7,8 @@
 use bevy::ecs::entity::MapEntities;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
-use chem_sim::{ReagentId, Solution, Units};
+use chem_sim::thermal::approach;
+use chem_sim::{Kelvin, ReagentId, Solution, Units};
 use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
@@ -33,6 +34,8 @@ impl Plugin for MachinePlugin {
             .add_mapped_client_message::<PackageRequested>(Channel::Ordered)
             .add_mapped_client_message::<AnalyzeRequested>(Channel::Ordered)
             .add_mapped_client_message::<GrindRequested>(Channel::Ordered)
+            .add_mapped_client_message::<SetTargetTemperature>(Channel::Ordered)
+            .add_mapped_client_message::<SetHeaterPower>(Channel::Ordered)
             .add_message::<ReactionsFired>()
             .add_systems(
                 Update,
@@ -45,6 +48,9 @@ impl Plugin for MachinePlugin {
                     handle_grind,
                     handle_eject,
                     handle_empty,
+                    handle_thermostat_controls,
+                    apply_thermostats,
+                    cool_to_ambient,
                 )
                     .chain()
                     .run_if(in_state(AppState::Playing))
@@ -67,6 +73,11 @@ pub enum MachineKind {
     DeliveryWindow,
     /// Where the shift is started, signed off, and requisitioned against.
     ShiftBoard,
+    /// Heats and cools a loaded container toward a dialled-in temperature.
+    ///
+    /// The only machine that does nothing on its own: it changes the conditions
+    /// and lets the chemistry decide what that means.
+    ReactionChamber,
 }
 
 impl MachineKind {
@@ -79,6 +90,7 @@ impl MachineKind {
             MachineKind::TestBench => "Test Bench",
             MachineKind::DeliveryWindow => "Delivery Window",
             MachineKind::ShiftBoard => "Shift Board",
+            MachineKind::ReactionChamber => "Reaction Chamber",
         }
     }
 
@@ -91,10 +103,51 @@ impl MachineKind {
             MachineKind::TestBench => Color::srgb(0.95, 0.85, 0.35),
             MachineKind::DeliveryWindow => Color::srgb(0.95, 0.35, 0.35),
             MachineKind::ShiftBoard => Color::srgb(0.95, 0.88, 0.45),
+            MachineKind::ReactionChamber => Color::srgb(0.98, 0.45, 0.18),
         }
     }
-
 }
+
+/// A reaction chamber's dial.
+///
+/// Replicated: both chemists have to see what the other has set it to, or the
+/// second one to walk up cooks the batch by accident.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Thermostat {
+    pub target: Kelvin,
+    pub powered: bool,
+}
+
+impl Default for Thermostat {
+    fn default() -> Self {
+        Thermostat {
+            target: Kelvin::AMBIENT,
+            powered: false,
+        }
+    }
+}
+
+/// The temperatures the panel offers.
+///
+/// Fixed buttons rather than a slider: this is a first-person game and a
+/// draggable control under a crosshair is miserable. The spread covers freezing,
+/// room temperature, and the bands the hot recipes sit in.
+pub const TEMPERATURE_PRESETS: [f32; 6] = [273.0, 293.0, 350.0, 400.0, 450.0, 500.0];
+
+/// Fraction of the remaining gap a powered chamber closes per second.
+///
+/// Deliberately unhurried. From room temperature this reaches phlogiston's
+/// 374K in about 7 seconds dialled to 400K, 3.7s at 450K and 2.5s at 500K —
+/// so the target is a real speed-against-control decision, and there is time to
+/// watch the readout climb and change your mind. At 0.55 the whole thing was
+/// over in under two seconds and the machine may as well have been a button.
+const CHAMBER_RATE: f32 = 0.18;
+
+/// The same, for a container sitting out in the room.
+///
+/// Far slower, so a hot beaker stays useful long enough to carry to the
+/// ChemMaster — but not forever. This is the clock a chemist is racing.
+const AMBIENT_RATE: f32 = 0.06;
 
 /// A machine's shared state.
 ///
@@ -174,9 +227,33 @@ pub struct DispenseRequested {
 /// This is the hook recipe discovery hangs off: the resolver already reports
 /// which reactions fired, so learning is a matter of noticing, not of
 /// re-deriving anything.
+///
+/// It carries the side effects too. `ResolveReport` has always reported smoke
+/// and explosions and nothing ever read them; routing them through the message
+/// every caller of `Container::mutate` already sends means hazards need no
+/// parallel plumbing of their own.
 #[derive(Message)]
 pub struct ReactionsFired {
     pub reactions: Vec<chem_sim::ReactionId>,
+    /// Where it happened, so a blast lands in the right part of the room.
+    pub container: Entity,
+    pub effects: Vec<chem_sim::ReactionEffect>,
+}
+
+impl ReactionsFired {
+    /// Builds a report for `container`, or `None` if nothing worth announcing
+    /// happened. Keeps the "did anything happen?" test in one place now that
+    /// there are two ways for the answer to be yes.
+    fn from_report(container: Entity, report: &chem_sim::ResolveReport) -> Option<Self> {
+        if !report.reacted() && report.effects.is_empty() {
+            return None;
+        }
+        Some(ReactionsFired {
+            reactions: report.fired_reactions(),
+            container,
+            effects: report.effects.clone(),
+        })
+    }
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
@@ -230,6 +307,25 @@ pub struct GrindRequested {
     pub all: bool,
 }
 
+/// Dial the chamber to a temperature.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
+pub struct SetTargetTemperature {
+    #[entities]
+    pub machine: Entity,
+    /// `Kelvin` is a newtype over `f32` and needs no special wire encoding.
+    /// The `deserialize_any` problem that `Units` has is specific to "is `15`
+    /// an integer or a float", which a float does not have.
+    pub target: Kelvin,
+}
+
+/// Switch the chamber on or off.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
+pub struct SetHeaterPower {
+    #[entities]
+    pub machine: Entity,
+    pub on: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Systems
 // ---------------------------------------------------------------------------
@@ -264,6 +360,7 @@ fn handle_machine_interact(
     held: Query<(Entity, &HeldBy)>,
     produce: Query<&Produce>,
     slotted: Query<(Entity, &InSlot)>,
+    bodies: Query<&crate::body::Body>,
 ) {
     for request in requests.read() {
         // The sender's identity comes from the connection, never from the
@@ -272,6 +369,11 @@ fn handle_machine_interact(
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
+        // A collapsed chemist cannot work a machine. Checked before anything
+        // is claimed, so going down never leaves a machine locked.
+        if bodies.get(player).is_ok_and(|body| body.0.collapsed) {
+            continue;
+        }
         let Ok((mut machine, slot, transform)) = machines.get_mut(request.target) else {
             continue;
         };
@@ -317,6 +419,103 @@ fn handle_machine_interact(
     }
 }
 
+fn handle_thermostat_controls(
+    mut targets: MessageReader<FromClient<SetTargetTemperature>>,
+    mut power: MessageReader<FromClient<SetHeaterPower>>,
+    mut thermostats: Query<&mut Thermostat>,
+) {
+    for request in targets.read() {
+        if let Ok(mut thermostat) = thermostats.get_mut(request.machine) {
+            thermostat.target = request.target;
+        }
+    }
+    for request in power.read() {
+        if let Ok(mut thermostat) = thermostats.get_mut(request.machine) {
+            thermostat.powered = request.on;
+        }
+    }
+}
+
+/// Drives a loaded container toward its chamber's target temperature.
+///
+/// Nothing here knows what a recipe is. Every change goes through
+/// [`Container::mutate`], which resolves — and `Reaction::max_scale` has always
+/// checked `min_temp`/`max_temp`. So crossing a threshold *is* the trigger, and
+/// temperature-gating a recipe costs no gating code at all.
+fn apply_thermostats(
+    time: Res<Time>,
+    db: Res<ChemDb>,
+    mut fired: MessageWriter<ReactionsFired>,
+    chambers: Query<(Entity, &Thermostat)>,
+    slotted: Query<(Entity, &InSlot)>,
+    mut containers: Query<&mut Container>,
+) {
+    let dt = time.delta_secs();
+    for (machine, thermostat) in &chambers {
+        if !thermostat.powered {
+            continue;
+        }
+        let Some(target) = slotted_container(machine, &slotted) else {
+            continue;
+        };
+        let Ok(mut container) = containers.get_mut(target) else {
+            continue;
+        };
+
+        let current = container.solution.temperature;
+        let next = approach(current, thermostat.target, CHAMBER_RATE, dt);
+        // Settled. Going through `mutate` anyway would re-resolve and mark the
+        // component changed every frame, which wakes the panel and replication
+        // for nothing.
+        if next == current {
+            continue;
+        }
+
+        let (_, report) = container.mutate(&db, |solution| solution.temperature = next);
+        if let Some(message) = ReactionsFired::from_report(target, &report) {
+                fired.write(message);
+        }
+    }
+}
+
+/// Everything not in a powered chamber drifts back to room temperature.
+///
+/// Without this a beaker heated once stays hot for the rest of the shift, and
+/// the chamber becomes a one-time switch rather than something you have to
+/// work against.
+fn cool_to_ambient(
+    time: Res<Time>,
+    db: Res<ChemDb>,
+    mut fired: MessageWriter<ReactionsFired>,
+    heating: Query<(Entity, &Thermostat)>,
+    slotted: Query<(Entity, &InSlot)>,
+    mut containers: Query<(Entity, &mut Container)>,
+) {
+    let dt = time.delta_secs();
+    // Whatever a powered chamber is actively holding is exempt.
+    let held_hot: Vec<Entity> = heating
+        .iter()
+        .filter(|(_, thermostat)| thermostat.powered)
+        .filter_map(|(machine, _)| slotted_container(machine, &slotted))
+        .collect();
+
+    for (entity, mut container) in &mut containers {
+        if held_hot.contains(&entity) || container.solution.is_empty() {
+            continue;
+        }
+        let current = container.solution.temperature;
+        let next = approach(current, chem_sim::Kelvin::AMBIENT, AMBIENT_RATE, dt);
+        if next == current {
+            continue;
+        }
+
+        let (_, report) = container.mutate(&db, |solution| solution.temperature = next);
+        if let Some(message) = ReactionsFired::from_report(entity, &report) {
+            fired.write(message);
+        }
+    }
+}
+
 /// Resolves a connection to the chemist it drives.
 pub fn chemist_entity(chemists: &Query<(Entity, &Chemist)>, client: ClientId) -> Option<Entity> {
     chemists
@@ -348,10 +547,8 @@ fn handle_dispense(
         };
         let (_, report) =
             container.mutate(&db, |solution| solution.add(request.reagent, amount.0));
-        if report.reacted() {
-            fired.write(ReactionsFired {
-                reactions: report.fired_reactions(),
-            });
+        if let Some(message) = ReactionsFired::from_report(target, &report) {
+                fired.write(message);
         }
 
         // Anything drawn from the test bench is practice stock. Marking the
@@ -403,11 +600,9 @@ fn handle_buffer_transfer(
                 if overflow.is_positive() {
                     let _ = buffer.0.add(request.reagent, overflow);
                 }
-                if report.reacted() {
-                    fired.write(ReactionsFired {
-                        reactions: report.fired_reactions(),
-                    });
-                }
+                if let Some(message) = ReactionsFired::from_report(target, &report) {
+                        fired.write(message);
+        }
             }
         }
     }
@@ -540,8 +735,12 @@ fn handle_analyze(
             .collect();
 
         if !identified.is_empty() {
+            // No effects: the analyzer identifies a sample, it does not react
+            // one. Nothing here can smoke or detonate.
             fired.write(ReactionsFired {
                 reactions: identified,
+                container: target,
+                effects: Vec::new(),
             });
         }
     }
@@ -582,6 +781,10 @@ fn handle_grind(
 
         let passes = if request.all { hopper.0.len() } else { 1 };
         let mut reactions = Vec::new();
+        // Accumulated across passes alongside the reactions, for the same
+        // reason: grinding the whole hopper is one action to the player, and
+        // reporting it as several would spawn several smoke clouds.
+        let mut effects = Vec::new();
         for _ in 0..passes {
             let Some(&next) = hopper.0.first() else {
                 break;
@@ -602,10 +805,15 @@ fn handle_grind(
                 }
             });
             reactions.extend(report.fired_reactions());
+            effects.extend(report.effects);
         }
 
-        if !reactions.is_empty() {
-            fired.write(ReactionsFired { reactions });
+        if !reactions.is_empty() || !effects.is_empty() {
+            fired.write(ReactionsFired {
+                reactions,
+                container: target,
+                effects,
+            });
         }
     }
 }
@@ -641,6 +849,9 @@ mod tests {
             .add_message::<FromClient<BufferTransferRequested>>()
             .add_message::<FromClient<InteractRequested>>()
             .add_message::<FromClient<GrindRequested>>()
+            .add_message::<FromClient<SetTargetTemperature>>()
+            .add_message::<FromClient<SetHeaterPower>>()
+            .init_resource::<Time>()
             .add_systems(
                 Update,
                 (
@@ -648,7 +859,11 @@ mod tests {
                     handle_dispense,
                     handle_buffer_transfer,
                     handle_grind,
-                ),
+                    handle_thermostat_controls,
+                    apply_thermostats,
+                    cool_to_ambient,
+                )
+                    .chain(),
             );
         app
     }
@@ -1102,6 +1317,242 @@ mod tests {
             *app.world().get::<InteractionMode>(second).unwrap(),
             InteractionMode::Roaming,
             "the second chemist must be turned away, not silently take over"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Reaction chamber
+    // -----------------------------------------------------------------------
+
+    /// A chamber with a beaker in the slot, dialled to `target`.
+    fn chamber(app: &mut App, target: f32, powered: bool, contents: &[(&str, i32)]) -> Entity {
+        let machine = app
+            .world_mut()
+            .spawn((
+                Machine::new(MachineKind::ReactionChamber),
+                Thermostat {
+                    target: Kelvin(target),
+                    powered,
+                },
+                Transform::default(),
+            ))
+            .id();
+
+        let ids: Vec<(ReagentId, i32)> = contents
+            .iter()
+            .map(|(key, amount)| (reagent(app, key), *amount))
+            .collect();
+        let mut container = Container::new(ContainerKind::Beaker);
+        for (id, amount) in ids {
+            let overflow = container.solution.add(id, Units::whole(amount));
+            assert!(overflow.is_zero(), "the test beaker overflowed");
+        }
+        app.world_mut().spawn((container, InSlot(machine)));
+        machine
+    }
+
+    /// Runs `seconds` of game time in one-tenth-second frames.
+    fn run_for(app: &mut App, seconds: f32) {
+        let frames = (seconds / 0.1).round() as u32;
+        for _ in 0..frames {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+        }
+    }
+
+    fn slot_temperature(app: &mut App, machine: Entity) -> Kelvin {
+        slot_contents(app, machine).temperature
+    }
+
+    /// Puts the loaded beaker at `kelvin` without waiting for the chamber.
+    fn preheat_slot(app: &mut App, machine: Entity, kelvin: f32) {
+        let mut query = app.world_mut().query::<(&mut Container, &InSlot)>();
+        let (mut container, _) = query
+            .iter_mut(app.world_mut())
+            .find(|(_, slot)| slot.0 == machine)
+            .expect("a container should be loaded");
+        container.solution.temperature = Kelvin(kelvin);
+    }
+
+    #[test]
+    fn a_powered_chamber_heats_its_beaker_and_settles_on_the_target() {
+        let mut app = test_app();
+        let machine = chamber(&mut app, 400.0, true, &[("water", 20)]);
+
+        run_for(&mut app, 2.0);
+        let partway = slot_temperature(&mut app, machine);
+        assert!(
+            partway.0 > 293.15 && partway.0 < 400.0,
+            "it should be on its way, not there yet: {partway}"
+        );
+
+        // Closing the last fraction of a kelvin is the slow part of an
+        // exponential approach — a full settle takes around forty seconds at
+        // `CHAMBER_RATE`, which is deliberate: the chamber is meant to be
+        // watched, not waited on once.
+        run_for(&mut app, 60.0);
+        assert_eq!(
+            slot_temperature(&mut app, machine),
+            Kelvin(400.0),
+            "and it should stop exactly on the dial rather than creep at it"
+        );
+    }
+
+    #[test]
+    fn an_unpowered_chamber_heats_nothing() {
+        let mut app = test_app();
+        let machine = chamber(&mut app, 500.0, false, &[("water", 20)]);
+
+        run_for(&mut app, 5.0);
+
+        assert_eq!(
+            slot_temperature(&mut app, machine),
+            Kelvin::AMBIENT,
+            "the dial is set but the switch is off"
+        );
+    }
+
+    #[test]
+    fn an_empty_chamber_is_a_no_op() {
+        let mut app = test_app();
+        let machine = app
+            .world_mut()
+            .spawn((
+                Machine::new(MachineKind::ReactionChamber),
+                Thermostat {
+                    target: Kelvin(500.0),
+                    powered: true,
+                },
+                Transform::default(),
+            ))
+            .id();
+
+        // Nothing loaded. The assertion is that this runs at all: an empty slot
+        // is the normal state of the machine between batches, and a chamber
+        // that panicked on it would take the whole shift with it.
+        run_for(&mut app, 5.0);
+
+        let mut slots = app.world_mut().query::<&InSlot>();
+        assert_eq!(
+            slots.iter(app.world()).count(),
+            0,
+            "and heating an empty chamber must not conjure a container"
+        );
+        assert!(app.world().get::<Thermostat>(machine).unwrap().powered);
+    }
+
+    #[test]
+    fn a_beaker_out_of_the_chamber_cools_back_to_the_room() {
+        let mut app = test_app();
+        let machine = chamber(&mut app, 450.0, true, &[("water", 20)]);
+        run_for(&mut app, 60.0);
+        assert_eq!(slot_temperature(&mut app, machine), Kelvin(450.0));
+
+        // Switch off: the beaker is now just a hot beaker on a bench.
+        app.world_mut()
+            .get_mut::<Thermostat>(machine)
+            .unwrap()
+            .powered = false;
+        run_for(&mut app, 10.0);
+
+        let cooling = slot_temperature(&mut app, machine);
+        assert!(
+            cooling.0 < 450.0,
+            "it should be losing heat to the room: {cooling}"
+        );
+        assert!(
+            cooling.0 > Kelvin::AMBIENT.0,
+            "but slowly enough to still be worth carrying somewhere: {cooling}"
+        );
+    }
+
+    #[test]
+    fn crossing_a_recipes_minimum_temperature_is_what_fires_it() {
+        // The point of the whole machine: no gating code anywhere in the game
+        // layer. `Container::mutate` resolves on every change, and
+        // `Reaction::max_scale` has always checked `min_temp`.
+        let data = ChemData::from_ron(
+            r#"[
+                (id: "cold", name: "Cold", color: (0.2, 0.4, 0.9), dispensable: true),
+                (id: "hot",  name: "Hot",  color: (0.9, 0.4, 0.2)),
+            ]"#,
+            r#"[
+                (id: "bake", reactants: [("cold", 1)], products: [("hot", 1)],
+                 min_temp: Some((380.0)), hints: ["Needs heat."]),
+            ]"#,
+        )
+        .expect("fixture chemistry should load");
+
+        let mut app = test_app();
+        app.insert_resource(ChemDb(data));
+
+        let machine = chamber(&mut app, 400.0, true, &[("cold", 20)]);
+        let hot = reagent(&app, "hot");
+
+        run_for(&mut app, 0.5);
+        assert_eq!(
+            slot_contents(&mut app, machine).volume_of(hot),
+            Units::ZERO,
+            "still too cold"
+        );
+
+        run_for(&mut app, 20.0);
+        assert_eq!(
+            slot_contents(&mut app, machine).volume_of(hot),
+            Units::whole(20),
+            "and it fires the moment the chamber carries it over the line"
+        );
+    }
+
+    /// Reagents added to a beaker that is *already* too hot.
+    ///
+    /// This is the only way a chamber can overheat something, and the reason is
+    /// worth writing down: the resolver is instant, so a reaction fires the
+    /// moment the rising temperature crosses its `min_temp` — hundreds of
+    /// degrees before the chamber reaches its overheat threshold. Heating a
+    /// loaded beaker slowly can therefore never spoil it. What spoils a batch
+    /// is putting the reagents into a chamber somebody already left running,
+    /// or a reaction exothermic enough to cook itself (covered in
+    /// `crates/chem_sim/tests/reactions.rs`).
+    #[test]
+    fn reagents_dropped_into_an_already_hot_chamber_waste_the_batch() {
+        let data = ChemData::from_ron(
+            r#"[
+                (id: "cold", name: "Cold", color: (0.2, 0.4, 0.9), dispensable: true),
+                (id: "hot",  name: "Hot",  color: (0.9, 0.4, 0.2)),
+            ]"#,
+            r#"[
+                (id: "bake", reactants: [("cold", 1)], products: [("hot", 1)],
+                 min_temp: Some((380.0)), overheat_temp: Some((420.0)),
+                 overheat: ReducedYield(over: 60.0), hints: ["Needs heat."]),
+            ]"#,
+        )
+        .expect("fixture chemistry should load");
+
+        let mut app = test_app();
+        app.insert_resource(ChemDb(data));
+
+        let machine = chamber(&mut app, 450.0, true, &[("cold", 20)]);
+        // Already at 440K when the reagents are in it: hot enough to run the
+        // recipe, and 20K past the point where it starts going wrong. Nothing
+        // has resolved yet, because nothing has changed the solution.
+        preheat_slot(&mut app, machine, 440.0);
+
+        // One frame of the chamber nudging the temperature is enough to trigger
+        // the resolve, and it resolves hot.
+        run_for(&mut app, 0.2);
+
+        let made = slot_contents(&mut app, machine).volume_of(reagent(&app, "hot"));
+        assert!(
+            made.is_positive() && made < Units::whole(20),
+            "past the threshold the yield should fall short, got {made} from 20u"
+        );
+        assert_eq!(
+            slot_contents(&mut app, machine).volume_of(reagent(&app, "cold")),
+            Units::ZERO,
+            "and the reactants go in full regardless — that is what overheating costs"
         );
     }
 }

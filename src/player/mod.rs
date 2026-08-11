@@ -11,8 +11,10 @@ use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use bevy_replicon::prelude::*;
+use chem_sim::StatusKind;
 use serde::{Deserialize, Serialize};
 
+use crate::body::{Body, Bloodstream};
 use crate::interaction::{Focus, InteractionMode};
 use crate::lab::{Solid, ROOM_HALF_X, ROOM_HALF_Z};
 use crate::AppState;
@@ -20,6 +22,7 @@ use crate::AppState;
 pub const EYE_HEIGHT: f32 = 1.7;
 
 const PLAYER_RADIUS: f32 = 0.35;
+/// Unhurried, unmedicated walking pace.
 const WALK_SPEED: f32 = 4.2;
 const MOUSE_SENSITIVITY: f32 = 0.0022;
 /// Just under 90°, so looking straight up or down never flips the view.
@@ -151,6 +154,10 @@ fn spawn_chemist(commands: &mut Commands, client: ClientId, lane: f32) -> Entity
             Look::default(),
             InteractionMode::default(),
             Focus::default(),
+            // A chemist is a person now. Both replicate, so each end can see
+            // how the other is doing without asking.
+            Body::default(),
+            Bloodstream::default(),
             Transform::from_xyz(lane, EYE_HEIGHT, 2.6),
             Visibility::default(),
             Replicated,
@@ -226,17 +233,35 @@ fn send_move_input(
     });
 }
 
+/// How fast this chemist is currently moving.
+///
+/// Read on the server inside [`apply_move_input`], never on the client. That is
+/// not incidental: movement is server-authoritative with no prediction, so if
+/// the client scaled its own speed the two would disagree and the player would
+/// rubber-band every time they took a stimulant.
+fn walk_speed(blood: &Bloodstream, body: &Body) -> f32 {
+    if body.0.collapsed {
+        return 0.0;
+    }
+    let hastened = blood.0.status(StatusKind::Hastened).intensity;
+    let sluggish = blood.0.status(StatusKind::Sluggish).intensity;
+    // Hastened and sluggish cancel rather than compete, so taking both is
+    // simply a waste of two chemicals.
+    let factor = (1.0 + 0.6 * hastened - 0.4 * sluggish).clamp(0.25, 2.0);
+    WALK_SPEED * factor
+}
+
 /// Server-side movement. The only place a chemist's position changes.
 fn apply_move_input(
     time: Res<Time>,
     mut inputs: MessageReader<FromClient<MoveInput>>,
-    mut chemists: Query<(&mut Transform, &mut Look, &Chemist)>,
+    mut chemists: Query<(&mut Transform, &mut Look, &Chemist, &Body, &Bloodstream)>,
     solids: Query<(&Transform, &Solid), Without<Chemist>>,
 ) {
     for input in inputs.read() {
-        let Some((mut transform, mut look, _)) = chemists
+        let Some((mut transform, mut look, _, body, blood)) = chemists
             .iter_mut()
-            .find(|(_, _, chemist)| chemist.client == input.client_id)
+            .find(|(_, _, chemist, _, _)| chemist.client == input.client_id)
         else {
             continue;
         };
@@ -247,9 +272,14 @@ fn apply_move_input(
             continue;
         }
 
+        let speed = walk_speed(blood, body);
+        if speed <= 0.0 {
+            continue;
+        }
+
         let local = Vec3::new(input.direction.x, 0.0, input.direction.y);
         let step = Quat::from_rotation_y(input.yaw) * local;
-        let mut position = transform.translation + step * WALK_SPEED * time.delta_secs();
+        let mut position = transform.translation + step * speed * time.delta_secs();
         position.y = EYE_HEIGHT;
 
         for (solid_transform, solid) in &solids {

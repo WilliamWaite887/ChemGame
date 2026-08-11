@@ -1,8 +1,10 @@
 //! ChemGame — a focused recreation of the Space Station 13/14 chemist.
 
+mod body;
 mod chem_data;
 mod containers;
 mod crew;
+mod hazards;
 mod interaction;
 mod knowledge;
 mod lab;
@@ -45,8 +47,14 @@ fn main() {
             ),
             produce::ProducePlugin,
             radio::RadioPlugin,
-            player::PlayerPlugin,
-            interaction::InteractionPlugin,
+            // The chemist themselves: who they are, what they are looking at,
+            // and what the chemistry is doing to them.
+            (
+                player::PlayerPlugin,
+                interaction::InteractionPlugin,
+                body::BodyPlugin,
+                hazards::HazardPlugin,
+            ),
             ui::UiPlugin,
         ))
         .run();

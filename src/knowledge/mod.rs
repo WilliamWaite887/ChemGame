@@ -442,14 +442,21 @@ mod tests {
         frontier.sort();
 
         // Arithrazine is two steps out and must NOT appear until hyronalin is
-        // learned.
+        // learned. Phlogiston likewise, because it needs sulphuric acid first —
+        // which is the check that matters most here, since it is the one recipe
+        // that can hurt you.
         assert_eq!(
             frontier,
             vec![
                 "bicaridine",
+                "chloral_hydrate",
                 "dermaline",
                 "dexalin",
+                "hooch",
+                "hyperzine",
                 "hyronalin",
+                "sulphuric_acid",
+                "synaptizine",
                 "tricordrazine"
             ]
         );

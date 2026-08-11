@@ -10,6 +10,7 @@ use bevy_replicon::prelude::*;
 use chem_sim::{resolve, ResolveReport, Solution, Units};
 use serde::{Deserialize, Serialize};
 
+use crate::body::Body;
 use crate::chem_data::ChemDb;
 use crate::interaction::{InteractRequested, Interactable};
 use crate::machines::chemist_entity;
@@ -47,6 +48,9 @@ pub enum ContainerKind {
     LargeBeaker,
     Bottle,
     Pill,
+    /// Draws from a container and injects. The only route that delivers a whole
+    /// dose at once, which is what makes it worth the trip to the ChemMaster.
+    Syringe,
 }
 
 impl ContainerKind {
@@ -56,6 +60,7 @@ impl ContainerKind {
             ContainerKind::LargeBeaker => Units::whole(100),
             ContainerKind::Bottle => Units::whole(30),
             ContainerKind::Pill => Units::whole(20),
+            ContainerKind::Syringe => Units::whole(15),
         }
     }
 
@@ -65,6 +70,7 @@ impl ContainerKind {
             ContainerKind::LargeBeaker => "Large Beaker",
             ContainerKind::Bottle => "Bottle",
             ContainerKind::Pill => "Pill",
+            ContainerKind::Syringe => "Syringe",
         }
     }
 
@@ -75,7 +81,20 @@ impl ContainerKind {
             ContainerKind::LargeBeaker => (0.07, 0.17),
             ContainerKind::Bottle => (0.035, 0.10),
             ContainerKind::Pill => (0.022, 0.012),
+            ContainerKind::Syringe => (0.012, 0.09),
         }
+    }
+
+    /// Whether this is swallowed or injected in one go rather than measured out.
+    ///
+    /// What separates a dose from bulk supply. A beaker of something gets
+    /// portioned later; a pill, a bottle or a syringe is taken as it comes,
+    /// which is why only these can be graded as an overdose.
+    pub fn is_single_dose(self) -> bool {
+        matches!(
+            self,
+            ContainerKind::Pill | ContainerKind::Bottle | ContainerKind::Syringe
+        )
     }
 }
 
@@ -220,6 +239,18 @@ fn spawn_starting_glassware(
         );
     }
 
+    // One syringe to start with. Cargo's restock deliberately ignores syringes
+    // — they come out of the ChemMaster — so this is the only one that exists
+    // until the player makes another.
+    spawn_container(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &assets,
+        ContainerKind::Syringe,
+        Vec3::new(-0.7, bench_top, -1.2),
+    );
+
     commands.insert_resource(assets);
 }
 
@@ -242,11 +273,16 @@ fn handle_pickup(
     pickable: Pickable,
     held: Query<&HeldBy>,
     chemists: Query<(Entity, &Chemist)>,
+    bodies: Query<&Body>,
 ) {
     for request in requests.read() {
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
+        // Someone on the floor cannot reach the bench.
+        if bodies.get(player).is_ok_and(|body| body.0.collapsed) {
+            continue;
+        }
         if !pickable.contains(request.target) || held.contains(request.target) {
             continue;
         }

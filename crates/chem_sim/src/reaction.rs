@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::reagent::{ReagentId, ReagentRegistry};
 use crate::solution::Solution;
+use crate::thermal::Overheat;
 use crate::units::{Kelvin, Units};
 
 /// Index of a reaction within a [`ReactionSet`].
@@ -44,6 +45,17 @@ pub struct ReactionDef {
     pub min_temp: Option<Kelvin>,
     #[serde(default)]
     pub max_temp: Option<Kelvin>,
+    /// Past this the reaction **still runs**, but goes wrong.
+    ///
+    /// Deliberately not `max_temp`, which simply stops it. An overheat is the
+    /// more interesting failure: the reactants are gone and you do not find out
+    /// what it cost until you look at the yield.
+    ///
+    /// RON will not coerce an integer into this `f32`. Write `Some((420.0))`.
+    #[serde(default)]
+    pub overheat_temp: Option<Kelvin>,
+    #[serde(default)]
+    pub overheat: Overheat,
     /// Higher priority wins when two reactions compete for the same reagent.
     #[serde(default)]
     pub priority: i32,
@@ -65,6 +77,8 @@ pub struct Reaction {
     pub products: Vec<(ReagentId, Units)>,
     pub min_temp: Option<Kelvin>,
     pub max_temp: Option<Kelvin>,
+    pub overheat_temp: Option<Kelvin>,
+    pub overheat: Overheat,
     pub priority: i32,
     pub effects: Vec<ReactionEffect>,
     pub hints: Vec<String>,
@@ -120,6 +134,23 @@ impl Reaction {
     pub fn product_ids(&self) -> impl Iterator<Item = ReagentId> + '_ {
         self.products.iter().map(|(id, _)| *id)
     }
+
+    /// Share of the normal product yield at this temperature.
+    ///
+    /// [`Units::ONE`] unless the reaction names an `overheat_temp` and the
+    /// solution is past it — so every recipe written before this existed is
+    /// completely unaffected.
+    pub fn yield_factor(&self, temperature: Kelvin) -> Units {
+        match self.overheat_temp {
+            Some(threshold) => self.overheat.yield_factor(threshold, temperature),
+            None => Units::ONE,
+        }
+    }
+
+    /// Whether this is hot enough to be going wrong right now.
+    pub fn is_overheated(&self, temperature: Kelvin) -> bool {
+        matches!(self.overheat_temp, Some(threshold) if temperature > threshold)
+    }
 }
 
 /// Every known reaction.
@@ -174,6 +205,8 @@ impl ReactionSet {
             products,
             min_temp: def.min_temp,
             max_temp: def.max_temp,
+            overheat_temp: def.overheat_temp,
+            overheat: def.overheat,
             priority: def.priority,
             effects: def.effects,
             hints: def.hints,

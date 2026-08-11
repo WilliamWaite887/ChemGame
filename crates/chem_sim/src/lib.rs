@@ -24,16 +24,25 @@
 //! # }
 //! ```
 
+pub mod body;
+pub mod effect;
 pub mod reaction;
 pub mod reagent;
 pub mod resolver;
 pub mod solution;
+pub mod thermal;
 pub mod units;
 
+pub use body::{
+    blast_radius, explosion_damage, metabolise, Bloodstream, ExposureReport, Health, StatusState,
+    TickReport, Vitals, COLLAPSE, MAX_DAMAGE_PER_KIND, RECOVER, TICK_SECONDS,
+};
+pub use effect::{Damage, DamageKind, ReagentEffect, Route, StatusKind};
 pub use reaction::{ChemDataError, Reaction, ReactionDef, ReactionEffect, ReactionId, ReactionSet};
-pub use reagent::{Reagent, ReagentDef, ReagentId, ReagentRegistry};
+pub use reagent::{Reagent, ReagentDef, ReagentId, ReagentRegistry, DEFAULT_METABOLISM};
 pub use resolver::{resolve, ReactionEvent, ResolveReport, MAX_ITERATIONS};
 pub use solution::Solution;
+pub use thermal::{approach, boil_off, Overheat};
 pub use units::{Kelvin, Units};
 
 /// Every reagent and reaction in the game, loaded from data.

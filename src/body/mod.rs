@@ -1,0 +1,1045 @@
+//! Chemists with bodies.
+//!
+//! The simulation lives in `chem_sim::body`; this is the Bevy wrapper around
+//! it. Everything here is entities, timers, messages and authority — the
+//! arithmetic of being poisoned is deliberately somewhere a unit test can reach
+//! without an `App`.
+//!
+//! Authority sits with the server, like every other mutation in the game. The
+//! tick runs there and the result reaches clients as replicated components, so
+//! there is nothing to predict and nothing to reconcile.
+
+use bevy::ecs::entity::MapEntities;
+use bevy::prelude::*;
+use bevy_replicon::prelude::*;
+use chem_sim::body::{Health, TICK_SECONDS};
+use chem_sim::{metabolise, DamageKind, Route, Units};
+use serde::{Deserialize, Serialize};
+
+use crate::chem_data::ChemDb;
+use crate::containers::{Container, ContainerKind, HeldBy};
+use crate::machines::chemist_entity;
+use crate::player::Chemist;
+use crate::AppState;
+
+/// How much of a beaker or bottle one press swallows.
+///
+/// A mouthful rather than the lot: drinking 50u of something in one keypress
+/// would make the syringe pointless and the mistake unrecoverable.
+const SIP: Units = Units::whole(5);
+
+/// Ticks to run at most in one frame.
+///
+/// A frame that stalled — an asset load, a window drag, a client joining — must
+/// not deliver twenty ticks of plasma at once. Clamping here rather than
+/// relying on `Time<Fixed>`'s own catch-up keeps the limit somewhere it can be
+/// reasoned about and tested.
+const MAX_CATCHUP_TICKS: u32 = 3;
+
+/// Seconds before medical comes and drags a collapsed chemist out.
+///
+/// This is the anti-softlock, and singleplayer needs it: a chemist who goes
+/// down alone with brute damage cannot walk, cannot drink, and cannot reach the
+/// dispenser to make the thing that would fix them. In co-op the other chemist
+/// can beat this clock with a syringe, which is the best reason the game has
+/// for a second person being in the room.
+const MEDBAY_SECONDS: f32 = 25.0;
+
+/// Reputation lost for going down on shift. Matches `Outcome::Wrong`: it is the
+/// same size of mistake.
+const COLLAPSE_PENALTY: i32 = -3;
+
+/// How hurt medical hands you back. Below `RECOVER`, so you are on your feet,
+/// and not by much, so it is not a free heal.
+const PATCHED_UP: Health = Units::whole(60);
+
+pub struct BodyPlugin;
+
+impl Plugin for BodyPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<MetabolismClock>()
+            .add_client_message::<ConsumeRequested>(Channel::Ordered)
+            .add_mapped_client_message::<ApplyHeldRequested>(Channel::Ordered)
+            .add_systems(
+                OnEnter(crate::shift::ShiftPhase::Prep),
+                clear_bodies_at_prep.run_if(in_state(ClientState::Disconnected)),
+            )
+            .add_systems(
+                Update,
+                (
+                    (
+                        handle_apply_held,
+                        handle_consume,
+                        run_metabolism,
+                        handle_collapse,
+                        run_medbay_retrieval,
+                    )
+                        .chain()
+                        .run_if(in_state(ClientState::Disconnected)),
+                    (request_consume, request_apply_held),
+                )
+                    .run_if(in_state(AppState::Playing)),
+            );
+    }
+}
+
+/// How hurt a chemist is.
+///
+/// A newtype in the shape of `Buffer(Solution)`, and separate from
+/// [`Bloodstream`] so the HUD can watch `Changed<Body>` without waking up every
+/// time a reagent ticks down by 0.4u.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Body(pub chem_sim::Vitals);
+
+/// What is currently inside a chemist.
+#[derive(Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Bloodstream(pub chem_sim::Bloodstream);
+
+/// Drives the 2-second metabolism cycle.
+///
+/// A plain `Timer` in `Update` rather than a `FixedUpdate` schedule, and that
+/// is a considered choice. `Time<Fixed>` is a single global: setting it to two
+/// seconds would set it for anything that ever wants a fixed step later, and
+/// metabolism's cadence is a gameplay number rather than the app's simulation
+/// rate. It also keeps the headless tests honest — they drive `app.update()` in
+/// a tight loop where microseconds of real time elapse, so a two-second fixed
+/// system would essentially never fire.
+#[derive(Resource)]
+pub struct MetabolismClock(pub Timer);
+
+impl Default for MetabolismClock {
+    fn default() -> Self {
+        MetabolismClock(Timer::from_seconds(TICK_SECONDS, TimerMode::Repeating))
+    }
+}
+
+/// Drink or swallow whatever is in hand.
+///
+/// No fields, exactly like `DropRequested`: the sender's identity comes from
+/// the connection, never from the message, so one client cannot make the other
+/// chemist swallow something.
+#[derive(Message, Serialize, Deserialize, Clone)]
+pub struct ConsumeRequested;
+
+/// Use what is in hand on what is under the crosshair.
+///
+/// Carries the target but *not* the actor, for the same reason
+/// `InteractRequested` does not: a message that named its own actor would let
+/// one client inject the other chemist by editing a field.
+///
+/// The server decides what the pair means. A syringe on a container draws; a
+/// syringe on a body injects; a syringe on nothing injects you.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
+pub struct ApplyHeldRequested {
+    #[entities]
+    pub target: Option<Entity>,
+}
+
+/// **R** — take a mouthful.
+///
+/// Deliberately its own key rather than sharing `E`. `E` already means "pick up
+/// or use", and a misfire that made you drink the plasma you were reaching for
+/// is not an acceptable failure mode of a button you press constantly.
+fn request_consume(
+    keys: Res<ButtonInput<KeyCode>>,
+    players: Query<&crate::interaction::InteractionMode, With<crate::player::LocalPlayer>>,
+    mut requests: MessageWriter<ConsumeRequested>,
+) {
+    if !keys.just_pressed(KeyCode::KeyR) {
+        return;
+    }
+    // Not while a panel is open: R is a text-adjacent key and the panel has
+    // focus.
+    if players.iter().any(|mode| mode.is_roaming()) {
+        requests.write(ConsumeRequested);
+    }
+}
+
+/// **F** — use the thing in your hand on the thing you are looking at.
+///
+/// Deliberately not `E`. `E` already means "pick up, or load this machine", and
+/// walking up to the ChemMaster holding a syringe would make it ambiguous
+/// whether you meant to load the syringe or inject the machine.
+fn request_apply_held(
+    keys: Res<ButtonInput<KeyCode>>,
+    players: Query<(&crate::interaction::Focus, &crate::interaction::InteractionMode), With<crate::player::LocalPlayer>>,
+    mut requests: MessageWriter<ApplyHeldRequested>,
+) {
+    if !keys.just_pressed(KeyCode::KeyF) {
+        return;
+    }
+    for (focus, mode) in &players {
+        if mode.is_roaming() {
+            requests.write(ApplyHeldRequested {
+                target: focus.target,
+            });
+        }
+    }
+}
+
+/// Draws into a syringe, or empties one into somebody.
+///
+/// The whole of the syringe's behaviour lives here, keyed off what is in hand
+/// and what is being pointed at. Anything else in hand is ignored — the beaker
+/// you are carrying is not a weapon.
+fn handle_apply_held(
+    db: Res<ChemDb>,
+    mut requests: MessageReader<FromClient<ApplyHeldRequested>>,
+    chemists: Query<(Entity, &Chemist)>,
+    mut bodies: Query<(&mut Body, &mut Bloodstream)>,
+    held: Query<(Entity, &HeldBy)>,
+    mut containers: Query<&mut Container>,
+) {
+    for request in requests.read() {
+        let Some(player) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
+        if bodies.get(player).is_ok_and(|(body, _)| body.0.collapsed) {
+            continue;
+        }
+        let Some((syringe_entity, _)) = held.iter().find(|(_, holder)| holder.0 == player) else {
+            continue;
+        };
+        if !containers
+            .get(syringe_entity)
+            .is_ok_and(|container| container.kind == ContainerKind::Syringe)
+        {
+            continue;
+        }
+
+        // Pointing at a container means draw; anything else means inject.
+        let drawing = request
+            .target
+            .is_some_and(|target| target != syringe_entity && containers.contains(target));
+
+        if drawing {
+            let source_entity = request.target.expect("a draw target was just checked");
+            let space = {
+                let syringe = containers
+                    .get(syringe_entity)
+                    .expect("the syringe was just checked");
+                syringe.solution.available_volume()
+            };
+            if !space.is_positive() {
+                continue;
+            }
+
+            // Proportional, because `transfer_to` is: you cannot syringe the
+            // oxygen out of a mixed beaker and leave the sugar behind.
+            let drawn = {
+                let Ok(mut source) = containers.get_mut(source_entity) else {
+                    continue;
+                };
+                source
+                    .mutate(&db, |solution| solution.split(space))
+                    .0
+            };
+            if let Ok(mut syringe) = containers.get_mut(syringe_entity) {
+                syringe.mutate(&db, |solution| {
+                    for (reagent, amount) in drawn.iter() {
+                        let _ = solution.add(reagent, amount);
+                    }
+                });
+            }
+            continue;
+        }
+
+        // Injecting. The target is another chemist if one is under the
+        // crosshair, otherwise yourself.
+        let patient = match request.target {
+            Some(target) if bodies.contains(target) => target,
+            _ => player,
+        };
+        let Ok(mut syringe) = containers.get_mut(syringe_entity) else {
+            continue;
+        };
+        let mut dose = syringe
+            .mutate(&db, |solution| solution.split(solution.total_volume()))
+            .0;
+        if dose.total_volume().is_zero() {
+            continue;
+        }
+        let Ok((mut body, mut blood)) = bodies.get_mut(patient) else {
+            continue;
+        };
+        blood
+            .0
+            .receive(&mut dose, Route::Injected, &mut body.0, &db);
+    }
+}
+
+fn handle_consume(
+    mut commands: Commands,
+    db: Res<ChemDb>,
+    mut requests: MessageReader<FromClient<ConsumeRequested>>,
+    chemists: Query<(Entity, &Chemist)>,
+    mut bodies: Query<(&mut Body, &mut Bloodstream)>,
+    held: Query<(Entity, &HeldBy)>,
+    mut containers: Query<&mut Container>,
+) {
+    for request in requests.read() {
+        let Some(player) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
+        let Ok((mut body, mut blood)) = bodies.get_mut(player) else {
+            continue;
+        };
+        if body.0.collapsed {
+            continue;
+        }
+        let Some((entity, _)) = held.iter().find(|(_, holder)| holder.0 == player) else {
+            continue;
+        };
+        let Ok(mut container) = containers.get_mut(entity) else {
+            continue;
+        };
+
+        // A pill is swallowed whole; anything you drink from gives a mouthful.
+        let whole = matches!(container.kind, ContainerKind::Pill);
+        let amount = if whole {
+            container.solution.total_volume()
+        } else {
+            SIP
+        };
+        let (mut dose, _) = container.mutate(&db, |solution| solution.split(amount));
+        if dose.total_volume().is_zero() {
+            continue;
+        }
+
+        blood
+            .0
+            .receive(&mut dose, Route::Ingested, &mut body.0, &db);
+
+        // An empty pill is a wrapper. Nothing else despawns on use, because a
+        // beaker you have drained is still a beaker.
+        if whole {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Runs the metabolism tick for every body in the lab.
+fn run_metabolism(
+    time: Res<Time>,
+    db: Option<Res<ChemDb>>,
+    mut clock: ResMut<MetabolismClock>,
+    mut bodies: Query<(&mut Body, &mut Bloodstream)>,
+) {
+    let Some(db) = db else {
+        return;
+    };
+    let ticks = clock
+        .0
+        .tick(time.delta())
+        .times_finished_this_tick()
+        .min(MAX_CATCHUP_TICKS);
+    if ticks == 0 {
+        return;
+    }
+
+    for (mut body, mut blood) in &mut bodies {
+        // An untouched chemist with no damage has nothing a tick could change,
+        // and mutating through the `Mut` guard would flag the component as
+        // changed and wake the HUD and replication for nothing.
+        if blood.0.is_empty() && !body.0.is_hurt() {
+            continue;
+        }
+        for _ in 0..ticks {
+            metabolise(&mut body.0, &mut blood.0, &db);
+        }
+    }
+}
+
+/// Counts down to medical arriving for a chemist who is on the floor.
+#[derive(Component)]
+pub struct MedbayRetrieval(pub f32);
+
+/// Everything that happens the moment a chemist goes down.
+///
+/// Split from the metabolism tick because a body can also collapse from a
+/// blast, and both paths must let go of the machine and the beaker. Keyed off
+/// `Added` rather than the tick report so there is exactly one place that
+/// notices, whatever caused it.
+#[allow(clippy::too_many_arguments)]
+fn handle_collapse(
+    mut commands: Commands,
+    mut shift: ResMut<crate::orders::Shift>,
+    mut radio: ResMut<crate::radio::RadioLog>,
+    bodies: Query<(Entity, &Body), Changed<Body>>,
+    down: Query<(), With<MedbayRetrieval>>,
+    mut modes: Query<&mut crate::interaction::InteractionMode>,
+    mut machines: Query<&mut crate::machines::Machine>,
+    held: Query<(Entity, &HeldBy)>,
+    transforms: Query<&Transform>,
+) {
+    for (player, body) in &bodies {
+        if !body.0.collapsed || down.contains(player) {
+            continue;
+        }
+
+        // Let go of whatever they were holding, where they stand.
+        if let Ok(transform) = transforms.get(player) {
+            for (container, holder) in &held {
+                if holder.0 != player {
+                    continue;
+                }
+                let ahead = transform.translation + transform.forward() * 0.4;
+                commands
+                    .entity(container)
+                    .remove::<HeldBy>()
+                    .insert(Transform::from_xyz(ahead.x, 0.08, ahead.z));
+            }
+        }
+
+        // And of whatever machine they had open, or it stays claimed forever
+        // and the other chemist can never use it.
+        if let Ok(mut mode) = modes.get_mut(player) {
+            crate::interaction::leave_machine(player, &mut mode, &mut machines);
+        }
+
+        commands
+            .entity(player)
+            .insert(MedbayRetrieval(MEDBAY_SECONDS));
+        shift.reputation += COLLAPSE_PENALTY;
+        radio.push(crate::radio::RadioEntry {
+            channel: "MED".to_string(),
+            text: "Chemistry, we're reading a crew member down in your lab. \
+                   Someone is on the way."
+                .to_string(),
+            good: false,
+        });
+    }
+}
+
+/// Medical arrives, patches you up, and leaves you by the door.
+fn run_medbay_retrieval(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut radio: ResMut<crate::radio::RadioLog>,
+    mut down: Query<(
+        Entity,
+        &mut MedbayRetrieval,
+        &mut Body,
+        &mut Bloodstream,
+        &mut Transform,
+    )>,
+) {
+    for (player, mut retrieval, mut body, mut blood, mut transform) in &mut down {
+        // Somebody got to them first — the co-op save.
+        if !body.0.collapsed {
+            commands.entity(player).remove::<MedbayRetrieval>();
+            continue;
+        }
+
+        retrieval.0 -= time.delta_secs();
+        if retrieval.0 > 0.0 {
+            continue;
+        }
+
+        // Patched up, not healed: enough to stand, not enough to be careless.
+        // The bloodstream is flushed, because whatever put them down is still
+        // in there and would put them straight back down.
+        body.0 = chem_sim::Vitals {
+            damage: chem_sim::Damage {
+                brute: PATCHED_UP.min(body.0.damage.brute),
+                burn: PATCHED_UP.min(body.0.damage.burn),
+                toxin: PATCHED_UP.min(body.0.damage.toxin),
+                oxygen: Units::ZERO,
+            },
+            collapsed: false,
+        };
+        // Scale the whole body back under the recovery line in one step rather
+        // than clamping each type, which for four maxed types would still leave
+        // them collapsed.
+        while body.0.total() >= chem_sim::RECOVER {
+            for kind in DamageKind::ALL {
+                let slot = body.0.damage.get_mut(kind);
+                *slot = (*slot - Units::whole(5)).clamp_non_negative();
+            }
+        }
+        *blood = Bloodstream::default();
+
+        // Left by the door, which is where medical would have dragged them.
+        transform.translation = Vec3::new(
+            crate::lab::DOOR_MIN_X + 0.4,
+            crate::player::EYE_HEIGHT,
+            crate::lab::ROOM_HALF_Z - 0.8,
+        );
+        commands.entity(player).remove::<MedbayRetrieval>();
+        radio.push(crate::radio::RadioEntry {
+            channel: "MED".to_string(),
+            text: "Got them back on their feet. Try not to make a habit of it.".to_string(),
+            good: false,
+        });
+    }
+}
+
+/// Medical patch everyone up between shifts.
+///
+/// This is why no health lives in `progress.ron`: damage never crosses a shift
+/// boundary, so there is no save field, no migration and no version bump. A
+/// catastrophic shift costs reputation, not the career — and prep stays the
+/// safe window it was designed to be.
+fn clear_bodies_at_prep(mut bodies: Query<(&mut Body, &mut Bloodstream)>) {
+    for (mut body, mut blood) in &mut bodies {
+        if body.0 != chem_sim::Vitals::default() {
+            body.0 = chem_sim::Vitals::default();
+        }
+        if !blood.0.is_empty() {
+            *blood = Bloodstream::default();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Headless: message in, body out. No window, no renderer.
+    //!
+    //! The arithmetic of metabolism is covered in `crates/chem_sim/tests/body.rs`
+    //! with no `App` at all. What is left to test here is the wiring — the
+    //! clock, the keypress path, and who is allowed to act.
+
+    use super::*;
+    use crate::containers::HeldBy;
+    use bevy::app::App;
+    use chem_sim::{ChemData, DamageKind, Solution};
+    use std::time::Duration;
+
+    fn test_app() -> App {
+        let data = ChemData::from_ron(
+            include_str!("../../assets/data/chem.reagents.ron"),
+            include_str!("../../assets/data/chem.reactions.ron"),
+        )
+        .expect("chemistry data should load");
+
+        let mut app = App::new();
+        app.insert_resource(ChemDb(data))
+            .init_resource::<MetabolismClock>()
+            .init_resource::<Time>()
+            .add_message::<FromClient<ConsumeRequested>>()
+            .add_message::<FromClient<ApplyHeldRequested>>()
+            .add_systems(
+                Update,
+                (handle_apply_held, handle_consume, run_metabolism).chain(),
+            );
+        app
+    }
+
+    /// A chemist holding `kind` filled with `amount` of `reagent`.
+    fn chemist_holding(app: &mut App, kind: ContainerKind, reagent: &str, amount: i32) -> (Entity, Entity) {
+        let id = app.world().resource::<ChemDb>().reagent(reagent);
+        let player = app
+            .world_mut()
+            .spawn((
+                Chemist {
+                    client: ClientId::Server,
+                },
+                Body::default(),
+                Bloodstream::default(),
+            ))
+            .id();
+
+        let mut container = Container::new(kind);
+        let _ = container.solution.add(id, Units::whole(amount));
+        let held = app.world_mut().spawn((container, HeldBy(player))).id();
+        (player, held)
+    }
+
+    fn consume(app: &mut App) {
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: ConsumeRequested,
+        });
+        app.update();
+    }
+
+    /// Moves the clock on without running any real time.
+    fn advance(app: &mut App, seconds: f32) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f32(seconds));
+        app.update();
+    }
+
+    /// Puts a dose straight into the blood, skipping the container and the
+    /// keypress. `Vitals` is `Copy`, so it can be taken out, handed to
+    /// `receive` alongside the borrowed bloodstream, and written back.
+    fn inject(app: &mut App, player: Entity, reagent: &str, amount: i32) {
+        let db = app.world().resource::<ChemDb>().0.clone();
+        let mut dose = Solution::unbounded();
+        let _ = dose.add(db.reagent(reagent), Units::whole(amount));
+
+        let mut entity = app.world_mut().entity_mut(player);
+        let mut vitals = entity.get::<Body>().unwrap().0;
+        entity
+            .get_mut::<Bloodstream>()
+            .unwrap()
+            .0
+            .receive(&mut dose, Route::Injected, &mut vitals, &db);
+        entity.get_mut::<Body>().unwrap().0 = vitals;
+    }
+
+    fn blood_of(app: &App, player: Entity) -> &chem_sim::Bloodstream {
+        &app.world().get::<Bloodstream>(player).unwrap().0
+    }
+
+    #[test]
+    fn drinking_takes_a_mouthful_out_of_the_beaker_and_into_the_stomach() {
+        let mut app = test_app();
+        let (player, beaker) = chemist_holding(&mut app, ContainerKind::Beaker, "dylovene", 40);
+        let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
+
+        consume(&mut app);
+
+        let left = app.world().get::<Container>(beaker).unwrap();
+        assert_eq!(
+            left.solution.volume_of(dylovene),
+            Units::whole(35),
+            "a sip, not the lot"
+        );
+        // 60% of a 5u sip lands, and it lands in the stomach rather than the
+        // blood — that delay is the whole difference from a syringe.
+        assert_eq!(blood_of(&app, player).stomach.volume_of(dylovene), Units::whole(3));
+        assert!(blood_of(&app, player).blood.is_empty());
+    }
+
+    #[test]
+    fn a_pill_is_swallowed_whole_and_the_wrapper_goes_with_it() {
+        let mut app = test_app();
+        let (player, pill) = chemist_holding(&mut app, ContainerKind::Pill, "dylovene", 20);
+        let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
+
+        consume(&mut app);
+
+        assert!(
+            app.world().get_entity(pill).is_err(),
+            "an emptied pill is a wrapper, not glassware"
+        );
+        assert_eq!(
+            blood_of(&app, player).stomach.volume_of(dylovene),
+            Units::whole(12),
+            "all 20u swallowed, 60% of it absorbed"
+        );
+    }
+
+    #[test]
+    fn drinking_an_empty_beaker_does_nothing() {
+        let mut app = test_app();
+        let (player, beaker) = chemist_holding(&mut app, ContainerKind::Beaker, "water", 0);
+
+        consume(&mut app);
+
+        assert!(app.world().get_entity(beaker).is_ok());
+        assert!(blood_of(&app, player).is_empty());
+    }
+
+    #[test]
+    fn a_collapsed_chemist_cannot_drink() {
+        let mut app = test_app();
+        let (player, beaker) = chemist_holding(&mut app, ContainerKind::Beaker, "dylovene", 40);
+        app.world_mut().get_mut::<Body>(player).unwrap().0.collapsed = true;
+
+        consume(&mut app);
+
+        let left = app.world().get::<Container>(beaker).unwrap();
+        assert_eq!(
+            left.solution.total_volume(),
+            Units::whole(40),
+            "someone on the floor cannot reach their own beaker"
+        );
+    }
+
+    #[test]
+    fn the_clock_ticks_once_every_two_seconds() {
+        let mut app = test_app();
+        let (player, _) = chemist_holding(&mut app, ContainerKind::Beaker, "water", 0);
+        // Plasma does 3 toxin per tick, which makes the clock readable.
+        inject(&mut app, player, "plasma", 10);
+
+        advance(&mut app, 1.0);
+        assert_eq!(
+            app.world().get::<Body>(player).unwrap().0.damage.toxin,
+            Units::ZERO,
+            "one second is not a tick"
+        );
+
+        advance(&mut app, 1.0);
+        assert_eq!(
+            app.world().get::<Body>(player).unwrap().0.damage.toxin,
+            Units::whole(3),
+            "two seconds is"
+        );
+    }
+
+    #[test]
+    fn a_stalled_frame_cannot_deliver_a_whole_shifts_worth_of_poison() {
+        let mut app = test_app();
+        let (player, _) = chemist_holding(&mut app, ContainerKind::Beaker, "water", 0);
+        inject(&mut app, player, "plasma", 50);
+
+        // One 20-second frame — an asset load, a window drag, a client joining.
+        advance(&mut app, 20.0);
+
+        assert_eq!(
+            app.world().get::<Body>(player).unwrap().0.damage.toxin,
+            Units::whole(9),
+            "clamped to {MAX_CATCHUP_TICKS} ticks, not the ten the clock is owed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Syringe
+    // -----------------------------------------------------------------------
+
+    fn apply(app: &mut App, target: Option<Entity>) {
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: ApplyHeldRequested { target },
+        });
+        app.update();
+    }
+
+    /// A loose beaker on the bench holding `contents`.
+    fn bench_beaker(app: &mut App, contents: &[(&str, i32)]) -> Entity {
+        let db = app.world().resource::<ChemDb>().0.clone();
+        let mut container = Container::new(ContainerKind::Beaker);
+        for (key, amount) in contents {
+            // `add` returns what did not fit. Ignoring it makes a fixture that
+            // overflows its beaker look like it worked, and then the test that
+            // reads it fails somewhere far less obvious.
+            let overflow = container.solution.add(db.reagent(key), Units::whole(*amount));
+            assert!(overflow.is_zero(), "{key} overflowed the test beaker");
+        }
+        app.world_mut().spawn(container).id()
+    }
+
+    fn contents_of(app: &App, container: Entity) -> Solution {
+        app.world()
+            .get::<Container>(container)
+            .unwrap()
+            .solution
+            .clone()
+    }
+
+    #[test]
+    fn a_syringe_draws_up_to_its_capacity_and_no_further() {
+        let mut app = test_app();
+        let (_, syringe) = chemist_holding(&mut app, ContainerKind::Syringe, "water", 0);
+        let beaker = bench_beaker(&mut app, &[("dylovene", 40)]);
+        let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
+
+        apply(&mut app, Some(beaker));
+
+        assert_eq!(
+            contents_of(&app, syringe).volume_of(dylovene),
+            Units::whole(15),
+            "a syringe holds 15u"
+        );
+        assert_eq!(
+            contents_of(&app, beaker).volume_of(dylovene),
+            Units::whole(25),
+            "and the rest stays in the beaker"
+        );
+    }
+
+    #[test]
+    fn drawing_takes_a_proportional_sample_of_a_mixture() {
+        let mut app = test_app();
+        let (_, syringe) = chemist_holding(&mut app, ContainerKind::Syringe, "water", 0);
+        // Two reagents that do not react with each other, 2:1, inside a
+        // beaker's 50u.
+        let beaker = bench_beaker(&mut app, &[("sugar", 30), ("iron", 15)]);
+
+        apply(&mut app, Some(beaker));
+
+        let drawn = contents_of(&app, syringe);
+        let sugar = app.world().resource::<ChemDb>().reagent("sugar");
+        let iron = app.world().resource::<ChemDb>().reagent("iron");
+        assert_eq!(drawn.volume_of(sugar), Units::whole(10));
+        assert_eq!(drawn.volume_of(iron), Units::whole(5));
+    }
+
+    #[test]
+    fn drawing_from_an_empty_beaker_leaves_the_syringe_empty() {
+        let mut app = test_app();
+        let (_, syringe) = chemist_holding(&mut app, ContainerKind::Syringe, "water", 0);
+        let beaker = bench_beaker(&mut app, &[]);
+
+        apply(&mut app, Some(beaker));
+
+        assert!(contents_of(&app, syringe).is_empty());
+    }
+
+    #[test]
+    fn injecting_empties_the_syringe_straight_into_the_blood() {
+        let mut app = test_app();
+        let (player, syringe) = chemist_holding(&mut app, ContainerKind::Syringe, "dylovene", 15);
+        let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
+
+        apply(&mut app, None);
+
+        assert!(contents_of(&app, syringe).is_empty(), "the syringe is spent");
+        // Injection bypasses the stomach entirely: all 15u, immediately, which
+        // is exactly what drinking does not do.
+        assert_eq!(
+            blood_of(&app, player).blood.volume_of(dylovene),
+            Units::whole(15)
+        );
+        assert!(blood_of(&app, player).stomach.is_empty());
+    }
+
+    #[test]
+    fn injecting_beats_drinking_to_the_same_dose() {
+        let dose_in_blood = |kind: ContainerKind| {
+            let mut app = test_app();
+            let (player, _) = chemist_holding(&mut app, kind, "dylovene", 15);
+            match kind {
+                ContainerKind::Syringe => apply(&mut app, None),
+                _ => consume(&mut app),
+            }
+            let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
+            blood_of(&app, player).blood.volume_of(dylovene)
+        };
+
+        assert!(
+            dose_in_blood(ContainerKind::Syringe) > dose_in_blood(ContainerKind::Beaker),
+            "the needle is the whole reason to make one"
+        );
+    }
+
+    #[test]
+    fn a_syringe_can_be_used_on_the_other_chemist() {
+        let mut app = test_app();
+        let (_, _) = chemist_holding(&mut app, ContainerKind::Syringe, "dylovene", 15);
+        // A second chemist, face down.
+        let patient = app
+            .world_mut()
+            .spawn((
+                Chemist {
+                    client: ClientId::Client(Entity::PLACEHOLDER),
+                },
+                Body::default(),
+                Bloodstream::default(),
+            ))
+            .id();
+
+        apply(&mut app, Some(patient));
+
+        let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
+        assert_eq!(
+            blood_of(&app, patient).blood.volume_of(dylovene),
+            Units::whole(15),
+            "reviving the other chemist is the best reason to have one in the room"
+        );
+    }
+
+    #[test]
+    fn a_beaker_in_hand_is_not_a_syringe() {
+        let mut app = test_app();
+        let (player, _) = chemist_holding(&mut app, ContainerKind::Beaker, "dylovene", 40);
+        let beaker = bench_beaker(&mut app, &[("plasma", 20)]);
+
+        apply(&mut app, Some(beaker));
+
+        assert!(
+            blood_of(&app, player).is_empty(),
+            "F with a beaker in hand does nothing at all"
+        );
+        assert_eq!(contents_of(&app, beaker).total_volume(), Units::whole(20));
+    }
+
+    // -----------------------------------------------------------------------
+    // Collapse
+    // -----------------------------------------------------------------------
+
+    /// The collapse systems need the shift tally and the radio, which the
+    /// leaner app above deliberately does without.
+    fn collapse_app() -> App {
+        let mut app = test_app();
+        app.init_resource::<crate::orders::Shift>()
+            .init_resource::<crate::radio::RadioLog>()
+            .add_systems(Update, (handle_collapse, run_medbay_retrieval).chain());
+        app
+    }
+
+    fn flatten(app: &mut App, player: Entity) {
+        app.world_mut()
+            .get_mut::<Body>(player)
+            .unwrap()
+            .0
+            .apply(chem_sim::Damage::of(DamageKind::Brute, Units::whole(120)));
+        app.update();
+    }
+
+    #[test]
+    fn going_down_drops_what_you_were_holding() {
+        let mut app = collapse_app();
+        let (player, beaker) = chemist_holding(&mut app, ContainerKind::Beaker, "dylovene", 30);
+        app.world_mut()
+            .entity_mut(player)
+            .insert(Transform::default());
+
+        flatten(&mut app, player);
+
+        assert!(
+            app.world().get::<HeldBy>(beaker).is_none(),
+            "an unconscious chemist is not still holding their beaker"
+        );
+    }
+
+    #[test]
+    fn going_down_releases_the_machine_you_had_open() {
+        let mut app = collapse_app();
+        let (player, _) = chemist_holding(&mut app, ContainerKind::Beaker, "water", 0);
+        let machine = app
+            .world_mut()
+            .spawn(crate::machines::Machine::new(
+                crate::machines::MachineKind::Dispenser,
+            ))
+            .id();
+        app.world_mut().entity_mut(player).insert((
+            Transform::default(),
+            crate::interaction::InteractionMode::UsingMachine(machine),
+        ));
+        app.world_mut()
+            .get_mut::<crate::machines::Machine>(machine)
+            .unwrap()
+            .in_use_by = Some(player);
+
+        flatten(&mut app, player);
+
+        assert_eq!(
+            app.world()
+                .get::<crate::machines::Machine>(machine)
+                .unwrap()
+                .in_use_by,
+            None,
+            "otherwise the machine stays claimed and the other chemist is locked out"
+        );
+        assert_eq!(
+            *app.world()
+                .get::<crate::interaction::InteractionMode>(player)
+                .unwrap(),
+            crate::interaction::InteractionMode::Roaming
+        );
+    }
+
+    #[test]
+    fn going_down_costs_standing_once() {
+        let mut app = collapse_app();
+        let (player, _) = chemist_holding(&mut app, ContainerKind::Beaker, "water", 0);
+        app.world_mut()
+            .entity_mut(player)
+            .insert(Transform::default());
+
+        flatten(&mut app, player);
+        let after = app.world().resource::<crate::orders::Shift>().reputation;
+        assert_eq!(after, COLLAPSE_PENALTY);
+
+        // Still down several frames later; it must not keep charging.
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().resource::<crate::orders::Shift>().reputation,
+            after,
+            "the penalty is for going down, not for staying down"
+        );
+    }
+
+    #[test]
+    fn medical_eventually_comes_and_gets_you() {
+        // The anti-softlock: alone and unable to walk, drink or reach a
+        // machine, a chemist would otherwise be stuck for the rest of the game.
+        let mut app = collapse_app();
+        let (player, _) = chemist_holding(&mut app, ContainerKind::Beaker, "water", 0);
+        app.world_mut()
+            .entity_mut(player)
+            .insert(Transform::default());
+        inject(&mut app, player, "plasma", 40);
+
+        flatten(&mut app, player);
+        assert!(app.world().get::<Body>(player).unwrap().0.collapsed);
+
+        for _ in 0..((MEDBAY_SECONDS / 0.5).ceil() as u32 + 2) {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_secs_f32(0.5));
+            app.update();
+        }
+
+        let body = app.world().get::<Body>(player).unwrap();
+        assert!(!body.0.collapsed, "back on their feet");
+        assert!(body.0.total() < chem_sim::RECOVER, "and staying that way");
+        assert!(
+            blood_of(&app, player).is_empty(),
+            "flushed, or whatever put them down would do it again immediately"
+        );
+    }
+
+    #[test]
+    fn a_syringe_beats_the_medbay_clock() {
+        // The co-op case, and the best reason to have a second chemist.
+        let mut app = collapse_app();
+        let (player, _) = chemist_holding(&mut app, ContainerKind::Beaker, "water", 0);
+        app.world_mut()
+            .entity_mut(player)
+            .insert(Transform::default());
+
+        flatten(&mut app, player);
+        assert!(app.world().get::<MedbayRetrieval>(player).is_some());
+
+        // Somebody gets to them first.
+        app.world_mut()
+            .get_mut::<Body>(player)
+            .unwrap()
+            .0
+            .heal(chem_sim::Damage::of(DamageKind::Brute, Units::whole(60)));
+        app.update();
+
+        assert!(
+            app.world().get::<MedbayRetrieval>(player).is_none(),
+            "medical stand down once someone else has handled it"
+        );
+    }
+
+    #[test]
+    fn prep_patches_everyone_up() {
+        let mut app = collapse_app();
+        let (player, _) = chemist_holding(&mut app, ContainerKind::Beaker, "water", 0);
+        inject(&mut app, player, "plasma", 30);
+        app.world_mut()
+            .get_mut::<Body>(player)
+            .unwrap()
+            .0
+            .apply(chem_sim::Damage::of(DamageKind::Burn, Units::whole(40)));
+
+        app.world_mut().run_system_cached(clear_bodies_at_prep).ok();
+
+        assert!(!app.world().get::<Body>(player).unwrap().0.is_hurt());
+        assert!(
+            blood_of(&app, player).is_empty(),
+            "damage never crosses a shift boundary, which is why none of it is saved"
+        );
+    }
+
+    #[test]
+    fn an_unpoisoned_body_is_left_alone_entirely() {
+        let mut app = test_app();
+        let (player, _) = chemist_holding(&mut app, ContainerKind::Beaker, "water", 0);
+
+        advance(&mut app, 10.0);
+
+        assert!(
+            !app.world().get::<Body>(player).unwrap().0.is_hurt(),
+            "nothing to metabolise means nothing happens"
+        );
+        assert_eq!(
+            app.world()
+                .get::<Body>(player)
+                .unwrap()
+                .0
+                .fraction(DamageKind::Toxin),
+            0.0
+        );
+    }
+}

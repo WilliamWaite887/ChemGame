@@ -24,9 +24,11 @@ use bevy_replicon_renet::renet::ConnectionConfig;
 // only the bevy wrappers are resources.
 use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRenetPlugins};
 
+use crate::body::{Bloodstream, Body};
 use crate::containers::{Container, HeldBy, InSlot};
 use crate::crew::CrewMember;
-use crate::machines::{Buffer, DispenseAmount, Hopper, Machine};
+use crate::hazards::{ActiveHazard, SmokeCloud, SmokePayload};
+use crate::machines::{Buffer, DispenseAmount, Hopper, Machine, Thermostat};
 use crate::produce::Produce;
 
 /// Arbitrary; both ends must agree.
@@ -117,7 +119,20 @@ fn register_replication(app: &mut App) {
         .replicate::<Hopper>()
         .replicate::<DispenseAmount>()
         .replicate::<Produce>()
-        .replicate::<CrewMember>();
+        .replicate::<CrewMember>()
+        // What the chamber is set to. Without this the second chemist to walk
+        // up cannot see it is running and cooks the batch.
+        .replicate::<Thermostat>()
+        // Clouds are entities, so replication carries them and no snapshot
+        // message is needed — which is exactly why they are entities.
+        .replicate::<SmokeCloud>()
+        .replicate::<SmokePayload>()
+        .replicate::<ActiveHazard>()
+        // A chemist's condition is shared lab state too: the whole point of
+        // the second pair of hands is being able to see that the first pair is
+        // in trouble.
+        .replicate::<Body>()
+        .replicate::<Bloodstream>();
 }
 
 fn start_hosting(mut commands: Commands, channels: Res<RepliconChannels>) {

@@ -99,9 +99,11 @@ fn order_glassware(
     let supply = &station.config.supply;
 
     // Only beaker-class glassware counts, wherever it is — bench, hand, machine
-    // slot, delivery window. Pills and bottles are minted by the ChemMaster
-    // without limit, so counting them would let a player who spammed packaging
-    // starve themselves of the beakers that make packaging possible.
+    // slot, delivery window. Pills, bottles and syringes are minted by the
+    // ChemMaster without limit, so counting them would let a player who spammed
+    // packaging starve themselves of the beakers that make packaging possible.
+    // That is also why cargo never resupplies a syringe: it is something you
+    // make, not something you order.
     let live = glassware
         .iter()
         .filter(|container| {

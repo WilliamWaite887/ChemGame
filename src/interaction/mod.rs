@@ -11,7 +11,8 @@ use bevy::window::{CursorGrabMode, CursorOptions};
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::containers::HeldBy;
+use crate::containers::{Container, ContainerKind, HeldBy};
+use crate::hazards::SmokeVisual;
 use crate::lab::MachineScreen;
 use crate::machines::Machine;
 use crate::player::{LocalPlayer, PlayerCamera};
@@ -176,6 +177,7 @@ fn update_focus(
     interactables: Query<(), With<Interactable>>,
     screens: Query<(), With<MachineScreen>>,
     held: Query<(), With<HeldBy>>,
+    smoke: Query<(), With<SmokeVisual>>,
 ) {
     for (camera_transform, camera) in &cameras {
         let Ok(mut focus) = players.get_mut(camera.chemist) else {
@@ -186,9 +188,12 @@ fn update_focus(
         // Machine screens sit a hair proud of their casing, so without this
         // filter every machine would be permanently blocked by its own screen.
         // A carried beaker rides in front of the camera and would do the same.
-        // Everything else stays in the cast, so walls and benches still
-        // occlude properly.
-        let filter = |entity: Entity| !screens.contains(entity) && !held.contains(entity);
+        // A smoke cloud is a sphere metres wide and would block the entire room
+        // for as long as it hung there. Everything else stays in the cast, so
+        // walls and benches still occlude properly.
+        let filter = |entity: Entity| {
+            !screens.contains(entity) && !held.contains(entity) && !smoke.contains(entity)
+        };
         let settings = MeshRayCastSettings::default().with_filter(&filter);
 
         focus.target = ray_cast
@@ -258,22 +263,54 @@ fn update_prompt(
     players: Query<(Entity, &Focus), With<LocalPlayer>>,
     interactables: Query<&Interactable>,
     machines: Query<&Machine>,
+    held: Query<(&HeldBy, &Container)>,
     prompt: Single<&mut Text, With<InteractionPrompt>>,
 ) {
     let mut text = prompt.into_inner();
     let message = players
         .iter()
         .find_map(|(player, focus)| {
-            let target = focus.target?;
-            let label = &interactables.get(target).ok()?.label;
-            // Occupied machines still show a prompt, just an unusable one, so
-            // the other chemist's activity is visible rather than mysterious.
-            Some(match machines.get(target) {
-                Ok(machine) if !machine.available_to(player) => {
-                    format!("{label} — in use")
-                }
-                _ => format!("[E]  {label}"),
-            })
+            let looking_at = focus.target.and_then(|target| {
+                let label = &interactables.get(target).ok()?.label;
+                // Occupied machines still show a prompt, just an unusable one,
+                // so the other chemist's activity is visible rather than
+                // mysterious.
+                Some(match machines.get(target) {
+                    Ok(machine) if !machine.available_to(player) => {
+                        format!("{label} — in use")
+                    }
+                    _ => format!("[E]  {label}"),
+                })
+            });
+
+            // What is in your hand is worth saying too. Taking a chemical is a
+            // keypress with no button and no panel behind it, so without this
+            // the whole mechanic is invisible.
+            let carrying = held
+                .iter()
+                .find(|(holder, _)| holder.0 == player)
+                .and_then(|(_, container)| {
+                    let empty = container.solution.total_volume().is_zero();
+                    match (container.kind, empty) {
+                        (ContainerKind::Syringe, true) => {
+                            // Only useful pointed at something worth drawing
+                            // from, so only offered then.
+                            focus.target.map(|_| "[F]  draw".to_string())
+                        }
+                        (ContainerKind::Syringe, false) => Some("[F]  inject".to_string()),
+                        (_, true) => None,
+                        (ContainerKind::Pill, false) => Some("[R]  swallow".to_string()),
+                        (kind, false) => {
+                            format!("[R]  drink from {}", kind.label().to_lowercase()).into()
+                        }
+                    }
+                });
+
+            match (looking_at, carrying) {
+                (Some(target), Some(hand)) => Some(format!("{target}      {hand}")),
+                (Some(target), None) => Some(target),
+                (None, hand) => hand,
+            }
         })
         .unwrap_or_default();
 

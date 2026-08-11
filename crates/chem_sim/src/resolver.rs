@@ -2,6 +2,7 @@
 
 use crate::reaction::{Reaction, ReactionEffect, ReactionId, ReactionSet};
 use crate::solution::Solution;
+use crate::thermal::Overheat;
 use crate::units::{Kelvin, Units};
 
 /// Recipes can form cycles (A makes B, B makes A). Without a cap the resolver
@@ -25,6 +26,9 @@ pub struct ResolveReport {
     /// pending — almost always a cycle in the data.
     pub hit_iteration_cap: bool,
     pub effects: Vec<ReactionEffect>,
+    /// Reactions that ran hot enough to lose yield. The chemist has already
+    /// paid for these in reactants; the machine panel is how they find out.
+    pub overheated: Vec<ReactionId>,
 }
 
 impl ResolveReport {
@@ -59,16 +63,38 @@ pub fn resolve(solution: &mut Solution, reactions: &ReactionSet) -> ResolveRepor
         let Some((reaction, scale)) = best_reaction(solution, reactions) else {
             return report;
         };
-        apply(solution, reaction, scale);
+        let overheated = reaction.is_overheated(solution.temperature);
+        apply(solution, reaction, scale, reaction.yield_factor(solution.temperature));
         report.events.push(ReactionEvent {
             reaction: reaction.id,
             scale,
         });
+        if overheated && !report.overheated.contains(&reaction.id) {
+            report.overheated.push(reaction.id);
+        }
         for effect in &reaction.effects {
             report.effects.push(effect.clone());
             if let ReactionEffect::Heat(kelvin_per_unit) = effect {
                 solution.temperature =
                     Kelvin(solution.temperature.0 + kelvin_per_unit * scale.as_f32());
+            }
+        }
+
+        // A runaway exothermic reaction is the one failure that does not wait
+        // for the chemist to notice. Handled after the heat above, so a
+        // reaction can cook itself into its own detonation in a single pass.
+        if reaction.is_overheated(solution.temperature) {
+            match reaction.overheat {
+                Overheat::Detonate { power } => {
+                    report.effects.push(ReactionEffect::Explosion(power));
+                    solution.clear();
+                    return report;
+                }
+                Overheat::Ruin => {
+                    solution.clear();
+                    return report;
+                }
+                Overheat::ReducedYield { .. } => {}
             }
         }
     }
@@ -101,7 +127,11 @@ fn best_reaction<'a>(
 }
 
 /// Consumes reactants and adds products. Catalysts are untouched by design.
-fn apply(solution: &mut Solution, reaction: &Reaction, scale: Units) {
+///
+/// `yield_factor` scales the **products only**. Reactants are always consumed
+/// in full: an overheated reaction wastes what it was given, which is the whole
+/// point of letting one overheat rather than simply stopping it.
+fn apply(solution: &mut Solution, reaction: &Reaction, scale: Units, yield_factor: Units) {
     for &(id, required) in &reaction.reactants {
         let consumed = required.scaled(scale, Units::ONE);
         let removed = solution.remove(id, consumed);
@@ -114,7 +144,7 @@ fn apply(solution: &mut Solution, reaction: &Reaction, scale: Units) {
     // Reactants are removed first, so products are never rejected for want of
     // space the reaction itself just freed.
     for &(id, produced) in &reaction.products {
-        let amount = produced.scaled(scale, Units::ONE);
+        let amount = produced.scaled(scale, Units::ONE).scaled(yield_factor, Units::ONE);
         let _overflow = solution.add(id, amount);
     }
 }

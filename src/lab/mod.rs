@@ -8,7 +8,9 @@ use bevy::prelude::*;
 use chem_sim::{Solution, Units};
 
 use crate::interaction::Interactable;
-use crate::machines::{Buffer, ContainerSlot, DispenseAmount, Hopper, Machine, MachineKind};
+use crate::machines::{
+    Buffer, ContainerSlot, DispenseAmount, Hopper, Machine, MachineKind, Thermostat,
+};
 use crate::AppState;
 
 /// Room interior runs from `-HALF` to `+HALF` on each axis.
@@ -257,6 +259,21 @@ fn spawn_equipment(
         Vec3::X,
     );
 
+    // Reaction chamber on the west wall too, at the dispenser end. A hot batch
+    // has to be carried to the ChemMaster before it cools, so the walk between
+    // the two is the deadline — putting the chamber next to the ChemMaster
+    // would remove the only cost heating has.
+    spawn_machine(
+        &mut commands,
+        &mut materials,
+        &cube,
+        &casing,
+        MachineKind::ReactionChamber,
+        Vec3::new(-ROOM_HALF_X + 0.55, 0.0, -1.6),
+        Vec3::new(1.0, 1.5, 1.4),
+        Vec3::X,
+    );
+
     // Delivery counter, stood off the wall so crew can reach the far side of
     // it after coming through the door.
     spawn_machine(
@@ -334,6 +351,9 @@ fn spawn_machine(
         }
         MachineKind::Analyzer => {
             commands.entity(body).insert(slot);
+        }
+        MachineKind::ReactionChamber => {
+            commands.entity(body).insert((slot, Thermostat::default()));
         }
         MachineKind::DeliveryWindow => {
             // A tray, not a machine: whatever is left here gets handed to the
