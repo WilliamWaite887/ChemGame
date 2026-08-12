@@ -1,0 +1,35 @@
+[package]
+name = "bevy_replicon_renet2"
+version = "0.18.0"
+authors = [
+  "Hennadii Chernyshchyk <genaloner@gmail.com>",
+  "koe <ukoe@protonmail.com>",
+]
+edition = "2021"
+description = "Integration with renet2 for bevy_replicon (locally patched for bevy_replicon 0.42 — see PATCH_NOTES.md)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+bevy_replicon = { version = "0.42", default-features = false }
+bevy_renet2 = { version = "0.16.0", default-features = false }
+bevy = { version = "0.19", default-features = false, features = ["bevy_log"] }
+
+[features]
+default = ["renet_serde", "netcode", "client", "server"]
+
+# Re-exports of bevy_replicon features
+client = ["bevy_replicon/client"]
+server = ["bevy_replicon/server"]
+
+# Re-exports of renet features
+renet_serde = ["bevy_renet2/serde"]
+netcode = ["bevy_renet2/netcode"]
+steam = ["bevy_renet2/steam"]
+native_transport = ["netcode", "bevy_renet2/native_transport"]
+memory_transport = ["netcode", "bevy_renet2/memory_transport"]
+wt_server_transport = ["netcode", "bevy_renet2/wt_server_transport"]
+wt_client_transport = ["netcode", "bevy_renet2/wt_client_transport"]
+ws_server_transport = ["netcode", "bevy_renet2/ws_server_transport"]
+ws_client_transport = ["netcode", "bevy_renet2/ws_client_transport"]
+ws-rustls = ["bevy_renet2/ws-rustls"]
+ws-native-tls = ["bevy_renet2/ws-native-tls"]

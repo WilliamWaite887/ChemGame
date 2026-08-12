@@ -25,6 +25,34 @@ use bevy::prelude::*;
 
 fn main() {
     let mut app = App::new();
+
+    // Before `DefaultPlugins`: `bevy_steamworks` requires this, because it
+    // must be up before the render plugin inside `DefaultPlugins` builds.
+    // Not fatal on failure (Steam not running, App ID mismatch, no SDK) —
+    // LAN/direct play (`--host`/`--join`, and every headless test) works
+    // with no Steam dependency at all. `net::warn_if_steam_unavailable`
+    // reports the failure in-game if someone then tries `LaunchMode::
+    // HostSteam`/`JoinSteam` anyway, rather than that silently doing
+    // nothing.
+    let steam_ready = match bevy_steamworks::SteamworksPlugin::init_app(net::steam::STEAM_APP_ID) {
+        Ok(steam) => {
+            app.add_plugins(steam);
+            true
+        }
+        Err(e) => {
+            // `LogPlugin` (part of `DefaultPlugins`, added next) is not up
+            // yet, so `info!`/`error!` have nothing to write to.
+            eprintln!(
+                "Steam did not initialise ({e:?}) — Steam co-op will be \
+                 unavailable this session. Is Steam running, and does the \
+                 App ID match (steam_appid.txt in dev, App ID {} on the \
+                 Steamworks dashboard)?",
+                net::steam::STEAM_APP_ID
+            );
+            false
+        }
+    };
+
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "ChemGame — Chemistry Lab".into(),
@@ -71,8 +99,17 @@ fn main() {
                 hazards::HazardPlugin,
             ),
             (ui::UiPlugin, menu::MenuPlugin),
-        ))
-        .run();
+        ));
+
+    // Kept out of the tuple above (already near Bevy's 16-plugin limit) and
+    // added only when Steam actually initialised — its systems assume
+    // `SteamworksEvent` is registered, which only `SteamworksPlugin`
+    // succeeding guarantees.
+    if steam_ready {
+        app.add_plugins(net::steam::SteamPlugin);
+    }
+
+    app.run();
 }
 
 #[derive(States, Debug, Clone, Copy, Default, Eq, PartialEq, Hash)]

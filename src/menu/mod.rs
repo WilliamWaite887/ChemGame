@@ -160,7 +160,7 @@ fn show_mode_screen(mut commands: Commands) {
             ));
             panel.spawn(choice(
                 "Host",
-                "Play your save and open the lab to a second chemist.",
+                "Play your save and open the lab to a second chemist, over Steam.",
                 MenuAction::ChooseHost,
             ));
             panel.spawn(choice(
@@ -177,7 +177,7 @@ fn show_mode_screen(mut commands: Commands) {
 
 fn show_save_screen(mut commands: Commands, pending: Res<PendingMode>) {
     let subtitle = match pending.0 {
-        LaunchMode::Host => "Hosting — the save you pick is the lab you both work.",
+        LaunchMode::HostSteam => "Hosting — the save you pick is the lab you both work.",
         _ => "Playing alone.",
     };
     let slots = saves::list_slots();
@@ -365,7 +365,11 @@ fn handle_menu_clicks(
                 screen.set(MenuScreen::Save);
             }
             MenuAction::ChooseHost => {
-                pending.0 = LaunchMode::Host;
+                // Steam, not the direct/LAN transport `LaunchMode::Host`
+                // still drives — that one stays reachable only via `--host`
+                // now, which is how co-op gets tested from one terminal
+                // without Steam running (see `net::steam`'s module doc).
+                pending.0 = LaunchMode::HostSteam;
                 screen.set(MenuScreen::Save);
             }
             MenuAction::ChooseJoin => screen.set(MenuScreen::Join),
@@ -573,7 +577,7 @@ mod tests {
         // career, and how many people are working it is a different decision.
         for (chosen, expected) in [
             (MenuAction::ChooseSolo, LaunchMode::Singleplayer),
-            (MenuAction::ChooseHost, LaunchMode::Host),
+            (MenuAction::ChooseHost, LaunchMode::HostSteam),
         ] {
             let mut app = menu_app();
             app.world_mut()
@@ -602,7 +606,7 @@ mod tests {
 
         assert_eq!(state(&app), AppState::Playing);
         assert_eq!(screen(&app), MenuScreen::Hidden);
-        assert_eq!(*app.world().resource::<LaunchMode>(), LaunchMode::Host);
+        assert_eq!(*app.world().resource::<LaunchMode>(), LaunchMode::HostSteam);
         assert_eq!(
             app.world().resource::<SaveSlot>().name(),
             "Chemist",

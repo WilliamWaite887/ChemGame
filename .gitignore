@@ -7,3 +7,9 @@ progress.ron
 
 # Local planning doc, not part of the repo
 /this-is-the-start-nested-wigderson.md
+
+# Dev-only Steam App ID marker for running outside the real Steam client.
+# Never ship this — real builds launched through Steam get their App ID
+# from the client itself.
+/steam_appid.txt
+.cargo/config.toml

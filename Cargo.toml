@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/chem_sim"]
+members = ["crates/chem_sim", "crates/bevy_replicon_renet2_patched"]
 
 [package]
 name = "chemgame"
@@ -15,6 +15,25 @@ rand = "0.10.2"
 ron = "0.11"
 bevy_replicon = "0.42.0"
 bevy_replicon_renet = "0.18.0"
+# Locally patched — see crates/bevy_replicon_renet2_patched/PATCH_NOTES.md.
+# Only the Steam transport (net/steam.rs) uses this; the LAN/dev path above
+# is untouched. netcode/default features stay off to avoid pulling in a
+# second, unused copy of the netcode transport.
+bevy_replicon_renet2 = { path = "crates/bevy_replicon_renet2_patched", default-features = false, features = [
+    "steam",
+    "client",
+    "server",
+] }
+# Published under a hyphenated crate name; imports as `bevy_steamworks` in code.
+bevy-steamworks = "0.17.0"
+# `bevy_replicon_renet2` re-exports renet2's own core (`RenetServer`,
+# `ConnectionConfig`, ...) under its `renet2` module, but not the
+# steam-specific transport types (`SteamServerTransport` and friends) —
+# those only live in `bevy_renet2::steam`, so this is a direct dependency
+# too, pinned to the exact version the patched crate already depends on.
+bevy_renet2 = { version = "0.16.0", default-features = false, features = [
+    "steam",
+] }
 
 [features]
 # Links bevy dynamically, which cuts iteration builds down a lot. Off by

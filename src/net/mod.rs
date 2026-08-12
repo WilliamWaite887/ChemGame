@@ -34,11 +34,19 @@ use crate::player::Player;
 use crate::produce::Produce;
 use crate::AppState;
 
+pub mod steam;
+
 /// Arbitrary; both ends must agree.
 const PROTOCOL_ID: u64 = 0x43_48_45_4d_00_00_00_01;
 const DEFAULT_PORT: u16 = 5327;
 
 /// How this process was launched.
+///
+/// `Host`/`Join` dial an address directly over the LAN/dev transport
+/// (`start_hosting`/`start_joining` below); `HostSteam`/`JoinSteam` go
+/// through Steam Networking Sockets instead (`steam::start_hosting_steam`/
+/// `steam::start_joining_steam`) — see `steam`'s module doc for why the two
+/// transports coexist rather than one replacing the other.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum LaunchMode {
     /// One chemist, no sockets. Server logic runs locally.
@@ -48,13 +56,26 @@ pub enum LaunchMode {
     Host,
     /// Joins a lab hosted elsewhere.
     Join(SocketAddr),
+    /// Listen server, reached through a Steam lobby instead of an address.
+    HostSteam,
+    /// Joins a lab hosted over Steam. Carries the lobby, not the host's
+    /// `SteamId` directly, because that is what both ways of getting here —
+    /// accepting an overlay invite, or picking a friend from a lobby list —
+    /// actually hand back; the host's id is looked up from the lobby once
+    /// joined.
+    JoinSteam(steam::LobbyId),
 }
 
 impl LaunchMode {
-    /// Reads `--solo`, `--host` or `--join [addr]` from the command line.
+    /// Reads `--solo`, `--host`, `--join [addr]` or `--host-steam` from the
+    /// command line.
     ///
     /// `None` means the command line said nothing, which is the signal to show
     /// the menu instead of guessing.
+    ///
+    /// No `--join-steam` equivalent: there is no address or code to type for
+    /// the Steam path, only a lobby id, which is not something a person
+    /// reads out loud the way an IP is — see `steam`'s module doc.
     pub fn from_args() -> Option<Self> {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut iter = args.iter();
@@ -62,6 +83,7 @@ impl LaunchMode {
             match arg.as_str() {
                 "--solo" => return Some(LaunchMode::Singleplayer),
                 "--host" => return Some(LaunchMode::Host),
+                "--host-steam" => return Some(LaunchMode::HostSteam),
                 "--join" => {
                     let address = iter
                         .next()
@@ -93,7 +115,7 @@ pub fn apply_command_line(app: &mut App) {
         return;
     };
     app.insert_resource(mode).insert_resource(LaunchedFromArgs);
-    if !matches!(mode, LaunchMode::Join(_)) {
+    if !matches!(mode, LaunchMode::Join(_) | LaunchMode::JoinSteam(_)) {
         crate::saves::migrate_legacy_saves();
         app.insert_resource(crate::saves::SaveSlot::default_slot());
     }
@@ -162,17 +184,58 @@ fn lan_address() -> Option<SocketAddr> {
 /// Absent resource reads as authority: that is a headless test driving the
 /// simulation directly, which is exactly the singleplayer case.
 pub fn is_authority(mode: Option<Res<LaunchMode>>) -> bool {
-    !matches!(mode.as_deref(), Some(LaunchMode::Join(_)))
+    !matches!(
+        mode.as_deref(),
+        Some(LaunchMode::Join(_)) | Some(LaunchMode::JoinSteam(_))
+    )
 }
 
-/// Run condition: this process is opening its lab to others.
+/// Run condition: this process is opening its lab to others over the
+/// direct/LAN transport specifically — `hosting_steam` below is the Steam
+/// equivalent, deliberately kept separate so each only ever drives its own
+/// transport's startup.
 fn hosting(mode: Option<Res<LaunchMode>>) -> bool {
     matches!(mode.as_deref(), Some(LaunchMode::Host))
 }
 
-/// Run condition: this process is dialling someone else's lab.
+/// Run condition: this process is dialling someone else's lab directly.
 fn joining(mode: Option<Res<LaunchMode>>) -> bool {
     matches!(mode.as_deref(), Some(LaunchMode::Join(_)))
+}
+
+/// Run condition: this process is opening its lab to others over Steam.
+fn hosting_steam(mode: Option<Res<LaunchMode>>) -> bool {
+    matches!(mode.as_deref(), Some(LaunchMode::HostSteam))
+}
+
+/// Run condition: this process is joining a lab over Steam.
+fn joining_steam(mode: Option<Res<LaunchMode>>) -> bool {
+    matches!(mode.as_deref(), Some(LaunchMode::JoinSteam(_)))
+}
+
+/// Says why nothing happened, for the case `hosting_steam`/`joining_steam`
+/// wanted to start a Steam transport but Steam never actually came up (not
+/// running, `steam_appid.txt`/App ID mismatch, SDK missing). Without this,
+/// `LaunchMode::HostSteam`/`JoinSteam` under a failed Steam init look
+/// exactly like every other silent co-op bug this project has hit before:
+/// the menu accepts the click, the state moves to `Playing`, and nothing
+/// else ever happens.
+fn warn_if_steam_unavailable(
+    mode: Option<Res<LaunchMode>>,
+    client: Option<Res<steam::Client>>,
+) {
+    if client.is_some() {
+        return;
+    }
+    match mode.as_deref() {
+        Some(LaunchMode::HostSteam) => {
+            error!("Steam is not available, so a Steam lobby cannot be opened. Is Steam running?")
+        }
+        Some(LaunchMode::JoinSteam(_)) => {
+            error!("Steam is not available, so this Steam lobby cannot be joined. Is Steam running?")
+        }
+        _ => {}
+    }
 }
 
 pub struct NetPlugin;
@@ -195,6 +258,7 @@ impl Plugin for NetPlugin {
                 (
                     start_hosting.run_if(hosting),
                     start_joining.run_if(joining),
+                    warn_if_steam_unavailable.run_if(hosting_steam.or_else(joining_steam)),
                 ),
             );
     }
@@ -598,7 +662,11 @@ mod tests {
         // receiving the server's on top.
         assert!(authority_for(Some(LaunchMode::Singleplayer)));
         assert!(authority_for(Some(LaunchMode::Host)));
+        assert!(authority_for(Some(LaunchMode::HostSteam)));
         assert!(!authority_for(Some(LaunchMode::Join(loopback_address()))));
+        assert!(!authority_for(Some(LaunchMode::JoinSteam(
+            steam::LobbyId::from_raw(1)
+        ))));
         assert!(
             authority_for(None),
             "a headless test with no launch mode is driving the simulation itself"
