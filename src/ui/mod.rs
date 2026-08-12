@@ -23,14 +23,11 @@ use crate::machines::{
     Machine, MachineKind, PackageRequested, SetHeaterPower, SetTargetTemperature, TestBenchStock,
     Thermostat, TEMPERATURE_PRESETS,
 };
-use crate::orders::{Order, Shift};
+use crate::orders::{Department, Order, Shift};
 use crate::player::LocalPlayer;
 use crate::produce::{ProduceCatalog, ProduceId};
 use crate::radio::RadioLog;
-use crate::shift::{
-    can_afford, BeginShiftRequested, RequisitionKind, RequisitionRequested, ShiftClock, ShiftPhase,
-    ShiftReport, SignOffRequested,
-};
+use crate::shift::{can_afford, RequisitionKind, RequisitionRequested, ToggleAcceptingOrders};
 use crate::AppState;
 
 /// How many orders the queue can show at once.
@@ -79,10 +76,7 @@ impl Plugin for UiPlugin {
                 update_radio_feed,
                 scroll_reference_book,
                 announce_discoveries,
-                // Presentation only, so unlike every other phase system this
-                // runs on both ends: a joined chemist needs to know the shift
-                // just started every bit as much as the host does.
-                announce_phase,
+                announce_accepting_toggle,
                 show_toasts,
                 expire_toasts,
             )
@@ -121,8 +115,7 @@ enum PanelAction {
     TogglePower,
     BuyHint(chem_sim::ReactionId),
     ShowCategory(Option<Category>),
-    BeginShift,
-    SignOff,
+    ToggleAcceptingOrders,
     Requisition(RequisitionKind),
     Close,
 }
@@ -161,15 +154,10 @@ struct PanelSignature {
     /// switching tab is exactly the same kind of change as any other: it
     /// alters what the panel shows, so it rebuilds the panel.
     book_category: Option<Category>,
-    /// The shift board draws entirely from these, so without them its panel
-    /// would freeze on whatever it happened to show first.
-    ///
-    /// The countdown is deliberately absent: it moves every frame, and this
-    /// comparison decides whether to despawn and rebuild the whole panel. The
-    /// clock belongs on the HUD banner, which writes into fixed slots.
-    phase: Option<ShiftPhase>,
-    resolved: u32,
-    reputation: i32,
+    /// The standing board draws entirely from these, so without them its
+    /// panel would freeze on whatever it happened to show first.
+    department_standing: Vec<(Department, i32)>,
+    accepting_orders: bool,
     research_points: u32,
     /// Chamber state. The sample's temperature is **rounded to 5K** for exactly
     /// the reason the countdown above is absent: while a chamber runs it moves
@@ -196,9 +184,12 @@ impl Default for PanelSignature {
             amount: None,
             known_recipes: usize::MAX,
             book_category: None,
-            phase: None,
-            resolved: u32::MAX,
-            reputation: i32::MAX,
+            department_standing: Vec::new(),
+            // Neither `true` nor `false` alone is guaranteed to differ from
+            // the first real frame's value, so the vector above carries the
+            // "never compared yet" signal on its own — this field just needs
+            // *a* starting value.
+            accepting_orders: false,
             research_points: u32::MAX,
             temperature: Some(i32::MAX),
             target: Some(i32::MAX),
@@ -239,7 +230,6 @@ fn sync_panel(
     knowledge: Res<Knowledge>,
     book: Res<BookView>,
     catalog: Option<Res<ProduceCatalog>>,
-    clock: Res<ShiftClock>,
     shift: Res<Shift>,
     mut previous: Local<PanelSignature>,
 ) {
@@ -274,9 +264,11 @@ fn sync_panel(
             .map(|a| a.0),
         known_recipes: knowledge.known_count(),
         book_category: book.category,
-        phase: Some(clock.phase),
-        resolved: clock.resolved,
-        reputation: shift.reputation,
+        department_standing: Department::ALL
+            .into_iter()
+            .map(|dept| (dept, shift.standing(dept)))
+            .collect(),
+        accepting_orders: shift.accepting_orders,
         research_points: knowledge.research_points,
         // Only tracked while a chamber panel is open, so no other machine pays
         // for the extra comparison.
@@ -359,8 +351,8 @@ fn sync_panel(
                         MachineKind::DeliveryWindow => {
                             delivery_window_body(panel, &db, loaded, test_stock);
                         }
-                        MachineKind::ShiftBoard => {
-                            shift_board_body(panel, &clock, &shift);
+                        MachineKind::StandingBoard => {
+                            standing_board_body(panel, &shift);
                         }
                         MachineKind::ReactionChamber => {
                             heater_body(panel, &db, thermostat, loaded);
@@ -374,117 +366,68 @@ fn sync_panel(
         });
 }
 
-/// The board, which is a different thing in each of the three phases.
+/// Every department's standing, what each values, and live requisitions.
 ///
-/// One panel rather than three screens because `InteractionMode` is per-player:
-/// a modal debrief would have to be global, and would trap one chemist at a
-/// summary while the other was still working.
-fn shift_board_body(panel: &mut ChildSpawnerCommands, clock: &ShiftClock, shift: &Shift) {
+/// One panel rather than a modal, exactly like the old shift board: this is
+/// per-player `InteractionMode`, and a modal would trap one chemist on a
+/// summary screen while the other was still working the counter.
+fn standing_board_body(panel: &mut ChildSpawnerCommands, shift: &Shift) {
     panel.spawn(label(
-        format!("Shift {} · {}", clock.shift, clock.phase.label()),
+        if shift.accepting_orders {
+            "Taking requests."
+        } else {
+            "Not accepting requests right now — flip the sign back when you're ready."
+        },
         13.0,
         TEXT_DIM,
     ));
+    panel.spawn(row()).with_children(|row| {
+        let caption = if shift.accepting_orders {
+            "Stop taking requests"
+        } else {
+            "Start taking requests"
+        };
+        row.spawn(button(caption, PanelAction::ToggleAcceptingOrders));
+    });
 
-    match clock.phase {
-        ShiftPhase::Prep => {
-            panel.spawn(label(
-                match &clock.forecast {
-                    Some(pick) => pick.briefing.clone(),
-                    None => "No briefing yet.".to_string(),
-                },
-                15.0,
-                TEXT,
-            ));
-            panel.spawn(label(
-                "Nobody is asking for anything until you start. Stock up, run the \
-                 bench, work something out.",
-                13.0,
-                TEXT_DIM,
-            ));
-            panel.spawn(label(
-                format!(
-                    "This shift: {} orders, up to {} at the counter.",
-                    clock.rules.quota, clock.rules.max_active
-                ),
-                13.0,
-                TEXT_DIM,
-            ));
-            panel.spawn(row()).with_children(|row| {
-                row.spawn(button("Begin shift", PanelAction::BeginShift));
-            });
+    for department in Department::ALL {
+        panel.spawn(label(
+            format!(
+                "{}  ·  {:+} standing",
+                department.label(),
+                shift.standing(department)
+            ),
+            15.0,
+            TEXT,
+        ));
+        panel.spawn(label(department.blurb(), 12.0, TEXT_DIM));
+
+        let kinds: Vec<RequisitionKind> = RequisitionKind::ALL
+            .into_iter()
+            .filter(|kind| kind.department() == department)
+            .collect();
+        if kinds.is_empty() {
+            continue;
         }
-
-        ShiftPhase::Service => {
-            panel.spawn(label(
-                format!(
-                    "{} of {} orders resolved.",
-                    clock.resolved, clock.rules.quota
-                ),
-                15.0,
-                TEXT,
-            ));
-            if let Some(pick) = &clock.forecast {
-                panel.spawn(label(pick.briefing.clone(), 13.0, TEXT_DIM));
-            }
-        }
-
-        ShiftPhase::Debrief => {
-            let report = ShiftReport::between(&clock.opening, &clock.closing);
-            panel.spawn(label(
-                format!(
-                    "Delivered {}   ·   botched {}   ·   standing {:+}",
-                    report.delivered, report.botched, report.reputation
-                ),
-                15.0,
-                TEXT,
-            ));
-            panel.spawn(label(
-                format!(
-                    "Research earned {}   ·   recipes recorded {}",
-                    report.research, report.recipes
-                ),
-                13.0,
-                TEXT_DIM,
-            ));
-
-            panel.spawn(label(
-                format!("Requisition — {} standing available", shift.reputation),
-                13.0,
-                TEXT_DIM,
-            ));
-            panel.spawn(wrap_row()).with_children(|row| {
-                for kind in RequisitionKind::ALL {
-                    // A produce crate is a flag, not a count: buying a second
-                    // one would charge again for something already ordered.
-                    let already =
-                        kind == RequisitionKind::ProduceCrate && clock.requisition.produce_crate;
-                    let available = can_afford(shift.reputation, kind) && !already;
-                    let caption = if already {
-                        format!("{} — ordered", kind.label())
-                    } else {
-                        format!("{} ({})", kind.label(), kind.cost())
-                    };
-                    let mut entity = row.spawn(button(caption, PanelAction::Requisition(kind)));
-                    // Drawn dead rather than drawn live and silently doing
-                    // nothing — a button that looks clickable but is refused
-                    // reads as the game being broken.
-                    if !available {
-                        entity.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
-                    }
+        panel.spawn(wrap_row()).with_children(|row| {
+            for &kind in &kinds {
+                let available = can_afford(shift.standing(department), kind);
+                let caption = format!("{} ({})", kind.label(), kind.cost());
+                let mut entity = row.spawn(button(caption, PanelAction::Requisition(kind)));
+                // Drawn dead rather than drawn live and silently doing
+                // nothing — a button that looks clickable but is refused
+                // reads as the game being broken.
+                if !available {
+                    entity.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
                 }
-            });
-            for kind in RequisitionKind::ALL {
-                panel.spawn(label(
-                    format!("  {} — {}", kind.label(), kind.blurb()),
-                    12.0,
-                    TEXT_DIM,
-                ));
             }
-
-            panel.spawn(row()).with_children(|row| {
-                row.spawn(button("Sign off", PanelAction::SignOff));
-            });
+        });
+        for kind in kinds {
+            panel.spawn(label(
+                format!("  {} — {}", kind.label(), kind.blurb()),
+                12.0,
+                TEXT_DIM,
+            ));
         }
     }
 }
@@ -1360,42 +1303,24 @@ fn spawn_order_queue(mut commands: Commands) {
         });
 }
 
-/// The one line that tells the player what the lab is doing and what ends it.
+/// The one line that tells the player whether the lab is taking requests.
 ///
-/// Pure so the wording of every phase can be checked at once — this is the only
-/// place the untimed first prep explains itself, and a player who cannot tell
-/// why nobody is arriving will read the feature as the game being broken.
-fn phase_banner_line(clock: &ShiftClock) -> String {
-    let shift = clock.shift;
-    match clock.phase {
-        ShiftPhase::Prep => match clock.remaining {
-            Some(left) => format!("PREP · SHIFT {shift} — service in {}", mmss(left)),
-            None => format!("PREP · SHIFT {shift} — begin at the shift board when you're ready"),
-        },
-        ShiftPhase::Service => format!(
-            "SERVICE · SHIFT {shift} — {} of {} resolved",
-            clock.resolved, clock.rules.quota
-        ),
-        ShiftPhase::Debrief => match clock.remaining {
-            Some(left) => format!(
-                "DEBRIEF · SHIFT {shift} — sign off at the board · {}",
-                mmss(left)
-            ),
-            None => format!("DEBRIEF · SHIFT {shift} — sign off at the board"),
-        },
+/// Pure so both wordings can be checked at once. There is no shift or phase
+/// to report on any more — just the sign the player themselves controls at
+/// the standing board.
+fn accepting_banner_line(shift: &Shift) -> &'static str {
+    if shift.accepting_orders {
+        "OPEN — crew are coming in"
+    } else {
+        "CLOSED — not accepting requests"
     }
 }
 
-fn mmss(seconds: f32) -> String {
-    let whole = seconds.max(0.0) as u32;
-    format!("{}:{:02}", whole / 60, whole % 60)
-}
-
-fn update_phase_banner(clock: Res<ShiftClock>, banner: BannerText) {
-    let line = phase_banner_line(&clock);
+fn update_phase_banner(shift: Res<Shift>, banner: BannerText) {
+    let line = accepting_banner_line(&shift);
     let mut banner = banner.into_inner();
     if banner.0 != line {
-        banner.0 = line;
+        banner.0 = line.to_string();
     }
 }
 
@@ -1409,11 +1334,7 @@ fn update_order_queue(
 ) {
     // Most urgent first, so the one about to expire is always at the top.
     let mut pending: Vec<(&CrewMember, &Order, &CrewRoute)> = orders.iter().collect();
-    pending.sort_by(|a, b| {
-        a.1.timer
-            .remaining_secs()
-            .total_cmp(&b.1.timer.remaining_secs())
-    });
+    pending.sort_by(|a, b| a.1.remaining().total_cmp(&b.1.remaining()));
 
     for (slot, mut text, mut color) in &mut slots {
         let line = pending.get(slot.0).map(|(member, order, route)| {
@@ -1426,7 +1347,7 @@ fn update_order_queue(
                     )
                 }
                 _ => {
-                    let remaining = order.timer.remaining_secs().max(0.0) as u32;
+                    let remaining = order.remaining() as u32;
                     format!(
                         "{}\n  {} {}  ·  {}:{:02}",
                         member.name,
@@ -1441,7 +1362,7 @@ fn update_order_queue(
 
         let urgent = pending
             .get(slot.0)
-            .map(|(_, order, _)| order.timer.remaining_secs() < 30.0)
+            .map(|(_, order, _)| order.remaining() < 30.0)
             .unwrap_or(false);
         let wanted = if urgent {
             Color::srgb(0.95, 0.55, 0.45)
@@ -1469,10 +1390,7 @@ fn update_order_queue(
         plea_line.0 = plea;
     }
 
-    let summary = format!(
-        "delivered {}   botched {}   reputation {:+}",
-        shift.succeeded, shift.botched, shift.reputation
-    );
+    let summary = format!("delivered {}   botched {}", shift.succeeded, shift.botched);
     let mut readout = readout.into_inner();
     if readout.0 != summary {
         readout.0 = summary;
@@ -1587,58 +1505,45 @@ fn announce_discoveries(
     }
 }
 
-/// Says out loud what just changed about the lab.
+/// Toasts when the "accepting requests" sign flips.
 ///
-/// Watches the clock from `Update` rather than hanging off `OnEnter`, because
-/// what it has to say is filled in *by* the phase-entry systems — the shift's
-/// quota, the report, the briefing. Read on the transition it would show the
-/// previous shift's numbers, or none at all on the first prep of a session,
-/// where the forecast is not drawn until the data files land.
-fn announce_phase(
-    clock: Res<ShiftClock>,
-    mut announced: Local<Option<(ShiftPhase, u32)>>,
+/// Watches `Shift` from `Update` rather than the toggle message itself,
+/// because this runs on both ends — a joined chemist needs to notice their
+/// partner flipping the sign too, and only the replicated resource reaches
+/// them, not the client message that caused it.
+fn announce_accepting_toggle(
+    shift: Res<Shift>,
+    mut announced: Local<Option<bool>>,
     mut toasts: MessageWriter<ShowToast>,
 ) {
-    // Prep on the first frame is not yet open: it has no briefing to give.
-    if clock.pending_open {
+    if *announced == Some(shift.accepting_orders) {
         return;
     }
-    let current = (clock.phase, clock.shift);
-    if *announced == Some(current) {
+    // Don't toast the very first frame — that would just announce "open" the
+    // instant every session starts.
+    let first_run = announced.is_none();
+    *announced = Some(shift.accepting_orders);
+    if first_run {
         return;
     }
-    *announced = Some(current);
 
-    let (kicker, subtitle, background) = match clock.phase {
-        ShiftPhase::Prep => (
-            "PREP",
-            match &clock.forecast {
-                Some(pick) => pick.briefing.clone(),
-                None => "Nobody is asking for anything yet.".to_string(),
-            },
-            Color::srgba(0.10, 0.14, 0.22, 0.94),
-        ),
-        ShiftPhase::Service => (
-            "SHIFT STARTED",
-            format!("{} orders to work through", clock.rules.quota),
+    let (kicker, subtitle, background) = if shift.accepting_orders {
+        (
+            "OPEN",
+            "Taking requests again.".to_string(),
+            Color::srgba(0.10, 0.20, 0.13, 0.94),
+        )
+    } else {
+        (
+            "CLOSED",
+            "Not accepting requests for a while.".to_string(),
             Color::srgba(0.18, 0.15, 0.09, 0.94),
-        ),
-        ShiftPhase::Debrief => {
-            let report = ShiftReport::between(&clock.opening, &clock.closing);
-            (
-                "SHIFT OVER",
-                format!(
-                    "{} delivered, {} botched, {:+} standing",
-                    report.delivered, report.botched, report.reputation
-                ),
-                Color::srgba(0.10, 0.20, 0.13, 0.94),
-            )
-        }
+        )
     };
 
     toasts.write(ShowToast {
         kicker,
-        title: format!("Shift {}", clock.shift),
+        title: "Chemistry".to_string(),
         subtitle,
         background,
     });
@@ -2139,8 +2044,7 @@ struct PanelMessages<'w> {
     grind: MessageWriter<'w, GrindRequested>,
     set_target: MessageWriter<'w, SetTargetTemperature>,
     set_power: MessageWriter<'w, SetHeaterPower>,
-    begin_shift: MessageWriter<'w, BeginShiftRequested>,
-    sign_off: MessageWriter<'w, SignOffRequested>,
+    toggle_accepting: MessageWriter<'w, ToggleAcceptingOrders>,
     requisition: MessageWriter<'w, RequisitionRequested>,
     leave_machine: MessageWriter<'w, LeaveMachineRequested>,
 }
@@ -2251,15 +2155,12 @@ fn handle_panel_clicks(
                     .is_ok_and(|thermostat| !thermostat.powered);
                 out.set_power.write(SetHeaterPower { machine, on });
             }
-            // The board's three. Requests, not writes: the server owns the
-            // phase and the standing, and a client that moved either locally
+            // The board's two. Requests, not writes: the server owns the
+            // standing and the sign, and a client that moved either locally
             // would be corrected out from under the player a frame later.
-            PanelAction::BeginShift => {
-                out.begin_shift
-                    .write(BeginShiftRequested { board: machine });
-            }
-            PanelAction::SignOff => {
-                out.sign_off.write(SignOffRequested { board: machine });
+            PanelAction::ToggleAcceptingOrders => {
+                out.toggle_accepting
+                    .write(ToggleAcceptingOrders { board: machine });
             }
             PanelAction::Requisition(kind) => {
                 out.requisition.write(RequisitionRequested {
@@ -2277,58 +2178,13 @@ fn handle_panel_clicks(
 mod tests {
     use super::*;
 
-    fn clock(phase: ShiftPhase, remaining: Option<f32>) -> ShiftClock {
-        ShiftClock {
-            shift: 3,
-            phase,
-            remaining,
-            ..default()
-        }
-    }
-
     #[test]
-    fn an_untimed_prep_says_how_it_ends() {
-        // The one case with nothing on screen counting down. Without this line
-        // an empty room reads as the game having stopped working.
-        let line = phase_banner_line(&clock(ShiftPhase::Prep, None));
-        assert!(line.contains("PREP"), "{line}");
-        assert!(line.contains("shift board"), "{line}");
-        assert!(
-            !line.contains(':'),
-            "an untimed prep should show no clock: {line}"
-        );
-    }
+    fn the_banner_reads_the_accepting_sign() {
+        let mut shift = Shift::default();
+        assert!(accepting_banner_line(&shift).contains("OPEN"));
 
-    #[test]
-    fn a_timed_prep_shows_the_countdown() {
-        let line = phase_banner_line(&clock(ShiftPhase::Prep, Some(107.0)));
-        assert!(line.contains("1:47"), "{line}");
-    }
-
-    #[test]
-    fn service_shows_progress_against_the_quota() {
-        let mut clock = clock(ShiftPhase::Service, None);
-        clock.resolved = 2;
-        clock.rules.quota = 7;
-        let line = phase_banner_line(&clock);
-        assert!(line.contains("SERVICE"), "{line}");
-        assert!(line.contains("2 of 7"), "{line}");
-    }
-
-    #[test]
-    fn the_debrief_points_at_the_board() {
-        let line = phase_banner_line(&clock(ShiftPhase::Debrief, Some(41.0)));
-        assert!(line.contains("sign off"), "{line}");
-        assert!(line.contains("0:41"), "{line}");
-    }
-
-    #[test]
-    fn the_clock_reads_as_minutes_and_seconds() {
-        assert_eq!(mmss(0.0), "0:00");
-        assert_eq!(mmss(9.6), "0:09");
-        assert_eq!(mmss(120.0), "2:00");
-        // A countdown that has run past zero must not render as a negative.
-        assert_eq!(mmss(-5.0), "0:00");
+        shift.accepting_orders = false;
+        assert!(accepting_banner_line(&shift).contains("CLOSED"));
     }
 
     // -- the reference book's grouping --------------------------------------

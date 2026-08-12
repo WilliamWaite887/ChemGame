@@ -483,4 +483,77 @@
             "Equal parts ammonia and water.",
         ],
     ),
+
+    // ---- Illicit --------------------------------------------------------
+    //
+    // Never listed in `station.orders.ron` — only the hidden pool in
+    // `station.antagonist.ron` asks for these. Reachable and hinted exactly
+    // like every other locked recipe; finding one by accident is the point.
+    (
+        id: "space_drugs",
+        reactants: [("lithium", 1), ("mercury", 1), ("sugar", 1)],
+        products: [("space_drugs", 3)],
+        priority: 8,
+        hints: [
+            "Three base reagents, none of them anything a chemist reaches for on purpose.",
+            "A metal that unsteadies, a metal that poisons, and sugar.",
+            "Equal parts lithium, mercury and sugar.",
+        ],
+    ),
+    (
+        id: "bath_salts",
+        reactants: [("space_drugs", 1), ("sodium", 1), ("sulfur", 1)],
+        products: [("bath_salts", 3)],
+        priority: 8,
+        hints: [
+            "One compound and two base reagents, and the compound is not medicine.",
+            "Cut what space drugs make with sodium and sulfur.",
+            "Equal parts space drugs, sodium and sulfur.",
+        ],
+    ),
+    (
+        id: "krokodil",
+        reactants: [("oil", 1), ("iodine", 1), ("phosphorus", 1)],
+        products: [("krokodil", 3)],
+        priority: 8,
+        hints: [
+            "One compound and two base reagents. The compound is thickened welding fuel.",
+            "Oil, cut with iodine and phosphorus.",
+            "Equal parts oil, iodine and phosphorus.",
+        ],
+    ),
+    (
+        id: "methamphetamine",
+        reactants: [("ammonia", 1), ("iodine", 1), ("phosphorus", 1)],
+        products: [("methamphetamine", 3)],
+        min_temp: Some((374.0)),
+        priority: 8,
+        hints: [
+            "One compound and two base reagents, and the chamber has to run hot.",
+            "Ammonia, cut with iodine and phosphorus, above 374K.",
+            "Equal parts ammonia, iodine and phosphorus, above 374K.",
+        ],
+    ),
+    (
+        id: "mindbreaker_toxin",
+        reactants: [("silicon", 1), ("hydrogen", 1), ("sulfur", 1)],
+        products: [("mindbreaker_toxin", 3)],
+        priority: 8,
+        hints: [
+            "Three base reagents, equal parts.",
+            "The one that etches glass, the lightest gas, and the yellow one.",
+            "Equal parts silicon, hydrogen and sulfur.",
+        ],
+    ),
+    (
+        id: "zombie_powder",
+        reactants: [("radium", 1), ("potassium", 1), ("mercury", 1)],
+        products: [("zombie_powder", 3)],
+        priority: 8,
+        hints: [
+            "Three base reagents, equal parts, two of them dangerous alone.",
+            "Radium and mercury, cut with potassium.",
+            "Equal parts radium, potassium and mercury.",
+        ],
+    ),
 ]

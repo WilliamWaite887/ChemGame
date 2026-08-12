@@ -1,0 +1,66 @@
+// The hidden antagonist thread.
+//
+// Every entry here is a crew visit indistinguishable from a legitimate one —
+// same roster, same walk to the counter, same queue slot. `pretext` asks for
+// the reagent by its real name, wrapped in an excuse ordinary enough to pass
+// unremarked. `incident_line` is the only tell: an unrelated-sounding piece
+// of station news naming the same reagent, aired independently of the visit
+// by `antagonist::generate_antagonist_orders`. `chaos_line` is the delayed
+// report of what happened if you actually gave it to them.
+//
+// Nothing here is ever listed in `station.orders.ron` — these requests only
+// ever come from this file, through their own generator, on their own much
+// rarer clock.
+(
+    gap_seconds: (240.0, 420.0),
+    requests: [
+        (
+            reagent: "space_drugs",
+            amounts: [15, 20],
+            role: "Service",
+            pretext: "Could I get some Space Drugs? It's for the bar — someone asked, I didn't ask why.",
+            incident_line: "Security log: a crewman was seen glassy-eyed and giggling near the bar, no idea why.",
+            chaos_line: "Whatever's been going around the bar has three people missing their shift now.",
+        ),
+        (
+            reagent: "bath_salts",
+            amounts: [10, 15],
+            role: "Security",
+            pretext: "Need some Bath Salts logged into evidence storage. Paperwork's already filed.",
+            incident_line: "Engineering reports someone tore a support panel off the wall with their bare hands.",
+            chaos_line: "That 'evidence' never made it to storage — two more crew came in twitching since.",
+        ),
+        (
+            reagent: "krokodil",
+            amounts: [10, 15],
+            role: "Medical",
+            pretext: "Could you mix up some Krokodil? Doctor's orders, for a research sample.",
+            incident_line: "Janitorial found a patch of scorched, blistered flooring outside the medbay backroom.",
+            chaos_line: "Someone's arm looks like it's rotting from the inside. Medbay's asking where the Krokodil went.",
+        ),
+        (
+            reagent: "methamphetamine",
+            amounts: [10, 15],
+            role: "Engineering",
+            pretext: "Any chance of some Methamphetamine? Double shift, need to stay sharp on the reactor.",
+            incident_line: "Atmos flagged someone pacing the same corridor for forty minutes, talking to no one.",
+            chaos_line: "Engineering's had someone rewiring conduits that were never broken. Hasn't slept in two shifts.",
+        ),
+        (
+            reagent: "mindbreaker_toxin",
+            amounts: [10, 15],
+            role: "Cargo",
+            pretext: "Could you whip up some Mindbreaker Toxin? Testing pest deterrents on the shipment.",
+            incident_line: "Someone in the cargo bay swears the crates were whispering to them.",
+            chaos_line: "Cargo's short a crewman — last seen arguing with a wall about the shipping manifest.",
+        ),
+        (
+            reagent: "zombie_powder",
+            amounts: [8, 10],
+            role: "Security",
+            pretext: "I need some Zombie Powder for a restraint procedure. Nothing to worry about.",
+            incident_line: "A crewman collapsed mid-sentence in the hallway — breathing, but unresponsive.",
+            chaos_line: "That's the second crewman found frozen stiff this shift. Whoever's handing out Zombie Powder needs to stop.",
+        ),
+    ],
+)

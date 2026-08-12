@@ -1,5 +1,6 @@
 //! ChemGame — a focused recreation of the Space Station 13/14 chemist.
 
+mod antagonist;
 mod body;
 mod chem_data;
 mod containers;
@@ -16,6 +17,7 @@ mod player;
 mod produce;
 mod radio;
 mod saves;
+mod security;
 mod shift;
 mod ui;
 
@@ -54,6 +56,12 @@ fn main() {
             ),
             produce::ProducePlugin,
             radio::RadioPlugin,
+            // The hidden antagonist thread. After orders/shift/radio, since it
+            // leans on `Order`, `current_rules` and `PendingBroadcasts`.
+            antagonist::AntagonistPlugin,
+            // Security's response to it. After antagonist, since it reads
+            // the suspicion antagonist builds.
+            security::SecurityPlugin,
             // The chemist themselves: who they are, what they are looking at,
             // and what the chemistry is doing to them.
             (

@@ -62,10 +62,6 @@ impl Plugin for BodyPlugin {
             .add_client_message::<ConsumeRequested>(Channel::Ordered)
             .add_mapped_client_message::<ApplyHeldRequested>(Channel::Ordered)
             .add_systems(
-                OnEnter(crate::shift::ShiftPhase::Prep),
-                clear_bodies_at_prep.run_if(is_authority),
-            )
-            .add_systems(
                 Update,
                 (
                     (
@@ -424,7 +420,7 @@ fn handle_collapse(
         commands
             .entity(player)
             .insert(MedbayRetrieval(MEDBAY_SECONDS));
-        shift.reputation += COLLAPSE_PENALTY;
+        shift.adjust(crate::orders::Department::Medical, COLLAPSE_PENALTY);
         radio.push(crate::radio::RadioEntry {
             channel: "MED".to_string(),
             text: "Chemistry, we're reading a crew member down in your lab. \
@@ -491,23 +487,6 @@ fn run_medbay_retrieval(
             text: "Got them back on their feet. Try not to make a habit of it.".to_string(),
             good: false,
         });
-    }
-}
-
-/// Medical patch everyone up between shifts.
-///
-/// This is why no health lives in `progress.ron`: damage never crosses a shift
-/// boundary, so there is no save field, no migration and no version bump. A
-/// catastrophic shift costs reputation, not the career — and prep stays the
-/// safe window it was designed to be.
-fn clear_bodies_at_prep(mut bodies: Query<(&mut Body, &mut Bloodstream)>) {
-    for (mut body, mut blood) in &mut bodies {
-        if body.0 != chem_sim::Vitals::default() {
-            body.0 = chem_sim::Vitals::default();
-        }
-        if !blood.0.is_empty() {
-            *blood = Bloodstream::default();
-        }
     }
 }
 
@@ -967,14 +946,19 @@ mod tests {
             .insert(Transform::default());
 
         flatten(&mut app, player);
-        let after = app.world().resource::<crate::orders::Shift>().reputation;
+        let after = app
+            .world()
+            .resource::<crate::orders::Shift>()
+            .standing(crate::orders::Department::Medical);
         assert_eq!(after, COLLAPSE_PENALTY);
 
         // Still down several frames later; it must not keep charging.
         app.update();
         app.update();
         assert_eq!(
-            app.world().resource::<crate::orders::Shift>().reputation,
+            app.world()
+                .resource::<crate::orders::Shift>()
+                .standing(crate::orders::Department::Medical),
             after,
             "the penalty is for going down, not for staying down"
         );
@@ -1033,26 +1017,6 @@ mod tests {
         assert!(
             app.world().get::<MedbayRetrieval>(player).is_none(),
             "medical stand down once someone else has handled it"
-        );
-    }
-
-    #[test]
-    fn prep_patches_everyone_up() {
-        let mut app = collapse_app();
-        let (player, _) = chemist_holding(&mut app, ContainerKind::Beaker, "water", 0);
-        inject(&mut app, player, "plasma", 30);
-        app.world_mut()
-            .get_mut::<Body>(player)
-            .unwrap()
-            .0
-            .apply(chem_sim::Damage::of(DamageKind::Burn, Units::whole(40)));
-
-        app.world_mut().run_system_cached(clear_bodies_at_prep).ok();
-
-        assert!(!app.world().get::<Body>(player).unwrap().0.is_hurt());
-        assert!(
-            blood_of(&app, player).is_empty(),
-            "damage never crosses a shift boundary, which is why none of it is saved"
         );
     }
 

@@ -95,7 +95,27 @@ impl RadioLog {
 }
 
 #[derive(Resource, Default)]
-struct PendingBroadcasts(Vec<(Timer, RadioEntry)>);
+pub struct PendingBroadcasts(Vec<(Timer, RadioEntry)>);
+
+impl PendingBroadcasts {
+    /// Schedules `entry` to land in `delay` seconds.
+    ///
+    /// The one write path onto the queue — `queue_reports` uses this
+    /// internally too, so a delayed line always looks the same to
+    /// `deliver_broadcasts` regardless of what caused it.
+    pub fn push_delayed(&mut self, delay: f32, entry: RadioEntry) {
+        self.0
+            .push((Timer::from_seconds(delay.max(0.0), TimerMode::Once), entry));
+    }
+
+    /// How many lines are queued but not yet delivered. Test-only: other
+    /// modules' tests use this to confirm something was actually scheduled,
+    /// without reaching into the queue's contents.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+}
 
 /// Short department tag shown against each line.
 pub fn channel_for(role: &str) -> String {
@@ -184,14 +204,14 @@ fn queue_reports(
             .replace("{reagent}", &reagent);
 
         let delay = rng.random_range(script.delay_seconds.0..=script.delay_seconds.1);
-        pending.0.push((
-            Timer::from_seconds(delay, TimerMode::Once),
+        pending.push_delayed(
+            delay,
             RadioEntry {
                 channel: channel_for(&report.role),
                 text,
                 good: report.outcome == Outcome::Success,
             },
-        ));
+        );
     }
 }
 

@@ -3,7 +3,7 @@
 //! Grading lives in [`grade`], a pure function with no ECS involvement, so the
 //! rules that decide whether a shift went well can be tested exhaustively.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use bevy_common_assets::ron::RonAssetPlugin;
@@ -22,7 +22,7 @@ use crate::machines::{chemist_entity, slotted_container, Machine, MachineKind, T
 use crate::net::is_authority;
 use crate::player::Chemist;
 use crate::radio::{announce_request, channel_for, RadioEntry, RadioLog};
-use crate::shift::{count_resolved_orders, weighted_pick, ShiftClock, ShiftPhase};
+use crate::shift::{current_rules, weighted_pick, CurrentForecast};
 use crate::AppState;
 
 /// How often a clean delivery earns a sample vial of something unfamiliar.
@@ -50,20 +50,16 @@ impl Plugin for OrderPlugin {
                 // promoted everywhere, exactly like the produce catalog.
                 promote_station_data,
                 (
-                    // Gated: nobody new walks in during prep or the debrief.
-                    // That window is the whole point — it is when the bench,
-                    // the grinder and the book are free to actually use.
-                    generate_orders.run_if(in_state(ShiftPhase::Service)),
-                    // Deliberately *not* gated. Gating these would freeze an
-                    // in-flight order's patience mid-countdown and strand the
-                    // crew member at the counter with no way to resolve.
+                    // Crew arrive continuously — the only gate left is the
+                    // player's own "not accepting requests" toggle, checked
+                    // inside `generate_orders` itself against `Shift`.
+                    generate_orders,
+                    // Deliberately not gated the same way: the sign stops new
+                    // arrivals, not the clock on whoever is already waiting.
                     expire_orders,
                     handle_delivery,
                     handle_window_delivery,
                     leave_sample_vials,
-                    // After all three resolution paths, so it sees this
-                    // frame's resolutions rather than next frame's.
-                    count_resolved_orders,
                     broadcast_shift,
                 )
                     .chain()
@@ -89,19 +85,24 @@ pub struct OrderConfig {
     pub gap_seconds: (f32, f32),
     pub patience_seconds: (f32, f32),
     pub max_active: usize,
-    /// How long the prep and debrief windows run for.
-    #[serde(default)]
-    pub windows: WindowDef,
-    /// How the numbers above tighten shift by shift.
+    /// How often the station briefing redraws. There is no shift boundary to
+    /// redraw it against any more, so it runs on its own clock.
+    #[serde(default = "default_forecast_seconds")]
+    pub forecast_seconds: (f32, f32),
+    /// How the numbers above tighten as the career goes on.
     #[serde(default)]
     pub ramp: RampDef,
     /// What cargo keeps the lab stocked with.
     #[serde(default)]
     pub supply: SupplyDef,
-    /// What the station expects of a shift, briefed during prep.
+    /// What the station expects, briefed periodically over the radio.
     #[serde(default)]
     pub forecasts: Vec<ForecastDef>,
     pub requests: Vec<RequestDef>,
+}
+
+fn default_forecast_seconds() -> (f32, f32) {
+    (180.0, 300.0)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -109,40 +110,25 @@ pub struct RequestDef {
     pub reagent: String,
     pub amounts: Vec<u32>,
     pub plea: String,
-    /// What kind of shift this request belongs to, so a forecast can lean on
-    /// it. An untagged request can never be forecast — see
+    /// What kind of briefing this request belongs to, so a forecast can lean
+    /// on it. An untagged request can never be forecast — see
     /// `every_request_carries_a_theme`.
     #[serde(default)]
     pub themes: Vec<String>,
 }
 
-/// Lengths of the two windows that are not the shift itself.
-#[derive(Clone, Debug, Deserialize)]
-pub struct WindowDef {
-    pub prep_seconds: f32,
-    pub debrief_seconds: f32,
-    /// The first prep of a session has no clock, so a new chemist can take the
-    /// lab apart before anyone starts asking for anything.
-    pub first_shift_untimed: bool,
-}
-
-impl Default for WindowDef {
-    fn default() -> Self {
-        WindowDef {
-            prep_seconds: 120.0,
-            debrief_seconds: 90.0,
-            first_shift_untimed: true,
-        }
-    }
-}
-
-/// How each shift tightens on the one before it.
+/// How the difficulty tightens as the career goes on.
+///
+/// There is no shift boundary any more — crew arrive continuously — so the
+/// tier that drives every field below comes from total orders resolved
+/// (`shift.succeeded + shift.botched`) divided by `orders_per_tier`, computed
+/// fresh wherever it's needed rather than frozen once per shift. See
+/// [`current_rules`].
 #[derive(Clone, Debug, Deserialize)]
 pub struct RampDef {
-    pub quota_base: u32,
-    pub quota_per_shift: u32,
-    pub quota_cap: u32,
-    /// Multiplied into the gap between orders, once per shift elapsed.
+    /// Orders resolved before the difficulty steps up once.
+    pub orders_per_tier: u32,
+    /// Multiplied into the gap between orders, once per tier elapsed.
     pub gap_scale: f32,
     pub gap_floor: f32,
     pub patience_scale: f32,
@@ -167,9 +153,7 @@ pub struct RampDef {
 impl Default for RampDef {
     fn default() -> Self {
         RampDef {
-            quota_base: 5,
-            quota_per_shift: 1,
-            quota_cap: 10,
+            orders_per_tier: 5,
             gap_scale: 0.92,
             gap_floor: 18.0,
             patience_scale: 0.95,
@@ -288,13 +272,40 @@ fn promote_station_data(
 // ---------------------------------------------------------------------------
 
 /// An outstanding request, held on the crew member who made it.
-#[derive(Component)]
+///
+/// `patience`/`waited` are plain `f32` rather than a `Timer` — `Timer` is not
+/// `Serialize`, which is why `Order` was never replicated. Both chemists in
+/// co-op now see the same queue with the same countdowns.
+#[derive(Component, Clone, Serialize, Deserialize)]
 pub struct Order {
     pub reagent: ReagentId,
     pub amount: Units,
     pub plea: String,
-    pub timer: Timer,
+    /// Seconds before a waiting crew member gives up and leaves.
+    pub patience: f32,
+    /// Seconds actually waited so far. Drives [`reputation_delta`] — how much
+    /// a resolution is worth, not whether one happens.
+    pub waited: f32,
 }
+
+impl Order {
+    /// Seconds left before patience runs out, for the HUD countdown.
+    pub fn remaining(&self) -> f32 {
+        (self.patience - self.waited).max(0.0)
+    }
+}
+
+/// Marks a crew visit as secretly an antagonist's — someone after an illicit
+/// reagent under an ordinary-sounding pretext.
+///
+/// **Never** add this to `net::register_replication`, and never query
+/// `Has<IllicitOrder>` from `src/ui/mod.rs`. Either would break the one
+/// guarantee the whole mechanic depends on: nothing on screen ever marks a
+/// visit as suspicious. The crew entity is spawned, dressed and routed
+/// exactly like a legitimate one — this marker only changes what grading does
+/// with the result, in [`complete_delivery`]/[`expire_orders`].
+#[derive(Component)]
+pub struct IllicitOrder;
 
 /// How a delivery went.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
@@ -313,18 +324,40 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    pub fn reputation_delta(self) -> i32 {
+    /// Reputation at an instant hand-off (`t = 0`) and at patience fully
+    /// spent (`t = 1`). See [`reputation_delta`].
+    fn reputation_range(self) -> (i32, i32) {
         match self {
-            Outcome::Success => 2,
-            Outcome::Short | Outcome::Impure => -1,
-            Outcome::Expired => -2,
-            Outcome::Overdose | Outcome::Wrong => -3,
+            Outcome::Success => (2, 1),
+            Outcome::Short | Outcome::Impure => (-1, -3),
+            Outcome::Overdose | Outcome::Wrong => (-3, -5),
+            // No longer a separate hard-penalty event outside the curve — an
+            // `Expired` resolution *is* the curve, evaluated at its worst
+            // point, so both endpoints are the same number.
+            Outcome::Expired => (-4, -4),
         }
     }
 
     pub fn is_good(self) -> bool {
         self == Outcome::Success
     }
+}
+
+/// How much standing a resolved order moves, scaled by how long it waited.
+///
+/// `t = 0` is an instant hand-off; `t = 1` is patience fully spent. The
+/// principle behind the numbers in [`Outcome::reputation_range`]: the fresh
+/// endpoint reproduces the flat constants this replaced exactly, so only the
+/// stale endpoint is new — a fast delivery scores the same as it always did,
+/// and everything to do with taking your time is the addition.
+pub fn reputation_delta(outcome: Outcome, waited: f32, patience: f32) -> i32 {
+    let t = if patience > 0.0 {
+        (waited / patience).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let (fresh, stale) = outcome.reputation_range();
+    (fresh as f32 + (stale - fresh) as f32 * t).round() as i32
 }
 
 /// Emitted when an order finishes, one way or another.
@@ -339,13 +372,128 @@ pub struct OrderResolved {
     pub role: String,
     pub reagent: ReagentId,
     pub outcome: Outcome,
+    /// Whether this was secretly an antagonist's order. Never surfaced in the
+    /// UI — read only by `antagonist`'s own resolution handler, which is what
+    /// keeps the "no visible tell" guarantee intact even downstream of
+    /// grading.
+    pub illicit: bool,
 }
 
-#[derive(Resource, Default, Clone, Serialize, Deserialize)]
+/// A station department whose standing rises and falls with how you treat its
+/// crew.
+///
+/// Mirrors the five roles `station.crew.ron` actually writes — the same
+/// vocabulary `radio::channel_for` already matches, for the same reason:
+/// departments are content, not architecture.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum Department {
+    Medical,
+    Security,
+    Engineering,
+    Cargo,
+    Service,
+}
+
+impl Department {
+    pub const ALL: [Department; 5] = [
+        Department::Medical,
+        Department::Security,
+        Department::Engineering,
+        Department::Cargo,
+        Department::Service,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Department::Medical => "Medical",
+            Department::Security => "Security",
+            Department::Engineering => "Engineering",
+            Department::Cargo => "Cargo",
+            Department::Service => "Service",
+        }
+    }
+
+    /// What this department values, shown on the standing board.
+    pub fn blurb(self) -> &'static str {
+        match self {
+            Department::Medical => {
+                "Wants the dose they asked for, on time, and nothing extra in it."
+            }
+            Department::Security => {
+                "Wants contraband kept off the shelves and orders filled honestly."
+            }
+            Department::Engineering => {
+                "Wants burns treated fast and the lab not blowing the breaker."
+            }
+            Department::Cargo => "Wants glassware back in circulation and crates signed for.",
+            Department::Service => {
+                "Wants the bar and the kitchen kept stocked, not complaining."
+            }
+        }
+    }
+
+    /// The department a crew role belongs to, or `None` for a name that is
+    /// not on the roster — a content bug, not a reason to crash.
+    pub fn from_role(role: &str) -> Option<Department> {
+        match role {
+            "Medical" => Some(Department::Medical),
+            "Security" => Some(Department::Security),
+            "Engineering" => Some(Department::Engineering),
+            "Cargo" => Some(Department::Cargo),
+            "Service" => Some(Department::Service),
+            _ => None,
+        }
+    }
+}
+
+/// Supplies bought against a department's standing.
+///
+/// Only glassware banks anything: it still has to be carried in by the
+/// courier, so a purchase lands at the next restock pass rather than
+/// instantly. Every other requisition kind applies the moment it is bought.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Requisition {
+    /// Extra glassware on top of the standing target, banked until the next
+    /// restock check consumes it.
+    pub glassware: usize,
+}
+
+#[derive(Resource, Clone, Serialize, Deserialize)]
 pub struct Shift {
     pub succeeded: u32,
     pub botched: u32,
-    pub reputation: i32,
+    pub department_standing: HashMap<Department, i32>,
+    pub requisition: Requisition,
+    /// The "not accepting requests" sign. Either chemist can flip it; while
+    /// it's down, nobody new walks in — but whoever is already at the
+    /// counter keeps waiting, and their clock keeps running, exactly as if
+    /// the sign were still up. It stops new traffic, not existing orders.
+    pub accepting_orders: bool,
+}
+
+impl Default for Shift {
+    fn default() -> Self {
+        Shift {
+            succeeded: 0,
+            botched: 0,
+            department_standing: HashMap::new(),
+            requisition: Requisition::default(),
+            accepting_orders: true,
+        }
+    }
+}
+
+impl Shift {
+    pub fn adjust(&mut self, department: Department, delta: i32) {
+        *self.department_standing.entry(department).or_insert(0) += delta;
+    }
+
+    pub fn standing(&self, department: Department) -> i32 {
+        self.department_standing
+            .get(&department)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 /// The shift tally, pushed to clients. Both chemists share one score — the
@@ -414,7 +562,8 @@ fn generate_orders(
     station: Option<Res<StationData>>,
     mut spawner: Option<ResMut<OrderSpawner>>,
     knowledge: Option<Res<Knowledge>>,
-    clock: Res<ShiftClock>,
+    shift: Res<Shift>,
+    forecast: Option<Res<CurrentForecast>>,
     mut radio: ResMut<RadioLog>,
     active: Query<&CrewMember>,
 ) {
@@ -424,10 +573,17 @@ fn generate_orders(
     let (Some(station), Some(spawner)) = (station, spawner.as_mut()) else {
         return;
     };
+    // The player's own "not accepting requests" sign. Nobody new walks in
+    // while it's down — the direct replacement for the old prep/debrief gate,
+    // except it's a choice rather than a clock.
+    if !shift.accepting_orders {
+        return;
+    }
 
-    // This shift's difficulty, frozen when service opened, rather than the
-    // base config — see `ShiftRules::for_shift`.
-    let rules = &clock.rules;
+    // Computed fresh from career totals rather than frozen per shift — there
+    // is no shift boundary left to freeze a snapshot against.
+    let rules = current_rules(&station.config, &shift);
+    let rules = &rules;
 
     if !spawner.timer.tick(time.delta()).just_finished() {
         return;
@@ -486,14 +642,12 @@ fn generate_orders(
     };
 
     // The forecast leans on whichever pool was chosen; it never chooses for it,
-    // so a shift briefed for burns still only asks for things the chemist can
+    // so a briefing for burns still only asks for things the chemist can
     // plausibly make.
-    let Some(request) = weighted_pick(
-        pool,
-        clock.forecast_themes(),
-        rules.forecast_boost,
-        rng.random::<f64>(),
-    ) else {
+    let no_themes: &[String] = &[];
+    let themes = forecast.as_ref().map(|f| f.themes()).unwrap_or(no_themes);
+    let Some(request) = weighted_pick(pool, themes, rules.forecast_boost, rng.random::<f64>())
+    else {
         return;
     };
     // A request naming a reagent that is not in the chemistry data is a
@@ -515,7 +669,8 @@ fn generate_orders(
             reagent,
             amount: Units::whole(amount as i32),
             plea: request.plea.clone(),
-            timer: Timer::from_seconds(patience, TimerMode::Once),
+            patience,
+            waited: 0.0,
         },
         Interactable::new(format!(
             "{} — hand over {}u {}",
@@ -538,15 +693,22 @@ fn expire_orders(
     time: Res<Time>,
     mut shift: ResMut<Shift>,
     mut resolved: MessageWriter<OrderResolved>,
-    mut orders: Query<(Entity, &mut Order, &CrewMember, &mut CrewRoute)>,
+    mut orders: Query<(Entity, &mut Order, &CrewMember, &mut CrewRoute, Has<IllicitOrder>)>,
 ) {
-    for (entity, mut order, crew, mut route) in &mut orders {
+    // Deliberately *not* gated on `accepting_orders`. The sign stops new
+    // people walking in; it is not a pause button, so whoever is already at
+    // the counter keeps waiting — and keeps costing you — exactly as if it
+    // were still up.
+    let dt = time.delta_secs();
+
+    for (entity, mut order, crew, mut route, illicit) in &mut orders {
         // Patience only runs down once they have actually arrived, so a slow
         // walk in never counts against the player.
         if route.phase != CrewPhase::Waiting {
             continue;
         }
-        if !order.timer.tick(time.delta()).just_finished() {
+        order.waited += dt;
+        if order.waited < order.patience {
             continue;
         }
 
@@ -555,13 +717,29 @@ fn expire_orders(
             role: crew.role.clone(),
             reagent: order.reagent,
             outcome: Outcome::Expired,
+            illicit,
         });
         shift.botched += 1;
-        shift.reputation += Outcome::Expired.reputation_delta();
+        // An abandoned illicit order is not a chaos-causing success, so it
+        // always falls through to the ordinary department penalty — the same
+        // shape "declining isn't specially punished" takes on the delivery
+        // side, just arrived at by giving up rather than choosing to.
+        adjust_for_role(&mut shift, &crew.role, Outcome::Expired, order.waited, order.patience);
 
         commands.entity(entity).remove::<Order>();
         route.leave();
     }
+}
+
+/// Applies a resolution's reputation delta to the department the crew
+/// member's role names, warning rather than panicking if it names none — a
+/// content bug in `station.crew.ron` should not take the shift down with it.
+fn adjust_for_role(shift: &mut Shift, role: &str, outcome: Outcome, waited: f32, patience: f32) {
+    let Some(department) = Department::from_role(role) else {
+        warn!("order resolved for unrecognised department role '{role}'");
+        return;
+    };
+    shift.adjust(department, reputation_delta(outcome, waited, patience));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -572,7 +750,7 @@ fn handle_delivery(
     mut shift: ResMut<Shift>,
     mut radio: ResMut<RadioLog>,
     mut resolved: MessageWriter<OrderResolved>,
-    mut crew: Query<(&CrewMember, &Order, &mut CrewRoute)>,
+    mut crew: Query<(&CrewMember, &Order, &mut CrewRoute, Has<IllicitOrder>)>,
     containers: Query<(Entity, &Container, &HeldBy, Has<TestBenchStock>)>,
     chemists: Query<(Entity, &Chemist)>,
     mut knowledge: ResMut<Knowledge>,
@@ -581,7 +759,7 @@ fn handle_delivery(
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
-        let Ok((member, order, mut route)) = crew.get_mut(request.target) else {
+        let Ok((member, order, mut route, illicit)) = crew.get_mut(request.target) else {
             continue;
         };
         let Some((container_entity, container, _, test_stock)) = containers
@@ -618,6 +796,7 @@ fn handle_delivery(
                 route: &mut route,
                 container_entity,
                 container,
+                illicit,
             },
         );
     }
@@ -631,6 +810,7 @@ struct Handover<'a> {
     route: &'a mut CrewRoute,
     container_entity: Entity,
     container: &'a Container,
+    illicit: bool,
 }
 
 /// Grades a handover and closes the order out.
@@ -653,6 +833,7 @@ fn complete_delivery(
         route,
         container_entity,
         container,
+        illicit,
     } = handover;
 
     let outcome = grade(
@@ -668,6 +849,7 @@ fn complete_delivery(
         role: member.role.clone(),
         reagent: order.reagent,
         outcome,
+        illicit,
     });
 
     if outcome.is_good() {
@@ -676,7 +858,17 @@ fn complete_delivery(
     } else {
         shift.botched += 1;
     }
-    shift.reputation += outcome.reputation_delta();
+    // A successful illicit delivery is graded but never banked against the
+    // pretext department — that department was never the real requester, and
+    // crediting or blaming it would be a narrative contradiction. Its
+    // consequences (underworld standing, the delayed chaos report, Security
+    // suspicion) live entirely in `antagonist`, reacting to the same
+    // `OrderResolved` this just wrote. Every other case — including a
+    // declined illicit order — falls through to the ordinary path below,
+    // unchanged.
+    if !(illicit && outcome.is_good()) {
+        adjust_for_role(shift, &member.role, outcome, order.waited, order.patience);
+    }
 
     info!(
         "{} took {} — {:?}",
@@ -714,11 +906,7 @@ fn window_recipient<'a>(
     waiting
         .filter(|(_, _, route)| route.phase == CrewPhase::Waiting)
         .filter(|(_, order, _)| contents.volume_of(order.reagent).is_positive())
-        .min_by(|a, b| {
-            a.1.timer
-                .remaining_secs()
-                .total_cmp(&b.1.timer.remaining_secs())
-        })
+        .min_by(|a, b| a.1.remaining().total_cmp(&b.1.remaining()))
         .map(|(entity, _, _)| entity)
 }
 
@@ -739,7 +927,7 @@ fn handle_window_delivery(
     windows: Query<(Entity, &Machine)>,
     slotted: Query<(Entity, &InSlot)>,
     containers: Query<(&Container, Has<TestBenchStock>)>,
-    mut crew: Query<(Entity, &CrewMember, &Order, &mut CrewRoute)>,
+    mut crew: Query<(Entity, &CrewMember, &Order, &mut CrewRoute, Has<IllicitOrder>)>,
 ) {
     for (window, machine) in &windows {
         if machine.kind != MachineKind::DeliveryWindow {
@@ -761,12 +949,12 @@ fn handle_window_delivery(
 
         let candidates = crew
             .iter()
-            .map(|(entity, _, order, route)| (entity, order, route));
+            .map(|(entity, _, order, route, _)| (entity, order, route));
         let Some(recipient) = window_recipient(&container.solution, candidates) else {
             continue;
         };
 
-        let Ok((crew_entity, member, order, mut route)) = crew.get_mut(recipient) else {
+        let Ok((crew_entity, member, order, mut route, illicit)) = crew.get_mut(recipient) else {
             continue;
         };
         complete_delivery(
@@ -782,6 +970,7 @@ fn handle_window_delivery(
                 route: &mut route,
                 container_entity,
                 container,
+                illicit,
             },
         );
     }
@@ -947,7 +1136,8 @@ mod tests {
                     reagent,
                     amount: Units::whole(amount),
                     plea: String::new(),
-                    timer: Timer::from_seconds(patience, TimerMode::Once),
+                    patience,
+                    waited: 0.0,
                 },
                 route,
             ))
@@ -961,6 +1151,125 @@ mod tests {
             .read(messages)
             .map(|report| (report.name.clone(), report.outcome))
             .collect()
+    }
+
+    // -- expiry, and the accepting-orders sign -------------------------
+
+    fn expiry_app() -> App {
+        let data = data();
+        let mut app = App::new();
+        app.insert_resource(ChemDb(data))
+            .init_resource::<Shift>()
+            .init_resource::<Time>()
+            .add_message::<OrderResolved>()
+            .add_systems(Update, expire_orders);
+        app
+    }
+
+    fn advance(app: &mut App, seconds: f32) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(seconds));
+        app.update();
+    }
+
+    #[test]
+    fn a_closed_sign_does_not_pause_an_orders_clock() {
+        // The sign stops new arrivals; it is not a pause button. Whoever is
+        // already at the counter keeps waiting, and keeps costing you,
+        // exactly as if the sign were still up.
+        let mut app = expiry_app();
+        app.world_mut().resource_mut::<Shift>().accepting_orders = false;
+        let crew = waiting_crew(&mut app, "Dr. Vance", "kelotane", 20, 1.0, true);
+
+        advance(&mut app, 1.5);
+
+        assert!(
+            app.world().get::<Order>(crew).is_none(),
+            "the order should still expire even with the sign down"
+        );
+        assert_eq!(app.world().resource::<Shift>().botched, 1);
+        assert_eq!(
+            outcomes(&app),
+            vec![("Dr. Vance".to_string(), Outcome::Expired)]
+        );
+    }
+
+    #[test]
+    fn an_open_sign_behaves_exactly_the_same_way() {
+        // Same clock, same outcome — the sign has no effect on an order that
+        // is already in progress, only on whether a new one can start.
+        let mut app = expiry_app();
+        let crew = waiting_crew(&mut app, "Dr. Vance", "kelotane", 20, 1.0, true);
+
+        advance(&mut app, 1.5);
+
+        assert!(app.world().get::<Order>(crew).is_none());
+        assert_eq!(app.world().resource::<Shift>().botched, 1);
+    }
+
+    #[test]
+    fn a_slow_arrival_is_never_charged_for_the_walk() {
+        let mut app = expiry_app();
+        let crew = waiting_crew(&mut app, "Dr. Vance", "kelotane", 20, 1.0, false);
+
+        advance(&mut app, 5.0);
+
+        assert!(
+            app.world().get::<Order>(crew).is_some(),
+            "patience must not run while still walking in"
+        );
+    }
+
+    // -- the antagonist thread's grading fall-through --------------------
+
+    #[test]
+    fn a_successful_illicit_delivery_never_touches_the_pretext_departments_standing() {
+        // The department was never the real requester — crediting it would
+        // be a narrative contradiction. `antagonist::handle_illicit_resolutions`
+        // is where the real consequences live; this only proves grading
+        // itself stays out of the way.
+        let mut app = window_app();
+        let (_, beaker) = window_with(&mut app, &[("dylovene", 30)], false);
+        let crew = waiting_crew(&mut app, "Dr. Vance", "dylovene", 30, 60.0, true);
+        app.world_mut().entity_mut(crew).insert(IllicitOrder);
+
+        app.update();
+
+        assert_eq!(
+            outcomes(&app),
+            vec![("Dr. Vance".to_string(), Outcome::Success)]
+        );
+        assert!(app.world().get_entity(beaker).is_err());
+        assert_eq!(
+            app.world().resource::<Shift>().standing(Department::Medical),
+            0,
+            "a successful illicit delivery must not move the pretext department"
+        );
+    }
+
+    #[test]
+    fn a_declined_illicit_order_grades_like_any_other_bad_outcome() {
+        // Nothing special happens on a decline — it falls through to the
+        // exact same expiry path a legitimate order takes, dollar for dollar.
+        let illicit_delta = {
+            let mut app = expiry_app();
+            let crew = waiting_crew(&mut app, "Dr. Vance", "kelotane", 20, 1.0, true);
+            app.world_mut().entity_mut(crew).insert(IllicitOrder);
+            advance(&mut app, 1.5);
+            app.world().resource::<Shift>().standing(Department::Medical)
+        };
+        let legitimate_delta = {
+            let mut app = expiry_app();
+            waiting_crew(&mut app, "Dr. Vance", "kelotane", 20, 1.0, true);
+            advance(&mut app, 1.5);
+            app.world().resource::<Shift>().standing(Department::Medical)
+        };
+        assert_eq!(
+            illicit_delta, legitimate_delta,
+            "a declined illicit order must cost exactly what an ordinary one does"
+        );
+        assert_ne!(illicit_delta, 0, "an expired order should have cost something");
     }
 
     #[test]

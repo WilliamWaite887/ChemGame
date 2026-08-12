@@ -16,10 +16,9 @@ use crate::containers::{spawn_container, Container, ContainerKind};
 use crate::crew::{spawn_crew_member, CrewMember, CrewPhase, CrewRoute};
 use crate::lab::{COUNTER_DROP_Z, COUNTER_SPOT, COUNTER_TOP};
 use crate::net::is_authority;
-use crate::orders::StationData;
-use crate::produce::DeliverySchedule;
+use crate::orders::{Shift, StationData};
 use crate::radio::{channel_for, RadioEntry, RadioLog};
-use crate::shift::{crate_contents, restock_order, PrepOpened, ShiftClock};
+use crate::shift::{crate_contents, restock_order};
 use crate::AppState;
 
 /// Gap between pieces laid out on the counter.
@@ -28,6 +27,13 @@ const ITEM_SPACING: f32 = 0.3;
 /// lands inside a vial.
 const CRATE_X_OFFSET: f32 = -1.05;
 
+/// How often the lab's glassware deficit is rechecked.
+///
+/// There is no prep window to hang this off any more, so it runs on its own
+/// clock instead — the first check fires immediately (a `None` timer reads as
+/// due), so a fresh session is not left short for twenty seconds.
+const GLASSWARE_CHECK_SECONDS: f32 = 20.0;
+
 pub struct RestockPlugin;
 
 impl Plugin for RestockPlugin {
@@ -35,18 +41,13 @@ impl Plugin for RestockPlugin {
         app.init_resource::<PendingRestock>().add_systems(
             Update,
             (
-                // Driven by `PrepOpened` rather than `OnEnter(Prep)`: the
-                // transition fires before the station data has loaded and
-                // before `spawn_starting_glassware` has put anything on the
-                // benches, so a restock hung off it would count an empty lab
-                // and send four beakers to a room that already had five.
-                (order_glassware, expedite_requisitioned_produce),
+                order_glassware,
                 // Split from ordering so a crate that cannot go out this frame
                 // is retried rather than lost — see [`PendingRestock`].
                 dispatch_glassware,
-                // Not phase-gated: the courier may still be walking when the
-                // player starts the shift early, and one frozen mid-stride
-                // holding a crate never leaves.
+                // Not gated on the accepting-orders sign: the courier may
+                // still be walking mid-stride when the player flips it, and
+                // one frozen holding a crate never leaves.
                 unload_glassware,
             )
                 .chain()
@@ -72,25 +73,39 @@ impl GlasswareDelivery {
 /// A crate that has been decided on but not yet handed to a courier.
 ///
 /// Ordering and dispatching are separate because the courier may be
-/// unavailable at the moment prep opens — he is on the ordinary crew roster, so
-/// he can still be walking out from last shift. Ordering happens once, on
-/// `PrepOpened`; dispatch retries until it takes. Collapsed into one system,
-/// a courier who happened to be in the room would cancel the lab's entire
-/// resupply for the shift, and any requisition paid for it with it.
+/// unavailable the moment a deficit is found — he is on the ordinary crew
+/// roster too, so he can still be walking out from an earlier delivery.
+/// Ordering happens on its own periodic check; dispatch retries until it
+/// takes. Collapsed into one system, a courier who happened to be in the room
+/// would cancel the lab's entire resupply, and any requisition paid for it
+/// with it.
 #[derive(Resource, Default)]
 struct PendingRestock(Option<usize>);
 
-/// Works out how short the lab is, once per prep.
+/// Works out how short the lab is, on a periodic check rather than once per
+/// prep — there is no prep to hang it off any more.
 fn order_glassware(
-    mut opened: MessageReader<PrepOpened>,
+    time: Res<Time>,
+    mut timer: Local<Option<Timer>>,
     mut pending: ResMut<PendingRestock>,
-    mut clock: ResMut<ShiftClock>,
+    mut shift: ResMut<Shift>,
     station: Option<Res<StationData>>,
     glassware: Query<&Container>,
 ) {
-    if opened.read().count() == 0 {
+    let due = match timer.as_mut() {
+        Some(t) => t.tick(time.delta()).just_finished(),
+        // Nothing scheduled yet: this is the first frame, and the lab should
+        // not sit unchecked for a full interval before the first delivery.
+        None => true,
+    };
+    if !due {
         return;
     }
+    *timer = Some(Timer::from_seconds(
+        GLASSWARE_CHECK_SECONDS,
+        TimerMode::Repeating,
+    ));
+
     let Some(station) = station else {
         return;
     };
@@ -116,7 +131,7 @@ fn order_glassware(
     // only the target would make the purchase a no-op in exactly the case it is
     // bought for: a lab already short by more than a crate is capped at
     // `crate_max` either way.
-    let bonus = clock.requisition.glassware;
+    let bonus = shift.requisition.glassware;
     let needed = restock_order(
         live,
         supply.glassware_target + bonus,
@@ -127,8 +142,8 @@ fn order_glassware(
     }
 
     // Only spent once it has bought something. Zeroed above the early return it
-    // could be consumed by a prep that delivered nothing at all.
-    clock.requisition.glassware = 0;
+    // could be consumed by a check that delivered nothing at all.
+    shift.requisition.glassware = 0;
     pending.0 = Some(needed);
 }
 
@@ -174,33 +189,6 @@ fn dispatch_glassware(
         .entity(courier)
         .insert(GlasswareDelivery { beakers, large });
     pending.0 = None;
-}
-
-/// How soon a requisitioned haul turns up, in seconds into prep.
-///
-/// Early enough to be worth grinding before the shift starts, late enough that
-/// the player is not handed it the instant they buy it.
-const EXPEDITED_PRODUCE_DELAY: f32 = 25.0;
-
-/// Cashes in a requisitioned produce crate.
-fn expedite_requisitioned_produce(
-    mut opened: MessageReader<PrepOpened>,
-    mut clock: ResMut<ShiftClock>,
-    schedule: Option<ResMut<DeliverySchedule>>,
-) {
-    if opened.read().count() == 0 {
-        return;
-    }
-    if !clock.requisition.produce_crate {
-        return;
-    }
-    let Some(mut schedule) = schedule else {
-        // Botany's schedule has not loaded yet. Hold the requisition rather
-        // than spending it on nothing.
-        return;
-    };
-    clock.requisition.produce_crate = false;
-    schedule.expedite(EXPEDITED_PRODUCE_DELAY);
 }
 
 /// Puts the crate down once he reaches the counter, then sends him out.

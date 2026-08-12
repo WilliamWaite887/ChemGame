@@ -483,7 +483,10 @@ mod tests {
         // which is the check that matters most here, since it is the one recipe
         // that can hurt you. Of the recipes added since, `smoke_powder` is the
         // one to watch: it is one catalyst away from `smoke` and must wait for
-        // stabilizing agent.
+        // stabilizing agent. `krokodil`/`methamphetamine`/`bath_salts` are
+        // deliberately absent too — each needs a compound (`oil`, `ammonia`,
+        // `space_drugs`) first, unlike the other three Illicit reagents below,
+        // which are one base-reagent mix away like anything else this early.
         assert_eq!(
             frontier,
             vec![
@@ -500,16 +503,19 @@ mod tests {
                 "hyronalin",
                 "ice",
                 "mannitol",
+                "mindbreaker_toxin",
                 "oil",
                 "potassium_iodide",
                 "smoke",
                 "sodium_chloride",
+                "space_drugs",
                 "stabilizing_agent",
                 "sulphuric_acid",
                 "synaptizine",
                 "thermite",
                 "tricordrazine",
                 "unstable_mutagen",
+                "zombie_powder",
             ]
         );
     }

@@ -702,7 +702,7 @@ fn unknown_reagents_in_reactions_are_rejected() {
 fn seed_data_loads_completely() {
     let data = data();
     assert_eq!(data.reagents.dispensable().count(), 23);
-    assert_eq!(data.reactions.len(), 35);
+    assert_eq!(data.reactions.len(), 41);
     for recipe in STARTING_RECIPES {
         assert!(data.reactions.find(recipe).is_some(), "missing {recipe}");
     }

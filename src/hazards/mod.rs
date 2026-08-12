@@ -18,7 +18,6 @@ use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::net::is_authority;
-use crate::shift::ShiftPhase;
 
 use crate::body::{Bloodstream, Body, MetabolismClock};
 use crate::chem_data::ChemDb;
@@ -47,24 +46,19 @@ impl Plugin for HazardPlugin {
             .add_server_message::<HazardFelt>(Channel::Ordered)
             .init_resource::<IncidentSchedule>()
             .add_systems(Startup, start_loading_hazards)
-            // A shift starts with a clean slate. Without this a warning still
-            // pending when service ended would fire the moment the next one
-            // opened, with no siren to explain it.
-            .add_systems(OnEnter(ShiftPhase::Service), reset_incident_schedule)
-            .add_systems(OnExit(ShiftPhase::Service), clear_active_hazards)
             .add_systems(
                 Update,
                 (
                     (spawn_hazards, expose_to_smoke, fade_smoke)
                         .chain()
                         .run_if(is_authority),
-                    // Incidents only happen while the lab is open for business.
-                    // Prep is meant to be the safe window, the same reason
-                    // `generate_orders` is gated out of it.
+                    // A grace period on session start, not a phase: there is
+                    // no "prep" any more for this to be the safe alternative
+                    // to, just a short window so a brand new chemist is not
+                    // hit by an incident before they have found the door.
                     (schedule_incidents, run_incidents)
                         .chain()
-                        .run_if(is_authority)
-                        .run_if(in_state(ShiftPhase::Service)),
+                        .run_if(is_authority),
                     build_smoke_visuals,
                 )
                     .run_if(in_state(AppState::Playing)),
@@ -79,7 +73,10 @@ impl Plugin for HazardPlugin {
 /// `assets/data/station.hazards.ron`, as written.
 #[derive(Asset, TypePath, Deserialize)]
 pub struct HazardScript {
-    pub first_shift_safe: bool,
+    /// Seconds after entering the lab before the first incident can be
+    /// scheduled — long enough for a new chemist to find the door before
+    /// anything goes wrong.
+    pub grace_seconds: f32,
     pub gap_seconds: (f32, f32),
     pub warning_seconds: f32,
     pub incidents: Vec<IncidentDef>,
@@ -123,23 +120,15 @@ fn start_loading_hazards(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(PendingHazardScript(assets.load("data/station.hazards.ron")));
 }
 
-fn reset_incident_schedule(mut schedule: ResMut<IncidentSchedule>) {
-    *schedule = IncidentSchedule::default();
-}
-
-/// Whatever was leaking gets fixed when the counter closes. Debrief is not the
-/// place to still be taking damage from something you cannot treat.
-fn clear_active_hazards(mut commands: Commands, hazards: Query<Entity, With<ActiveHazard>>) {
-    for hazard in &hazards {
-        commands.entity(hazard).despawn();
-    }
-}
-
 /// Picks an incident, warns the lab, then starts it.
 fn schedule_incidents(
     mut commands: Commands,
     time: Res<Time>,
-    clock: Res<crate::shift::ShiftClock>,
+    // Time actually spent in the lab, not wall-clock time since the process
+    // started — the grace period should not burn away while a player sits at
+    // the menu. Local rather than a resource because nothing else needs it,
+    // and it starts at zero on its own the moment this system starts running.
+    mut elapsed: Local<f32>,
     scripts: Res<Assets<HazardScript>>,
     pending: Option<Res<PendingHazardScript>>,
     mut schedule: ResMut<IncidentSchedule>,
@@ -148,14 +137,15 @@ fn schedule_incidents(
     let Some(script) = pending.and_then(|handle| scripts.get(&handle.0)) else {
         return;
     };
-    if script.first_shift_safe && clock.shift <= 1 {
+    let dt = time.delta_secs();
+    *elapsed += dt;
+    if *elapsed < script.grace_seconds {
         return;
     }
 
-    let dt = time.delta_secs();
     let mut rng = rand::rng();
 
-    // First call of the shift: put one on the clock.
+    // First call past the grace period: put one on the clock.
     if schedule.next_in.is_none() {
         schedule.next_in = Some(rng.random_range(script.gap_seconds.0..=script.gap_seconds.1));
         return;
@@ -264,9 +254,9 @@ fn run_incidents(
 
 /// A cloud hanging in the room.
 ///
-/// `remaining` is a plain `f32` rather than a `Timer` for the same reason
-/// `ShiftClock::remaining` is: `Timer` is not `Serialize`, and this crosses the
-/// wire.
+/// `remaining` is a plain `f32` rather than a `Timer`, the same reason
+/// `Order.patience`/`waited` are: `Timer` is not `Serialize`, and this crosses
+/// the wire.
 #[derive(Component, Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct SmokeCloud {
     pub radius: f32,

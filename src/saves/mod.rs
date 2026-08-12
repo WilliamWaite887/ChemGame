@@ -89,9 +89,8 @@ impl SaveSlot {
 /// What the menu shows about a save without loading it.
 pub struct SlotSummary {
     pub name: String,
-    /// The shift the save resumes at. 1 for a save written before any sign-off.
-    pub shift: u32,
-    pub reputation: i32,
+    pub delivered: u32,
+    pub botched: u32,
     /// Recipes in the notebook. `None` if the notebook is missing or unreadable.
     pub known: Option<usize>,
 }
@@ -105,8 +104,8 @@ impl SlotSummary {
             None => String::new(),
         };
         format!(
-            "shift {}, {:+} standing{recipes}",
-            self.shift, self.reputation
+            "{} delivered, {} botched{recipes}",
+            self.delivered, self.botched
         )
     }
 }
@@ -128,8 +127,8 @@ pub fn list_slots() -> Vec<SlotSummary> {
         .filter_map(|entry| entry.file_name().into_string().ok())
         .map(|name| {
             let slot = SaveSlot::new(name);
-            let (shift, reputation) =
-                crate::shift::progress_summary(&slot.progress_path()).unwrap_or((1, 0));
+            let (delivered, botched) =
+                crate::shift::progress_summary(&slot.progress_path()).unwrap_or((0, 0));
             let touched = [slot.progress_path(), slot.knowledge_path()]
                 .iter()
                 .filter_map(|path| std::fs::metadata(path).ok()?.modified().ok())
@@ -139,8 +138,8 @@ pub fn list_slots() -> Vec<SlotSummary> {
                 SlotSummary {
                     known: crate::knowledge::known_count_in(&slot.knowledge_path()),
                     name: slot.name,
-                    shift,
-                    reputation,
+                    delivered,
+                    botched,
                 },
             )
         })
@@ -251,28 +250,28 @@ mod tests {
     fn the_summary_line_reads_as_a_sentence() {
         let summary = SlotSummary {
             name: "Chemist".into(),
-            shift: 4,
-            reputation: 12,
+            delivered: 9,
+            botched: 2,
             known: Some(9),
         };
-        assert_eq!(summary.detail(), "shift 4, +12 standing · 9 recipes");
+        assert_eq!(summary.detail(), "9 delivered, 2 botched · 9 recipes");
 
         // An unreadable or missing notebook says nothing rather than "0".
         let fresh = SlotSummary {
             name: "Chemist 2".into(),
-            shift: 1,
-            reputation: 0,
+            delivered: 0,
+            botched: 0,
             known: None,
         };
-        assert_eq!(fresh.detail(), "shift 1, +0 standing");
+        assert_eq!(fresh.detail(), "0 delivered, 0 botched");
 
         // Singular, because "1 recipes" in a menu looks like a bug.
         let one = SlotSummary {
             name: "Chemist 3".into(),
-            shift: 1,
-            reputation: -2,
+            delivered: 5,
+            botched: 1,
             known: Some(1),
         };
-        assert_eq!(one.detail(), "shift 1, -2 standing · 1 recipe");
+        assert_eq!(one.detail(), "5 delivered, 1 botched · 1 recipe");
     }
 }

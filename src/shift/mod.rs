@@ -1,15 +1,20 @@
-//! The shift cycle: prep, service, debrief.
+//! Difficulty, forecasts, requisitions, and the career save.
 //!
-//! The game used to be one unbroken stream of orders, which meant the test
-//! bench, the grinder and the reference book all competed with a live deadline
-//! and so never got used. A shift is the frame that gives them room: nobody
-//! asks for anything during prep, so stocking up and experimenting are things
-//! you *choose* to spend a window on rather than things you steal time for.
+//! There used to be a Prep/Service/Debrief phase machine here — a shift began,
+//! crew arrived, and it ended at a quota with a shop to spend standing at.
+//! That is gone. Crew arrive continuously for as long as the lab is open, the
+//! difficulty tightens on career totals rather than a shift counter, and every
+//! requisition is bought live against whichever department's standing pays
+//! for it. The one thing carried over from the old "safe window" is the
+//! player's own choice: [`Shift::accepting_orders`] is a sign the player can
+//! flip when they need a break, not a clock nobody controls.
 //!
-//! Everything that decides how a shift goes lives in this module as a pure
-//! function — the difficulty ramp, the phase transitions, the quota, the
-//! forecast weighting, the restock arithmetic, the requisition costs. Balance
-//! that can only be checked by playing shift nine is balance nobody checks.
+//! Everything that used to be per-shift arithmetic — the difficulty ramp, the
+//! forecast weighting, the restock arithmetic, the requisition costs — still
+//! lives in this module as pure functions, because balance that can only be
+//! checked by playing for an hour is balance nobody checks.
+
+use std::collections::HashMap;
 
 use bevy::ecs::entity::MapEntities;
 use bevy::prelude::*;
@@ -17,109 +22,40 @@ use bevy_replicon::prelude::*;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::crew::{CrewMember, CrewRoute};
-use crate::interaction::Interactable;
 use crate::knowledge::Knowledge;
 use crate::machines::{Machine, MachineKind};
 use crate::net::is_authority;
-use crate::saves::SaveSlot;
 use crate::orders::{
-    ForecastDef, Order, OrderConfig, OrderResolved, OrderSpawner, RampDef, RequestDef, Shift,
-    StationData, SupplyDef, WindowDef,
+    Department, ForecastDef, OrderConfig, RampDef, RequestDef, Shift, StationData, SupplyDef,
 };
-use crate::radio::{channel_for, RadioEntry, RadioLog};
+use crate::produce::DeliverySchedule;
+use crate::radio::RadioEntry;
+use crate::radio::RadioLog;
+use crate::saves::SaveSlot;
 use crate::AppState;
 
 mod restock;
 
 pub use restock::RestockPlugin;
 
-/// The phase machine on its own: states, the clock, and the board's messages.
+/// The whole cycle, minus the phases: difficulty, forecasts and requisitions.
 ///
-/// Kept separate from [`RestockPlugin`], which spawns things into the world and
-/// so needs meshes and materials. This one needs neither, which is what lets
-/// the whole cycle be driven headlessly in tests.
+/// Kept separate from [`RestockPlugin`], which spawns things into the world
+/// and so needs meshes and materials — this one needs neither, which is what
+/// lets it be driven headlessly in tests.
 pub struct ShiftPlugin;
 
 impl Plugin for ShiftPlugin {
     fn build(&self, app: &mut App) {
-        app.add_sub_state::<ShiftPhase>()
-            .init_resource::<ShiftClock>()
-            .add_message::<PrepOpened>()
-            // Which phase the lab is in is the server's call, exactly like the
-            // orders it gates. A client mirrors what it is told.
-            .add_systems(OnEnter(ShiftPhase::Prep), enter_prep.run_if(is_authority))
-            .add_systems(
-                OnEnter(ShiftPhase::Service),
-                open_service.run_if(is_authority),
-            )
-            .add_systems(
-                OnEnter(ShiftPhase::Debrief),
-                (close_shift, dismiss_outstanding_orders)
-                    .chain()
-                    .run_if(is_authority),
-            )
-            .add_systems(
-                OnExit(ShiftPhase::Debrief),
-                advance_shift.run_if(is_authority),
-            )
-            .add_server_message::<ShiftClockSync>(Channel::Ordered)
-            // Working the board is a request like every other player action:
-            // the panel asks, the server decides.
-            .add_mapped_client_message::<BeginShiftRequested>(Channel::Ordered)
-            .add_mapped_client_message::<SignOffRequested>(Channel::Ordered)
+        app.init_resource::<CurrentForecast>()
             .add_mapped_client_message::<RequisitionRequested>(Channel::Ordered)
+            .add_mapped_client_message::<ToggleAcceptingOrders>(Channel::Ordered)
             .add_systems(
                 Update,
-                (
-                    (
-                        open_prep,
-                        handle_begin_shift,
-                        handle_sign_off,
-                        handle_requisition,
-                        tick_phase_countdown,
-                        broadcast_shift_clock,
-                    )
-                        .chain()
-                        .run_if(is_authority),
-                    // A client is told the phase and mirrors it. It never
-                    // decides one.
-                    (apply_shift_clock, tick_local_clock, mirror_phase_state)
-                        .chain()
-                        .run_if(in_state(ClientState::Connected)),
-                )
+                (redraw_forecast, handle_requisition, handle_toggle_accepting)
+                    .run_if(is_authority)
                     .run_if(in_state(AppState::Playing)),
             );
-    }
-}
-
-/// Where the lab is in its cycle.
-///
-/// A sub-state rather than a bare resource because the phase boundaries carry
-/// exactly-once side effects — re-arming the spawner, snapshotting the tally,
-/// sending the crew home, picking the forecast — and `OnEnter`/`OnExit` give
-/// exactly-once for free. Hand-rolled edge detection would have to be right in
-/// six places at once.
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Hash, SubStates, Serialize, Deserialize)]
-#[source(AppState = AppState::Playing)]
-#[states(scoped_entities)]
-pub enum ShiftPhase {
-    /// No orders. Stock up, experiment, listen to the briefing.
-    #[default]
-    Prep,
-    /// The crew are asking for things.
-    Service,
-    /// The shift is over. Read the report, spend your standing.
-    Debrief,
-}
-
-impl ShiftPhase {
-    pub fn label(self) -> &'static str {
-        match self {
-            ShiftPhase::Prep => "PREP",
-            ShiftPhase::Service => "SERVICE",
-            ShiftPhase::Debrief => "DEBRIEF",
-        }
     }
 }
 
@@ -127,15 +63,13 @@ impl ShiftPhase {
 // Difficulty
 // ---------------------------------------------------------------------------
 
-/// One shift's difficulty, resolved from the ramp and frozen for its duration.
+/// The difficulty at a point in the career.
 ///
-/// Frozen rather than recomputed per order so the numbers cannot drift under
-/// the player mid-shift, and so the whole set can be shipped to a client in one
-/// snapshot for its HUD.
+/// No longer frozen state — there is no shift boundary left to freeze it
+/// against — just a pure value recomputed wherever [`current_rules`] is
+/// called.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShiftRules {
-    /// Orders that must resolve — delivered or expired — before the shift ends.
-    pub quota: u32,
     pub gap_seconds: (f32, f32),
     pub patience_seconds: (f32, f32),
     pub max_active: usize,
@@ -146,7 +80,6 @@ pub struct ShiftRules {
 impl Default for ShiftRules {
     fn default() -> Self {
         ShiftRules {
-            quota: 5,
             gap_seconds: (32.0, 58.0),
             patience_seconds: (135.0, 230.0),
             max_active: 3,
@@ -157,38 +90,32 @@ impl Default for ShiftRules {
 }
 
 impl ShiftRules {
-    /// The difficulty for shift `shift` (1-based).
-    ///
-    /// Shift 1 must reproduce the base config exactly, or the ramp silently
-    /// re-balances a game that was already tuned. Everything else tightens
-    /// monotonically and stops at a cap, because an unclamped ramp only reveals
-    /// itself as unplayable somewhere nobody tests.
-    pub fn for_shift(base: &OrderConfig, ramp: &RampDef, shift: u32) -> ShiftRules {
-        let elapsed = shift.saturating_sub(1);
-
-        let quota = (ramp.quota_base + ramp.quota_per_shift * elapsed).min(ramp.quota_cap);
-
-        let decay = ramp.gap_scale.powi(elapsed as i32);
+    /// The difficulty at tier `tier` (0-based — tier 0 must reproduce the base
+    /// config exactly, or the ramp silently re-balances a game that was
+    /// already tuned by hand). Everything else tightens monotonically and
+    /// stops at a cap, because an unclamped ramp only reveals itself as
+    /// unplayable somewhere nobody tests.
+    pub fn for_tier(base: &OrderConfig, ramp: &RampDef, tier: u32) -> ShiftRules {
+        let decay = ramp.gap_scale.powi(tier as i32);
         let gap_seconds = (
             (base.gap_seconds.0 * decay).max(ramp.gap_floor),
             (base.gap_seconds.1 * decay).max(ramp.gap_floor),
         );
 
-        let patience_decay = ramp.patience_scale.powi(elapsed as i32);
+        let patience_decay = ramp.patience_scale.powi(tier as i32);
         let patience_seconds = (
             (base.patience_seconds.0 * patience_decay).max(ramp.patience_floor),
             (base.patience_seconds.1 * patience_decay).max(ramp.patience_floor),
         );
 
         // A zero interval is a content bug, not a reason to divide by zero.
-        let extra = elapsed.checked_div(ramp.max_active_every).unwrap_or(0) as usize;
+        let extra = tier.checked_div(ramp.max_active_every).unwrap_or(0) as usize;
         let max_active = (base.max_active + extra).min(ramp.max_active_cap);
 
         let stretch_chance =
-            (ramp.stretch_base + ramp.stretch_step * elapsed as f64).min(ramp.stretch_cap);
+            (ramp.stretch_base + ramp.stretch_step * tier as f64).min(ramp.stretch_cap);
 
         ShiftRules {
-            quota,
             gap_seconds,
             patience_seconds,
             max_active,
@@ -198,748 +125,85 @@ impl ShiftRules {
     }
 }
 
+/// The live difficulty, computed fresh from how much of the career has
+/// actually happened — total orders resolved, successfully or not — rather
+/// than a shift number nothing tracks any more.
+pub fn current_rules(config: &OrderConfig, shift: &Shift) -> ShiftRules {
+    let tier = (shift.succeeded + shift.botched) / config.ramp.orders_per_tier.max(1);
+    ShiftRules::for_tier(config, &config.ramp, tier)
+}
+
 // ---------------------------------------------------------------------------
-// The clock
+// Forecast
 // ---------------------------------------------------------------------------
 
-/// The station's expectations for a shift, drawn at the start of prep.
+/// What the station is currently expecting, and the requests it makes
+/// likelier.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ForecastPick {
     pub id: String,
-    /// Carried alongside the id so a client can show what to prepare for
-    /// without needing the station data files.
     pub themes: Vec<String>,
     pub briefing: String,
 }
 
-/// Career tallies at a moment in time, so a shift can be reported on its own.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ShiftSnapshot {
-    pub succeeded: u32,
-    pub botched: u32,
-    pub reputation: i32,
-    pub research_points: u32,
-    pub known_recipes: usize,
-}
+/// The station's live briefing, redrawn periodically rather than once per
+/// shift — there is no shift boundary left to redraw it against. `None`
+/// before the first redraw or if the data carries no forecasts at all.
+#[derive(Resource, Default)]
+pub struct CurrentForecast(pub Option<ForecastPick>);
 
-/// What one shift actually did, as shown on the debrief board.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ShiftReport {
-    pub delivered: u32,
-    pub botched: u32,
-    pub reputation: i32,
-    pub research: u32,
-    pub recipes: usize,
-}
-
-impl ShiftReport {
-    /// The difference between two snapshots.
-    ///
-    /// Deltas rather than live totals: by the time the player reads this they
-    /// may already have spent reputation at the board, and a report that
-    /// rewrote itself as they spent would be worse than no report.
-    pub fn between(opening: &ShiftSnapshot, closing: &ShiftSnapshot) -> ShiftReport {
-        ShiftReport {
-            delivered: closing.succeeded.saturating_sub(opening.succeeded),
-            botched: closing.botched.saturating_sub(opening.botched),
-            reputation: closing.reputation - opening.reputation,
-            research: closing
-                .research_points
-                .saturating_sub(opening.research_points),
-            recipes: closing.known_recipes.saturating_sub(opening.known_recipes),
-        }
-    }
-}
-
-/// Supplies bought at the debrief, waiting to land at the next prep.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Requisition {
-    /// Extra glassware on top of the standing target, for one shift.
-    pub glassware: usize,
-    /// Bring the botanist forward.
-    pub produce_crate: bool,
-}
-
-/// Everything a client must be told about, coarse enough not to resend a
-/// running countdown every frame. See [`ShiftClock::sync_key`].
-pub type SyncKey = (u32, ShiftPhase, u32, u32, Option<String>, i32);
-
-/// Where the lab is in the cycle, and everything a client needs to draw it.
-///
-/// The authority owns `State<ShiftPhase>` and mirrors it into `phase` here so
-/// the whole thing can be shipped; a client receives this and mirrors `phase`
-/// back into its own `NextState`. One-way on each end, which is what keeps the
-/// two from fighting.
-#[derive(Resource, Clone, Debug, Serialize, Deserialize)]
-pub struct ShiftClock {
-    /// 1-based. Shift 1 is the one you learn the lab on.
-    pub shift: u32,
-    pub phase: ShiftPhase,
-    pub rules: ShiftRules,
-    pub resolved: u32,
-    /// Seconds left in the current window, or `None` for a window with no clock
-    /// — which is shift 1's prep, and every phase that ends on something other
-    /// than time.
-    ///
-    /// Deliberately an `f32` and not a `Timer`: `Timer` is not `Serialize`, and
-    /// this struct is the co-op sync payload.
-    pub remaining: Option<f32>,
-    pub forecast: Option<ForecastPick>,
-    /// Career tallies as service opened.
-    pub opening: ShiftSnapshot,
-    /// Career tallies as the shift closed, frozen at debrief entry.
-    pub closing: ShiftSnapshot,
-    pub requisition: Requisition,
-    /// Prep has been entered but its opening work has not run yet.
-    ///
-    /// The station data files load in `Update`, so the very first
-    /// `OnEnter(Prep)` fires a frame or more before there is a config to read a
-    /// window length or a forecast out of. Rather than have four systems each
-    /// cope with that, entering prep only raises this flag and
-    /// [`open_prep`] does the work on the first frame it can.
-    #[serde(skip)]
-    pub pending_open: bool,
-}
-
-impl Default for ShiftClock {
-    fn default() -> Self {
-        ShiftClock {
-            shift: 1,
-            phase: ShiftPhase::Prep,
-            rules: ShiftRules::default(),
-            resolved: 0,
-            remaining: None,
-            forecast: None,
-            opening: ShiftSnapshot::default(),
-            closing: ShiftSnapshot::default(),
-            requisition: Requisition::default(),
-            pending_open: true,
-        }
-    }
-}
-
-impl ShiftClock {
-    /// Runs the window down. Returns the phase to move to once it closes.
-    ///
-    /// A `None` countdown never closes on its own — that is the untimed first
-    /// prep, which only the player can end. Service never ends on a clock
-    /// either; it ends on the quota, in [`record_resolution`](Self::record_resolution).
-    pub fn tick(&mut self, dt: f32) -> Option<ShiftPhase> {
-        let remaining = self.remaining.as_mut()?;
-        *remaining -= dt;
-        if *remaining > 0.0 {
-            return None;
-        }
-        // Cleared, so a second tick in the same window cannot fire the
-        // transition twice while the state change is still in flight.
-        self.remaining = None;
-        match self.phase {
-            ShiftPhase::Prep => Some(ShiftPhase::Service),
-            ShiftPhase::Debrief => Some(ShiftPhase::Prep),
-            ShiftPhase::Service => None,
-        }
-    }
-
-    /// Runs the window down without ever transitioning.
-    ///
-    /// What a client does with the countdown: the number has to keep moving
-    /// between snapshots, but deciding the phase is the server's job alone.
-    pub fn tick_display(&mut self, dt: f32) {
-        if let Some(remaining) = self.remaining.as_mut() {
-            *remaining = (*remaining - dt).max(0.0);
-        }
-    }
-
-    /// Books a resolved order against the quota. True when this was the one
-    /// that closed the shift.
-    ///
-    /// Counting outside service would let an order that resolves during the
-    /// debrief — a beaker already in the window when the bell went — end the
-    /// next shift early.
-    pub fn record_resolution(&mut self) -> bool {
-        if self.phase != ShiftPhase::Service {
-            return false;
-        }
-        self.resolved += 1;
-        self.resolved == self.rules.quota
-    }
-
-    /// The themes this shift's forecast leans on, or nothing.
-    pub fn forecast_themes(&self) -> &[String] {
-        match &self.forecast {
+impl CurrentForecast {
+    pub fn themes(&self) -> &[String] {
+        match &self.0 {
             Some(pick) => &pick.themes,
             None => &[],
         }
     }
-
-    /// Everything a client must be told, with the countdown rounded to whole
-    /// seconds.
-    ///
-    /// `remaining` moves every frame, so change detection would push a snapshot
-    /// per frame forever. Rounding means a running clock costs one small
-    /// message a second, while any real change still goes out immediately.
-    pub fn sync_key(&self) -> SyncKey {
-        (
-            self.shift,
-            self.phase,
-            self.resolved,
-            self.rules.quota,
-            self.forecast.as_ref().map(|pick| pick.id.clone()),
-            self.remaining.map(|left| left.ceil() as i32).unwrap_or(-1),
-        )
-    }
 }
 
-// ---------------------------------------------------------------------------
-// The phase machine
-// ---------------------------------------------------------------------------
-
-/// Raises the flag [`open_prep`] acts on.
+/// Redraws the briefing on its own clock, radioing whatever it lands on.
 ///
-/// Nothing else happens here because the station data files may not have landed
-/// yet — this fires the moment `AppState::Playing` is entered, and
-/// `promote_station_data` runs in `Update`.
-fn enter_prep(mut clock: ResMut<ShiftClock>) {
-    clock.phase = ShiftPhase::Prep;
-    clock.resolved = 0;
-    clock.remaining = None;
-    clock.forecast = None;
-    clock.pending_open = true;
-}
-
-/// Prep has actually opened: the config was there and the forecast is drawn.
-///
-/// Entering the phase is not the same moment as opening it — the station data
-/// files load in `Update`, so the first `OnEnter(Prep)` of a session lands
-/// before there is a config to read. Anything that needs the shift's numbers,
-/// or needs the world to have finished spawning, has to hang off this rather
-/// than off the transition.
-#[derive(Message)]
-pub struct PrepOpened;
-
-/// Does prep's opening work on the first frame the config is available.
-fn open_prep(
-    clock: Option<ResMut<ShiftClock>>,
-    station: Option<Res<StationData>>,
-    mut radio: ResMut<RadioLog>,
-    mut opened: MessageWriter<PrepOpened>,
-) {
-    let (Some(mut clock), Some(station)) = (clock, station) else {
-        return;
-    };
-    if !clock.pending_open {
-        return;
-    }
-
-    let windows = &station.config.windows;
-    // The first prep of a session has no clock, so a chemist who has never seen
-    // the lab can take it apart before anyone starts asking for anything.
-    clock.remaining = if clock.shift <= 1 && windows.first_shift_untimed {
-        None
-    } else {
-        Some(windows.prep_seconds)
-    };
-
-    // The briefing goes out over the radio rather than only onto the board, so
-    // it lands the same way every other piece of station news does — and it
-    // reaches a joined client for free, because the log is already
-    // whole-snapshotted to clients whenever it changes.
-    let roll = rand::rng().random::<f64>();
-    if let Some(forecast) = draw_forecast(&station.config.forecasts, roll) {
-        radio.push(RadioEntry {
-            channel: "COM".to_string(),
-            text: format!("Shift {} briefing: {}", clock.shift, forecast.briefing),
-            good: true,
-        });
-        clock.forecast = Some(ForecastPick {
-            id: forecast.id.clone(),
-            themes: forecast.themes.clone(),
-            briefing: forecast.briefing.clone(),
-        });
-    }
-
-    clock.pending_open = false;
-    opened.write(PrepOpened);
-
-    info!(
-        "shift {} — prep ({}), forecast {}",
-        clock.shift,
-        match clock.remaining {
-            Some(seconds) => format!("{seconds:.0}s"),
-            None => "untimed".to_string(),
-        },
-        clock
-            .forecast
-            .as_ref()
-            .map(|pick| pick.id.as_str())
-            .unwrap_or("none")
-    );
-}
-
-/// Opens the shift: freezes this shift's difficulty and starts the clock over.
-fn open_service(
-    mut clock: ResMut<ShiftClock>,
-    shift: Res<Shift>,
-    knowledge: Option<Res<Knowledge>>,
-    station: Option<Res<StationData>>,
-    spawner: Option<ResMut<OrderSpawner>>,
-) {
-    clock.phase = ShiftPhase::Service;
-    clock.resolved = 0;
-    // Service ends on the quota, never on a clock.
-    clock.remaining = None;
-
-    if let Some(station) = station.as_ref() {
-        clock.rules = ShiftRules::for_shift(&station.config, &station.config.ramp, clock.shift);
-    }
-    clock.opening = snapshot(&shift, knowledge.as_deref());
-
-    // `generate_orders` re-rolls this timer *before* it checks `max_active`, so
-    // it is always left holding a partial random remainder when generation
-    // stops. Left alone, the first order of the shift would land at whatever
-    // that remainder happened to be — possibly the instant the player walks out
-    // of the briefing.
-    if let (Some(station), Some(mut spawner)) = (station, spawner) {
-        spawner.timer = Timer::from_seconds(station.config.first_order_delay, TimerMode::Once);
-    }
-
-    info!(
-        "shift {} — service, {} orders at {:?}",
-        clock.shift, clock.rules.quota, clock.rules.gap_seconds
-    );
-}
-
-/// Freezes the report before the player can spend against it.
-fn close_shift(
-    mut clock: ResMut<ShiftClock>,
-    shift: Res<Shift>,
-    knowledge: Option<Res<Knowledge>>,
-    station: Option<Res<StationData>>,
-) {
-    clock.phase = ShiftPhase::Debrief;
-    clock.closing = snapshot(&shift, knowledge.as_deref());
-    clock.remaining = Some(match station {
-        Some(station) => station.config.windows.debrief_seconds,
-        None => WindowDef::default().debrief_seconds,
-    });
-
-    let report = ShiftReport::between(&clock.opening, &clock.closing);
-    info!(
-        "shift {} closed — {} delivered, {} botched, {:+} standing",
-        clock.shift, report.delivered, report.botched, report.reputation
-    );
-}
-
-fn advance_shift(mut clock: ResMut<ShiftClock>) {
-    clock.shift += 1;
-}
-
-fn snapshot(shift: &Shift, knowledge: Option<&Knowledge>) -> ShiftSnapshot {
-    ShiftSnapshot {
-        succeeded: shift.succeeded,
-        botched: shift.botched,
-        reputation: shift.reputation,
-        research_points: knowledge.map(|k| k.research_points).unwrap_or(0),
-        known_recipes: knowledge.map(|k| k.known_count()).unwrap_or(0),
-    }
-}
-
-/// Sends anyone still at the counter home when the bell goes.
-///
-/// Deliberately writes no [`OrderResolved`] and touches no tally. The shift
-/// ended; they were not ignored. A resolution here would re-enter the quota
-/// count, fire a verdict line over the radio for a delivery that never
-/// happened, and roll for a sample vial.
-fn dismiss_outstanding_orders(
-    mut commands: Commands,
-    mut radio: ResMut<RadioLog>,
-    mut waiting: Query<(Entity, &CrewMember, &mut CrewRoute), With<Order>>,
-) {
-    for (entity, member, mut route) in &mut waiting {
-        commands
-            .entity(entity)
-            .remove::<Order>()
-            .remove::<Interactable>();
-        route.leave();
-        radio.push(RadioEntry {
-            channel: channel_for(&member.role),
-            text: format!(
-                "{}: shift's up. I'll put it back through next rotation.",
-                member.name
-            ),
-            good: false,
-        });
-    }
-}
-
-fn tick_phase_countdown(
+/// A `None` local timer reads as "due now", so a fresh session is briefed
+/// immediately rather than sitting silent for a full interval.
+fn redraw_forecast(
     time: Res<Time>,
-    mut clock: ResMut<ShiftClock>,
-    mut next: ResMut<NextState<ShiftPhase>>,
-) {
-    if let Some(phase) = clock.tick(time.delta_secs()) {
-        next.set(phase);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The board
-// ---------------------------------------------------------------------------
-
-/// Start the shift now, without waiting out the rest of prep.
-#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
-pub struct BeginShiftRequested {
-    #[entities]
-    pub board: Entity,
-}
-
-/// Close the debrief and go straight to the next prep.
-#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
-pub struct SignOffRequested {
-    #[entities]
-    pub board: Entity,
-}
-
-/// Spend standing on next shift's supplies.
-#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
-pub struct RequisitionRequested {
-    #[entities]
-    pub board: Entity,
-    pub kind: RequisitionKind,
-}
-
-/// Books a purchase, or does nothing at all.
-///
-/// Returns whether it went through, so the caller never has to guess: a
-/// half-applied requisition that took the standing and delivered nothing is
-/// the worst outcome available here.
-pub fn apply_requisition(
-    shift: &mut Shift,
-    clock: &mut ShiftClock,
-    knowledge: &mut Knowledge,
-    supply: &SupplyDef,
-    kind: RequisitionKind,
-) -> bool {
-    if !can_afford(shift.reputation, kind) {
-        return false;
-    }
-    // Buying a second crate would charge again for a flag that is already set.
-    // Glassware stacks, so only this one needs the guard.
-    if kind == RequisitionKind::ProduceCrate && clock.requisition.produce_crate {
-        return false;
-    }
-    shift.reputation -= kind.cost();
-
-    match kind {
-        RequisitionKind::Glassware => {
-            clock.requisition.glassware += supply.requisition_glassware_bonus;
-        }
-        RequisitionKind::ProduceCrate => {
-            clock.requisition.produce_crate = true;
-        }
-        // Lands immediately rather than next prep, because research is the one
-        // thing you can spend during the debrief itself.
-        RequisitionKind::ResearchGrant => {
-            knowledge.award_research(RESEARCH_GRANT);
-        }
-    }
-    true
-}
-
-/// What a research grant is worth.
-pub const RESEARCH_GRANT: u32 = 2;
-
-#[allow(clippy::too_many_arguments)]
-fn handle_requisition(
-    mut requests: MessageReader<FromClient<RequisitionRequested>>,
-    boards: Query<&Machine>,
-    phase: Res<State<ShiftPhase>>,
+    mut timer: Local<Option<Timer>>,
     station: Option<Res<StationData>>,
-    mut shift: ResMut<Shift>,
-    mut clock: ResMut<ShiftClock>,
-    mut knowledge: ResMut<Knowledge>,
+    mut forecast: ResMut<CurrentForecast>,
     mut radio: ResMut<RadioLog>,
 ) {
     let Some(station) = station else {
         return;
     };
-    for request in requests.read() {
-        // Only at the debrief. Requisitioning mid-shift would let a player
-        // spend standing they are still in the middle of earning.
-        if *phase.get() != ShiftPhase::Debrief || !is_board(request.board, &boards) {
-            continue;
-        }
-        if !apply_requisition(
-            &mut shift,
-            &mut clock,
-            &mut knowledge,
-            &station.config.supply,
-            request.kind,
-        ) {
-            continue;
-        }
-        radio.push(RadioEntry {
-            channel: "CGO".to_string(),
-            text: format!("Requisition logged: {}.", request.kind.label()),
-            good: true,
-        });
+    let due = match timer.as_mut() {
+        Some(t) => t.tick(time.delta()).just_finished(),
+        None => true,
+    };
+    if !due {
+        return;
     }
-}
+    let window = station.config.forecast_seconds;
+    let next = rand::rng().random_range(window.0..=window.1);
+    *timer = Some(Timer::from_seconds(next, TimerMode::Once));
 
-/// Is this entity actually the shift board?
-///
-/// A message names the machine it acts on, and a client is free to name any
-/// entity at all. Checking the kind here is what stops a crafted message from
-/// starting a shift by pointing at the grinder.
-fn is_board(entity: Entity, boards: &Query<&Machine>) -> bool {
-    boards
-        .get(entity)
-        .is_ok_and(|machine| machine.kind == MachineKind::ShiftBoard)
-}
-
-fn handle_begin_shift(
-    mut requests: MessageReader<FromClient<BeginShiftRequested>>,
-    boards: Query<&Machine>,
-    phase: Res<State<ShiftPhase>>,
-    mut next: ResMut<NextState<ShiftPhase>>,
-) {
-    for request in requests.read() {
-        if *phase.get() != ShiftPhase::Prep || !is_board(request.board, &boards) {
-            continue;
-        }
-        next.set(ShiftPhase::Service);
-    }
-}
-
-fn handle_sign_off(
-    mut requests: MessageReader<FromClient<SignOffRequested>>,
-    boards: Query<&Machine>,
-    phase: Res<State<ShiftPhase>>,
-    mut next: ResMut<NextState<ShiftPhase>>,
-) {
-    for request in requests.read() {
-        if *phase.get() != ShiftPhase::Debrief || !is_board(request.board, &boards) {
-            continue;
-        }
-        next.set(ShiftPhase::Prep);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Persistence
-// ---------------------------------------------------------------------------
-
-// The career lives in its own file inside the save, apart from the notebook
-// that `KnowledgePlugin` owns. `SaveData` is deliberately both the notebook's
-// disk format *and* the `KnowledgeSync` payload, built from `Knowledge` alone.
-// Threading the shift tally through it would either couple knowledge to orders
-// or make the sync carry data it does not want.
-
-/// Reading and writing `progress.ron`.
-///
-/// A plugin of its own rather than part of [`ShiftPlugin`] because it touches
-/// the disk, and [`ShiftPlugin`] is what the headless tests drive — folded
-/// together, every test run would read and write the player's real save and the
-/// tests would pollute each other through it.
-pub struct ProgressPlugin;
-
-impl Plugin for ProgressPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(
-            OnEnter(AppState::Playing),
-            load_progress.run_if(is_authority),
-        )
-        .add_systems(
-            Update,
-            persist_progress
-                .run_if(in_state(AppState::Playing))
-                .run_if(is_authority),
-        );
-    }
-}
-
-#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
-struct ProgressSave {
-    /// The shift to start on next launch.
-    #[serde(default)]
-    shift: u32,
-    #[serde(default)]
-    reputation: i32,
-    #[serde(default)]
-    succeeded: u32,
-    #[serde(default)]
-    botched: u32,
-}
-
-/// Restores the career on launch.
-///
-/// The phase, the quota progress, the countdown, the forecast and any unspent
-/// requisition are all deliberately absent: resuming always drops you into prep
-/// of the next shift. Restoring a half-finished service would put the player in
-/// an empty room with a partly-met quota and a forecast they never heard.
-fn load_progress(
-    mut clock: ResMut<ShiftClock>,
-    mut shift: ResMut<Shift>,
-    slot: Option<Res<SaveSlot>>,
-) {
-    // No slot means a new game with nothing to restore, or a guest whose career
-    // is the host's and arrives replicated.
-    let Some(save) = slot.and_then(|slot| read_progress(&slot.progress_path())) else {
+    let roll = rand::rng().random::<f64>();
+    let Some(picked) = draw_forecast(&station.config.forecasts, roll) else {
         return;
     };
 
-    clock.shift = save.shift.max(1);
-    shift.succeeded = save.succeeded;
-    shift.botched = save.botched;
-    shift.reputation = save.reputation;
-    info!(
-        "resuming at shift {} with {:+} standing",
-        clock.shift, shift.reputation
-    );
-}
-
-/// The career on disk, or `None` if there is not a readable one.
-fn read_progress(path: &std::path::Path) -> Option<ProgressSave> {
-    if !path.exists() {
-        return None;
-    }
-    // A corrupt save should cost the player their progress, not the session.
-    match std::fs::read_to_string(path).map(|text| ron::from_str::<ProgressSave>(&text)) {
-        Ok(Ok(save)) => Some(save),
-        Ok(Err(error)) => {
-            warn!("ignoring unreadable {}: {error}", path.display());
-            None
-        }
-        Err(error) => {
-            warn!("could not read {}: {error}", path.display());
-            None
-        }
-    }
-}
-
-/// The shift and standing a save resumes at, for the menu's load list.
-///
-/// Read through the owning module rather than by parsing the file in the menu,
-/// so `ProgressSave` stays the one description of this format.
-pub fn progress_summary(path: &std::path::Path) -> Option<(u32, i32)> {
-    let save = read_progress(path)?;
-    Some((save.shift.max(1), save.reputation))
-}
-
-fn persist_progress(
-    clock: Res<ShiftClock>,
-    shift: Res<Shift>,
-    slot: Option<Res<SaveSlot>>,
-    mut written: Local<Option<ProgressSave>>,
-) {
-    let Some(slot) = slot else {
-        return;
-    };
-    let save = ProgressSave {
-        shift: clock.shift,
-        reputation: shift.reputation,
-        succeeded: shift.succeeded,
-        botched: shift.botched,
-    };
-    // Compared against what is actually on disk rather than gated on
-    // `is_changed()`: the countdown mutates `ShiftClock` every frame, so change
-    // detection here would rewrite the save sixty times a second for a file
-    // that only moves a handful of times a shift.
-    if written.as_ref() == Some(&save) {
-        return;
-    }
-    let Ok(text) = ron::ser::to_string_pretty(&save, default()) else {
-        return;
-    };
-    *written = Some(save);
-    slot.write_progress(&text);
-}
-
-// ---------------------------------------------------------------------------
-// Co-op
-// ---------------------------------------------------------------------------
-
-/// The whole clock, pushed to clients.
-///
-/// `ShiftClock` is a resource, and replicon does not replicate resources — so
-/// it goes as a snapshot, the same shape as `ShiftSync`, `KnowledgeSync` and
-/// `RadioSync`. Kept separate from `ShiftSync` because the two move at very
-/// different rates: the tally changes per order, this changes per second.
-#[derive(Message, Serialize, Deserialize, Clone)]
-pub struct ShiftClockSync(ShiftClock);
-
-fn broadcast_shift_clock(
-    clock: Res<ShiftClock>,
-    mut last: Local<Option<SyncKey>>,
-    mut outgoing: MessageWriter<ToClients<ShiftClockSync>>,
-) {
-    // Change detection is useless here: `remaining` moves every frame, so
-    // `is_changed()` would push a snapshot per frame forever. The key rounds
-    // the countdown to whole seconds instead.
-    let key = clock.sync_key();
-    if last.as_ref() == Some(&key) {
-        return;
-    }
-    *last = Some(key);
-
-    outgoing.write(ToClients {
-        // Never the host: it holds the authoritative copy, and echoing to it
-        // would overwrite the original with a copy of itself.
-        targets: SendTargets::CLIENTS_ONLY,
-        message: ShiftClockSync(clock.clone()),
+    radio.push(RadioEntry {
+        channel: "COM".to_string(),
+        text: format!("Station briefing: {}", picked.briefing),
+        good: true,
     });
-}
+    forecast.0 = Some(ForecastPick {
+        id: picked.id.clone(),
+        themes: picked.themes.clone(),
+        briefing: picked.briefing.clone(),
+    });
 
-fn apply_shift_clock(mut clock: ResMut<ShiftClock>, mut incoming: MessageReader<ShiftClockSync>) {
-    for sync in incoming.read() {
-        *clock = sync.0.clone();
-    }
+    info!("briefing: {}", picked.id);
 }
-
-/// Smooths the client's countdown between snapshots.
-///
-/// Without this the HUD clock would visibly step once a second. It is allowed
-/// to drift, because the next snapshot corrects it and nothing on a client
-/// acts on the number.
-fn tick_local_clock(time: Res<Time>, mut clock: ResMut<ShiftClock>) {
-    clock.tick_display(time.delta_secs());
-}
-
-/// Follows the server's phase.
-///
-/// The asymmetry is deliberate: on the authority `State<ShiftPhase>` is primary
-/// and `clock.phase` mirrors it so it can be shipped; on a client the clock
-/// arrives over the wire and is primary. One-way on each end, so the two can
-/// never fight over which is right.
-fn mirror_phase_state(
-    clock: Res<ShiftClock>,
-    current: Res<State<ShiftPhase>>,
-    mut next: ResMut<NextState<ShiftPhase>>,
-) {
-    if *current.get() != clock.phase {
-        next.set(clock.phase);
-    }
-}
-
-/// Books resolved orders against the quota and closes the shift on the last.
-///
-/// Registered inside `OrderPlugin`'s chain rather than here so it is guaranteed
-/// to run after all three resolution paths in the same frame they write.
-pub fn count_resolved_orders(
-    mut clock: ResMut<ShiftClock>,
-    mut resolved: MessageReader<OrderResolved>,
-    mut next: ResMut<NextState<ShiftPhase>>,
-) {
-    for _ in resolved.read() {
-        if clock.record_resolution() {
-            next.set(ShiftPhase::Debrief);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Forecast weighting
-// ---------------------------------------------------------------------------
 
 /// Draws the shift the station is expecting. `roll` is in `[0, 1)`.
 ///
@@ -963,8 +227,8 @@ pub fn draw_forecast(forecasts: &[ForecastDef], roll: f64) -> Option<&ForecastDe
     forecasts.last()
 }
 
-/// Picks a request from `pool`, leaning toward whatever the shift was briefed
-/// for. `roll` is in `[0, 1)`.
+/// Picks a request from `pool`, leaning toward whatever the station was
+/// briefed for. `roll` is in `[0, 1)`.
 ///
 /// This layers on top of the knowledge gate rather than replacing it: `pool`
 /// has already been filtered to things the chemist can plausibly make, so a
@@ -1007,7 +271,7 @@ pub fn weighted_pick<'a>(
 // Supply
 // ---------------------------------------------------------------------------
 
-/// How many pieces of glassware cargo brings this prep.
+/// How many pieces of glassware cargo brings this check.
 ///
 /// Supply is a function of the deficit, never a flat crate. That is what makes
 /// the lab impossible to starve — every hand-off over the counter takes the
@@ -1028,7 +292,7 @@ pub fn crate_contents(count: usize, large_every: usize) -> (usize, usize) {
 // Requisition
 // ---------------------------------------------------------------------------
 
-/// Something bought at the debrief with the standing you earned.
+/// Something bought against a department's standing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RequisitionKind {
     Glassware,
@@ -1043,7 +307,7 @@ impl RequisitionKind {
         RequisitionKind::ResearchGrant,
     ];
 
-    /// In reputation.
+    /// In the department's standing.
     pub fn cost(self) -> i32 {
         match self {
             RequisitionKind::Glassware => 3,
@@ -1062,24 +326,290 @@ impl RequisitionKind {
 
     pub fn blurb(self) -> &'static str {
         match self {
-            RequisitionKind::Glassware => "Cargo stock the lab deeper next shift",
-            RequisitionKind::ProduceCrate => "Botany come early with the next haul",
+            RequisitionKind::Glassware => "Cargo stock the lab deeper on the next resupply",
+            RequisitionKind::ProduceCrate => "Botany bring the next haul forward",
             RequisitionKind::ResearchGrant => "Two research points, right now",
+        }
+    }
+
+    /// Which department's standing this draws from.
+    ///
+    /// A content call, not an architectural one: Cargo fits glassware and
+    /// produce because the courier who brings both is already Cargo;
+    /// Engineering fits a research grant as R&D flavour, and could as easily
+    /// be a different department if the roster grows one.
+    pub fn department(self) -> Department {
+        match self {
+            RequisitionKind::Glassware | RequisitionKind::ProduceCrate => Department::Cargo,
+            RequisitionKind::ResearchGrant => Department::Engineering,
         }
     }
 }
 
+/// How long a requisitioned produce crate is brought forward by.
+///
+/// Early enough to be worth grinding right away, late enough that the player
+/// is not handed it the instant they buy it.
+const EXPEDITED_PRODUCE_SECONDS: f32 = 25.0;
+
 /// Standing is what you cash in for supplies.
 ///
-/// Debt is allowed to exist — a bad shift should sting — but it cannot be
-/// spent, or a run that went badly would dig itself further under.
-pub fn can_afford(reputation: i32, kind: RequisitionKind) -> bool {
-    reputation >= kind.cost()
+/// Debt is allowed to exist — a bad run of deliveries should sting — but it
+/// cannot be spent, or a department already dug under would dig itself
+/// further.
+pub fn can_afford(standing: i32, kind: RequisitionKind) -> bool {
+    standing >= kind.cost()
+}
+
+/// Books a purchase, or does nothing at all.
+///
+/// Returns whether it went through, so the caller never has to guess: a
+/// half-applied requisition that took the standing and delivered nothing is
+/// the worst outcome available here. Every kind but glassware applies at
+/// once — glassware still has to be carried in by hand, so it banks into
+/// [`Requisition::glassware`] for the next restock check to consume.
+pub fn apply_requisition(
+    shift: &mut Shift,
+    knowledge: &mut Knowledge,
+    produce: Option<&mut DeliverySchedule>,
+    supply: &SupplyDef,
+    kind: RequisitionKind,
+) -> bool {
+    let department = kind.department();
+    if !can_afford(shift.standing(department), kind) {
+        return false;
+    }
+    shift.adjust(department, -kind.cost());
+
+    match kind {
+        RequisitionKind::Glassware => {
+            shift.requisition.glassware += supply.requisition_glassware_bonus;
+        }
+        RequisitionKind::ProduceCrate => {
+            if let Some(schedule) = produce {
+                schedule.expedite(EXPEDITED_PRODUCE_SECONDS);
+            }
+        }
+        RequisitionKind::ResearchGrant => {
+            knowledge.award_research(RESEARCH_GRANT);
+        }
+    }
+    true
+}
+
+/// What a research grant is worth.
+pub const RESEARCH_GRANT: u32 = 2;
+
+/// Spend standing on a department's supplies, any time affordability holds.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
+pub struct RequisitionRequested {
+    #[entities]
+    pub board: Entity,
+    pub kind: RequisitionKind,
+}
+
+/// Flips the "not accepting requests" sign. Either chemist can use it.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
+pub struct ToggleAcceptingOrders {
+    #[entities]
+    pub board: Entity,
+}
+
+fn handle_requisition(
+    mut requests: MessageReader<FromClient<RequisitionRequested>>,
+    boards: Query<&Machine>,
+    station: Option<Res<StationData>>,
+    mut shift: ResMut<Shift>,
+    mut knowledge: ResMut<Knowledge>,
+    mut produce: Option<ResMut<DeliverySchedule>>,
+    mut radio: ResMut<RadioLog>,
+) {
+    let Some(station) = station else {
+        return;
+    };
+    for request in requests.read() {
+        if !is_board(request.board, &boards) {
+            continue;
+        }
+        if !apply_requisition(
+            &mut shift,
+            &mut knowledge,
+            produce.as_deref_mut(),
+            &station.config.supply,
+            request.kind,
+        ) {
+            continue;
+        }
+        radio.push(RadioEntry {
+            channel: "CGO".to_string(),
+            text: format!("Requisition logged: {}.", request.kind.label()),
+            good: true,
+        });
+    }
+}
+
+fn handle_toggle_accepting(
+    mut requests: MessageReader<FromClient<ToggleAcceptingOrders>>,
+    boards: Query<&Machine>,
+    mut shift: ResMut<Shift>,
+    mut radio: ResMut<RadioLog>,
+) {
+    for request in requests.read() {
+        if !is_board(request.board, &boards) {
+            continue;
+        }
+        shift.accepting_orders = !shift.accepting_orders;
+        radio.push(RadioEntry {
+            channel: "COM".to_string(),
+            text: if shift.accepting_orders {
+                "Chemistry: back open.".to_string()
+            } else {
+                "Chemistry: not accepting requests for a while.".to_string()
+            },
+            good: shift.accepting_orders,
+        });
+    }
+}
+
+/// Is this entity actually the standing board?
+///
+/// A message names the machine it acts on, and a client is free to name any
+/// entity at all. Checking the kind here is what stops a crafted message from
+/// buying a requisition by pointing at the grinder.
+fn is_board(entity: Entity, boards: &Query<&Machine>) -> bool {
+    boards
+        .get(entity)
+        .is_ok_and(|machine| machine.kind == MachineKind::StandingBoard)
+}
+
+// ---------------------------------------------------------------------------
+// Persistence
+// ---------------------------------------------------------------------------
+
+// The career lives in its own file inside the save, apart from the notebook
+// that `KnowledgePlugin` owns. `SaveData` is deliberately both the notebook's
+// disk format *and* the `KnowledgeSync` payload, built from `Knowledge` alone.
+// Threading the shift tally through it would either couple knowledge to orders
+// or make the sync carry data it does not want.
+
+/// Reading and writing `progress.ron`.
+///
+/// A plugin of its own rather than part of [`ShiftPlugin`] because it touches
+/// the disk, and [`ShiftPlugin`] is what the headless tests drive — folded
+/// together, every test run would read and write the player's real save and the
+/// tests would pollute each other through it.
+pub struct ProgressPlugin;
+
+impl Plugin for ProgressPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            OnEnter(AppState::Playing),
+            load_progress.run_if(is_authority),
+        )
+        .add_systems(
+            Update,
+            persist_progress
+                .run_if(in_state(AppState::Playing))
+                .run_if(is_authority),
+        );
+    }
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
+struct ProgressSave {
+    #[serde(default)]
+    succeeded: u32,
+    #[serde(default)]
+    botched: u32,
+    #[serde(default)]
+    department_standing: HashMap<Department, i32>,
+    /// A career fact like any other — this game keeps no secrets from a
+    /// player willing to open a save file in a text editor.
+    #[serde(default)]
+    underworld_standing: i32,
+}
+
+/// Restores the career on launch.
+fn load_progress(
+    mut shift: ResMut<Shift>,
+    underworld: Option<ResMut<crate::antagonist::UnderworldStanding>>,
+    slot: Option<Res<SaveSlot>>,
+) {
+    // No slot means a new game with nothing to restore, or a guest whose career
+    // is the host's and arrives replicated.
+    let Some(save) = slot.and_then(|slot| read_progress(&slot.progress_path())) else {
+        return;
+    };
+
+    shift.succeeded = save.succeeded;
+    shift.botched = save.botched;
+    shift.department_standing = save.department_standing;
+    if let Some(mut underworld) = underworld {
+        underworld.0 = save.underworld_standing;
+    }
+    info!(
+        "resuming with {} delivered, {} botched",
+        shift.succeeded, shift.botched
+    );
+}
+
+/// The career on disk, or `None` if there is not a readable one.
+fn read_progress(path: &std::path::Path) -> Option<ProgressSave> {
+    if !path.exists() {
+        return None;
+    }
+    // A corrupt save should cost the player their progress, not the session.
+    match std::fs::read_to_string(path).map(|text| ron::from_str::<ProgressSave>(&text)) {
+        Ok(Ok(save)) => Some(save),
+        Ok(Err(error)) => {
+            warn!("ignoring unreadable {}: {error}", path.display());
+            None
+        }
+        Err(error) => {
+            warn!("could not read {}: {error}", path.display());
+            None
+        }
+    }
+}
+
+/// The delivered/botched totals a save resumes at, for the menu's load list.
+///
+/// Read through the owning module rather than by parsing the file in the menu,
+/// so `ProgressSave` stays the one description of this format.
+pub fn progress_summary(path: &std::path::Path) -> Option<(u32, u32)> {
+    let save = read_progress(path)?;
+    Some((save.succeeded, save.botched))
+}
+
+fn persist_progress(
+    shift: Res<Shift>,
+    underworld: Option<Res<crate::antagonist::UnderworldStanding>>,
+    slot: Option<Res<SaveSlot>>,
+    mut written: Local<Option<ProgressSave>>,
+) {
+    let Some(slot) = slot else {
+        return;
+    };
+    let save = ProgressSave {
+        succeeded: shift.succeeded,
+        botched: shift.botched,
+        department_standing: shift.department_standing.clone(),
+        underworld_standing: underworld.map(|u| u.0).unwrap_or(0),
+    };
+    if written.as_ref() == Some(&save) {
+        return;
+    }
+    let Ok(text) = ron::ser::to_string_pretty(&save, default()) else {
+        return;
+    };
+    *written = Some(save);
+    slot.write_progress(&text);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::state::app::StatesPlugin;
 
     fn config() -> OrderConfig {
         ron::from_str(include_str!("../../assets/data/station.orders.ron"))
@@ -1095,46 +625,44 @@ mod tests {
         }
     }
 
-    // -- the ramp -----------------------------------------------------------
+    // -- the ramp -------------------------------------------------------
 
     #[test]
-    fn shift_one_matches_the_base_config() {
-        // The ramp must be a no-op on the first shift, or it silently
-        // re-balances numbers that were already tuned by hand.
+    fn tier_zero_matches_the_base_config() {
+        // The ramp must be a no-op at tier 0, or it silently re-balances
+        // numbers that were already tuned by hand.
         let base = config();
-        let rules = ShiftRules::for_shift(&base, &base.ramp, 1);
+        let rules = ShiftRules::for_tier(&base, &base.ramp, 0);
 
         assert_eq!(rules.gap_seconds, base.gap_seconds);
         assert_eq!(rules.patience_seconds, base.patience_seconds);
         assert_eq!(rules.max_active, base.max_active);
         assert_eq!(rules.stretch_chance, base.ramp.stretch_base);
-        assert_eq!(rules.quota, base.ramp.quota_base);
     }
 
     #[test]
     fn the_ramp_only_ever_tightens() {
         let base = config();
-        let mut previous = ShiftRules::for_shift(&base, &base.ramp, 1);
+        let mut previous = ShiftRules::for_tier(&base, &base.ramp, 0);
 
-        for shift in 2..=30 {
-            let rules = ShiftRules::for_shift(&base, &base.ramp, shift);
-            assert!(rules.quota >= previous.quota, "quota fell at shift {shift}");
+        for tier in 1..=30 {
+            let rules = ShiftRules::for_tier(&base, &base.ramp, tier);
             assert!(
                 rules.gap_seconds.0 <= previous.gap_seconds.0
                     && rules.gap_seconds.1 <= previous.gap_seconds.1,
-                "orders got further apart at shift {shift}"
+                "orders got further apart at tier {tier}"
             );
             assert!(
                 rules.patience_seconds.0 <= previous.patience_seconds.0,
-                "the crew got more patient at shift {shift}"
+                "the crew got more patient at tier {tier}"
             );
             assert!(
                 rules.max_active >= previous.max_active,
-                "the counter got quieter at shift {shift}"
+                "the counter got quieter at tier {tier}"
             );
             assert!(
                 rules.stretch_chance >= previous.stretch_chance,
-                "stretch orders got rarer at shift {shift}"
+                "stretch orders got rarer at tier {tier}"
             );
             previous = rules;
         }
@@ -1142,13 +670,12 @@ mod tests {
 
     #[test]
     fn the_ramp_stops_at_its_caps() {
-        // Unclamped, shift 50 is a gap of zero seconds and a counter nobody can
+        // Unclamped, tier 50 is a gap of zero seconds and a counter nobody can
         // work. That only shows up for a player who got that far.
         let base = config();
         let ramp = &base.ramp;
-        let rules = ShiftRules::for_shift(&base, ramp, 50);
+        let rules = ShiftRules::for_tier(&base, ramp, 50);
 
-        assert_eq!(rules.quota, ramp.quota_cap);
         assert_eq!(rules.max_active, ramp.max_active_cap);
         assert!((rules.stretch_chance - ramp.stretch_cap).abs() < f64::EPSILON);
         assert!(rules.gap_seconds.0 >= ramp.gap_floor);
@@ -1158,88 +685,20 @@ mod tests {
         assert!(rules.patience_seconds.0 <= rules.patience_seconds.1);
     }
 
-    // -- the clock ----------------------------------------------------------
-
-    fn clock(phase: ShiftPhase, remaining: Option<f32>) -> ShiftClock {
-        ShiftClock {
-            phase,
-            remaining,
-            ..default()
-        }
-    }
-
     #[test]
-    fn an_untimed_prep_never_starts_on_its_own() {
-        // Shift 1. The only way out is the player pressing the button.
-        let mut clock = clock(ShiftPhase::Prep, None);
-        for _ in 0..3600 {
-            assert_eq!(clock.tick(1.0), None);
-        }
+    fn current_rules_reads_the_tier_off_career_totals() {
+        let base = config();
+        let shift = Shift {
+            succeeded: base.ramp.orders_per_tier * 2,
+            ..Shift::default()
+        };
+
+        let rules = current_rules(&base, &shift);
+        let expected = ShiftRules::for_tier(&base, &base.ramp, 2);
+        assert_eq!(rules, expected);
     }
 
-    #[test]
-    fn a_timed_prep_opens_service_when_the_window_closes() {
-        let mut clock = clock(ShiftPhase::Prep, Some(2.0));
-        assert_eq!(clock.tick(1.0), None);
-        assert_eq!(clock.tick(1.5), Some(ShiftPhase::Service));
-    }
-
-    #[test]
-    fn a_debrief_rolls_into_the_next_prep() {
-        let mut clock = clock(ShiftPhase::Debrief, Some(1.0));
-        assert_eq!(clock.tick(1.5), Some(ShiftPhase::Prep));
-    }
-
-    #[test]
-    fn service_never_ends_on_a_clock() {
-        // Even with a countdown set, service only ends on the quota. A shift
-        // that ended mid-order would strand the crew member at the counter.
-        let mut clock = clock(ShiftPhase::Service, Some(1.0));
-        assert_eq!(clock.tick(90.0), None);
-    }
-
-    #[test]
-    fn a_closed_window_clears_its_countdown() {
-        // The state change takes a frame to land, so the window has to stop
-        // firing the moment it closes or it transitions twice.
-        let mut clock = clock(ShiftPhase::Prep, Some(0.5));
-        assert_eq!(clock.tick(1.0), Some(ShiftPhase::Service));
-        assert_eq!(clock.remaining, None);
-        assert_eq!(clock.tick(1.0), None);
-    }
-
-    // -- the quota ----------------------------------------------------------
-
-    #[test]
-    fn the_shift_ends_on_the_quota_and_not_before() {
-        let mut clock = clock(ShiftPhase::Service, None);
-        clock.rules.quota = 3;
-        assert!(!clock.record_resolution());
-        assert!(!clock.record_resolution());
-        assert!(clock.record_resolution());
-    }
-
-    #[test]
-    fn two_orders_landing_in_one_frame_still_only_end_the_shift_once() {
-        // Both delivery routes run in the same frame, so a double resolution is
-        // ordinary. A second `true` would push a second phase transition.
-        let mut clock = clock(ShiftPhase::Service, None);
-        clock.rules.quota = 1;
-        assert!(clock.record_resolution());
-        assert!(!clock.record_resolution());
-    }
-
-    #[test]
-    fn resolutions_outside_service_are_not_counted() {
-        // A beaker already sitting in the window when the bell goes resolves
-        // during the debrief. Counting it would end the next shift early.
-        let mut clock = clock(ShiftPhase::Debrief, None);
-        clock.rules.quota = 1;
-        assert!(!clock.record_resolution());
-        assert_eq!(clock.resolved, 0);
-    }
-
-    // -- forecast weighting -------------------------------------------------
+    // -- forecast weighting -----------------------------------------------
 
     #[test]
     fn the_forecast_leans_on_the_pool_without_replacing_it() {
@@ -1325,15 +784,61 @@ mod tests {
         assert_eq!(draw_forecast(&forecasts, 0.5).unwrap().id, "common");
     }
 
+    /// Enough app to run the forecast/requisition systems: states and
+    /// resources, no renderer, no crew walking, no assets.
+    fn shift_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+        ))
+        .init_state::<AppState>()
+        .add_plugins(ShiftPlugin)
+        .init_resource::<Shift>()
+        .init_resource::<RadioLog>()
+        .insert_resource(Knowledge::new(&chemistry()))
+        .insert_resource(station());
+        app.finish();
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Playing);
+        app.update();
+        app
+    }
+
+    fn chemistry() -> chem_sim::ChemData {
+        chem_sim::ChemData::from_ron(
+            include_str!("../../assets/data/chem.reagents.ron"),
+            include_str!("../../assets/data/chem.reactions.ron"),
+        )
+        .unwrap()
+    }
+
+    fn station() -> StationData {
+        StationData {
+            crew: ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap(),
+            config: config(),
+        }
+    }
+
     #[test]
-    fn a_prep_briefs_the_shift_over_the_radio() {
-        // The briefing is what turns prep from idle time into a decision, and
-        // it reaches a joined client only because the radio log already syncs.
-        let mut app = phase_app();
+    fn a_briefing_reaches_the_radio_without_waiting_a_full_interval() {
+        // A `None` timer reads as due now, so a fresh session is not left
+        // silent for a full `forecast_seconds` before the first line.
+        let mut app = shift_app();
         app.update();
 
-        let clock = app.world().resource::<ShiftClock>();
-        let pick = clock.forecast.clone().expect("prep should draw a forecast");
+        assert!(
+            app.world().resource::<CurrentForecast>().0.is_some(),
+            "the first redraw should not wait out a full interval"
+        );
+        let pick = app
+            .world()
+            .resource::<CurrentForecast>()
+            .0
+            .clone()
+            .unwrap();
         assert!(
             app.world()
                 .resource::<RadioLog>()
@@ -1344,28 +849,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn each_shift_is_briefed_afresh() {
-        let mut app = phase_app();
-        app.update();
-        move_to(&mut app, ShiftPhase::Service);
-        assert!(app.world().resource::<ShiftClock>().forecast.is_some());
-
-        move_to(&mut app, ShiftPhase::Debrief);
-        move_to(&mut app, ShiftPhase::Prep);
-        app.update();
-
-        assert!(
-            app.world().resource::<ShiftClock>().forecast.is_some(),
-            "shift 2 opened with no briefing"
-        );
-    }
-
     // -- supply -------------------------------------------------------------
 
     #[test]
     fn a_full_lab_gets_no_delivery() {
-        // Otherwise every prep adds glassware and the benches silt up.
+        // Otherwise every check adds glassware and the benches silt up.
         assert_eq!(restock_order(6, 6, 4), 0);
         assert_eq!(restock_order(9, 6, 4), 0);
     }
@@ -1395,7 +883,7 @@ mod tests {
         assert_eq!(crate_contents(3, 0), (0, 3));
     }
 
-    // -- requisition --------------------------------------------------------
+    // -- requisition ----------------------------------------------------
 
     #[test]
     fn you_cannot_requisition_on_credit() {
@@ -1406,463 +894,11 @@ mod tests {
         }
     }
 
-    // -- the report ---------------------------------------------------------
-
-    #[test]
-    fn the_debrief_reports_this_shift_and_not_the_career() {
-        let opening = ShiftSnapshot {
-            succeeded: 10,
-            botched: 4,
-            reputation: 7,
-            research_points: 10,
-            known_recipes: 5,
-        };
-        let closing = ShiftSnapshot {
-            succeeded: 14,
-            botched: 5,
-            reputation: 12,
-            research_points: 14,
-            known_recipes: 6,
-        };
-        let report = ShiftReport::between(&opening, &closing);
-
-        assert_eq!(report.delivered, 4);
-        assert_eq!(report.botched, 1);
-        assert_eq!(report.reputation, 5);
-        assert_eq!(report.research, 4);
-        assert_eq!(report.recipes, 1);
-    }
-
-    #[test]
-    fn a_shift_that_lost_standing_reports_it_as_a_loss() {
-        let opening = ShiftSnapshot {
-            reputation: 4,
-            ..default()
-        };
-        let closing = ShiftSnapshot {
-            reputation: -3,
-            ..default()
-        };
-        assert_eq!(ShiftReport::between(&opening, &closing).reputation, -7);
-    }
-
-    // -- sync ---------------------------------------------------------------
-
-    #[test]
-    fn a_running_countdown_costs_one_message_a_second() {
-        let mut clock = clock(ShiftPhase::Prep, Some(10.0));
-        let key = clock.sync_key();
-        clock.remaining = Some(9.4);
-        assert_eq!(clock.sync_key(), key, "sub-second ticks should not resend");
-        clock.remaining = Some(8.9);
-        assert_ne!(clock.sync_key(), key, "a whole second should resend");
-    }
-
-    #[test]
-    fn a_phase_change_goes_out_at_once() {
-        let clock = clock(ShiftPhase::Prep, Some(10.0));
-        let mut moved = clock.clone();
-        moved.phase = ShiftPhase::Service;
-        assert_ne!(clock.sync_key(), moved.sync_key());
-    }
-
-    // -- data integrity -----------------------------------------------------
-
-    #[test]
-    fn every_request_carries_a_theme() {
-        // An untagged request can never be forecast, so it would quietly sit
-        // outside the whole briefing system.
-        for request in &config().requests {
-            assert!(
-                !request.themes.is_empty(),
-                "request for '{}' has no theme, so no forecast can reach it",
-                request.reagent
-            );
-        }
-    }
-
-    #[test]
-    fn every_forecast_theme_is_asked_for_by_some_request() {
-        // A forecast naming a theme nothing carries biases nothing: the
-        // briefing promises a shift that never arrives, and there is no way to
-        // notice from inside the game.
-        let config = config();
-        for forecast in &config.forecasts {
-            for theme in &forecast.themes {
-                assert!(
-                    config
-                        .requests
-                        .iter()
-                        .any(|request| request.themes.contains(theme)),
-                    "forecast '{}' promises '{theme}', which no request carries",
-                    forecast.id
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn every_forecast_has_a_briefing_and_a_positive_weight() {
-        for forecast in &config().forecasts {
-            assert!(
-                !forecast.briefing.trim().is_empty(),
-                "forecast '{}' briefs nothing, so prep opens in silence",
-                forecast.id
-            );
-            assert!(
-                forecast.weight > 0.0,
-                "forecast '{}' can never be drawn",
-                forecast.id
-            );
-        }
-    }
-
-    #[test]
-    fn there_is_a_forecast_to_draw() {
-        assert!(
-            !config().forecasts.is_empty(),
-            "with no forecasts every prep opens with no briefing"
-        );
-    }
-
-    #[test]
-    fn the_glassware_courier_is_on_the_crew_roster() {
-        // Missing, the restock is skipped with a warning, which looks exactly
-        // like the lab simply never getting any glassware back.
-        let supply = config().supply;
-        let roster: Vec<crate::crew::CrewDef> =
-            ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap();
-        assert!(
-            roster.iter().any(|member| member.name == supply.courier),
-            "no crew member named '{}' to bring glassware",
-            supply.courier
-        );
-    }
-
-    // -- the phase machine, headless ----------------------------------------
-
-    use crate::crew::{CrewPhase, CrewRoute};
-    use crate::orders::Outcome;
-    use bevy::state::app::StatesPlugin;
-    use bevy_replicon::test_app::ServerTestAppExt;
-    use chem_sim::{ReagentId, Units};
-
-    fn chemistry() -> chem_sim::ChemData {
-        chem_sim::ChemData::from_ron(
-            include_str!("../../assets/data/chem.reagents.ron"),
-            include_str!("../../assets/data/chem.reactions.ron"),
-        )
-        .unwrap()
-    }
-
-    fn station() -> StationData {
-        StationData {
-            crew: ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap(),
-            config: config(),
-        }
-    }
-
-    /// Enough app to run the phase machine: states and resources, no renderer,
-    /// no crew walking, no assets.
-    ///
-    /// Replicon comes along because the phase systems are authority-gated on
-    /// `ClientState` exactly like the orders they gate. Its default is
-    /// `Disconnected`, which is singleplayer, so this is the real code path
-    /// rather than a stand-in.
-    fn phase_app() -> App {
-        let mut app = App::new();
-        app.add_plugins((
-            MinimalPlugins,
-            StatesPlugin,
-            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
-        ))
-        .init_state::<AppState>()
-        .add_plugins(ShiftPlugin)
-        .init_resource::<Shift>()
-        .init_resource::<RadioLog>()
-        .add_message::<OrderResolved>()
-        .insert_resource(Knowledge::new(&chemistry()))
-        .insert_resource(station())
-        .insert_resource(OrderSpawner {
-            timer: Timer::from_seconds(999.0, TimerMode::Once),
-        })
-        .add_systems(Update, count_resolved_orders);
-        app.finish();
-
-        // `ShiftPhase` only exists once `AppState` reaches `Playing`, so the
-        // sub-state has to be brought into being before anything can be asked
-        // of it.
-        app.world_mut()
-            .resource_mut::<NextState<AppState>>()
-            .set(AppState::Playing);
-        app.update();
-        app
-    }
-
-    fn phase_of(app: &App) -> ShiftPhase {
-        *app.world().resource::<State<ShiftPhase>>().get()
-    }
-
-    fn move_to(app: &mut App, phase: ShiftPhase) {
-        app.world_mut()
-            .resource_mut::<NextState<ShiftPhase>>()
-            .set(phase);
-        app.update();
-    }
-
-    #[test]
-    fn a_session_opens_in_prep() {
-        // The player gets the lab to themselves before anyone asks for
-        // anything. That is the whole feature.
-        let app = phase_app();
-        assert_eq!(phase_of(&app), ShiftPhase::Prep);
-        assert_eq!(app.world().resource::<ShiftClock>().shift, 1);
-    }
-
-    #[test]
-    fn the_first_prep_of_a_session_has_no_clock() {
-        // `first_shift_untimed` — a chemist who has never seen the lab should
-        // not be racing a countdown while they find the dispenser.
-        let mut app = phase_app();
-        app.update();
-        let clock = app.world().resource::<ShiftClock>();
-        assert_eq!(clock.remaining, None);
-        assert!(!clock.pending_open, "prep never opened");
-    }
-
-    #[test]
-    fn later_preps_are_timed() {
-        let mut app = phase_app();
-        app.update();
-
-        move_to(&mut app, ShiftPhase::Service);
-        move_to(&mut app, ShiftPhase::Debrief);
-        move_to(&mut app, ShiftPhase::Prep);
-        app.update();
-
-        let clock = app.world().resource::<ShiftClock>();
-        assert_eq!(clock.shift, 2, "signing off should advance the shift");
-        let remaining = clock.remaining.expect("prep after the first is timed");
-        // A frame or two of countdown has already run by now.
-        assert!(
-            (remaining - config().windows.prep_seconds).abs() < 1.0,
-            "prep opened with {remaining}s"
-        );
-    }
-
-    #[test]
-    fn the_order_spawner_is_re_armed_when_service_opens() {
-        // `generate_orders` re-rolls its timer before it checks `max_active`,
-        // so it always stops holding a partial remainder. Without this the
-        // first order of a shift lands at a stale random offset — possibly the
-        // instant the player walks out of the briefing.
-        let mut app = phase_app();
-        app.world_mut()
-            .resource_mut::<OrderSpawner>()
-            .timer
-            .tick(std::time::Duration::from_secs_f32(998.5));
-
-        move_to(&mut app, ShiftPhase::Service);
-
-        let remaining = app
-            .world()
-            .resource::<OrderSpawner>()
-            .timer
-            .remaining_secs();
-        assert!(
-            (remaining - config().first_order_delay).abs() < 0.001,
-            "service opened with {remaining}s on a stale clock"
-        );
-    }
-
-    #[test]
-    fn service_freezes_this_shifts_difficulty() {
-        let mut app = phase_app();
-        app.world_mut().resource_mut::<ShiftClock>().shift = 4;
-        move_to(&mut app, ShiftPhase::Service);
-
-        let base = config();
-        let expected = ShiftRules::for_shift(&base, &base.ramp, 4);
-        assert_eq!(app.world().resource::<ShiftClock>().rules, expected);
-    }
-
-    #[test]
-    fn the_quota_closes_the_shift() {
-        let mut app = phase_app();
-        move_to(&mut app, ShiftPhase::Service);
-        app.world_mut().resource_mut::<ShiftClock>().rules.quota = 2;
-
-        resolve_one(&mut app);
-        assert_eq!(phase_of(&app), ShiftPhase::Service, "closed a shift early");
-
-        resolve_one(&mut app);
-        assert_eq!(phase_of(&app), ShiftPhase::Debrief);
-    }
-
-    fn resolve_one(app: &mut App) {
-        app.world_mut().write_message(OrderResolved {
-            name: "Dr. Vance".into(),
-            role: "Medical".into(),
-            reagent: ReagentId(0),
-            outcome: Outcome::Success,
-        });
-        app.update();
-        // `NextState` written during `Update` is applied at the top of the
-        // following frame, so the phase change needs one more turn of the crank.
-        app.update();
-    }
-
-    #[test]
-    fn the_debrief_sends_waiting_crew_home_without_a_penalty() {
-        let mut app = phase_app();
-        move_to(&mut app, ShiftPhase::Service);
-
-        let crew = app
-            .world_mut()
-            .spawn((
-                CrewMember {
-                    name: "Dr. Vance".into(),
-                    role: "Medical".into(),
-                },
-                Order {
-                    reagent: ReagentId(0),
-                    amount: Units::whole(20),
-                    plea: "please".into(),
-                    timer: Timer::from_seconds(60.0, TimerMode::Once),
-                },
-                Interactable::new("Dr. Vance"),
-                CrewRoute::arrival(0.0),
-            ))
-            .id();
-
-        move_to(&mut app, ShiftPhase::Debrief);
-
-        let world = app.world();
-        assert!(
-            world.get::<Order>(crew).is_none(),
-            "the request should be withdrawn, not left hanging"
-        );
-        assert!(world.get::<Interactable>(crew).is_none());
-        assert_eq!(
-            world.get::<CrewRoute>(crew).unwrap().phase,
-            CrewPhase::Leaving
-        );
-
-        // They were not ignored — the shift ended. Charging them as a failure
-        // would punish the player for the quota's own boundary.
-        let shift = world.resource::<Shift>();
-        assert_eq!(shift.botched, 0);
-        assert_eq!(shift.reputation, 0);
-    }
-
-    #[test]
-    fn dismissed_crew_do_not_count_against_the_next_shifts_quota() {
-        // `dismiss_outstanding_orders` deliberately writes no `OrderResolved`.
-        // One that leaked through would be booked against the next shift, and
-        // would fire a radio verdict for a delivery that never happened.
-        let mut app = phase_app();
-        move_to(&mut app, ShiftPhase::Service);
-        app.world_mut().spawn((
-            CrewMember {
-                name: "Warden Bex".into(),
-                role: "Security".into(),
-            },
-            Order {
-                reagent: ReagentId(0),
-                amount: Units::whole(20),
-                plea: "please".into(),
-                timer: Timer::from_seconds(60.0, TimerMode::Once),
-            },
-            CrewRoute::arrival(0.0),
-        ));
-
-        move_to(&mut app, ShiftPhase::Debrief);
-        move_to(&mut app, ShiftPhase::Prep);
-        move_to(&mut app, ShiftPhase::Service);
-        app.update();
-
-        assert_eq!(app.world().resource::<ShiftClock>().resolved, 0);
-    }
-
-    // -- the board ----------------------------------------------------------
-
     fn board(app: &mut App) -> Entity {
         app.world_mut()
-            .spawn(Machine::new(MachineKind::ShiftBoard))
+            .spawn(Machine::new(MachineKind::StandingBoard))
             .id()
     }
-
-    #[test]
-    fn the_board_starts_the_shift() {
-        let mut app = phase_app();
-        let board = board(&mut app);
-
-        app.world_mut().write_message(FromClient {
-            client_id: ClientId::Server,
-            message: BeginShiftRequested { board },
-        });
-        app.update();
-        app.update();
-
-        assert_eq!(phase_of(&app), ShiftPhase::Service);
-    }
-
-    #[test]
-    fn only_the_board_can_start_a_shift() {
-        // A message names the machine it acts on, and a client is free to name
-        // any entity at all. Without the kind check a crafted message could
-        // start a shift by pointing at the grinder.
-        let mut app = phase_app();
-        let grinder = app
-            .world_mut()
-            .spawn(Machine::new(MachineKind::Grinder))
-            .id();
-
-        app.world_mut().write_message(FromClient {
-            client_id: ClientId::Server,
-            message: BeginShiftRequested { board: grinder },
-        });
-        app.update();
-        app.update();
-
-        assert_eq!(phase_of(&app), ShiftPhase::Prep);
-    }
-
-    #[test]
-    fn the_board_only_starts_a_shift_from_prep() {
-        let mut app = phase_app();
-        let board = board(&mut app);
-        move_to(&mut app, ShiftPhase::Service);
-
-        app.world_mut().write_message(FromClient {
-            client_id: ClientId::Server,
-            message: BeginShiftRequested { board },
-        });
-        app.update();
-        app.update();
-
-        assert_eq!(phase_of(&app), ShiftPhase::Service);
-    }
-
-    #[test]
-    fn signing_off_opens_the_next_prep() {
-        let mut app = phase_app();
-        let board = board(&mut app);
-        move_to(&mut app, ShiftPhase::Service);
-        move_to(&mut app, ShiftPhase::Debrief);
-
-        app.world_mut().write_message(FromClient {
-            client_id: ClientId::Server,
-            message: SignOffRequested { board },
-        });
-        app.update();
-        app.update();
-
-        assert_eq!(phase_of(&app), ShiftPhase::Prep);
-        assert_eq!(app.world().resource::<ShiftClock>().shift, 2);
-    }
-
-    // -- requisition --------------------------------------------------------
 
     fn requisition(app: &mut App, board: Entity, kind: RequisitionKind) {
         app.world_mut().write_message(FromClient {
@@ -1872,35 +908,36 @@ mod tests {
         app.update();
     }
 
-    fn at_debrief_with(reputation: i32) -> (App, Entity) {
-        let mut app = phase_app();
+    fn with_standing(department: Department, standing: i32) -> (App, Entity) {
+        let mut app = shift_app();
         let board = board(&mut app);
-        move_to(&mut app, ShiftPhase::Service);
-        app.world_mut().resource_mut::<Shift>().reputation = reputation;
-        move_to(&mut app, ShiftPhase::Debrief);
+        app.world_mut()
+            .resource_mut::<Shift>()
+            .adjust(department, standing);
         (app, board)
     }
 
     #[test]
-    fn a_requisition_takes_the_standing_and_lands_next_prep() {
-        let (mut app, board) = at_debrief_with(10);
+    fn a_requisition_can_be_bought_the_instant_standing_allows_it() {
+        // No shift boundary left to wait for — affordability is the only
+        // gate.
+        let (mut app, board) = with_standing(Department::Cargo, 10);
         requisition(&mut app, board, RequisitionKind::Glassware);
 
         let world = app.world();
         assert_eq!(
-            world.resource::<Shift>().reputation,
+            world.resource::<Shift>().standing(Department::Cargo),
             10 - RequisitionKind::Glassware.cost()
         );
         assert_eq!(
-            world.resource::<ShiftClock>().requisition.glassware,
+            world.resource::<Shift>().requisition.glassware,
             config().supply.requisition_glassware_bonus
         );
     }
 
     #[test]
     fn a_research_grant_lands_immediately() {
-        // The one thing you can spend standing on and use before the next prep.
-        let (mut app, board) = at_debrief_with(10);
+        let (mut app, board) = with_standing(Department::Engineering, 10);
         let before = app.world().resource::<Knowledge>().research_points;
 
         requisition(&mut app, board, RequisitionKind::ResearchGrant);
@@ -1912,28 +949,13 @@ mod tests {
     }
 
     #[test]
-    fn a_second_produce_crate_is_refused_rather_than_charged_for() {
-        // The crate is a flag, not a count. Charged twice it would take the
-        // standing and order nothing extra.
-        let (mut app, board) = at_debrief_with(20);
-        requisition(&mut app, board, RequisitionKind::ProduceCrate);
-        let after_first = app.world().resource::<Shift>().reputation;
-
-        requisition(&mut app, board, RequisitionKind::ProduceCrate);
-
-        assert_eq!(app.world().resource::<Shift>().reputation, after_first);
-    }
-
-    #[test]
     fn a_glassware_requisition_stacks() {
-        // Unlike the crate, this one is a quantity, so buying twice should buy
-        // twice as much.
-        let (mut app, board) = at_debrief_with(20);
+        let (mut app, board) = with_standing(Department::Cargo, 20);
         requisition(&mut app, board, RequisitionKind::Glassware);
         requisition(&mut app, board, RequisitionKind::Glassware);
 
         assert_eq!(
-            app.world().resource::<ShiftClock>().requisition.glassware,
+            app.world().resource::<Shift>().requisition.glassware,
             config().supply.requisition_glassware_bonus * 2
         );
     }
@@ -1963,98 +985,123 @@ mod tests {
     fn a_requisition_you_cannot_afford_changes_nothing() {
         // Not "takes what it can" — a half-applied purchase that took the
         // standing and delivered nothing is the worst outcome available.
-        let (mut app, board) = at_debrief_with(1);
+        let (mut app, board) = with_standing(Department::Engineering, 1);
         requisition(&mut app, board, RequisitionKind::ResearchGrant);
 
         let world = app.world();
-        assert_eq!(world.resource::<Shift>().reputation, 1);
-        assert!(!world.resource::<ShiftClock>().requisition.produce_crate);
+        assert_eq!(world.resource::<Shift>().standing(Department::Engineering), 1);
     }
 
     #[test]
-    fn you_cannot_requisition_mid_shift() {
-        // Otherwise standing could be spent while it is still being earned.
-        let mut app = phase_app();
-        let board = board(&mut app);
-        move_to(&mut app, ShiftPhase::Service);
-        app.world_mut().resource_mut::<Shift>().reputation = 20;
-
-        requisition(&mut app, board, RequisitionKind::Glassware);
-
-        assert_eq!(app.world().resource::<Shift>().reputation, 20);
-    }
-
-    #[test]
-    fn spending_at_the_debrief_does_not_rewrite_the_report() {
-        // `closing` is frozen on entry for exactly this reason: a report that
-        // shrank as you spent against it would be unreadable.
-        let (mut app, board) = at_debrief_with(10);
-        let before = {
-            let clock = app.world().resource::<ShiftClock>();
-            ShiftReport::between(&clock.opening, &clock.closing)
-        };
-
-        requisition(&mut app, board, RequisitionKind::Glassware);
-
-        let clock = app.world().resource::<ShiftClock>();
-        assert_eq!(ShiftReport::between(&clock.opening, &clock.closing), before);
-    }
-
-    // -- co-op --------------------------------------------------------------
-
-    #[test]
-    fn a_joined_chemist_is_told_which_phase_the_lab_is_in() {
-        // `ShiftClock` is a resource, and replicon does not replicate
-        // resources. Without the snapshot a client's HUD would sit on shift 1
-        // prep forever while the host worked a shift around them.
-        let mut server = phase_app();
-        let mut client = phase_app();
-        server.connect_client(&mut client);
-
-        server
+    fn only_the_board_can_be_requisitioned_against() {
+        // A message names the machine it acts on, and a client is free to
+        // name any entity at all. Without the kind check a crafted message
+        // could buy a requisition by pointing at the grinder.
+        let (mut app, _) = with_standing(Department::Cargo, 20);
+        let grinder = app
             .world_mut()
-            .resource_mut::<NextState<ShiftPhase>>()
-            .set(ShiftPhase::Service);
-        server.update();
-        server.update();
-        server.exchange_with_client(&mut client);
-        client.update();
-        client.update();
+            .spawn(Machine::new(MachineKind::Grinder))
+            .id();
 
-        assert_eq!(phase_of(&client), ShiftPhase::Service);
-        assert_eq!(
-            client.world().resource::<ShiftClock>().rules.quota,
-            server.world().resource::<ShiftClock>().rules.quota
+        requisition(&mut app, grinder, RequisitionKind::Glassware);
+
+        assert_eq!(app.world().resource::<Shift>().standing(Department::Cargo), 20);
+    }
+
+    // -- the accepting-orders toggle --------------------------------------
+
+    #[test]
+    fn either_chemist_can_flip_the_sign() {
+        let mut app = shift_app();
+        let board = board(&mut app);
+        assert!(app.world().resource::<Shift>().accepting_orders);
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: ToggleAcceptingOrders { board },
+        });
+        app.update();
+        assert!(!app.world().resource::<Shift>().accepting_orders);
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: ToggleAcceptingOrders { board },
+        });
+        app.update();
+        assert!(app.world().resource::<Shift>().accepting_orders);
+    }
+
+    // -- data integrity -----------------------------------------------------
+
+    #[test]
+    fn every_request_carries_a_theme() {
+        // An untagged request can never be forecast, so it would quietly sit
+        // outside the whole briefing system.
+        for request in &config().requests {
+            assert!(
+                !request.themes.is_empty(),
+                "request for '{}' has no theme, so no forecast can reach it",
+                request.reagent
+            );
+        }
+    }
+
+    #[test]
+    fn every_forecast_theme_is_asked_for_by_some_request() {
+        // A forecast naming a theme nothing carries biases nothing: the
+        // briefing promises something that never arrives, and there is no way
+        // to notice from inside the game.
+        let config = config();
+        for forecast in &config.forecasts {
+            for theme in &forecast.themes {
+                assert!(
+                    config
+                        .requests
+                        .iter()
+                        .any(|request| request.themes.contains(theme)),
+                    "forecast '{}' promises '{theme}', which no request carries",
+                    forecast.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_forecast_has_a_briefing_and_a_positive_weight() {
+        for forecast in &config().forecasts {
+            assert!(
+                !forecast.briefing.trim().is_empty(),
+                "forecast '{}' briefs nothing, so a redraw is silent",
+                forecast.id
+            );
+            assert!(
+                forecast.weight > 0.0,
+                "forecast '{}' can never be drawn",
+                forecast.id
+            );
+        }
+    }
+
+    #[test]
+    fn there_is_a_forecast_to_draw() {
+        assert!(
+            !config().forecasts.is_empty(),
+            "with no forecasts every redraw is silent"
         );
     }
 
     #[test]
-    fn the_host_does_not_overwrite_its_own_clock() {
-        // `CLIENTS_ONLY`. A snapshot echoed back to the host would land a frame
-        // late and undo whatever the host had just decided.
-        let mut server = phase_app();
-        let mut client = phase_app();
-        server.connect_client(&mut client);
-
-        server.world_mut().resource_mut::<ShiftClock>().shift = 7;
-        server.update();
-        server.update();
-
-        assert_eq!(server.world().resource::<ShiftClock>().shift, 7);
-    }
-
-    #[test]
-    fn the_report_covers_the_shift_that_just_ended() {
-        let mut app = phase_app();
-        // Two shifts' worth of career, one shift's worth of work.
-        app.world_mut().resource_mut::<Shift>().succeeded = 6;
-        move_to(&mut app, ShiftPhase::Service);
-        app.world_mut().resource_mut::<Shift>().succeeded = 9;
-        move_to(&mut app, ShiftPhase::Debrief);
-
-        let clock = app.world().resource::<ShiftClock>();
-        let report = ShiftReport::between(&clock.opening, &clock.closing);
-        assert_eq!(report.delivered, 3);
+    fn the_glassware_courier_is_on_the_crew_roster() {
+        // Missing, the restock is skipped with a warning, which looks exactly
+        // like the lab simply never getting any glassware back.
+        let supply = config().supply;
+        let roster: Vec<crate::crew::CrewDef> =
+            ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap();
+        assert!(
+            roster.iter().any(|member| member.name == supply.courier),
+            "no crew member named '{}' to bring glassware",
+            supply.courier
+        );
     }
 
     #[test]
@@ -2063,7 +1110,7 @@ mod tests {
         // counter than there are rows, the one about to expire is the one that
         // gets hidden.
         let base = config();
-        let busiest = ShiftRules::for_shift(&base, &base.ramp, 99).max_active;
+        let busiest = ShiftRules::for_tier(&base, &base.ramp, 99).max_active;
         assert!(
             crate::ui::ORDER_SLOTS >= busiest,
             "the ramp reaches {busiest} concurrent orders but the queue shows {}",

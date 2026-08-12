@@ -4,12 +4,12 @@
 // needed. Without them the only way to get hurt is to make a mistake, and a
 // careful player would never touch a medicine they made.
 //
-// `first_shift_safe` keeps shift 1 clear: the opening shift is where a player
+// `grace_seconds` keeps the opening minutes clear: that is where a player
 // learns the loop, and a radiation alarm during it reads as the game being
 // broken rather than as a hazard.
 (
-    first_shift_safe: true,
-    // Only during service, and never twice at once.
+    grace_seconds: 300.0,
+    // Never twice at once.
     gap_seconds: (95.0, 190.0),
     // Seconds of radio warning before it starts. Long enough to dose up, short
     // enough to be a scramble.

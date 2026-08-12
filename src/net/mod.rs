@@ -29,6 +29,7 @@ use crate::containers::{Container, HeldBy, InSlot};
 use crate::crew::CrewMember;
 use crate::hazards::{ActiveHazard, SmokeCloud, SmokePayload};
 use crate::machines::{Buffer, DispenseAmount, Hopper, Machine, Thermostat};
+use crate::orders::Order;
 use crate::player::Player;
 use crate::produce::Produce;
 use crate::AppState;
@@ -249,6 +250,11 @@ fn register_replication(app: &mut App) {
         .replicate::<Buffer>()
         .replicate::<Hopper>()
         .replicate::<DispenseAmount>()
+        // `Order` used to carry a `Timer`, which is not `Serialize` — that is
+        // the whole reason it was never on this list, and a joining client's
+        // order queue sat empty. `patience`/`waited` are plain `f32`, so it
+        // can finally ride the wire like everything else here.
+        .replicate::<Order>()
         .replicate::<Produce>()
         .replicate::<CrewMember>()
         // The marker itself, so a client can tell a chemist from any other

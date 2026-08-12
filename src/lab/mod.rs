@@ -653,7 +653,7 @@ fn fit(kind: MachineKind) -> MachineFit {
         // On the hall's east wall beside the lobby door, so it is the last
         // thing you pass on the way out to the counter and the first on the way
         // back in. Shallow, because it is a notice board, not a cabinet.
-        MachineKind::ShiftBoard => MachineFit {
+        MachineKind::StandingBoard => MachineFit {
             base: Vec3::new(hall.max_x - 0.4, 0.0, 0.5),
             size: Vec3::new(0.8, 1.7, 1.5),
             facing: Vec3::NEG_X,
@@ -808,7 +808,7 @@ fn spawn_machines(mut commands: Commands) {
             MachineKind::ReactionChamber => {
                 commands.entity(machine).insert(Thermostat::default());
             }
-            MachineKind::Analyzer | MachineKind::DeliveryWindow | MachineKind::ShiftBoard => {}
+            MachineKind::Analyzer | MachineKind::DeliveryWindow | MachineKind::StandingBoard => {}
         }
     }
 }
@@ -855,11 +855,11 @@ pub(crate) fn dress_machines(
         // towards the face the player approaches from. Static geometry, so it
         // is derived rather than replicated.
         //
-        // The shift board has none, deliberately: walking up holding a beaker
-        // would park it on the board instead of opening the panel, and the
-        // player would have no way of telling why the board had stopped
+        // The standing board has none, deliberately: walking up holding a
+        // beaker would park it on the board instead of opening the panel, and
+        // the player would have no way of telling why the board had stopped
         // responding.
-        if kind != MachineKind::ShiftBoard {
+        if kind != MachineKind::StandingBoard {
             commands.entity(entity).insert(ContainerSlot {
                 offset: Vec3::Y * (fit.size.y * 0.5 + 0.07) + fit.facing * 0.18,
             });
@@ -948,13 +948,13 @@ mod tests {
     }
 
     #[test]
-    fn the_shift_board_is_the_one_machine_with_no_slot() {
+    fn the_standing_board_is_the_one_machine_with_no_slot() {
         // Walking up to it holding a beaker would park the beaker on the board
         // instead of opening the panel, and nothing would explain why.
         let mut app = client_lab();
         let board = app
             .world_mut()
-            .spawn(Machine::new(MachineKind::ShiftBoard))
+            .spawn(Machine::new(MachineKind::StandingBoard))
             .id();
 
         app.update();

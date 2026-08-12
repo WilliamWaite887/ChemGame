@@ -49,7 +49,12 @@ impl Plugin for PlayerPlugin {
                     // Authority: runs on a dedicated server, a listen server,
                     // and in singleplayer — anywhere that is "not a remote
                     // client".
-                    (spawn_joining_chemists, apply_move_input).run_if(is_authority),
+                    (
+                        spawn_joining_chemists,
+                        despawn_leaving_chemists,
+                        (receive_move_input, apply_move_input).chain(),
+                    )
+                        .run_if(is_authority),
                     // Local presentation, runs everywhere.
                     (
                         dress_chemists,
@@ -82,6 +87,24 @@ pub struct Chemist {
 /// The chemist this client controls.
 #[derive(Component)]
 pub struct LocalPlayer;
+
+/// The most recent movement command a chemist's client has sent.
+///
+/// Server-only bookkeeping, not replicated: it exists so [`apply_move_input`]
+/// can move every chemist once per server frame regardless of how many — or
+/// how few — [`MoveInput`] messages actually arrived that frame. `MoveInput`
+/// travels over an unreliable channel, so on a lossy connection some frames
+/// get none at all; without something to fall back on, a dropped packet froze
+/// that chemist in place until the next one landed, which is what made the
+/// joining chemist visibly stall and lag behind the host. Latching instead of
+/// integrating means a lost packet just means "keep doing what you were
+/// told last", exactly like dead reckoning in any other server-authoritative
+/// game.
+#[derive(Component, Default)]
+struct MoveIntent {
+    direction: Vec2,
+    yaw: f32,
+}
 
 /// The camera. Not parented to the body, so head movement stays local.
 #[derive(Component)]
@@ -154,11 +177,35 @@ fn spawn_joining_chemists(
     }
 }
 
+/// Removes a chemist whose client has disconnected.
+///
+/// `ConnectedClient` is despawned by the networking backend the instant a
+/// connection drops (see its own docs), so this is the mirror image of
+/// [`spawn_joining_chemists`] rather than a poll for anything. Nothing else
+/// ever removes a `Player` entity — without this, a chemist who quit stayed
+/// in the lab forever, and the one who stayed behind went on seeing a
+/// colleague who had gone home.
+fn despawn_leaving_chemists(
+    mut commands: Commands,
+    mut gone: RemovedComponents<ConnectedClient>,
+    chemists: Query<(Entity, &Chemist)>,
+) {
+    for client in gone.read() {
+        let id = ClientId::Client(client);
+        for (entity, chemist) in &chemists {
+            if chemist.client == id {
+                commands.entity(entity).despawn();
+            }
+        }
+    }
+}
+
 fn spawn_chemist(commands: &mut Commands, client: ClientId, lane: f32) -> Entity {
     commands
         .spawn((
             Player,
             Chemist { client },
+            MoveIntent::default(),
             Look::default(),
             InteractionMode::default(),
             Focus::default(),
@@ -386,24 +433,47 @@ fn walk_speed(blood: &Bloodstream, body: &Body) -> f32 {
     WALK_SPEED * factor
 }
 
-/// Server-side movement. The only place a chemist's position changes.
-fn apply_move_input(
-    time: Res<Time>,
+/// Latches the newest movement command per chemist. Does not move anyone —
+/// see [`apply_move_input`] for why that is a separate step.
+fn receive_move_input(
     mut inputs: MessageReader<FromClient<MoveInput>>,
-    mut chemists: Query<(&mut Transform, &mut Look, &Chemist, &Body, &Bloodstream)>,
-    solids: Query<(&Transform, &Solid), Without<Chemist>>,
+    mut chemists: Query<(&Chemist, &mut MoveIntent)>,
 ) {
     for input in inputs.read() {
-        let Some((mut transform, mut look, _, body, blood)) = chemists
+        let Some((_, mut intent)) = chemists
             .iter_mut()
-            .find(|(_, _, chemist, _, _)| chemist.client == input.client_id)
+            .find(|(chemist, _)| chemist.client == input.client_id)
         else {
             continue;
         };
+        intent.direction = input.direction;
+        intent.yaw = input.yaw;
+    }
+}
 
-        look.yaw = input.yaw;
-        transform.rotation = Quat::from_rotation_y(input.yaw);
-        if input.direction == Vec2::ZERO {
+/// Server-side movement. The only place a chemist's position changes.
+///
+/// Moves every chemist once per server frame from their latched
+/// [`MoveIntent`], never once per message received. `MoveInput` rides an
+/// unreliable channel, so message arrival is bursty: a frame that happens to
+/// receive two queued packets must not walk the chemist twice as far, and a
+/// frame that receives none — the ordinary cost of a dropped unreliable
+/// packet — must not freeze them either. Both used to happen, because the
+/// old version multiplied `time.delta_secs()` by however many `MoveInput`
+/// messages arrived that frame instead of by frames elapsed: on a lossy
+/// connection that reads as one chemist visibly lagging behind the other.
+fn apply_move_input(
+    time: Res<Time>,
+    mut chemists: Query<
+        (&mut Transform, &mut Look, &MoveIntent, &Body, &Bloodstream),
+        With<Chemist>,
+    >,
+    solids: Query<(&Transform, &Solid), Without<Chemist>>,
+) {
+    for (mut transform, mut look, intent, body, blood) in &mut chemists {
+        look.yaw = intent.yaw;
+        transform.rotation = Quat::from_rotation_y(intent.yaw);
+        if intent.direction == Vec2::ZERO {
             continue;
         }
 
@@ -412,8 +482,8 @@ fn apply_move_input(
             continue;
         }
 
-        let local = Vec3::new(input.direction.x, 0.0, input.direction.y);
-        let step = Quat::from_rotation_y(input.yaw) * local;
+        let local = Vec3::new(intent.direction.x, 0.0, intent.direction.y);
+        let step = Quat::from_rotation_y(intent.yaw) * local;
         let mut position = transform.translation + step * speed * time.delta_secs();
         position.y = EYE_HEIGHT;
 
@@ -606,6 +676,128 @@ mod tests {
                 .filter(|(chemist, _)| *chemist == me)
                 .all(|(_, visibility)| *visibility == Visibility::Hidden),
             "your own body would sit over your own camera"
+        );
+    }
+
+    // -- movement: once per frame, not once per packet -------------------
+
+    fn move_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .add_message::<FromClient<MoveInput>>()
+            .add_systems(Update, (receive_move_input, apply_move_input).chain());
+        app
+    }
+
+    fn moving_chemist(app: &mut App, client: ClientId) -> Entity {
+        app.world_mut()
+            .spawn((
+                Chemist { client },
+                MoveIntent::default(),
+                Look::default(),
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_xyz(lab::SPAWN_SPOT.x, EYE_HEIGHT, lab::SPAWN_SPOT.z),
+            ))
+            .id()
+    }
+
+    fn send_input(app: &mut App, client: ClientId, direction: Vec2) {
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: MoveInput { direction, yaw: 0.0 },
+        });
+    }
+
+    fn tick(app: &mut App, seconds: f32) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(seconds));
+        app.update();
+    }
+
+    #[test]
+    fn a_dropped_move_packet_does_not_stall_the_chemist() {
+        // The bug this pins: movement used to be applied once per received
+        // `MoveInput` message rather than once per server frame. `MoveInput`
+        // rides an unreliable channel, so a frame that receives none — the
+        // ordinary cost of one dropped packet on a lossy link — used to
+        // freeze that chemist in place until the next packet landed, which
+        // is what made the joining chemist visibly stall and lag the host.
+        let mut app = move_app();
+        let client_entity = app.world_mut().spawn_empty().id();
+        let client = ClientId::Client(client_entity);
+        let chemist = moving_chemist(&mut app, client);
+
+        send_input(&mut app, client, Vec2::new(0.0, -1.0));
+        tick(&mut app, 0.1);
+        let after_first = app.world().get::<Transform>(chemist).unwrap().translation;
+        assert_ne!(after_first.z, 0.0, "the first frame should move the chemist");
+
+        // No new `MoveInput` this frame — exactly what a dropped packet
+        // looks like from the server's side.
+        tick(&mut app, 0.1);
+        let after_second = app.world().get::<Transform>(chemist).unwrap().translation;
+        assert_ne!(
+            after_second, after_first,
+            "a missing packet must not freeze the chemist in place"
+        );
+    }
+
+    #[test]
+    fn a_burst_of_queued_packets_does_not_double_the_step() {
+        // The other half of the same bug: two messages queued in one server
+        // frame — the ordinary result of jitter delivering a small backlog
+        // at once — used to move the chemist twice, once per message,
+        // instead of once for the frame elapsed.
+        let mut solo = move_app();
+        let solo_client = ClientId::Client(solo.world_mut().spawn_empty().id());
+        let solo_chemist = moving_chemist(&mut solo, solo_client);
+        send_input(&mut solo, solo_client, Vec2::new(0.0, -1.0));
+        tick(&mut solo, 0.1);
+        let single_step = solo.world().get::<Transform>(solo_chemist).unwrap().translation;
+
+        let mut bursty = move_app();
+        let bursty_client = ClientId::Client(bursty.world_mut().spawn_empty().id());
+        let bursty_chemist = moving_chemist(&mut bursty, bursty_client);
+        send_input(&mut bursty, bursty_client, Vec2::new(0.0, -1.0));
+        send_input(&mut bursty, bursty_client, Vec2::new(0.0, -1.0));
+        tick(&mut bursty, 0.1);
+        let bursty_step = bursty
+            .world()
+            .get::<Transform>(bursty_chemist)
+            .unwrap()
+            .translation;
+
+        assert_eq!(
+            bursty_step, single_step,
+            "a frame that receives two queued messages must move the chemist \
+             once, not twice"
+        );
+    }
+
+    // -- disconnect --------------------------------------------------------
+
+    #[test]
+    fn a_chemist_disappears_when_their_client_disconnects() {
+        // `ConnectedClient` is despawned by the networking backend the
+        // instant a connection drops. Nothing else ever removes a `Player`
+        // entity, so without this a chemist who quit stayed in the lab
+        // forever — the one who stayed behind went on seeing a colleague
+        // who had gone home.
+        let mut app = App::new();
+        app.add_systems(Update, despawn_leaving_chemists);
+
+        let client_entity = app.world_mut().spawn(ConnectedClient { max_size: 0 }).id();
+        let client = ClientId::Client(client_entity);
+        let chemist = app.world_mut().spawn((Player, Chemist { client })).id();
+
+        app.world_mut().despawn(client_entity);
+        app.update();
+
+        assert!(
+            app.world().get_entity(chemist).is_err(),
+            "the chemist must leave when their client disconnects"
         );
     }
 }

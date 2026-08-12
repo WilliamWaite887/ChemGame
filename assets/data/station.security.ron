@@ -1,0 +1,15 @@
+// Security's response to accumulated suspicion.
+//
+// Never surfaced anywhere the player can see except through what actually
+// happens: a warning line, then an officer walks in, then either a
+// confiscation or a clean report. `threshold` and the delays are tuned so a
+// warning gives real time to reach for `EmptyRequested` at any machine —
+// rinsing a beaker before the officer arrives is meant to work.
+(
+    threshold: 15,
+    warning_seconds: 25.0,
+    dwell_seconds: 4.0,
+    warning_line: "Security dispatch reports a spot inspection inbound to Chemistry.",
+    confiscation_line: "Chemistry, that's a controlled substance. It's being logged, and it's not coming back.",
+    clean_line: "Security swept Chemistry. Nothing out of place. Sorry for the trouble.",
+)

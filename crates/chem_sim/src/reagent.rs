@@ -38,13 +38,19 @@ pub enum Category {
     Pyrotechnics,
     Precursors,
     Utility,
+    /// Recreational, and never legitimately requested. Distinct from
+    /// `Poisons` on purpose: a raid's contraband check needs an unambiguous
+    /// "is this illegal" test, and stacking that test onto a category that
+    /// also holds real, legitimately-ordered medicine (hyperzine,
+    /// synaptizine) would be simply wrong.
+    Illicit,
 }
 
 impl Category {
     /// Every heading, in the order the book lists them: the four damage types
     /// first, then what a chemist reaches for less often, then the things that
     /// are not medicine at all.
-    pub const ALL: [Category; 10] = [
+    pub const ALL: [Category; 11] = [
         Category::Trauma,
         Category::Burns,
         Category::Antitoxins,
@@ -55,6 +61,7 @@ impl Category {
         Category::Pyrotechnics,
         Category::Precursors,
         Category::Utility,
+        Category::Illicit,
     ];
 
     pub fn label(self) -> &'static str {
@@ -69,6 +76,7 @@ impl Category {
             Category::Pyrotechnics => "Pyrotechnics",
             Category::Precursors => "Precursors",
             Category::Utility => "Utility",
+            Category::Illicit => "Illicit",
         }
     }
 
@@ -85,6 +93,7 @@ impl Category {
             Category::Pyrotechnics => "Fire, smoke and pressure. Not for people.",
             Category::Precursors => "Nothing on its own. Everything downstream needs it.",
             Category::Utility => "Neither medicine nor weapon.",
+            Category::Illicit => "Nobody will ever legitimately order these. Somebody might anyway.",
         }
     }
 }

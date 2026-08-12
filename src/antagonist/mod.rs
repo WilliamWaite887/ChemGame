@@ -1,0 +1,427 @@
+//! The hidden antagonist thread.
+//!
+//! Some crew visits are secretly someone after an illicit substance, under an
+//! entirely ordinary-sounding pretext — never flagged anywhere the player can
+//! see. The only tell is unrelated-looking ambient radio chatter that happens
+//! to mention the same substance, aired independently of the visit. Give them
+//! what they want and a hidden "underworld" standing rises, followed by a
+//! delayed report of the chaos it caused; decline, and the visit just grades
+//! like any other unfulfilled order — see [`crate::orders::complete_delivery`],
+//! which is where that fall-through actually happens.
+//!
+//! Deliberately its own system rather than a branch inside `generate_orders`:
+//! illicit requests are never knowledge-gated, forecast-weighted or
+//! stretch-chanced — the requester already knows exactly what they want.
+
+use bevy::prelude::*;
+use bevy_common_assets::ron::RonAssetPlugin;
+use chem_sim::Units;
+use rand::prelude::*;
+use serde::Deserialize;
+
+use crate::chem_data::ChemDb;
+use crate::crew::{spawn_crew_member, CrewMember};
+use crate::interaction::Interactable;
+use crate::net::is_authority;
+use crate::orders::{IllicitOrder, Order, OrderResolved, Shift, StationData};
+use crate::radio::{PendingBroadcasts, RadioEntry};
+use crate::shift::current_rules;
+use crate::AppState;
+
+/// Seconds after an antagonist order is created before the priming incident
+/// airs. Uniform across a wide range on purpose: an order can resolve in
+/// seconds (a beaker already in hand) or take minutes (patience nearly
+/// spent), so this alone decides whether the clue lands before the visit is
+/// over or only makes sense in hindsight afterwards.
+const PRIMING_DELAY_SECONDS: (f32, f32) = (0.0, 90.0);
+
+/// Seconds after a successful illicit delivery before the chaos it caused
+/// gets reported back. Much longer than the priming delay — the priming
+/// incident is background noise happening anyway; the chaos report is a
+/// direct consequence of what the player just did, and should feel like news
+/// arriving from elsewhere, not an instant reaction.
+const CHAOS_DELAY_SECONDS: (f32, f32) = (60.0, 180.0);
+
+/// How much a successful illicit delivery raises Security's hidden suspicion.
+///
+/// Applied as one lump at resolution rather than split across "now" and
+/// "when the chaos line airs" — the meter is never shown to the player, so
+/// there is nothing for a second, separately-timed bump to buy beyond
+/// complexity. Both the immediate exposure and the fallout that is already in
+/// motion are real the moment the delivery happens.
+const SUSPICION_PER_DELIVERY: i32 = 5;
+
+/// How much a successful illicit delivery raises underworld standing. A flat
+/// constant rather than the ordinary reward curve — that curve exists to
+/// punish making someone wait, and an antagonist's patience is already drawn
+/// from the same range a legitimate order's is, so scaling this too would
+/// double-count the same wait against the same number twice over.
+const UNDERWORLD_PER_DELIVERY: i32 = 2;
+
+pub struct AntagonistPlugin;
+
+impl Plugin for AntagonistPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(RonAssetPlugin::<AntagonistScript>::new(&["antagonist.ron"]))
+            .init_resource::<UnderworldStanding>()
+            .init_resource::<SecuritySuspicion>()
+            .add_systems(Startup, start_loading)
+            .add_systems(
+                Update,
+                (
+                    promote_script,
+                    generate_antagonist_orders,
+                    handle_illicit_resolutions,
+                )
+                    .chain()
+                    .run_if(is_authority)
+                    .run_if(in_state(AppState::Playing)),
+            );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hidden state
+// ---------------------------------------------------------------------------
+
+/// How much the underworld likes you. Never replicated, never shown in any
+/// UI — its only visible effects are the crew who show up and the radio
+/// lines that follow, both of which already ride their own rails.
+///
+/// Persisted to `progress.ron` regardless: this game keeps no secrets from a
+/// player willing to open a save file in a text editor, the same as every
+/// other career fact.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct UnderworldStanding(pub i32);
+
+/// How close Security is to raiding the lab. Never replicated, never shown,
+/// and never persisted — a reloaded save should not silently arm a raid the
+/// instant the file opens. Read and reset by `crate::security` (M10c).
+#[derive(Resource, Default, Clone, Copy)]
+pub struct SecuritySuspicion(pub i32);
+
+// ---------------------------------------------------------------------------
+// Data
+// ---------------------------------------------------------------------------
+
+/// `assets/data/station.antagonist.ron`, as written.
+#[derive(Asset, TypePath, Deserialize)]
+pub struct AntagonistScript {
+    pub gap_seconds: (f32, f32),
+    pub requests: Vec<AntagonistRequestDef>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AntagonistRequestDef {
+    pub reagent: String,
+    pub amounts: Vec<u32>,
+    /// Which department's crew voices this, for pretext plausibility — "vent
+    /// maintenance" reads as Engineering, not Medical. Also who a spawned
+    /// visitor is drawn from: an existing, already-recognised name off
+    /// `station.crew.ron`, never "a stranger" — a name nobody knows would
+    /// itself be the tell this whole system is built to avoid.
+    pub role: String,
+    /// The ordinary-sounding ask, naming the reagent directly.
+    pub pretext: String,
+    /// The unrelated-looking station-news line naming the same reagent — the
+    /// only tell, aired independently of the visit.
+    pub incident_line: String,
+    /// The delayed follow-up after a successful delivery.
+    pub chaos_line: String,
+}
+
+#[derive(Resource)]
+struct PendingAntagonistScript(Handle<AntagonistScript>);
+
+#[derive(Resource, Deref)]
+struct Script(AntagonistScript);
+
+/// The clock between antagonist visits — its own, much rarer than the
+/// legitimate `OrderSpawner`'s.
+#[derive(Resource)]
+struct AntagonistSpawner {
+    timer: Timer,
+}
+
+fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
+    commands.insert_resource(PendingAntagonistScript(
+        assets.load("data/station.antagonist.ron"),
+    ));
+}
+
+fn promote_script(
+    mut commands: Commands,
+    pending: Option<Res<PendingAntagonistScript>>,
+    mut scripts: ResMut<Assets<AntagonistScript>>,
+    spawner: Option<Res<AntagonistSpawner>>,
+) {
+    let Some(pending) = pending else {
+        return;
+    };
+    let Some(script) = scripts.remove(&pending.0) else {
+        return;
+    };
+    if spawner.is_none() {
+        let gap = rand::rng().random_range(script.gap_seconds.0..=script.gap_seconds.1);
+        commands.insert_resource(AntagonistSpawner {
+            timer: Timer::from_seconds(gap, TimerMode::Once),
+        });
+    }
+    commands.insert_resource(Script(script));
+    commands.remove_resource::<PendingAntagonistScript>();
+}
+
+// ---------------------------------------------------------------------------
+// Spawning
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn generate_antagonist_orders(
+    mut commands: Commands,
+    time: Res<Time>,
+    db: Res<ChemDb>,
+    station: Option<Res<StationData>>,
+    script: Option<Res<Script>>,
+    mut spawner: Option<ResMut<AntagonistSpawner>>,
+    shift: Res<Shift>,
+    mut broadcasts: ResMut<PendingBroadcasts>,
+    active: Query<&CrewMember>,
+) {
+    let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
+        return;
+    };
+    // The same sign that stops a legitimate visitor stops this one — a raid
+    // and an antagonist visit are both "new traffic" in the sense the sign
+    // controls, unlike an order already in progress.
+    if !shift.accepting_orders {
+        return;
+    }
+    if !spawner.timer.tick(time.delta()).just_finished() {
+        return;
+    }
+
+    let mut rng = rand::rng();
+    let gap = rng.random_range(script.gap_seconds.0..=script.gap_seconds.1);
+    spawner.timer = Timer::from_seconds(gap, TimerMode::Once);
+
+    let Some(request) = script.requests.choose(&mut rng) else {
+        return;
+    };
+    let candidates: Vec<_> = station
+        .crew
+        .iter()
+        .filter(|def| def.role == request.role)
+        .collect();
+    let Some(crew_def) = candidates.choose(&mut rng).copied() else {
+        warn!(
+            "no crew member with role '{}' to voice an antagonist request",
+            request.role
+        );
+        return;
+    };
+    let Some(reagent) = db.reagents.id_of(&request.reagent) else {
+        warn!("antagonist request names unknown reagent '{}'", request.reagent);
+        return;
+    };
+    let Some(&amount) = request.amounts.choose(&mut rng) else {
+        return;
+    };
+
+    // Reuses the ordinary difficulty's patience range rather than a range of
+    // its own — a visit that waited noticeably longer or shorter than normal
+    // would itself be a statistical tell, which the whole point of this
+    // system is to never give the player.
+    let rules = current_rules(&station.config, &shift);
+    let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
+
+    // Same lane-offset trick `generate_orders` uses, so a visit spawned here
+    // never overlaps a legitimate one queuing at the same counter.
+    let lane = active.iter().count() as f32 * 0.95;
+    let crew = spawn_crew_member(&mut commands, crew_def, lane);
+
+    let reagent_name = db.reagents.get(reagent).name.clone();
+    commands.entity(crew).insert((
+        Order {
+            reagent,
+            amount: Units::whole(amount as i32),
+            plea: request.pretext.clone(),
+            patience,
+            waited: 0.0,
+        },
+        IllicitOrder,
+        Interactable::new(format!(
+            "{} — hand over {}u {}",
+            crew_def.name, amount, reagent_name
+        )),
+    ));
+
+    let priming_delay =
+        rng.random_range(PRIMING_DELAY_SECONDS.0..=PRIMING_DELAY_SECONDS.1);
+    broadcasts.push_delayed(
+        priming_delay,
+        RadioEntry {
+            channel: "COM".to_string(),
+            text: request.incident_line.clone(),
+            good: false,
+        },
+    );
+
+    info!(
+        "antagonist: {} ({}) wants {}u {}",
+        crew_def.name, crew_def.role, amount, reagent_name
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Consequences
+// ---------------------------------------------------------------------------
+
+/// Reacts to a successful illicit delivery. Independent of
+/// `orders::complete_delivery`'s own reading of the same messages — Bevy
+/// gives every system its own cursor into a message queue, so this and
+/// `radio::queue_reports` both see every `OrderResolved` in full regardless
+/// of what the other already read.
+fn handle_illicit_resolutions(
+    script: Option<Res<Script>>,
+    db: Res<ChemDb>,
+    mut resolved: MessageReader<OrderResolved>,
+    mut underworld: ResMut<UnderworldStanding>,
+    mut suspicion: ResMut<SecuritySuspicion>,
+    mut broadcasts: ResMut<PendingBroadcasts>,
+) {
+    let Some(script) = script else {
+        resolved.clear();
+        return;
+    };
+
+    for report in resolved.read() {
+        if !report.illicit || !report.outcome.is_good() {
+            continue;
+        }
+
+        let reagent_key = &db.reagents.get(report.reagent).key;
+        let Some(request) = script
+            .requests
+            .iter()
+            .find(|request| &request.reagent == reagent_key)
+        else {
+            warn!("no antagonist request script found for '{reagent_key}'");
+            continue;
+        };
+
+        underworld.0 += UNDERWORLD_PER_DELIVERY;
+        suspicion.0 += SUSPICION_PER_DELIVERY;
+
+        let mut rng = rand::rng();
+        let delay = rng.random_range(CHAOS_DELAY_SECONDS.0..=CHAOS_DELAY_SECONDS.1);
+        broadcasts.push_delayed(
+            delay,
+            RadioEntry {
+                channel: "COM".to_string(),
+                text: request.chaos_line.clone(),
+                good: false,
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orders::OrderConfig;
+
+    fn antagonist_app() -> App {
+        let data = chem_sim::ChemData::from_ron(
+            include_str!("../../assets/data/chem.reagents.ron"),
+            include_str!("../../assets/data/chem.reactions.ron"),
+        )
+        .unwrap();
+        let crew: Vec<crate::crew::CrewDef> =
+            ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap();
+        let config: OrderConfig =
+            ron::from_str(include_str!("../../assets/data/station.orders.ron")).unwrap();
+        let script: AntagonistScript =
+            ron::from_str(include_str!("../../assets/data/station.antagonist.ron")).unwrap();
+
+        let mut app = App::new();
+        app.insert_resource(ChemDb(data))
+            .insert_resource(StationData { crew, config })
+            .insert_resource(Script(script))
+            .insert_resource(AntagonistSpawner {
+                // Effectively due on the first real tick, without depending
+                // on a zero-duration timer's edge-case semantics.
+                timer: Timer::from_seconds(0.01, TimerMode::Once),
+            })
+            .init_resource::<Shift>()
+            .init_resource::<Time>()
+            .init_resource::<PendingBroadcasts>()
+            .add_systems(Update, generate_antagonist_orders);
+        app
+    }
+
+    #[test]
+    fn a_visit_primes_an_ambient_incident() {
+        // The only tell this whole system is allowed to give: an unrelated-
+        // looking radio line, queued the moment the visit is created.
+        let mut app = antagonist_app();
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.1));
+        app.update();
+
+        let mut illicit = app.world_mut().query::<&IllicitOrder>();
+        assert_eq!(
+            illicit.iter(app.world()).count(),
+            1,
+            "one antagonist visit should have spawned"
+        );
+        assert_eq!(
+            app.world().resource::<PendingBroadcasts>().len(),
+            1,
+            "the priming incident should be queued alongside it"
+        );
+    }
+
+    #[test]
+    fn the_antagonist_script_parses_and_names_real_departments() {
+        let script: AntagonistScript =
+            ron::from_str(include_str!("../../assets/data/station.antagonist.ron"))
+                .expect("antagonist data should parse");
+        assert!(!script.requests.is_empty());
+        for request in &script.requests {
+            assert!(
+                crate::orders::Department::from_role(&request.role).is_some(),
+                "'{}' names a role no department recognises",
+                request.role
+            );
+            assert!(!request.pretext.trim().is_empty());
+            assert!(!request.incident_line.trim().is_empty());
+            assert!(!request.chaos_line.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn every_antagonist_reagent_is_a_real_illicit_reagent() {
+        let script: AntagonistScript =
+            ron::from_str(include_str!("../../assets/data/station.antagonist.ron")).unwrap();
+        let data = chem_sim::ChemData::from_ron(
+            include_str!("../../assets/data/chem.reagents.ron"),
+            include_str!("../../assets/data/chem.reactions.ron"),
+        )
+        .unwrap();
+        for request in &script.requests {
+            let reagent = data
+                .reagents
+                .id_of(&request.reagent)
+                .unwrap_or_else(|| panic!("'{}' names no real reagent", request.reagent));
+            assert!(
+                data.reagents
+                    .get(reagent)
+                    .categories
+                    .contains(&chem_sim::Category::Illicit),
+                "'{}' is requested by an antagonist but is not Category::Illicit",
+                request.reagent
+            );
+        }
+    }
+}

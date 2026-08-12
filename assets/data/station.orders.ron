@@ -4,30 +4,25 @@
 // achievable with one or two beakers — an order nobody can physically carry is
 // just a guaranteed failure.
 //
-// The numbers below are shift 1. Everything in `ramp` tightens them shift by
-// shift; `ShiftRules::for_shift` is where that arithmetic lives, and
-// `shift_one_matches_the_base_config` guarantees the ramp is a no-op here.
+// The numbers below are tier 0 — a brand new career. Everything in `ramp`
+// tightens them as `succeeded + botched` climbs; `ShiftRules::for_tier` is
+// where that arithmetic lives, and `tier_zero_matches_the_base_config`
+// guarantees the ramp is a no-op here.
 (
     first_order_delay: 8.0,
     gap_seconds: (32.0, 58.0),
     patience_seconds: (135.0, 230.0),
     max_active: 3,
 
-    // The two windows either side of the shift. The first prep of a session
-    // has no clock at all, so a new chemist can take the lab apart before
-    // anyone starts asking for anything.
-    windows: (
-        prep_seconds: 120.0,
-        debrief_seconds: 90.0,
-        first_shift_untimed: true,
-    ),
+    // How often the station briefing redraws. There is no shift boundary to
+    // redraw it against any more — crew arrive continuously — so this is its
+    // own clock.
+    forecast_seconds: (180.0, 300.0),
 
-    // How much harder each shift is than the one before. Every value is
+    // How much harder the lab gets as the career goes on. Every value is
     // clamped: an unclamped ramp is only unplayable somewhere nobody tests.
     ramp: (
-        quota_base: 5,
-        quota_per_shift: 1,
-        quota_cap: 10,
+        orders_per_tier: 5,
         gap_scale: 0.92,
         gap_floor: 18.0,
         patience_scale: 0.95,
@@ -40,9 +35,9 @@
         forecast_boost: 2.0,
     ),
 
-    // Cargo tops the lab up to `glassware_target` during prep. Beakers leave
-    // with whoever they were handed to and nothing else makes them, so without
-    // this the lab runs dry after five deliveries.
+    // Cargo tops the lab up to `glassware_target` on a periodic check.
+    // Beakers leave with whoever they were handed to and nothing else makes
+    // them, so without this the lab runs dry after five deliveries.
     supply: (
         courier: "Miner Sato",
         glassware_target: 6,
@@ -51,9 +46,9 @@
         requisition_glassware_bonus: 2,
     ),
 
-    // What the station expects of a shift, briefed over the radio during prep.
-    // A forecast leans the request pool toward its themes — it never chooses
-    // for it, so a shift you are unprepared for is still a shift you can work.
+    // What the station expects, briefed periodically over the radio. A
+    // forecast leans the request pool toward its themes — it never chooses
+    // for it, so a stretch you are unprepared for is still one you can work.
     forecasts: [
         (
             id: "hull_plate",

@@ -529,4 +529,77 @@
         categories: [Utility],
         effects: [Harm(Toxin, 1)],
     ),
+
+    // ---- Illicit ------------------------------------------------------
+    //
+    // Nobody on `station.orders.ron` ever asks for these — only the hidden
+    // antagonist pool in `station.antagonist.ron` does. Discoverable the same
+    // way Poisons are: mix into one by accident at the test bench, or deduce
+    // it from hints.
+    (
+        id: "space_drugs",
+        name: "Space Drugs",
+        color: (0.72, 0.30, 0.86),
+        overdose: Some(20),
+        treats: Some("Nothing anyone orders. A euphoric with a nasty comedown."),
+        categories: [Illicit],
+        effects: [Status(kind: Drunk, seconds: 6.0, intensity: 1.8)],
+        overdose_effects: [Harm(Toxin, 2), Status(kind: Unsteady, seconds: 4.0, intensity: 1.5)],
+    ),
+    (
+        id: "bath_salts",
+        name: "Bath Salts",
+        color: (0.90, 0.42, 0.58),
+        overdose: Some(15),
+        treats: Some("Nothing. A jittery, paranoid stimulant."),
+        categories: [Illicit],
+        effects: [
+            Status(kind: Hastened, seconds: 5.0, intensity: 1.5),
+            Status(kind: Unsteady, seconds: 5.0, intensity: 1.0),
+        ],
+        overdose_effects: [Harm(Toxin, 3), Harm(Brute, 1)],
+    ),
+    (
+        id: "krokodil",
+        name: "Krokodil",
+        color: (0.52, 0.62, 0.40),
+        overdose: Some(15),
+        treats: Some("Nothing. Numbs injury while it rots you from the inside."),
+        categories: [Illicit],
+        effects: [Heal(Brute, 1), Harm(Toxin, 1)],
+        overdose_effects: [Harm(Toxin, 3), Harm(Burn, 2)],
+    ),
+    (
+        id: "methamphetamine",
+        name: "Methamphetamine",
+        color: (0.88, 0.92, 0.96),
+        overdose: Some(10),
+        treats: Some("Nothing. A hard, grinding burst of speed."),
+        categories: [Illicit],
+        effects: [Status(kind: Hastened, seconds: 6.0, intensity: 2.0)],
+        overdose_effects: [Harm(Toxin, 2), Harm(Brute, 1)],
+    ),
+    (
+        id: "mindbreaker_toxin",
+        name: "Mindbreaker Toxin",
+        color: (0.58, 0.30, 0.68),
+        overdose: Some(12),
+        treats: Some("Nothing. A hallucinogen that unsteadies as much as it blurs."),
+        categories: [Illicit],
+        effects: [
+            Status(kind: Blurred, seconds: 8.0, intensity: 2.5),
+            Status(kind: Unsteady, seconds: 8.0, intensity: 2.0),
+        ],
+        overdose_effects: [Harm(Toxin, 2)],
+    ),
+    (
+        id: "zombie_powder",
+        name: "Zombie Powder",
+        color: (0.40, 0.44, 0.30),
+        overdose: Some(10),
+        treats: Some("Nothing. Enough of it and you barely move at all."),
+        categories: [Illicit],
+        effects: [Harm(Toxin, 3), Status(kind: Sluggish, seconds: 10.0, intensity: 3.0)],
+        overdose_effects: [Harm(Toxin, 6)],
+    ),
 ]
