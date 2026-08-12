@@ -19,6 +19,9 @@
     // the old flat 240-420s range; at the ramp's floor (legit gap 18s) it
     // tightens to roughly 108-180s.
     gap_multiplier: (6.0, 10.0),
+    // Matches crisis.ron's own `underworld_threshold` by content convention,
+    // not by code coupling — see `AntagonistScript::standing_tighten_at`.
+    standing_tighten_at: 8,
     requests: [
         (
             reagent: "space_drugs",
@@ -35,6 +38,9 @@
             pretext: "Need some Bath Salts logged into evidence storage. Paperwork's already filed.",
             incident_line: "Engineering reports someone tore a support panel off the wall with their bare hands.",
             chaos_line: "That 'evidence' never made it to storage — two more crew came in twitching since.",
+            // A Spy-flavoured deal: getting caught here is one bad handoff,
+            // not accumulated suspicion.
+            sting_chance: 0.2,
         ),
         (
             reagent: "krokodil",
@@ -43,6 +49,9 @@
             pretext: "Could you mix up some Krokodil? Doctor's orders, for a research sample.",
             incident_line: "Janitorial found a patch of scorched, blistered flooring outside the medbay backroom.",
             chaos_line: "Someone's arm looks like it's rotting from the inside. Medbay's asking where the Krokodil went.",
+            // A bolder ask — only surfaces once the underworld already
+            // trusts you a little.
+            min_standing: 4,
         ),
         (
             reagent: "methamphetamine",
@@ -67,6 +76,10 @@
             pretext: "I need some Zombie Powder for a restraint procedure. Nothing to worry about.",
             incident_line: "A crewman collapsed mid-sentence in the hallway — breathing, but unresponsive.",
             chaos_line: "That's the second crewman found frozen stiff this shift. Whoever's handing out Zombie Powder needs to stop.",
+            // The boldest ask in the roster — only once the underworld
+            // trusts you a lot.
+            min_standing: 6,
+            sting_chance: 0.15,
         ),
     ],
 )

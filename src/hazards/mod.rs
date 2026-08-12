@@ -291,6 +291,12 @@ pub enum HazardKind {
     Blast,
     Smoke,
     Radiation,
+    /// A rogue officer turning physical — see
+    /// `rogue_security::expire_rogue_encounters`. The one non-chemistry
+    /// source of `HazardFelt`, added for exactly the same reason every
+    /// other one exists: the damage already arrived through the replicated
+    /// `Body`, and this is only the screen reacting to it.
+    Assault,
 }
 
 /// The room position of a container, following its holder if it is being
@@ -410,6 +416,14 @@ fn spawn_hazards(
 /// Runs on the metabolism clock rather than every frame, so a chemist who walks
 /// through a cloud takes a dose rather than one per frame at whatever rate their
 /// machine happens to render.
+///
+/// Crew are dosed too, since M12 gave them a `Body`/`Bloodstream` of their
+/// own — a second, disjoint query rather than folding them into the chemist
+/// one, because there is no `HazardFelt` to send them: they have no
+/// `ClientId` to target, and their side of "the screen reacting" is the
+/// `fx::animate_crew_body` wobble/tint watching their `Bloodstream` directly,
+/// which arguably reads clearer for a bystander than a shake would anyway.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn expose_to_smoke(
     time: Res<Time>,
     db: Res<ChemDb>,
@@ -422,6 +436,13 @@ fn expose_to_smoke(
         &mut Bloodstream,
         &crate::player::Chemist,
     )>,
+    mut crew_bodies: Query<
+        (&Transform, &mut Body, &mut Bloodstream),
+        (
+            With<crate::crew::CrewMember>,
+            Without<crate::player::Chemist>,
+        ),
+    >,
 ) {
     // The clock is ticked by `run_metabolism`, which is chained after this;
     // reading `just_finished` here means exposure lands on the same beat.
@@ -456,6 +477,19 @@ fn expose_to_smoke(
                     strength: 0.5,
                 },
             });
+        }
+        for (body_transform, mut body, mut blood) in &mut crew_bodies {
+            let distance = body_transform
+                .translation
+                .distance(cloud_transform.translation);
+            if distance > cloud.radius {
+                continue;
+            }
+            let mut dose = payload.0.split(SMOKE_DOSE);
+            if dose.total_volume().is_zero() {
+                continue;
+            }
+            blood.0.receive(&mut dose, Route::Touched, &mut body.0, &db);
         }
     }
 }
@@ -553,6 +587,22 @@ mod tests {
             .spawn((
                 Chemist {
                     client: ClientId::Server,
+                },
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_translation(position),
+            ))
+            .id()
+    }
+
+    /// A crew member with a body, standing at `position` — M12's proof that
+    /// hazards no longer only ever touch the chemist.
+    fn crew_at(app: &mut App, position: Vec3) -> Entity {
+        app.world_mut()
+            .spawn((
+                crate::crew::CrewMember {
+                    name: "Bystander".to_string(),
+                    role: "Service".to_string(),
                 },
                 Body::default(),
                 Bloodstream::default(),
@@ -668,6 +718,31 @@ mod tests {
                 .0
                 .is_empty(),
             "and standing clear of it should not"
+        );
+    }
+
+    #[test]
+    fn a_cloud_doses_a_bystander_crew_member_too() {
+        // M12: crew are no longer structurally immune to a chemist's own
+        // chemistry — they lack `Chemist`, not `Body`, so the crew-side
+        // query in `expose_to_smoke` has to catch them independently.
+        let mut app = test_app();
+        let beaker = beaker_at(&mut app, Vec3::ZERO, &[("plasma", 40)]);
+        let bystander = crew_at(&mut app, Vec3::new(1.0, 0.0, 0.0));
+
+        report(&mut app, beaker, vec![ReactionEffect::Smoke(2.5)]);
+        one_tick(&mut app);
+
+        let plasma = app.world().resource::<ChemDb>().reagent("plasma");
+        assert!(
+            app.world()
+                .get::<Bloodstream>(bystander)
+                .unwrap()
+                .0
+                .blood
+                .volume_of(plasma)
+                .is_positive(),
+            "a crew member standing in the cloud should be dosed exactly like a chemist"
         );
     }
 

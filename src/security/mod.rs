@@ -111,9 +111,16 @@ struct RaidOfficer {
 
 /// When the next warning or sweep is due. `None` means suspicion has not
 /// crossed the threshold since the last sweep.
+///
+/// `pub(crate)` since the antagonist thread's Spy-flavoured sting
+/// (`antagonist::handle_illicit_resolutions`) arms this directly, bypassing
+/// the ordinary suspicion accumulation for one specific deal gone wrong —
+/// `schedule_raid` still owns everything past that (the officer, the dwell,
+/// the sweep) unmodified, since it only ever *reads* `warning_in` being
+/// already-`Some` the same way it would after its own threshold check.
 #[derive(Resource, Default)]
-struct RaidSchedule {
-    warning_in: Option<f32>,
+pub(crate) struct RaidSchedule {
+    pub(crate) warning_in: Option<f32>,
 }
 
 /// Watches suspicion, warns, then sends the officer in.

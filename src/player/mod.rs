@@ -254,42 +254,46 @@ fn adopt_my_chemist(mut commands: Commands, mut assigned: MessageReader<YouAreCh
     }
 }
 
+/// Lab coat white, so the other chemist reads instantly against the grey
+/// room and the coloured crew uniforms. Shared with [`animate_chemist_body`]
+/// in `fx`, which blends a chemical-status tint on top of this rather than
+/// whatever colour a mutated material happens to hold — see
+/// [`ChemistBody::base_color`].
+pub(crate) const COAT_COLOR: Color = Color::srgb(0.88, 0.90, 0.93);
+pub(crate) const SKIN_COLOR: Color = Color::srgb(0.76, 0.62, 0.52);
+
 /// Meshes every chemist in the lab is drawn from.
+///
+/// Materials are deliberately *not* here — M12 moved them into a fresh
+/// [`StandardMaterial`] per chemist, spawned in [`dress_chemists`]. A single
+/// shared `Handle<StandardMaterial>` for every chemist's coat would mean
+/// tinting one chemist drunk-red would tint every chemist sharing that
+/// handle, since a material handle is a reference to one asset, not a
+/// per-entity copy.
 #[derive(Resource)]
 pub(crate) struct ChemistAssets {
     body: Handle<Mesh>,
     head: Handle<Mesh>,
-    coat: Handle<StandardMaterial>,
-    skin: Handle<StandardMaterial>,
 }
 
-pub(crate) fn load_chemist_assets(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
+pub(crate) fn load_chemist_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
     commands.insert_resource(ChemistAssets {
         body: meshes.add(Capsule3d::new(0.3, 0.9)),
         head: meshes.add(Sphere::new(0.2)),
-        coat: materials.add(StandardMaterial {
-            // Lab coat white, so the other chemist reads instantly against the
-            // grey room and the coloured crew uniforms.
-            base_color: Color::srgb(0.88, 0.90, 0.93),
-            perceptual_roughness: 0.8,
-            ..default()
-        }),
-        skin: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.76, 0.62, 0.52),
-            perceptual_roughness: 0.8,
-            ..default()
-        }),
     });
 }
 
 /// A body part, and the chemist it belongs to.
+///
+/// `rest` is the part's un-animated local offset and `base_color` its
+/// un-tinted material colour — both needed so `fx::animate_chemist_body` can
+/// compute this frame's wobble/tint fresh from a fixed reference point
+/// instead of drifting by accumulating onto whatever the last frame left.
 #[derive(Component)]
 pub(crate) struct ChemistBody {
     pub(crate) chemist: Entity,
+    pub(crate) rest: Vec3,
+    pub(crate) base_color: Color,
 }
 
 /// Gives every chemist something to look at.
@@ -301,6 +305,7 @@ pub(crate) struct ChemistBody {
 pub(crate) fn dress_chemists(
     mut commands: Commands,
     assets: Option<Res<ChemistAssets>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     chemists: Query<Entity, Added<Player>>,
 ) {
     let Some(assets) = assets else {
@@ -320,20 +325,38 @@ pub(crate) fn dress_chemists(
         // `Visibility` is spelled out rather than left to `Mesh3d`'s required
         // components, because `hide_own_body` writes it: a part that only got
         // one implicitly is a part the hiding query cannot see.
+        let body_rest = Vec3::new(0.0, -0.85, 0.0);
         commands.spawn((
             Mesh3d(assets.body.clone()),
-            MeshMaterial3d(assets.coat.clone()),
-            Transform::from_xyz(0.0, -0.85, 0.0),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: COAT_COLOR,
+                perceptual_roughness: 0.8,
+                ..default()
+            })),
+            Transform::from_translation(body_rest),
             Visibility::default(),
-            ChemistBody { chemist },
+            ChemistBody {
+                chemist,
+                rest: body_rest,
+                base_color: COAT_COLOR,
+            },
             ChildOf(chemist),
         ));
+        let head_rest = Vec3::new(0.0, -0.15, 0.0);
         commands.spawn((
             Mesh3d(assets.head.clone()),
-            MeshMaterial3d(assets.skin.clone()),
-            Transform::from_xyz(0.0, -0.15, 0.0),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: SKIN_COLOR,
+                perceptual_roughness: 0.8,
+                ..default()
+            })),
+            Transform::from_translation(head_rest),
             Visibility::default(),
-            ChemistBody { chemist },
+            ChemistBody {
+                chemist,
+                rest: head_rest,
+                base_color: SKIN_COLOR,
+            },
             ChildOf(chemist),
         ));
     }
@@ -502,10 +525,19 @@ fn apply_move_input(
 }
 
 /// Keeps the camera on the chemist's shoulders, aimed by local yaw and pitch.
-type LocalChemists<'w, 's> =
+pub(crate) type LocalChemists<'w, 's> =
     Query<'w, 's, (&'static Transform, &'static Look), (With<LocalPlayer>, Without<PlayerCamera>)>;
 
-fn follow_chemist(chemists: LocalChemists, mut cameras: Query<(&mut Transform, &PlayerCamera)>) {
+/// `pub(crate)` since M12, so `fx`'s camera-effect systems can order
+/// themselves `.after(follow_chemist)` from a separate plugin — Bevy resolves
+/// `.after(some_fn)` by the system's type, not by which `add_systems` call it
+/// came from, so this is enough to guarantee the shake/tint/sway layer always
+/// composes on top of this frame's base camera placement rather than racing
+/// it.
+pub(crate) fn follow_chemist(
+    chemists: LocalChemists,
+    mut cameras: Query<(&mut Transform, &PlayerCamera)>,
+) {
     for (mut camera, target) in &mut cameras {
         let Ok((chemist, look)) = chemists.get(target.chemist) else {
             continue;

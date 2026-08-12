@@ -1,0 +1,39 @@
+// A stalker fixated on the chemist specifically. One recurring identity,
+// kept off station.crew.ron on purpose — see obsessed::ObsessedScript::name.
+// Visits are authored in order; escalation is the sequence, not chance.
+(
+    name: "Adair Voss",
+    role: "Service",
+    color: (0.58, 0.30, 0.62),
+    gap_multiplier: (10.0, 16.0),
+    visits: [
+        (
+            reagent: "inaprovaline",
+            amount: 15,
+            plea: "Could you make me something for the shakes? You always know exactly what I need.",
+            unsettling_line: "It's like you can read my mind. Nobody else here gets it.",
+            leaves_token: false,
+        ),
+        (
+            reagent: "tricordrazine",
+            amount: 15,
+            plea: "I know it's a lot to ask again, but you're the only one I trust in this whole station.",
+            unsettling_line: "Adair leaves a small vial on the counter, unasked. \"In case you ever need it. For you.\"",
+            leaves_token: true,
+        ),
+        (
+            reagent: "saline_glucose",
+            amount: 10,
+            plea: "I didn't really need anything today. I just wanted to see you.",
+            unsettling_line: "Adair lingers at the window long after the order's been handed over, watching.",
+            leaves_token: false,
+        ),
+        (
+            reagent: "dylovene",
+            amount: 10,
+            plea: "You looked tired last shift. I noticed. I notice everything about you.",
+            unsettling_line: "There's a second, identical vial already sitting on the counter when you turn around.",
+            leaves_token: true,
+        ),
+    ],
+)

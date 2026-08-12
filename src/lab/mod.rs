@@ -581,6 +581,7 @@ fn spawn_shell(
 
     for (index, room) in ROOMS.iter().enumerate() {
         let [r, g, b] = room.light;
+        let base_color = Color::srgb(r, g, b);
         for spot in light_spots(room) {
             commands.spawn((
                 PointLight {
@@ -590,13 +591,23 @@ fn spawn_shell(
                     // is a lot of render target for a lab you can cross in six
                     // seconds, and the side rooms read fine on their tint alone.
                     shadow_maps_enabled: index == HALL,
-                    color: Color::srgb(r, g, b),
+                    color: base_color,
                     ..default()
                 },
                 Transform::from_translation(spot),
+                LabLight { base_color },
             ));
         }
     }
+}
+
+/// Marks a ceiling light as one `crisis::pulse_alert_lighting` can pull
+/// toward red and back. `base_color` is the room's own tint, captured at
+/// spawn time — the lerp target to return to once a crisis clears, so red
+/// alert never permanently overwrites what a room actually looks like.
+#[derive(Component)]
+pub struct LabLight {
+    pub base_color: Color,
 }
 
 /// Ceiling light positions for a room: one every few metres along its long

@@ -24,9 +24,16 @@ use crate::crew::{spawn_crew_member, CrewMember};
 use crate::interaction::Interactable;
 use crate::net::is_authority;
 use crate::orders::{IllicitOrder, Order, OrderResolved, Shift, StationData};
-use crate::radio::{PendingBroadcasts, RadioEntry};
+use crate::radio::{PendingBroadcasts, RadioEntry, RadioLog};
 use crate::shift::current_rules;
 use crate::AppState;
+
+/// How long a stung delivery's raid warning runs before the officer walks
+/// in — short, since the whole point of a sting is that it reads as
+/// immediate rather than a slow-building suspicion. `security::schedule_raid`
+/// still owns everything past the warning (spawning the officer, the dwell,
+/// the sweep) unmodified.
+const STING_WARNING_SECONDS: f32 = 6.0;
 
 /// Seconds after an antagonist order is created before the priming incident
 /// airs. Uniform across a wide range on purpose: an order can resolve in
@@ -114,7 +121,26 @@ pub struct AntagonistScript {
     /// the ramp tightens, so antagonists would get relatively rarer over a
     /// career instead of scaling with it. See [`generate_antagonist_orders`].
     pub gap_multiplier: (f32, f32),
+    /// The underworld standing at which [`effective_gap_multiplier`] has
+    /// fully narrowed the range to its own low end — content-authored to
+    /// track `crisis::CrisisScript::underworld_threshold` (not code-coupled
+    /// to it; `crisis` already reads `UnderworldStanding` independently and
+    /// does not care what shaped the climb toward its own threshold).
+    pub standing_tighten_at: i32,
     pub requests: Vec<AntagonistRequestDef>,
+}
+
+/// The antagonist gap multiplier's effective range at a given underworld
+/// standing. Narrows toward its own low end as standing climbs toward
+/// `standing_tighten_at`, so a reliable dealer notices visits creeping
+/// closer together in the run-up to a crisis, on top of the ordinary career
+/// ramp `generate_antagonist_orders` already applies. Pure, so the trend is
+/// directly testable without spinning up an `App`.
+pub fn effective_gap_multiplier(script: &AntagonistScript, underworld: i32) -> (f32, f32) {
+    let frac = (underworld as f32 / script.standing_tighten_at.max(1) as f32).clamp(0.0, 1.0);
+    let lo = script.gap_multiplier.0;
+    let hi = script.gap_multiplier.1 - (script.gap_multiplier.1 - script.gap_multiplier.0) * frac;
+    (lo, hi.max(lo))
 }
 
 /// The antagonist clock's very first arm, before any `Shift`/`StationData`
@@ -141,6 +167,25 @@ pub struct AntagonistRequestDef {
     pub incident_line: String,
     /// The delayed follow-up after a successful delivery.
     pub chaos_line: String,
+    /// Floor on `UnderworldStanding` before this request can ever be
+    /// picked. Defaults to `i32::MIN`, i.e. always available — only the
+    /// bolder, higher-tier pretexts set this, so a reliable dealer sees the
+    /// pretext variety visibly shift as standing climbs. See
+    /// [`effective_gap_multiplier`] for the sibling tuning this pairs with.
+    #[serde(default = "min_standing_default")]
+    pub min_standing: i32,
+    /// Chance a *successful* delivery of this request is a sting: skips the
+    /// delayed `chaos_line` entirely and instead immediately arms
+    /// `security`'s raid — a Spy-flavoured variant of the black-market
+    /// thread, where getting caught is not a matter of accumulated
+    /// suspicion but of this one deal going wrong. `0.0` (inert) unless a
+    /// request opts in. See [`handle_illicit_resolutions`].
+    #[serde(default)]
+    pub sting_chance: f64,
+}
+
+fn min_standing_default() -> i32 {
+    i32::MIN
 }
 
 #[derive(Resource)]
@@ -197,6 +242,7 @@ fn generate_antagonist_orders(
     script: Option<Res<Script>>,
     mut spawner: Option<ResMut<AntagonistSpawner>>,
     shift: Res<Shift>,
+    underworld: Res<UnderworldStanding>,
     mut broadcasts: ResMut<PendingBroadcasts>,
     active: Query<&CrewMember>,
 ) {
@@ -216,13 +262,24 @@ fn generate_antagonist_orders(
     let mut rng = rand::rng();
     // Scaled off the *current* legitimate gap rather than a flat range, so
     // antagonist visits keep pace as the ramp tightens instead of becoming
-    // relatively rarer the longer a career runs.
+    // relatively rarer the longer a career runs. The multiplier's own range
+    // additionally narrows as underworld standing climbs — see
+    // `effective_gap_multiplier`.
     let rules = current_rules(&station.config, &shift);
     let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
-    let multiplier = rng.random_range(script.gap_multiplier.0..=script.gap_multiplier.1);
+    let (lo, hi) = effective_gap_multiplier(&script, underworld.0);
+    let multiplier = rng.random_range(lo..=hi);
     spawner.timer = Timer::from_seconds(legit_gap * multiplier, TimerMode::Once);
 
-    let Some(request) = script.requests.choose(&mut rng) else {
+    // Only requests whose `min_standing` floor the current underworld
+    // standing already clears — a reliable dealer sees bolder pretexts as
+    // their standing grows, without any UI ever naming the mechanism.
+    let in_standing: Vec<&AntagonistRequestDef> = script
+        .requests
+        .iter()
+        .filter(|request| request.min_standing <= underworld.0)
+        .collect();
+    let Some(request) = in_standing.choose(&mut rng).copied() else {
         return;
     };
     let candidates: Vec<_> = station
@@ -302,6 +359,7 @@ fn generate_antagonist_orders(
 /// gives every system its own cursor into a message queue, so this and
 /// `radio::queue_reports` both see every `OrderResolved` in full regardless
 /// of what the other already read.
+#[allow(clippy::too_many_arguments)]
 fn handle_illicit_resolutions(
     script: Option<Res<Script>>,
     db: Res<ChemDb>,
@@ -309,6 +367,8 @@ fn handle_illicit_resolutions(
     mut underworld: ResMut<UnderworldStanding>,
     mut suspicion: ResMut<SecuritySuspicion>,
     mut broadcasts: ResMut<PendingBroadcasts>,
+    mut radio: ResMut<RadioLog>,
+    mut raid_schedule: Option<ResMut<crate::security::RaidSchedule>>,
 ) {
     let Some(script) = script else {
         resolved.clear();
@@ -340,6 +400,23 @@ fn handle_illicit_resolutions(
         suspicion.0 += SUSPICION_PER_DELIVERY;
 
         let mut rng = rand::rng();
+        // A sting skips the delayed chaos report entirely — the raid it
+        // arms immediately below *is* the consequence — rather than queuing
+        // a redundant second one.
+        if request.sting_chance > 0.0 && rng.random_bool(request.sting_chance) {
+            if let Some(schedule) = raid_schedule.as_mut() {
+                if schedule.warning_in.is_none() {
+                    schedule.warning_in = Some(STING_WARNING_SECONDS);
+                }
+            }
+            radio.push(RadioEntry {
+                channel: "SEC".to_string(),
+                text: "Something about that last delivery didn't sit right. Security's already moving.".to_string(),
+                good: false,
+            });
+            continue;
+        }
+
         let delay = rng.random_range(CHAOS_DELAY_SECONDS.0..=CHAOS_DELAY_SECONDS.1);
         broadcasts.push_delayed(
             delay,
@@ -382,6 +459,7 @@ mod tests {
             .init_resource::<Shift>()
             .init_resource::<Time>()
             .init_resource::<PendingBroadcasts>()
+            .init_resource::<UnderworldStanding>()
             .add_systems(Update, generate_antagonist_orders);
         app
     }
@@ -450,5 +528,139 @@ mod tests {
                 request.reagent
             );
         }
+    }
+
+    // -- deepened Traitor: min_standing / gap tightening --------------------
+
+    fn script() -> AntagonistScript {
+        ron::from_str(include_str!("../../assets/data/station.antagonist.ron")).unwrap()
+    }
+
+    #[test]
+    fn the_gap_multiplier_narrows_as_underworld_standing_rises() {
+        let script = script();
+        let (lo0, hi0) = effective_gap_multiplier(&script, 0);
+        let (lo_mid, hi_mid) = effective_gap_multiplier(&script, script.standing_tighten_at / 2);
+        let (lo_full, hi_full) = effective_gap_multiplier(&script, script.standing_tighten_at);
+
+        assert_eq!(lo0, script.gap_multiplier.0, "the floor never moves");
+        assert_eq!(lo_mid, script.gap_multiplier.0);
+        assert_eq!(lo_full, script.gap_multiplier.0);
+        assert!(hi0 >= hi_mid, "the ceiling must not rise as standing climbs");
+        assert!(hi_mid >= hi_full);
+        assert_eq!(
+            hi_full, script.gap_multiplier.0,
+            "fully tightened, the range should have collapsed to its floor"
+        );
+    }
+
+    #[test]
+    fn the_multiplier_never_widens_past_standing_tighten_at() {
+        let script = script();
+        let (_, hi_full) = effective_gap_multiplier(&script, script.standing_tighten_at);
+        let (_, hi_past) = effective_gap_multiplier(&script, script.standing_tighten_at * 3);
+        assert_eq!(hi_full, hi_past, "the tightening must clamp, not overshoot");
+    }
+
+    #[test]
+    fn a_low_standing_request_is_reachable_from_the_start() {
+        let mut app = antagonist_app();
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.1));
+        app.update();
+
+        let mut illicit = app.world_mut().query::<&IllicitOrder>();
+        assert_eq!(
+            illicit.iter(app.world()).count(),
+            1,
+            "at least one request has no min_standing floor, so a fresh career must still see a visit"
+        );
+    }
+
+    #[test]
+    fn a_high_min_standing_request_is_unreachable_below_it() {
+        let script = script();
+        let underworld = 0;
+        let reachable: Vec<&AntagonistRequestDef> = script
+            .requests
+            .iter()
+            .filter(|r| r.min_standing <= underworld)
+            .collect();
+        assert!(
+            reachable.len() < script.requests.len(),
+            "at least one request should be gated behind standing this data authors"
+        );
+    }
+
+    // -- Spy: sting_chance ----------------------------------------------------
+
+    fn resolution_app() -> App {
+        let data = chem_sim::ChemData::from_ron(
+            include_str!("../../assets/data/chem.reagents.ron"),
+            include_str!("../../assets/data/chem.reactions.ron"),
+        )
+        .unwrap();
+        let mut app = App::new();
+        app.insert_resource(ChemDb(data))
+            .insert_resource(Script(script()))
+            .init_resource::<UnderworldStanding>()
+            .init_resource::<SecuritySuspicion>()
+            .init_resource::<PendingBroadcasts>()
+            .init_resource::<crate::radio::RadioLog>()
+            .add_message::<OrderResolved>()
+            .add_systems(Update, handle_illicit_resolutions);
+        app
+    }
+
+    fn resolve_illicit(app: &mut App, reagent: &str) {
+        let id = app.world().resource::<ChemDb>().reagent(reagent);
+        app.world_mut().write_message(OrderResolved {
+            name: "Test".to_string(),
+            role: "Security".to_string(),
+            reagent: Some(id),
+            category: None,
+            outcome: crate::orders::Outcome::Success,
+            illicit: true,
+            crisis: false,
+        });
+        app.update();
+    }
+
+    #[test]
+    fn a_non_sting_delivery_only_ever_queues_the_delayed_chaos_line() {
+        let mut app = resolution_app();
+        resolve_illicit(&mut app, "space_drugs"); // sting_chance defaults to 0.0
+
+        assert_eq!(app.world().resource::<PendingBroadcasts>().len(), 1);
+        assert!(app.world().resource::<crate::radio::RadioLog>().entries.is_empty());
+    }
+
+    #[test]
+    fn a_certain_sting_arms_the_raid_schedule_immediately() {
+        let mut app = resolution_app();
+        app.insert_resource(crate::security::RaidSchedule::default());
+        // zombie_powder carries the highest sting_chance in the data; drive
+        // it enough times that at least one hit is overwhelmingly likely,
+        // rather than depending on a specific seed.
+        for _ in 0..200 {
+            resolve_illicit(&mut app, "zombie_powder");
+            if app
+                .world()
+                .resource::<crate::security::RaidSchedule>()
+                .warning_in
+                .is_some()
+            {
+                break;
+            }
+        }
+
+        assert!(
+            app.world()
+                .resource::<crate::security::RaidSchedule>()
+                .warning_in
+                .is_some(),
+            "a sting should eventually arm the raid schedule directly"
+        );
     }
 }

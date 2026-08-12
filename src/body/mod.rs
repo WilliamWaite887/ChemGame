@@ -48,7 +48,10 @@ const MEDBAY_SECONDS: f32 = 25.0;
 
 /// Reputation lost for going down on shift. Matches `Outcome::Wrong`: it is the
 /// same size of mistake.
-const COLLAPSE_PENALTY: i32 = -3;
+///
+/// `pub(crate)` since M12: `crew::handle_crew_collapse` reuses it for a crew
+/// member going down in the lab, the same size of mistake either way.
+pub(crate) const COLLAPSE_PENALTY: i32 = -3;
 
 /// How hurt medical hands you back. Below `RECOVER`, so you are on your feet,
 /// and not by much, so it is not a free heal.
@@ -380,12 +383,16 @@ fn close_panel_on_collapse(
 /// blast, and both paths must let go of the machine and the beaker. Keyed off
 /// `Added` rather than the tick report so there is exactly one place that
 /// notices, whatever caused it.
-#[allow(clippy::too_many_arguments)]
+///
+/// `With<Chemist>` since M12, when crew gained `Body` too — a collapsed crew
+/// member is not holding a machine claim or waiting on medical, they are
+/// walking a route. See `crew::handle_crew_collapse` for their side of this.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn handle_collapse(
     mut commands: Commands,
     mut shift: ResMut<crate::orders::Shift>,
     mut radio: ResMut<crate::radio::RadioLog>,
-    bodies: Query<(Entity, &Body), Changed<Body>>,
+    bodies: Query<(Entity, &Body), (Changed<Body>, With<Chemist>)>,
     down: Query<(), With<MedbayRetrieval>>,
     mut modes: Query<&mut crate::interaction::InteractionMode>,
     mut machines: Query<&mut crate::machines::Machine>,

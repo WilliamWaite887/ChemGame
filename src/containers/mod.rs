@@ -278,7 +278,22 @@ fn spawn_starting_glassware(mut commands: Commands) {
 pub struct DropRequested;
 
 /// Everything a chemist can pick up off a bench.
-type Pickable<'w, 's> = Query<'w, 's, (), Or<(With<Container>, With<Produce>)>>;
+///
+/// `rogue_security::Deterrent` joins this for the same reason `Produce`
+/// already does: it is not a container either, but carrying is defined by
+/// `HeldBy` alone, and `carry_held_containers` already attaches *any* newly
+/// held entity to the camera generically, so nothing else here needs to
+/// change for it to be pickable.
+type Pickable<'w, 's> = Query<
+    'w,
+    's,
+    (),
+    Or<(
+        With<Container>,
+        With<Produce>,
+        With<crate::rogue_security::Deterrent>,
+    )>,
+>;
 
 /// Server-side pickup. Only `HeldBy` changes here; how a carried beaker looks
 /// is the holder's own business, handled in [`carry_held_containers`].

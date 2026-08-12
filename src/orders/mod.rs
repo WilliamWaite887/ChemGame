@@ -8,10 +8,11 @@ use std::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 use bevy_common_assets::ron::RonAssetPlugin;
 use bevy_replicon::prelude::*;
-use chem_sim::{Category, ReagentId, Solution, Units};
+use chem_sim::{Category, ReagentId, Route, Solution, Units};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::body::{Body, Bloodstream};
 use crate::chem_data::ChemDb;
 use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlot};
 use crate::crew::{spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewRoute};
@@ -26,7 +27,13 @@ use crate::shift::{current_rules, weighted_pick, CurrentForecast};
 use crate::AppState;
 
 /// How often a clean delivery earns a sample vial of something unfamiliar.
-const SAMPLE_VIAL_CHANCE: f64 = 0.35;
+///
+/// Dropped from 0.35 (M11) alongside the reagent-unlock and hint-cost tuning
+/// — at 35% this was a second full-strength unlock currency running in
+/// parallel with research points, undermining the point of slowing the other
+/// two down. Kept nonzero on purpose: it stays a nice surprise, just not the
+/// primary route to a free recipe anymore.
+const SAMPLE_VIAL_CHANCE: f64 = 0.15;
 
 pub struct OrderPlugin;
 
@@ -369,6 +376,19 @@ impl Order {
 #[derive(Component)]
 pub struct IllicitOrder;
 
+/// Marks a crew visit as a `crisis::CrisisOrder` — someone the chemist needs
+/// to treat, not just serve, before their `patience`/`waited` clock (reused
+/// unchanged as the crisis deadline) runs out.
+///
+/// Unlike [`IllicitOrder`] this carries no secrecy rule: a crisis is meant to
+/// be obvious, so it is fine to query `Has<CrisisOrder>` anywhere, including
+/// `src/ui/mod.rs`, if a future pass wants to flag it in the queue. Also
+/// unlike `IllicitOrder`, this one *is* replicated (`net::register_replication`)
+/// — `crisis::pulse_alert_lighting` reads it on every peer to decide whether
+/// to pull the lab's lighting toward red.
+#[derive(Component, Serialize, Deserialize)]
+pub struct CrisisOrder;
+
 /// How a delivery went.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
 pub enum Outcome {
@@ -461,6 +481,11 @@ pub struct OrderResolved {
     /// keeps the "no visible tell" guarantee intact even downstream of
     /// grading.
     pub illicit: bool,
+    /// Whether this was a `crisis::CrisisOrder` — read only by `crisis`'s own
+    /// resolution handler, the same shape `illicit` already takes. Unlike an
+    /// antagonist's order, a crisis has nothing to hide: the radio alarm and
+    /// the afflicted crew member's own reeling are the tell.
+    pub crisis: bool,
 }
 
 /// A station department whose standing rises and falls with how you treat its
@@ -976,13 +1001,21 @@ fn generate_specific_orders(
     );
 }
 
+#[allow(clippy::type_complexity)]
 fn expire_orders(
     mut commands: Commands,
     time: Res<Time>,
     db: Res<ChemDb>,
     mut shift: ResMut<Shift>,
     mut resolved: MessageWriter<OrderResolved>,
-    mut orders: Query<(Entity, &mut Order, &CrewMember, &mut CrewRoute, Has<IllicitOrder>)>,
+    mut orders: Query<(
+        Entity,
+        &mut Order,
+        &CrewMember,
+        &mut CrewRoute,
+        Has<IllicitOrder>,
+        Has<CrisisOrder>,
+    )>,
 ) {
     // Deliberately *not* gated on `accepting_orders`. The sign stops new
     // people walking in; it is not a pause button, so whoever is already at
@@ -990,7 +1023,7 @@ fn expire_orders(
     // were still up.
     let dt = time.delta_secs();
 
-    for (entity, mut order, crew, mut route, illicit) in &mut orders {
+    for (entity, mut order, crew, mut route, illicit, crisis) in &mut orders {
         // Patience only runs down once they have actually arrived, so a slow
         // walk in never counts against the player.
         if route.phase != CrewPhase::Waiting {
@@ -1017,6 +1050,7 @@ fn expire_orders(
             category,
             outcome: Outcome::Expired,
             illicit,
+            crisis,
         });
         shift.botched += 1;
         // An abandoned illicit order is not a chaos-causing success, so it
@@ -1051,7 +1085,7 @@ fn adjust_for_role(
     shift.adjust(department, reputation_delta(outcome, waited, patience, potency));
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn handle_delivery(
     mut commands: Commands,
     db: Res<ChemDb>,
@@ -1059,7 +1093,14 @@ fn handle_delivery(
     mut shift: ResMut<Shift>,
     mut radio: ResMut<RadioLog>,
     mut resolved: MessageWriter<OrderResolved>,
-    mut crew: Query<(&CrewMember, &Order, &mut CrewRoute, Has<IllicitOrder>)>,
+    mut crew: Query<(
+        &CrewMember,
+        &Order,
+        &mut CrewRoute,
+        Has<IllicitOrder>,
+        Has<CrisisOrder>,
+    )>,
+    mut bodies: Query<(&mut Body, &mut Bloodstream)>,
     containers: Query<(Entity, &Container, &HeldBy, Has<TestBenchStock>)>,
     chemists: Query<(Entity, &Chemist)>,
     mut knowledge: ResMut<Knowledge>,
@@ -1068,9 +1109,13 @@ fn handle_delivery(
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
-        let Ok((member, order, mut route, illicit)) = crew.get_mut(request.target) else {
+        let Ok((member, order, mut route, illicit, crisis)) = crew.get_mut(request.target) else {
             continue;
         };
+        let body = bodies
+            .get_mut(request.target)
+            .ok()
+            .map(|(b, blood)| (b.into_inner(), blood.into_inner()));
         let Some((container_entity, container, _, test_stock)) = containers
             .iter()
             .find(|(_, _, holder, _)| holder.0 == player)
@@ -1106,6 +1151,8 @@ fn handle_delivery(
                 container_entity,
                 container,
                 illicit,
+                crisis,
+                body,
             },
         );
     }
@@ -1120,6 +1167,14 @@ struct Handover<'a> {
     container_entity: Entity,
     container: &'a Container,
     illicit: bool,
+    /// Whether this is a `crisis::CrisisOrder` — see `OrderResolved::crisis`.
+    crisis: bool,
+    /// The recipient's body, so `complete_delivery` can route what was
+    /// actually handed over into them — every crew member has had one since
+    /// M12. `Option` because this struct already follows the "the caller
+    /// fetched it, not this function" shape for everything else; a missing
+    /// body just means the dose is never felt rather than a panic.
+    body: Option<(&'a mut Body, &'a mut Bloodstream)>,
 }
 
 /// Grades a handover and closes the order out.
@@ -1143,6 +1198,8 @@ fn complete_delivery(
         container_entity,
         container,
         illicit,
+        crisis,
+        body,
     } = handover;
 
     let (outcome, matched) = grade(
@@ -1172,6 +1229,7 @@ fn complete_delivery(
         category,
         outcome,
         illicit,
+        crisis,
     });
 
     if outcome.is_good() {
@@ -1199,6 +1257,20 @@ fn complete_delivery(
         container.kind.label(),
         outcome
     );
+
+    // They actually drink what you handed them — whether that was the
+    // medicine they asked for or, through carelessness or malice, something
+    // else entirely. Deliberately independent of `outcome`: a `Wrong`
+    // delivery still gets swallowed, which is exactly what makes handing
+    // over the wrong beaker a real mistake and not just a graded number.
+    if let Some((recipient_body, recipient_blood)) = body {
+        let mut dose = container.solution.clone();
+        if dose.total_volume().is_positive() {
+            recipient_blood
+                .0
+                .receive(&mut dose, Route::Ingested, &mut recipient_body.0, db);
+        }
+    }
 
     // They walk off with the glassware. Getting it back is someone else's
     // problem, which is also true in the original.
@@ -1254,7 +1326,7 @@ fn window_recipient<'a>(
 /// means a batch can be finished and parked before its requester has even
 /// walked in, which is what makes the window a post one chemist can work while
 /// the other mixes.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn handle_window_delivery(
     mut commands: Commands,
     db: Res<ChemDb>,
@@ -1264,7 +1336,15 @@ fn handle_window_delivery(
     windows: Query<(Entity, &Machine)>,
     slotted: Query<(Entity, &InSlot)>,
     containers: Query<(&Container, Has<TestBenchStock>)>,
-    mut crew: Query<(Entity, &CrewMember, &Order, &mut CrewRoute, Has<IllicitOrder>)>,
+    mut crew: Query<(
+        Entity,
+        &CrewMember,
+        &Order,
+        &mut CrewRoute,
+        Has<IllicitOrder>,
+        Has<CrisisOrder>,
+    )>,
+    mut bodies: Query<(&mut Body, &mut Bloodstream)>,
 ) {
     for (window, machine) in &windows {
         if machine.kind != MachineKind::DeliveryWindow {
@@ -1286,14 +1366,20 @@ fn handle_window_delivery(
 
         let candidates = crew
             .iter()
-            .map(|(entity, _, order, route, illicit)| (entity, order, route, illicit));
+            .map(|(entity, _, order, route, illicit, _)| (entity, order, route, illicit));
         let Some(recipient) = window_recipient(&container.solution, candidates, &db) else {
             continue;
         };
 
-        let Ok((crew_entity, member, order, mut route, illicit)) = crew.get_mut(recipient) else {
+        let Ok((crew_entity, member, order, mut route, illicit, crisis)) =
+            crew.get_mut(recipient)
+        else {
             continue;
         };
+        let body = bodies
+            .get_mut(crew_entity)
+            .ok()
+            .map(|(b, blood)| (b.into_inner(), blood.into_inner()));
         complete_delivery(
             &mut commands,
             &db,
@@ -1308,6 +1394,8 @@ fn handle_window_delivery(
                 container_entity,
                 container,
                 illicit,
+                crisis,
+                body,
             },
         );
     }
@@ -1631,6 +1719,36 @@ mod tests {
             "the order should be closed out"
         );
         assert_eq!(app.world().resource::<Shift>().succeeded, 1);
+    }
+
+    #[test]
+    fn a_delivered_solution_actually_lands_on_the_recipient() {
+        // M12: a delivery is not just graded, it is drunk. Handing over
+        // something should show up in the recipient's own Bloodstream, not
+        // just the order's outcome. Ingested lands in the stomach first
+        // (same as a chemist's own sip, `body::tests::drinking_takes_a_
+        // mouthful_out_of_the_beaker_and_into_the_stomach`) — turning that
+        // into a felt `Drunk` status is `run_metabolism`'s job, already
+        // covered in `body::mod::tests`, not this module's to re-prove.
+        let mut app = window_app();
+        window_with(&mut app, &[("hooch", 10)], false);
+        let crew = waiting_crew(&mut app, "Mx. Sample", "hooch", 10, 60.0, true);
+        app.world_mut()
+            .entity_mut(crew)
+            .insert((Body::default(), Bloodstream::default()));
+
+        app.update();
+
+        assert_eq!(
+            outcomes(&app),
+            vec![("Mx. Sample".to_string(), Outcome::Success)]
+        );
+        let hooch = reagent_id(&app, "hooch");
+        let blood = app.world().get::<Bloodstream>(crew).unwrap();
+        assert!(
+            blood.0.stomach.volume_of(hooch).is_positive(),
+            "the recipient should actually have swallowed something, not just been graded a success"
+        );
     }
 
     #[test]

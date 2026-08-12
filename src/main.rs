@@ -5,6 +5,9 @@ mod body;
 mod chem_data;
 mod containers;
 mod crew;
+mod crisis;
+mod cult;
+mod fx;
 mod hazards;
 mod interaction;
 mod knowledge;
@@ -12,10 +15,12 @@ mod lab;
 mod machines;
 mod menu;
 mod net;
+mod obsessed;
 mod orders;
 mod player;
 mod produce;
 mod radio;
+mod rogue_security;
 mod saves;
 mod security;
 mod shift;
@@ -84,12 +89,28 @@ fn main() {
             ),
             produce::ProducePlugin,
             radio::RadioPlugin,
-            // The hidden antagonist thread. After orders/shift/radio, since it
-            // leans on `Order`, `current_rules` and `PendingBroadcasts`.
-            antagonist::AntagonistPlugin,
-            // Security's response to it. After antagonist, since it reads
-            // the suspicion antagonist builds.
-            security::SecurityPlugin,
+            (
+                // The hidden antagonist thread. After orders/shift/radio,
+                // since it leans on `Order`, `current_rules` and
+                // `PendingBroadcasts`.
+                antagonist::AntagonistPlugin,
+                // Security's response to it. After antagonist, since it
+                // reads the suspicion antagonist builds, and since
+                // antagonist's Spy-flavoured sting arms its `RaidSchedule`
+                // directly.
+                security::SecurityPlugin,
+                // The station-wide fallout of it. After antagonist, since it
+                // reads `UnderworldStanding`; independent of security.
+                crisis::CrisisPlugin,
+                // Security, gone bad — a wholly separate threat from the
+                // antagonist thread, arming off `Department::Security`
+                // standing rather than anything hidden.
+                rogue_security::RogueSecurityPlugin,
+                // Two more crew-visit archetypes, same shape as antagonist,
+                // each independent of every other in this tuple.
+                obsessed::ObsessedPlugin,
+                cult::CultPlugin,
+            ),
             // The chemist themselves: who they are, what they are looking at,
             // and what the chemistry is doing to them.
             (
@@ -97,6 +118,9 @@ fn main() {
                 interaction::InteractionPlugin,
                 body::BodyPlugin,
                 hazards::HazardPlugin,
+                // What the chemistry above does to the camera and the
+                // models — reads `Bloodstream`, never mutates it.
+                fx::FxPlugin,
             ),
             (ui::UiPlugin, menu::MenuPlugin),
         ));

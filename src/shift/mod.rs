@@ -527,12 +527,29 @@ struct ProgressSave {
     /// player willing to open a save file in a text editor.
     #[serde(default)]
     underworld_standing: i32,
+    /// Whether Rogue Security's reward has already been earned — a one-shot
+    /// career fact, same reasoning as `underworld_standing`. See
+    /// `rogue_security::RogueRedeemed`.
+    #[serde(default)]
+    rogue_redeemed: bool,
+    /// How far into the obsessed thread's authored visit sequence the
+    /// career has reached. See `obsessed::ObsessedProgress`.
+    #[serde(default)]
+    obsessed_progress: usize,
+    /// How far into the cult thread's authored ritual the career has
+    /// reached. See `cult::CultProgress`.
+    #[serde(default)]
+    cult_progress: usize,
 }
 
 /// Restores the career on launch.
+#[allow(clippy::too_many_arguments)]
 fn load_progress(
     mut shift: ResMut<Shift>,
     underworld: Option<ResMut<crate::antagonist::UnderworldStanding>>,
+    rogue_redeemed: Option<ResMut<crate::rogue_security::RogueRedeemed>>,
+    obsessed_progress: Option<ResMut<crate::obsessed::ObsessedProgress>>,
+    cult_progress: Option<ResMut<crate::cult::CultProgress>>,
     slot: Option<Res<SaveSlot>>,
 ) {
     // No slot means a new game with nothing to restore, or a guest whose career
@@ -546,6 +563,15 @@ fn load_progress(
     shift.department_standing = save.department_standing;
     if let Some(mut underworld) = underworld {
         underworld.0 = save.underworld_standing;
+    }
+    if let Some(mut redeemed) = rogue_redeemed {
+        redeemed.0 = save.rogue_redeemed;
+    }
+    if let Some(mut progress) = obsessed_progress {
+        progress.0 = save.obsessed_progress;
+    }
+    if let Some(mut progress) = cult_progress {
+        progress.0 = save.cult_progress;
     }
     info!(
         "resuming with {} delivered, {} botched",
@@ -581,9 +607,13 @@ pub fn progress_summary(path: &std::path::Path) -> Option<(u32, u32)> {
     Some((save.succeeded, save.botched))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn persist_progress(
     shift: Res<Shift>,
     underworld: Option<Res<crate::antagonist::UnderworldStanding>>,
+    rogue_redeemed: Option<Res<crate::rogue_security::RogueRedeemed>>,
+    obsessed_progress: Option<Res<crate::obsessed::ObsessedProgress>>,
+    cult_progress: Option<Res<crate::cult::CultProgress>>,
     slot: Option<Res<SaveSlot>>,
     mut written: Local<Option<ProgressSave>>,
 ) {
@@ -595,6 +625,9 @@ fn persist_progress(
         botched: shift.botched,
         department_standing: shift.department_standing.clone(),
         underworld_standing: underworld.map(|u| u.0).unwrap_or(0),
+        rogue_redeemed: rogue_redeemed.map(|r| r.0).unwrap_or(false),
+        obsessed_progress: obsessed_progress.map(|p| p.0).unwrap_or(0),
+        cult_progress: cult_progress.map(|p| p.0).unwrap_or(0),
     };
     if written.as_ref() == Some(&save) {
         return;

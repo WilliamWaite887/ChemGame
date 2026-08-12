@@ -29,9 +29,10 @@ use crate::containers::{Container, HeldBy, InSlot};
 use crate::crew::CrewMember;
 use crate::hazards::{ActiveHazard, SmokeCloud, SmokePayload};
 use crate::machines::{Buffer, DispenseAmount, Hopper, Machine, Thermostat};
-use crate::orders::Order;
+use crate::orders::{CrisisOrder, Order};
 use crate::player::Player;
 use crate::produce::Produce;
+use crate::rogue_security::Deterrent;
 use crate::AppState;
 
 pub mod steam;
@@ -319,6 +320,10 @@ fn register_replication(app: &mut App) {
         // order queue sat empty. `patience`/`waited` are plain `f32`, so it
         // can finally ride the wire like everything else here.
         .replicate::<Order>()
+        // Unlike `IllicitOrder`, a crisis has nothing to hide — see its own
+        // doc comment. Replicated so `crisis::pulse_alert_lighting` reads the
+        // same "is one active" answer on every peer with no sync message.
+        .replicate::<CrisisOrder>()
         .replicate::<Produce>()
         .replicate::<CrewMember>()
         // The marker itself, so a client can tell a chemist from any other
@@ -336,7 +341,10 @@ fn register_replication(app: &mut App) {
         // the second pair of hands is being able to see that the first pair is
         // in trouble.
         .replicate::<Body>()
-        .replicate::<Bloodstream>();
+        .replicate::<Bloodstream>()
+        // Rogue Security's reward — a pickable prop, shared lab state like
+        // any other, so both peers see it appear on the counter.
+        .replicate::<Deterrent>();
 }
 
 fn start_hosting(mut commands: Commands, channels: Res<RepliconChannels>) {

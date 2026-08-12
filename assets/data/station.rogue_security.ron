@@ -1,0 +1,54 @@
+// Security, gone bad. Arms off Department::Security standing itself, not a
+// bespoke hidden counter — the same number every ordinary delivery to
+// Security crew already moves. Sink it low enough (raids, botched Security
+// orders) and Sergeant Voss starts shaking the chemist down directly; climb
+// back out through ordinary good service and the reward fires once, for
+// good.
+(
+    officer_name: "Sergeant Voss",
+    // Multiplied onto the current legitimate order gap, same shape as
+    // antagonist.ron's own gap_multiplier.
+    gap_multiplier: (5.0, 9.0),
+    hostile_below: -8,
+    redeemed_at: 15,
+    // Applied only on a refused, `physical: true` encounter, and only once
+    // standing is already at or below hostile_below — see
+    // rogue_security::expire_rogue_encounters.
+    physical_chance: 0.35,
+    encounters: [
+        (
+            reagent: "space_drugs",
+            amounts: [10, 15],
+            pretext: "Sergeant Voss: I know what you've been dispensing. Hand over some product and we'll call it square.",
+            refusal_line: "Sergeant Voss: Wrong answer. I've got a badge and a bad mood today.",
+            compliance_line: "Sergeant Voss pockets the vial without a word and doesn't look back.",
+            physical: false,
+        ),
+        (
+            reagent: "bath_salts",
+            amounts: [10, 15],
+            pretext: "Sergeant Voss: This is a shakedown, chemist. Bath salts. Now, and nobody has to write anything up.",
+            refusal_line: "Sergeant Voss shoves off the counter, furious, and promises this isn't over.",
+            compliance_line: "Sergeant Voss counts the vial twice, apparently satisfied.",
+            physical: true,
+        ),
+        (
+            reagent: "krokodil",
+            amounts: [10, 15],
+            pretext: "Sergeant Voss: Krokodil. I hear chemistry's been generous lately. Be generous with me too.",
+            refusal_line: "Sergeant Voss slams a fist on the counter and storms off, cursing your name.",
+            compliance_line: "Sergeant Voss tucks the vial away like this conversation never happened.",
+            physical: true,
+        ),
+        (
+            reagent: "methamphetamine",
+            amounts: [10, 15],
+            pretext: "Sergeant Voss: Long shift ahead. Something to keep me sharp — you know what I mean.",
+            refusal_line: "Sergeant Voss looks at you like you just made a very large mistake.",
+            compliance_line: "Sergeant Voss pockets it fast, checking over their shoulder out of habit.",
+            physical: false,
+        ),
+    ],
+    redemption_line: "Sergeant Voss: ...you know, you're alright. Forget I was ever in here.",
+    reward_line: "Sergeant Voss leaves a department-issue deterrent on the counter and walks out without another word.",
+)

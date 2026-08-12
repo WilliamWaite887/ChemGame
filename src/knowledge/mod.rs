@@ -31,10 +31,13 @@ const FREE_HINTS: usize = 1;
 /// Research points a hint costs. Every recipe's last hint is the literal
 /// recipe, so this is what paces "deduction over a small candidate set" into
 /// actually being deduction rather than a two-delivery unlock: a typical
-/// 3-hint recipe now costs 4 points (≈4 deliveries, or two purchased grants)
-/// to fully reveal instead of 2. `FREE_HINTS` stays untouched — the one free
-/// hint is what bootstraps the very first reasoned guess.
-pub const HINT_COST: u32 = 2;
+/// 3-hint recipe now costs 6 points (≈6 deliveries, or three purchased
+/// grants) to fully reveal instead of 2. `FREE_HINTS` stays untouched — the
+/// one free hint is what bootstraps the very first reasoned guess. Raised
+/// from 2 (M11) alongside the reagent unlock-cost tripling, so hints and
+/// reagent unlocks compete meaningfully for the same research points instead
+/// of hints being nearly free by comparison.
+pub const HINT_COST: u32 = 3;
 /// Points earned for a clean delivery.
 pub const RESEARCH_PER_SUCCESS: u32 = 1;
 
