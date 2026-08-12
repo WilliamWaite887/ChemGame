@@ -16,14 +16,14 @@ use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, InSlot};
 use crate::crew::{CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{leave_machine, InteractionMode, LeaveMachineRequested};
-use crate::knowledge::{reaction_categories, Knowledge, RecipeDiscovered, HINT_COST};
+use crate::knowledge::{reaction_categories, Knowledge, RecipeDiscovered, UnlockReagentRequested, HINT_COST};
 use crate::machines::{
     slotted_container, AnalyzeRequested, Buffer, BufferDirection, BufferTransferRequested,
     DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested, GrindRequested, Hopper,
     Machine, MachineKind, PackageRequested, SetHeaterPower, SetTargetTemperature, TestBenchStock,
     Thermostat, TEMPERATURE_PRESETS,
 };
-use crate::orders::{Department, Order, Shift};
+use crate::orders::{reference_category, Department, Order, Shift};
 use crate::player::LocalPlayer;
 use crate::produce::{ProduceCatalog, ProduceId};
 use crate::radio::RadioLog;
@@ -104,6 +104,7 @@ pub(crate) struct Selected;
 enum PanelAction {
     SetAmount(Units),
     Dispense(ReagentId),
+    UnlockReagent(ReagentId),
     Eject,
     Empty,
     ToBuffer(ReagentId, Units),
@@ -337,7 +338,7 @@ fn sync_panel(
 
                     match machine.kind {
                         MachineKind::Dispenser | MachineKind::TestBench => {
-                            dispenser_body(panel, &db, machine.kind, amount, loaded);
+                            dispenser_body(panel, &db, &knowledge, machine.kind, amount, loaded);
                         }
                         MachineKind::ChemMaster => {
                             chemmaster_body(panel, &db, buffer, loaded);
@@ -435,6 +436,7 @@ fn standing_board_body(panel: &mut ChildSpawnerCommands, shift: &Shift) {
 fn dispenser_body(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
+    knowledge: &Knowledge,
     kind: MachineKind,
     amount: Option<&DispenseAmount>,
     loaded: Option<&Container>,
@@ -463,10 +465,28 @@ fn dispenser_body(
     panel.spawn(label("Reagents", 13.0, TEXT_DIM));
     panel.spawn(wrap_row()).with_children(|row| {
         for reagent in db.reagents.dispensable() {
-            row.spawn(button(
-                reagent.name.clone(),
-                PanelAction::Dispense(reagent.id),
-            ));
+            match knowledge.reagent_unlock_cost(db, reagent.id) {
+                // Unlocked (free from the start, or already bought): the
+                // ordinary live dispense button, unchanged.
+                None => {
+                    row.spawn(button(reagent.name.clone(), PanelAction::Dispense(reagent.id)));
+                }
+                // Locked: same "drawn dead rather than drawn live and
+                // silently doing nothing" rule `standing_board_body` already
+                // uses for an unaffordable requisition. Clicking it either
+                // way sends the same request — `Knowledge::unlock_reagent`
+                // re-checks affordability server-side, so a dead button is
+                // just inert, never wrong.
+                Some(cost) => {
+                    let affordable = knowledge.research_points >= cost;
+                    let caption = format!("{} ({cost})", reagent.name);
+                    let mut entity =
+                        row.spawn(button(caption, PanelAction::UnlockReagent(reagent.id)));
+                    if !affordable {
+                        entity.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
+                    }
+                }
+            }
         }
     });
 
@@ -1338,7 +1358,23 @@ fn update_order_queue(
 
     for (slot, mut text, mut color) in &mut slots {
         let line = pending.get(slot.0).map(|(member, order, route)| {
-            let reagent = &db.reagents.get(order.reagent).name;
+            // `order.specific` is freely queryable (nothing secret about it —
+            // see its own doc comment) and always wins when set. Otherwise
+            // this never queries `Has<IllicitOrder>` — see that marker's own
+            // doc comment — and instead reads purely from the reagent's own
+            // category: a lenient legitimate order's category is always one
+            // of the six orderable ones, so it shows a want-phrase; anything
+            // else (every antagonist reagent is `Illicit`) falls back to the
+            // real name, which is no more a tell than the pretext already is.
+            let want = if order.specific {
+                db.reagents.get(order.reagent).name.clone()
+            } else {
+                reference_category(&db, order.reagent)
+                    .filter(|cat| cat.is_legitimately_orderable())
+                    .map(|cat| cat.want_phrase().to_string())
+                    .unwrap_or_else(|| db.reagents.get(order.reagent).name.clone())
+            };
+            let reagent = &want;
             match route.phase {
                 CrewPhase::Arriving => {
                     format!(
@@ -2047,6 +2083,7 @@ struct PanelMessages<'w> {
     toggle_accepting: MessageWriter<'w, ToggleAcceptingOrders>,
     requisition: MessageWriter<'w, RequisitionRequested>,
     leave_machine: MessageWriter<'w, LeaveMachineRequested>,
+    unlock_reagent: MessageWriter<'w, UnlockReagentRequested>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2079,6 +2116,10 @@ fn handle_panel_clicks(
         match action {
             PanelAction::BuyHint(reaction) => {
                 knowledge.buy_hint(&db, *reaction);
+                continue;
+            }
+            PanelAction::UnlockReagent(reagent) => {
+                out.unlock_reagent.write(UnlockReagentRequested { reagent: *reagent });
                 continue;
             }
             PanelAction::ShowCategory(category) => {
@@ -2169,7 +2210,7 @@ fn handle_panel_clicks(
                 });
             }
             // Handled above, before the machine guard.
-            PanelAction::BuyHint(_) | PanelAction::ShowCategory(_) | PanelAction::Close => {}
+            PanelAction::BuyHint(_) | PanelAction::UnlockReagent(_) | PanelAction::ShowCategory(_) | PanelAction::Close => {}
         }
     }
 }

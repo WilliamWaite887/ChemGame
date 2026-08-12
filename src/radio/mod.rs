@@ -54,6 +54,13 @@ impl Plugin for RadioPlugin {
 pub struct RadioScript {
     pub delay_seconds: (f32, f32),
     pub lines: Vec<RadioLineDef>,
+    /// Lines for a legitimate order that resolved with nothing matching its
+    /// category (`Wrong`/`Expired` only — every other outcome always has a
+    /// matched reagent to name). Uses `{category}`, never `{reagent}`: naming
+    /// the order's actual reference reagent here would leak the one thing the
+    /// player was never told to look for. See `OrderResolved::reagent`.
+    #[serde(default)]
+    pub category_lines: Vec<RadioLineDef>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -149,6 +156,33 @@ fn promote_script(
     commands.remove_resource::<PendingScript>();
 }
 
+/// Picks a line for `outcome`, preferring one written for `role` — role-
+/// specific lines win 60% of the time when one exists, so departments keep
+/// their own voice, and a general fallback exists so a new role can never
+/// silence a whole outcome.
+fn pick_line<'a>(
+    lines: &'a [RadioLineDef],
+    outcome: Outcome,
+    role: &str,
+    rng: &mut impl Rng,
+) -> Option<&'a RadioLineDef> {
+    let matching: Vec<&RadioLineDef> = lines.iter().filter(|line| line.outcome == outcome).collect();
+    let role_specific: Vec<&RadioLineDef> = matching
+        .iter()
+        .copied()
+        .filter(|line| line.role.as_deref() == Some(role))
+        .collect();
+    let general: Vec<&RadioLineDef> = matching.iter().copied().filter(|line| line.role.is_none()).collect();
+
+    if !role_specific.is_empty() && rng.random_bool(0.6) {
+        role_specific.choose(rng).copied()
+    } else if !general.is_empty() {
+        general.choose(rng).copied()
+    } else {
+        matching.first().copied()
+    }
+}
+
 /// Turns a resolved order into a line, scheduled for later.
 fn queue_reports(
     db: Res<ChemDb>,
@@ -165,43 +199,33 @@ fn queue_reports(
 
     let mut rng = rand::rng();
     for report in resolved.read() {
-        // Prefer a line written for this department, fall back to a general
-        // one. Without the fallback a new role would silence the radio.
-        let matching: Vec<&RadioLineDef> = script
-            .lines
-            .iter()
-            .filter(|line| line.outcome == report.outcome)
-            .collect();
-        let role_specific: Vec<&RadioLineDef> = matching
-            .iter()
-            .copied()
-            .filter(|line| line.role.as_deref() == Some(report.role.as_str()))
-            .collect();
-        let general: Vec<&RadioLineDef> = matching
-            .iter()
-            .copied()
-            .filter(|line| line.role.is_none())
-            .collect();
-
-        let chosen = if !role_specific.is_empty() && rng.random_bool(0.6) {
-            role_specific.choose(&mut rng).copied()
-        } else if !general.is_empty() {
-            general.choose(&mut rng).copied()
+        // A matched reagent (every antagonist order, and any legitimate order
+        // that resolved as Success/Short/Impure/Overdose) reads from the
+        // ordinary `{reagent}` pool. A legitimate order with nothing matching
+        // its category (Wrong/Expired) reads from `category_lines` instead,
+        // which never gets a real chemical name to substitute in.
+        let text = if let Some(reagent) = report.reagent {
+            let Some(line) = pick_line(&script.lines, report.outcome, &report.role, &mut rng) else {
+                warn!("no radio line for outcome {:?}", report.outcome);
+                continue;
+            };
+            let reagent = db.reagents.get(reagent).name.clone();
+            line.text
+                .replace("{name}", &report.name)
+                .replace("{role}", &report.role)
+                .replace("{reagent}", &reagent)
         } else {
-            matching.first().copied()
+            let Some(line) = pick_line(&script.category_lines, report.outcome, &report.role, &mut rng)
+            else {
+                warn!("no category radio line for outcome {:?}", report.outcome);
+                continue;
+            };
+            let phrase = report.category.map(|cat| cat.want_phrase()).unwrap_or_default();
+            line.text
+                .replace("{name}", &report.name)
+                .replace("{role}", &report.role)
+                .replace("{category}", phrase)
         };
-
-        let Some(line) = chosen else {
-            warn!("no radio line for outcome {:?}", report.outcome);
-            continue;
-        };
-
-        let reagent = db.reagents.get(report.reagent).name.clone();
-        let text = line
-            .text
-            .replace("{name}", &report.name)
-            .replace("{role}", &report.role)
-            .replace("{reagent}", &reagent);
 
         let delay = rng.random_range(script.delay_seconds.0..=script.delay_seconds.1);
         pending.push_delayed(
@@ -307,6 +331,28 @@ mod tests {
             assert!(
                 general > 0,
                 "{outcome:?} has no role-agnostic line, so an unmatched department would go silent"
+            );
+        }
+    }
+
+    #[test]
+    fn every_category_outcome_has_at_least_one_line() {
+        // Wrong and Expired are the only outcomes a legitimate order can
+        // resolve to with nothing matched — the only two that ever read from
+        // `category_lines` instead of `lines`.
+        let script: RadioScript =
+            ron::from_str(include_str!("../../assets/data/station.radio.ron")).unwrap();
+
+        for outcome in [Outcome::Wrong, Outcome::Expired] {
+            let general = script
+                .category_lines
+                .iter()
+                .filter(|line| line.outcome == outcome && line.role.is_none())
+                .count();
+            assert!(
+                general > 0,
+                "{outcome:?} has no role-agnostic category line, so an unmatched \
+                 legitimate order would go silent"
             );
         }
     }

@@ -575,6 +575,71 @@ fn a_small_beaker_of_phlogiston_can_never_detonate() {
     );
 }
 
+/// Makes chlorine trifluoride from `chlorine`-of-ratio (`chlorine` units of
+/// chlorine, `3 * chlorine` of fluorine — the reactants are a 3:1 ratio, not
+/// phlogiston's 1:1:1), held just over its 424K ignition point, and reports
+/// whether it went off.
+fn ctf_batch(data: &ChemData, chlorine: i32) -> (chem_sim::Kelvin, bool) {
+    let mut beaker = beaker(
+        data,
+        100,
+        &[("fluorine", chlorine * 3), ("chlorine", chlorine)],
+    );
+    beaker.temperature = chem_sim::Kelvin(424.5);
+    let report = resolve(&mut beaker, &data.reactions);
+    let detonated = report
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, chem_sim::ReactionEffect::Explosion(_)));
+    (beaker.temperature, detonated)
+}
+
+/// The same showpiece property phlogiston has, pinned the same way: a modest
+/// batch has to be safe, and a large one has to actually go off.
+///
+/// This exists because at the original `Heat(3.0)` it did not. A maximally
+/// full 100u beaker (25-of-ratio) peaked at 499.5K against a 500K threshold —
+/// 0.5K short, forever — the same "could never detonate at any fill" bug
+/// phlogiston's original `Heat(1.2)` had, just close enough to the line that
+/// nobody noticed by eye.
+#[test]
+fn a_big_batch_of_chlorine_trifluoride_cooks_itself_into_a_blast() {
+    let data = data();
+
+    let (small_temp, small_boom) = ctf_batch(&data, 15); // 60u total
+    assert!(
+        !small_boom,
+        "a modest batch has to be safe, or the recipe is unusable ({small_temp})"
+    );
+    assert!(small_temp.0 < 500.0);
+
+    let (big_temp, big_boom) = ctf_batch(&data, 20); // 80u total
+    assert!(
+        big_boom,
+        "20-of-ratio should run away; it only reached {big_temp}"
+    );
+}
+
+/// A 50u beaker cannot hold enough to reach the threshold, whatever you do —
+/// the same guarantee phlogiston makes.
+#[test]
+fn a_small_beaker_of_chlorine_trifluoride_can_never_detonate() {
+    let data = data();
+    // Twelve-of-ratio is 48u — as much as a 50u beaker will take.
+    let mut beaker = beaker(&data, 50, &[("fluorine", 36), ("chlorine", 12)]);
+    beaker.temperature = chem_sim::Kelvin(424.5);
+    let report = resolve(&mut beaker, &data.reactions);
+
+    assert!(
+        !report
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, chem_sim::ReactionEffect::Explosion(_))),
+        "a full small beaker reached {} and should not have gone off",
+        beaker.temperature
+    );
+}
+
 #[test]
 fn a_recipe_that_never_names_an_overheat_is_unaffected_by_temperature() {
     // The guarantee that let this land without touching a line of the existing

@@ -107,9 +107,22 @@ pub struct SecuritySuspicion(pub i32);
 /// `assets/data/station.antagonist.ron`, as written.
 #[derive(Asset, TypePath, Deserialize)]
 pub struct AntagonistScript {
-    pub gap_seconds: (f32, f32),
+    /// Multiplied onto the *current* legitimate order gap
+    /// (`current_rules(...).gap_seconds`) to get the antagonist gap, rather
+    /// than a flat range of its own. Without this, antagonist visits stay at
+    /// a fixed cadence while legitimate orders arrive faster and faster as
+    /// the ramp tightens, so antagonists would get relatively rarer over a
+    /// career instead of scaling with it. See [`generate_antagonist_orders`].
+    pub gap_multiplier: (f32, f32),
     pub requests: Vec<AntagonistRequestDef>,
 }
+
+/// The antagonist clock's very first arm, before any `Shift`/`StationData`
+/// exist to compute a ramp-scaled gap against. Only the *first* visit uses
+/// this — every re-arm after that reads `gap_multiplier` against the current
+/// legitimate order gap, so only the steady-state cadence needs to track the
+/// ramp.
+const INITIAL_GAP_SECONDS: (f32, f32) = (240.0, 420.0);
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AntagonistRequestDef {
@@ -162,7 +175,7 @@ fn promote_script(
         return;
     };
     if spawner.is_none() {
-        let gap = rand::rng().random_range(script.gap_seconds.0..=script.gap_seconds.1);
+        let gap = rand::rng().random_range(INITIAL_GAP_SECONDS.0..=INITIAL_GAP_SECONDS.1);
         commands.insert_resource(AntagonistSpawner {
             timer: Timer::from_seconds(gap, TimerMode::Once),
         });
@@ -201,8 +214,13 @@ fn generate_antagonist_orders(
     }
 
     let mut rng = rand::rng();
-    let gap = rng.random_range(script.gap_seconds.0..=script.gap_seconds.1);
-    spawner.timer = Timer::from_seconds(gap, TimerMode::Once);
+    // Scaled off the *current* legitimate gap rather than a flat range, so
+    // antagonist visits keep pace as the ramp tightens instead of becoming
+    // relatively rarer the longer a career runs.
+    let rules = current_rules(&station.config, &shift);
+    let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
+    let multiplier = rng.random_range(script.gap_multiplier.0..=script.gap_multiplier.1);
+    spawner.timer = Timer::from_seconds(legit_gap * multiplier, TimerMode::Once);
 
     let Some(request) = script.requests.choose(&mut rng) else {
         return;
@@ -230,8 +248,8 @@ fn generate_antagonist_orders(
     // Reuses the ordinary difficulty's patience range rather than a range of
     // its own — a visit that waited noticeably longer or shorter than normal
     // would itself be a statistical tell, which the whole point of this
-    // system is to never give the player.
-    let rules = current_rules(&station.config, &shift);
+    // system is to never give the player. `rules` was already computed above
+    // for the gap; reused here rather than recomputed.
     let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
 
     // Same lane-offset trick `generate_orders` uses, so a visit spawned here
@@ -243,6 +261,9 @@ fn generate_antagonist_orders(
     commands.entity(crew).insert((
         Order {
             reagent,
+            // `IllicitOrder` is what makes this exact, not this field — the
+            // two never stack. See `Order::specific`'s own doc comment.
+            specific: false,
             amount: Units::whole(amount as i32),
             plea: request.pretext.clone(),
             patience,
@@ -298,8 +319,14 @@ fn handle_illicit_resolutions(
         if !report.illicit || !report.outcome.is_good() {
             continue;
         }
-
-        let reagent_key = &db.reagents.get(report.reagent).key;
+        // An illicit order is always exact-match (see `orders::wanted_for`),
+        // so a good outcome always names its reagent — `None` here would be
+        // a contradiction in `OrderResolved` itself, not a reason to panic.
+        let Some(reagent) = report.reagent else {
+            warn!("illicit order resolved successfully but named no reagent");
+            continue;
+        };
+        let reagent_key = &db.reagents.get(reagent).key;
         let Some(request) = script
             .requests
             .iter()

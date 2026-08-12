@@ -23,60 +23,112 @@
     //
     // Most of these do nothing at all in a body, which is canon and also
     // useful: a chemist who drinks the oxygen supply learns something cheap.
-    (id: "aluminium",  name: "Aluminium",  color: (0.75, 0.76, 0.78), dispensable: true),
+    //
+    // `unlock_cost` gates the other 17 behind research points, spent at the
+    // dispenser itself (`Knowledge::unlock_reagent`). Cheap (2-3) covers
+    // reagents that feed early, common recipes (water alone unlocks hooch,
+    // hydrogen_peroxide and the saltwater chain); moderate (4-5) is more
+    // specialised or already pyro-adjacent; expensive (6-8) gates the exotic
+    // or outright dangerous end — chlorine trifluoride's fluorine, and
+    // mercury, the priciest of all, behind the illicit-adjacent
+    // mindbreaker_toxin/zombie_powder chain. Nothing here changes what a
+    // fully-unlocked career can eventually make.
+    (
+        id: "aluminium",
+        name: "Aluminium",
+        color: (0.75, 0.76, 0.78),
+        dispensable: true,
+        unlock_cost: Some(4),
+    ),
+    // Free from the start — one of the six base reagents the three starting
+    // recipes are built from. See `every_starting_ingredient_is_unlocked_free`.
     (id: "carbon",     name: "Carbon",     color: (0.12, 0.12, 0.13), dispensable: true),
     (
         id: "chlorine",
         name: "Chlorine",
         color: (0.82, 0.90, 0.44),
         dispensable: true,
+        unlock_cost: Some(4),
         effects: [Harm(Brute, 1)],
     ),
-    (id: "copper",     name: "Copper",     color: (0.72, 0.45, 0.20), dispensable: true),
+    (
+        id: "copper",
+        name: "Copper",
+        color: (0.72, 0.45, 0.20),
+        dispensable: true,
+        unlock_cost: Some(3),
+    ),
     (
         id: "ethanol",
         name: "Ethanol",
         color: (0.85, 0.85, 0.80),
         dispensable: true,
+        unlock_cost: Some(4),
         // Lingers: half the usual rate, which is what makes one drink a
         // problem for the next twenty minutes of a shift.
         metabolism: Some(0.2),
         effects: [Status(kind: Drunk, seconds: 2.0, intensity: 0.65)],
     ),
-    (id: "hydrogen",   name: "Hydrogen",   color: (0.90, 0.90, 0.95), dispensable: true),
+    (
+        id: "hydrogen",
+        name: "Hydrogen",
+        color: (0.90, 0.90, 0.95),
+        dispensable: true,
+        unlock_cost: Some(2),
+    ),
     (
         id: "iron",
         name: "Iron",
         color: (0.50, 0.28, 0.24),
         dispensable: true,
+        unlock_cost: Some(2),
         // Iron restores blood in SS13, and blood loss is what oxygen damage
         // represents here.
         effects: [Heal(Oxygen, 1)],
     ),
+    // Free from the start — see the `carbon` note above.
     (id: "nitrogen",   name: "Nitrogen",   color: (0.62, 0.70, 0.86), dispensable: true),
+    // Free from the start — see the `carbon` note above.
     (id: "oxygen",     name: "Oxygen",     color: (0.60, 0.80, 1.00), dispensable: true),
-    (id: "phosphorus", name: "Phosphorus", color: (0.94, 0.90, 0.66), dispensable: true),
+    (
+        id: "phosphorus",
+        name: "Phosphorus",
+        color: (0.94, 0.90, 0.66),
+        dispensable: true,
+        unlock_cost: Some(3),
+    ),
     (
         id: "plasma",
         name: "Plasma",
         color: (0.72, 0.24, 0.86),
         dispensable: true,
+        unlock_cost: Some(5),
         // The most poisonous thing the dispenser will hand you, and it boils
         // off at 50°C — so heating a beaker to run a hot recipe can quietly
         // cost you the catalyst that recipe needed.
         boils_at: Some((323.15)),
         effects: [Harm(Toxin, 3)],
     ),
+    // Free from the start — see the `carbon` note above.
     (id: "potassium",  name: "Potassium",  color: (0.86, 0.84, 0.72), dispensable: true),
     (
         id: "radium",
         name: "Radium",
         color: (0.44, 0.90, 0.42),
         dispensable: true,
+        unlock_cost: Some(6),
         effects: [Harm(Toxin, 2)],
     ),
+    // Free from the start — see the `carbon` note above.
     (id: "silicon",    name: "Silicon",    color: (0.66, 0.68, 0.72), dispensable: true),
-    (id: "sodium",     name: "Sodium",     color: (0.90, 0.88, 0.82), dispensable: true),
+    (
+        id: "sodium",
+        name: "Sodium",
+        color: (0.90, 0.88, 0.82),
+        dispensable: true,
+        unlock_cost: Some(2),
+    ),
+    // Free from the start — see the `carbon` note above.
     (
         id: "sugar",
         name: "Sugar",
@@ -93,6 +145,7 @@
         name: "Sulfur",
         color: (0.95, 0.90, 0.35),
         dispensable: true,
+        unlock_cost: Some(3),
         effects: [Harm(Toxin, 0.5)],
     ),
     (
@@ -100,6 +153,7 @@
         name: "Water",
         color: (0.55, 0.72, 0.90),
         dispensable: true,
+        unlock_cost: Some(2),
         // The only thing in the lab that sobers you up.
         effects: [Counter(kind: Drunk, seconds: 2.0, intensity: 0.25)],
     ),
@@ -108,6 +162,10 @@
         name: "Fluorine",
         color: (0.78, 0.92, 0.72),
         dispensable: true,
+        // The priciest halogen: chlorine trifluoride is the one recipe it
+        // gates, and chlorine trifluoride is the one recipe that can detonate
+        // harder than phlogiston.
+        unlock_cost: Some(7),
         effects: [Harm(Toxin, 1)],
     ),
     (
@@ -115,6 +173,7 @@
         name: "Lithium",
         color: (0.66, 0.68, 0.74),
         dispensable: true,
+        unlock_cost: Some(6),
         effects: [Status(kind: Unsteady, seconds: 4.0, intensity: 1.0)],
     ),
     (
@@ -122,6 +181,7 @@
         name: "Iodine",
         color: (0.34, 0.24, 0.42),
         dispensable: true,
+        unlock_cost: Some(4),
         effects: [Harm(Toxin, 0.5)],
     ),
     (
@@ -129,6 +189,7 @@
         name: "Welding Fuel",
         color: (0.58, 0.44, 0.18),
         dispensable: true,
+        unlock_cost: Some(6),
         // Drinkable in the sense that a mouthful will not kill you outright.
         // It is still the worst decision available at the dispenser.
         effects: [Harm(Toxin, 1)],
@@ -138,6 +199,9 @@
         name: "Mercury",
         color: (0.60, 0.62, 0.66),
         dispensable: true,
+        // The most expensive unlock in the game — it gates nothing legitimate
+        // at all, only mindbreaker_toxin and zombie_powder, both Illicit.
+        unlock_cost: Some(8),
         // SS13's mercury does brain damage. There is no brain pool here, so it
         // maps onto toxin plus the twitching and the blurred vision that come
         // with it — the symptoms a chemist would actually notice.
@@ -166,6 +230,9 @@
         color: (0.85, 0.85, 0.60),
         treats: Some("Asphyxiation. Stabilises the critically injured."),
         categories: [Airloss],
+        // General stabiliser rather than airloss-specific, so it's the weak
+        // end of the category for order-favor purposes too.
+        potency: 1,
         // Weak on purpose: it is the thing you take to stop getting worse, not
         // the thing that fixes you.
         effects: [Heal(Oxygen, 0.5)],
@@ -177,6 +244,7 @@
         overdose: Some(20),
         treats: Some("Poisoning and toxin damage."),
         categories: [Antitoxins],
+        potency: 2,
         effects: [Heal(Toxin, 2)],
         overdose_effects: [Harm(Toxin, 1)],
     ),
@@ -187,6 +255,7 @@
         overdose: Some(15),
         treats: Some("Burns."),
         categories: [Burns],
+        potency: 1,
         effects: [Heal(Burn, 2)],
         overdose_effects: [Harm(Toxin, 1)],
     ),
@@ -197,6 +266,7 @@
         overdose: Some(15),
         treats: Some("Brute force trauma."),
         categories: [Trauma],
+        potency: 2,
         effects: [Heal(Brute, 2)],
         overdose_effects: [Harm(Toxin, 1)],
     ),
@@ -207,6 +277,7 @@
         overdose: Some(10),
         treats: Some("Severe burns. Stronger than kelotane."),
         categories: [Burns],
+        potency: 2,
         // Heals harder than kelotane and overdoses sooner. That trade is the
         // entire reason to keep both on the shelf.
         effects: [Heal(Burn, 3)],
@@ -219,6 +290,10 @@
         treats: Some("All basic damage types, slowly. A good all-rounder."),
         // The one reagent that earns a place under every medical heading.
         categories: [Trauma, Burns, Antitoxins, Airloss],
+        // The weak end of all four categories it belongs to — versatile, not
+        // potent. A department pays less favor for it than for a dedicated
+        // medicine, which is the honest trade for "one bottle treats anything".
+        potency: 1,
         effects: [Heal(Brute, 1), Heal(Burn, 1), Heal(Toxin, 1), Heal(Oxygen, 1)],
     ),
     (
@@ -228,6 +303,7 @@
         overdose: Some(20),
         treats: Some("Airloss and oxygen deprivation."),
         categories: [Airloss],
+        potency: 2,
         effects: [Heal(Oxygen, 3)],
         overdose_effects: [Harm(Toxin, 1)],
     ),
@@ -238,6 +314,7 @@
         overdose: Some(30),
         treats: Some("Mild radiation exposure."),
         categories: [Radiation],
+        potency: 1,
         effects: [Heal(Toxin, 1), Counter(kind: Irradiated, seconds: 2.0, intensity: 1.0)],
         overdose_effects: [Harm(Toxin, 1)],
     ),
@@ -247,6 +324,9 @@
         color: (0.70, 0.90, 0.45),
         treats: Some("Severe radiation poisoning."),
         categories: [Radiation],
+        // The strongest treatment in its category, and the hardest to make —
+        // the three-step chain earns its favor bonus.
+        potency: 3,
         // Strips radiation three times faster than hyronalin and takes a
         // little skin off doing it. No overdose threshold: the brute cost is
         // already the limiter.
@@ -263,6 +343,7 @@
         overdose: Some(30),
         treats: Some("Radiation, before you get it rather than after."),
         categories: [Radiation],
+        potency: 1,
         // Weaker than hyronalin at stripping a dose already taken, but it is
         // two base reagents and nothing else, so it is what you can have ready
         // in a bottle before the alarm goes off.
@@ -276,6 +357,8 @@
         overdose: Some(15),
         treats: Some("Concussion. Clears a rung head."),
         categories: [Stimulants],
+        // The one genuinely medical member of its category.
+        potency: 2,
         // Synaptizine does the same job harder and poisons you for it. This
         // does not, and overdoses at fifteen instead.
         effects: [
@@ -294,6 +377,7 @@
         overdose: Some(60),
         treats: Some("Trauma and burns together, slowly. Safe in bulk."),
         categories: [Trauma, Burns],
+        potency: 1,
         effects: [Heal(Brute, 0.5), Heal(Burn, 0.5)],
         overdose_effects: [Harm(Brute, 1), Harm(Burn, 1)],
     ),

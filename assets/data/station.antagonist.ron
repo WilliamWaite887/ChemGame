@@ -12,7 +12,13 @@
 // ever come from this file, through their own generator, on their own much
 // rarer clock.
 (
-    gap_seconds: (240.0, 420.0),
+    // Multiplied onto whatever the *current* legitimate order gap is, rather
+    // than a flat range — so an antagonist visit keeps pace with the ramp
+    // instead of staying at a fixed cadence while legitimate orders arrive
+    // faster and faster. At tier 0 (legit gap 32-58s) this lands close to
+    // the old flat 240-420s range; at the ramp's floor (legit gap 18s) it
+    // tightens to roughly 108-180s.
+    gap_multiplier: (6.0, 10.0),
     requests: [
         (
             reagent: "space_drugs",

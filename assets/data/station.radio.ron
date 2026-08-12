@@ -45,4 +45,20 @@
         (outcome: Expired, text: "Cancel the {reagent}. We sorted it ourselves. Took longer than it should have."),
         (outcome: Expired, role: Some("Medical"), text: "Medbay. We needed that {reagent} twenty minutes ago. Had to improvise."),
     ],
+
+    // A legitimate order names a kind of chemical, not a specific one — so
+    // when nothing in the delivery ever matched what was needed, there is no
+    // reagent left to name. These lines use `{category}` instead of
+    // `{reagent}` and only ever fire for Wrong/Expired, the two outcomes a
+    // legitimate order can resolve to with nothing matched at all.
+    category_lines: [
+        (outcome: Wrong, text: "{name} here. I asked for {category}. This isn't it. I don't know what this is."),
+        (outcome: Wrong, text: "Chem lab — did anyone actually read my order? There's no {category} in this at all."),
+        (outcome: Wrong, role: Some("Security"), text: "Reyes to chemistry. Wrong chemical entirely. I'm logging this one."),
+        (outcome: Wrong, role: Some("Service"), text: "I don't think this is {category}. I think this is floor cleaner. Please advise."),
+
+        (outcome: Expired, text: "{name} to chem lab. Waited as long as I could for some {category}. Gone to find it elsewhere."),
+        (outcome: Expired, text: "Cancel the order. We needed {category}, not a wait. Sorted it ourselves in the end."),
+        (outcome: Expired, role: Some("Medical"), text: "Medbay. We needed {category} twenty minutes ago. Had to improvise."),
+    ],
 )

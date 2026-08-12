@@ -96,6 +96,55 @@ impl Category {
             Category::Illicit => "Nobody will ever legitimately order these. Somebody might anyway.",
         }
     }
+
+    /// A noun phrase naming what a crew member wants without naming a
+    /// chemical — how a legitimate order describes itself now that it asks
+    /// for a kind of treatment rather than one exact answer. No leading
+    /// article, so it drops cleanly into "hand over {amount}u {phrase}", "I
+    /// asked for {phrase}" and "no {phrase} in this at all" alike.
+    ///
+    /// Only the six legitimately-orderable categories are ever actually shown
+    /// this way — the rest exist so the match stays exhaustive, matching
+    /// `.label()`/`.blurb()`.
+    pub fn want_phrase(self) -> &'static str {
+        match self {
+            Category::Trauma => "trauma treatment",
+            Category::Burns => "burn treatment",
+            Category::Antitoxins => "antitoxin",
+            Category::Airloss => "airloss treatment",
+            Category::Radiation => "radiation treatment",
+            Category::Stimulants => "something from the stimulant cabinet",
+            Category::Poisons => "poison",
+            Category::Pyrotechnics => "pyrotechnic",
+            Category::Precursors => "precursor",
+            Category::Utility => "utility chemical",
+            Category::Illicit => "illicit substance",
+        }
+    }
+
+    /// Whether legitimate crew could ever ask for this category. Only
+    /// `Trauma`/`Burns`/`Antitoxins`/`Airloss`/`Radiation`/`Stimulants` —
+    /// everything else is either not medicine (`Precursors`, `Utility`,
+    /// `Pyrotechnics`) or medicine nobody admits to needing
+    /// (`Poisons`, `Illicit`, the antagonist thread's exclusive domain).
+    ///
+    /// The one place this matters structurally rather than just for content
+    /// authoring: it is how the order-queue HUD decides whether to show a
+    /// want-phrase or a reagent's real name *without* ever querying whether
+    /// an order is secretly an antagonist's — see `IllicitOrder` in
+    /// `src/orders/mod.rs`. Every antagonist reagent is `Illicit`, so this
+    /// test is equivalent in practice and needs no forbidden marker query.
+    pub fn is_legitimately_orderable(self) -> bool {
+        matches!(
+            self,
+            Category::Trauma
+                | Category::Burns
+                | Category::Antitoxins
+                | Category::Airloss
+                | Category::Radiation
+                | Category::Stimulants
+        )
+    }
 }
 
 /// An interned reagent handle. Cheap to copy, compare and sort.
@@ -128,6 +177,14 @@ pub struct ReagentDef {
     /// Whether the base chemical dispenser can produce it directly.
     #[serde(default)]
     pub dispensable: bool,
+    /// Research points to unlock this at the dispenser. `None` means it is
+    /// available from the start (or is not `dispensable` at all, where this
+    /// is simply unused). `chem_sim` has no opinion on what "unlocked" means
+    /// — that state lives in `Knowledge` on the game side, the same split
+    /// `Category`'s book-organising role already draws. See
+    /// `Knowledge::unlock_reagent`.
+    #[serde(default)]
+    pub unlock_cost: Option<u32>,
     /// Whether it comes out of ground produce rather than the dispenser.
     ///
     /// The sibling of `dispensable`: both mean "obtainable without a
@@ -146,6 +203,14 @@ pub struct ReagentDef {
     /// which `every_reaction_files_under_a_heading` enforces.
     #[serde(default)]
     pub categories: Vec<Category>,
+    /// How good a treatment this is within its category, `0` for anything
+    /// never meant to satisfy an order. Only meaningful for reagents in
+    /// `Category::Trauma/Burns/Antitoxins/Airloss/Radiation/Stimulants` — the
+    /// six categories a legitimate order can ever require — where a
+    /// higher-potency delivery earns more department favor than the bare
+    /// minimum. See `orders::reputation_delta`.
+    #[serde(default)]
+    pub potency: u32,
 
     // ---- Body effects -----------------------------------------------------
     //
@@ -187,9 +252,11 @@ pub struct Reagent {
     pub color: [f32; 3],
     pub overdose: Option<Units>,
     pub dispensable: bool,
+    pub unlock_cost: Option<u32>,
     pub from_produce: bool,
     pub treats: Option<String>,
     pub categories: Vec<Category>,
+    pub potency: u32,
     pub metabolism: Option<Units>,
     pub effects: Vec<ReagentEffect>,
     pub overdose_effects: Vec<ReagentEffect>,
@@ -246,9 +313,11 @@ impl ReagentRegistry {
             color: def.color,
             overdose: def.overdose,
             dispensable: def.dispensable,
+            unlock_cost: def.unlock_cost,
             from_produce: def.from_produce,
             treats: def.treats,
             categories: def.categories,
+            potency: def.potency,
             metabolism: def.metabolism,
             effects: def.effects,
             overdose_effects: def.overdose_effects,

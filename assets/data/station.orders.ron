@@ -14,6 +14,12 @@
     patience_seconds: (135.0, 230.0),
     max_active: 3,
 
+    // How much rarer an "asks for it by name" order is than an ordinary
+    // lenient one, multiplied onto the *current* legitimate gap above —
+    // matches `station.antagonist.ron`'s own `gap_multiplier` by default, so
+    // an honest specific ask happens exactly as often as an illicit one.
+    specific_gap_multiplier: (6.0, 10.0),
+
     // How often the station briefing redraws. There is no shift boundary to
     // redraw it against any more — crew arrive continuously — so this is its
     // own clock.
@@ -94,60 +100,82 @@
         ),
     ],
 
+    // `reagent` is still what each request is authored around — it decides
+    // the category the request actually requires (see
+    // `orders::reference_category`) and gates reachability. `plea` no longer
+    // names it: a legitimate order now describes the problem, not the cure,
+    // and accepts any chemical that treats the same category — deliver a
+    // better one than whatever's implied here and it earns more department
+    // favor (see `Reagent::potency`). `specific_plea` is what the same
+    // request says on the rare occasions it is drawn as an exact ask instead
+    // — see `orders::generate_specific_orders`.
     requests: [
         (
             reagent: "bicaridine",
             themes: ["trauma"],
             amounts: [20, 30, 40],
-            plea: "Got a crewman bleeding badly down here. Bicaridine, quick as you can.",
+            plea: "Got a crewman bleeding badly down here. Whatever stops it, quick as you can.",
+            specific_plea: "Got a crewman bleeding badly down here. Bicaridine, quick as you can.",
         ),
         (
             reagent: "kelotane",
             themes: ["burns"],
             amounts: [20, 30],
-            plea: "Welder burn. Nothing dramatic. Some kelotane would sort it.",
+            plea: "Welder burn. Nothing dramatic. Something for it would sort him out.",
+            specific_plea: "Welder burn. Nothing dramatic. Some kelotane would sort it.",
         ),
         (
             reagent: "dermaline",
             themes: ["burns"],
             amounts: [15, 20, 30],
-            plea: "Plasma fire in engineering, burns are deep. Need dermaline.",
+            plea: "Plasma fire in engineering, burns are deep. Need your best burn treatment.",
+            specific_plea: "Plasma fire in engineering, burns are deep. Need dermaline — nothing weaker's touching this.",
         ),
         (
             reagent: "dylovene",
             themes: ["poison"],
             amounts: [20, 30],
-            plea: "Someone's been poisoned in the bar. Dylovene, please.",
+            plea: "Someone's been poisoned in the bar. Whatever clears it, please.",
+            specific_plea: "Someone's been poisoned in the bar. Dylovene, please.",
         ),
         (
             reagent: "inaprovaline",
-            themes: ["trauma"],
+            // Retagged from "trauma": the reagent's real category is
+            // Airloss, and "crashing" reads as breathing trouble just as
+            // well — the theme should match what the order now literally
+            // requires.
+            themes: ["asphyxiation"],
             amounts: [30, 45],
-            plea: "This one's crashing. Inaprovaline to hold them steady.",
+            plea: "This one's crashing. Something to hold them steady while they breathe.",
+            specific_plea: "This one's crashing. Inaprovaline to hold them steady.",
         ),
         (
             reagent: "tricordrazine",
             themes: ["trauma", "poison"],
             amounts: [30, 40],
-            plea: "Bit of everything wrong with this patient. Tricordrazine.",
+            plea: "Bit of everything wrong with this patient. Anything that covers it all.",
+            specific_plea: "Bit of everything wrong with this patient. Doctor wants Tricordrazine specifically — don't substitute.",
         ),
         (
             reagent: "dexalin",
             themes: ["asphyxiation"],
             amounts: [20, 30],
-            plea: "Hull breach on deck two, we have asphyxiation cases. Dexalin.",
+            plea: "Hull breach on deck two, we have asphyxiation cases. Anything that helps them breathe.",
+            specific_plea: "Hull breach on deck two, we have asphyxiation cases. Dexalin, by name — we're not taking chances.",
         ),
         (
             reagent: "hyronalin",
             themes: ["radiation"],
             amounts: [20, 30],
-            plea: "Walked past a leaking container. Mild dose. Hyronalin should do.",
+            plea: "Walked past a leaking container. Mild dose. Something for it should do.",
+            specific_plea: "Walked past a leaking container. Mild dose. Hyronalin should do.",
         ),
         (
             reagent: "arithrazine",
             themes: ["radiation"],
             amounts: [20, 30],
-            plea: "Containment failure. This is a serious dose. Arithrazine, now.",
+            plea: "Containment failure. This is a serious dose. Your strongest anti-rad, now.",
+            specific_plea: "Containment failure. This is a serious dose. Arithrazine, now — nothing else touches it in time.",
         ),
         (
             // The one order that comes in large. Saline-glucose overdoses at
@@ -156,19 +184,22 @@
             reagent: "saline_glucose",
             themes: ["trauma", "burns"],
             amounts: [40, 50],
-            plea: "Two walking wounded and no beds. Send saline-glucose, as much as you can spare.",
+            plea: "Two walking wounded and no beds. Send whatever you can spare, in bulk.",
+            specific_plea: "Two walking wounded and no beds. Send saline-glucose, as much as you can spare.",
         ),
         (
             reagent: "potassium_iodide",
             themes: ["radiation"],
             amounts: [20, 30],
-            plea: "Atmos are going into the containment bay. Potassium iodide, before they do.",
+            plea: "Atmos are going into the containment bay. Something for it, before they do.",
+            specific_plea: "Atmos are going into the containment bay. Potassium iodide, before they do.",
         ),
         (
             reagent: "mannitol",
             themes: ["concussion"],
             amounts: [15, 20],
-            plea: "Took a baton to the head and can't hold a thought. Mannitol should clear it.",
+            plea: "Took a baton to the head and can't hold a thought. Something should clear it.",
+            specific_plea: "Took a baton to the head and can't hold a thought. Mannitol should clear it — synaptizine makes him worse.",
         ),
     ],
 )

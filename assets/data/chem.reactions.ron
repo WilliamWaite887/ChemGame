@@ -410,8 +410,18 @@
         overheat_temp: Some((500.0)),
         overheat: Detonate(power: 4.0),
         // Hotter per unit than phlogiston, and with a narrower window: 424K to
-        // start, 500K to detonate. A large batch closes that gap on its own.
-        effects: [Heat(3.0)],
+        // start, 500K to detonate. Reactants are a 3:1 ratio (not
+        // phlogiston's 1:1:1), so `scale` is chlorine's share:
+        //
+        //   50u beaker, at most 12-of-ratio  ->  ~472K, safe at any fill
+        //   100u beaker, under 20-of-ratio    ->  under 500K, safe
+        //   100u beaker, 20-of-ratio or more  ->  past 500K, detonates
+        //
+        // Tuned deliberately. At the original 3.0 a full 100u beaker
+        // (25-of-ratio) peaked at 499.5K — 0.5K short of 500K — which made
+        // the overheat rule dead data exactly the way phlogiston's original
+        // 1.2 did, just close enough to the line that it went unnoticed.
+        effects: [Heat(4.0)],
         priority: 25,
         hints: [
             "Two base reagents, and the chamber has to be very hot indeed.",

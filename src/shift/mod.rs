@@ -621,6 +621,7 @@ mod tests {
             reagent: "kelotane".into(),
             amounts: vec![20],
             plea: String::new(),
+            specific_plea: String::new(),
             themes: themes.iter().map(|theme| theme.to_string()).collect(),
         }
     }

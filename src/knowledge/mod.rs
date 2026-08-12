@@ -28,10 +28,27 @@ pub const STARTING_RECIPES: [&str; 3] = ["inaprovaline", "dylovene", "kelotane"]
 
 /// Hints visible before any research is spent.
 const FREE_HINTS: usize = 1;
-/// Research points a hint costs.
-pub const HINT_COST: u32 = 1;
+/// Research points a hint costs. Every recipe's last hint is the literal
+/// recipe, so this is what paces "deduction over a small candidate set" into
+/// actually being deduction rather than a two-delivery unlock: a typical
+/// 3-hint recipe now costs 4 points (≈4 deliveries, or two purchased grants)
+/// to fully reveal instead of 2. `FREE_HINTS` stays untouched — the one free
+/// hint is what bootstraps the very first reasoned guess.
+pub const HINT_COST: u32 = 2;
 /// Points earned for a clean delivery.
 pub const RESEARCH_PER_SUCCESS: u32 = 1;
+
+/// Distinct reagents a beaker can hold when it reacts and still count as a
+/// focused experiment worth learning from — see
+/// `chem_sim::ResolveReport::distinct_reagents` for why this works at all: a
+/// legitimate build, however deep the chain, never has more present at once
+/// than its widest single step's own reactant-plus-catalyst count (4, for
+/// `smoke_powder`), because the resolver eagerly consumes intermediates as
+/// they form. `5` gives that one unit of slack for a leftover catalyst from
+/// an earlier step still sitting in the beaker, while comfortably refusing a
+/// dump of most/all base reagents at once. Pinned by
+/// `every_reactions_reactant_and_catalyst_count_fits_under_the_crowd_threshold`.
+pub const CROWD_THRESHOLD: usize = 5;
 
 use crate::saves::SaveSlot;
 
@@ -41,6 +58,10 @@ impl Plugin for KnowledgePlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<RecipeDiscovered>()
             .add_server_message::<KnowledgeSync>(Channel::Ordered)
+            // Not `add_mapped_client_message` — it carries no `Entity` at
+            // all (unlocking is career-wide, not tied to a machine), so
+            // there is nothing for `MapEntities` to translate.
+            .add_client_message::<UnlockReagentRequested>(Channel::Ordered)
             .add_systems(OnEnter(AppState::Playing), initialise_knowledge)
             .add_systems(
                 Update,
@@ -48,6 +69,7 @@ impl Plugin for KnowledgePlugin {
                     // The shared notebook belongs to the lab, so the server
                     // owns it and only the server writes the save file.
                     (
+                        handle_reagent_unlock,
                         learn_from_experiments,
                         persist_knowledge,
                         broadcast_knowledge,
@@ -58,6 +80,30 @@ impl Plugin for KnowledgePlugin {
                 )
                     .run_if(in_state(AppState::Playing)),
             );
+    }
+}
+
+/// A client asking to unlock a dispensable reagent. Deliberately not tied to
+/// a machine — unlocking is a career-wide upgrade, not something one specific
+/// dispenser owns, the same way [`RecipeDiscovered`] and buying a hint aren't
+/// either. Unlike the hint-buying button (which mutates the local
+/// `Knowledge` directly and only actually sticks for whichever peer is
+/// authoritative), this crosses the network properly: the server is the only
+/// one that ever calls [`Knowledge::unlock_reagent`], via
+/// [`handle_reagent_unlock`], so a joining client's purchase is never quietly
+/// overwritten by the next [`KnowledgeSync`].
+#[derive(Message, Serialize, Deserialize)]
+pub struct UnlockReagentRequested {
+    pub reagent: ReagentId,
+}
+
+fn handle_reagent_unlock(
+    db: Res<ChemDb>,
+    mut requests: MessageReader<FromClient<UnlockReagentRequested>>,
+    mut knowledge: ResMut<Knowledge>,
+) {
+    for request in requests.read() {
+        knowledge.unlock_reagent(&db, request.reagent);
     }
 }
 
@@ -77,6 +123,10 @@ pub struct RecipeDiscovered {
 pub struct Knowledge {
     entries: HashMap<ReactionId, Entry>,
     pub research_points: u32,
+    /// Locked (`unlock_cost: Some(_)`) reagents that have been bought at the
+    /// dispenser. Starts empty — a reagent with no `unlock_cost` is available
+    /// unconditionally and never needs an entry here; see [`Self::dispensable`].
+    unlocked_reagents: HashSet<ReagentId>,
 }
 
 impl Knowledge {
@@ -99,6 +149,7 @@ impl Knowledge {
         Knowledge {
             entries,
             research_points: 0,
+            unlocked_reagents: HashSet::new(),
         }
     }
 
@@ -155,10 +206,50 @@ impl Knowledge {
         false
     }
 
+    /// Every dispensable reagent the chemist can actually draw from right
+    /// now — the ones with no `unlock_cost`, plus whichever locked ones have
+    /// been bought. Not necessarily all of them.
+    pub fn dispensable(&self, data: &ChemData) -> HashSet<ReagentId> {
+        data.reagents
+            .dispensable()
+            .filter(|r| r.unlock_cost.is_none() || self.unlocked_reagents.contains(&r.id))
+            .map(|r| r.id)
+            .collect()
+    }
+
+    /// Whether the dispenser will actually hand this over right now.
+    pub fn is_reagent_unlocked(&self, data: &ChemData, reagent: ReagentId) -> bool {
+        data.reagents.get(reagent).unlock_cost.is_none() || self.unlocked_reagents.contains(&reagent)
+    }
+
+    /// Research points to unlock this reagent, or `None` if it needs no
+    /// unlocking at all (free from the start, or already bought).
+    pub fn reagent_unlock_cost(&self, data: &ChemData, reagent: ReagentId) -> Option<u32> {
+        if self.is_reagent_unlocked(data, reagent) {
+            return None;
+        }
+        data.reagents.get(reagent).unlock_cost
+    }
+
+    /// Spends research points to unlock a dispensable reagent. Returns false
+    /// if it needs no unlocking (free, or already bought) or the chemist
+    /// cannot afford it — never partially spends.
+    pub fn unlock_reagent(&mut self, data: &ChemData, reagent: ReagentId) -> bool {
+        let Some(cost) = self.reagent_unlock_cost(data, reagent) else {
+            return false;
+        };
+        if self.research_points < cost {
+            return false;
+        }
+        self.research_points -= cost;
+        self.unlocked_reagents.insert(reagent);
+        true
+    }
+
     /// Every reagent the chemist can currently produce, plus the base reagents
     /// they can dispense.
     pub fn available_reagents(&self, data: &ChemData) -> HashSet<ReagentId> {
-        let mut available: HashSet<ReagentId> = data.reagents.dispensable().map(|r| r.id).collect();
+        let mut available: HashSet<ReagentId> = self.dispensable(data);
 
         // Known recipes feed each other, so keep going until nothing new
         // appears rather than making a single pass.
@@ -233,10 +324,20 @@ impl Knowledge {
             }
         }
         known.sort();
+        // Keys, not ids, for the same reason `known` uses them: ids are
+        // positions in the data file, and this must survive one shifting
+        // under it.
+        let mut unlocked_reagents: Vec<String> = self
+            .unlocked_reagents
+            .iter()
+            .map(|&id| data.reagents.get(id).key.clone())
+            .collect();
+        unlocked_reagents.sort();
         SaveData {
             known,
             hints,
             research_points: self.research_points,
+            unlocked_reagents,
         }
     }
 
@@ -257,6 +358,11 @@ impl Knowledge {
                 }
             }
         }
+        for key in &save.unlocked_reagents {
+            if let Some(id) = data.reagents.id_of(key) {
+                knowledge.unlocked_reagents.insert(id);
+            }
+        }
         knowledge
     }
 }
@@ -273,6 +379,8 @@ struct SaveData {
     hints: HashMap<String, usize>,
     #[serde(default)]
     research_points: u32,
+    #[serde(default)]
+    unlocked_reagents: Vec<String>,
 }
 
 fn initialise_knowledge(mut commands: Commands, db: Res<ChemDb>, slot: Option<Res<SaveSlot>>) {
@@ -352,11 +460,17 @@ fn default_ron_config() -> ron::ser::PrettyConfig {
     ron::ser::PrettyConfig::default()
 }
 
-/// Records any reaction the chemist manages to cause.
+/// Records any reaction the chemist manages to cause — but only from a
+/// focused experiment, not a shotgun dump.
 ///
 /// Making the thing *is* the discovery — there is no separate "confirm" step,
 /// because a chemist who has just watched a beaker turn the right colour knows
-/// perfectly well what they did.
+/// perfectly well what they did. That reasoning breaks down once the beaker
+/// holds more than a handful of unrelated reagents at once: nothing was
+/// *understood*, something just happened to be in the mix. The chemistry
+/// itself is never withheld — reactants still consume, products still form,
+/// hazards still fire — only the "you now know this" credit is, when
+/// [`CROWD_THRESHOLD`] is exceeded.
 fn learn_from_experiments(
     db: Res<ChemDb>,
     mut knowledge: ResMut<Knowledge>,
@@ -365,6 +479,19 @@ fn learn_from_experiments(
     mut radio: ResMut<RadioLog>,
 ) {
     for event in fired.read() {
+        if event.distinct_reagents > CROWD_THRESHOLD {
+            // Only worth a line if something was actually missed — a crowded
+            // beaker that only ever touches recipes already known costs
+            // nothing, so nagging about it would just be noise.
+            if event.reactions.iter().any(|reaction| !knowledge.is_known(*reaction)) {
+                radio.push(RadioEntry {
+                    channel: "LAB".to_string(),
+                    text: "Too much going on in that beaker to tell what did what.".to_string(),
+                    good: false,
+                });
+            }
+            continue;
+        }
         for reaction in &event.reactions {
             if !knowledge.learn(*reaction) {
                 continue;
@@ -467,6 +594,158 @@ mod tests {
         }
     }
 
+    // -- reagent unlocks ---------------------------------------------------
+
+    #[test]
+    fn every_starting_ingredients_reagent_is_unlocked_free() {
+        // Every base reagent the 3 starting recipes need must have no
+        // unlock_cost at all, or a fresh chemist could not even make what
+        // they're supposed to already know. Derived from the data rather
+        // than hardcoded, so a future edit to a starting recipe's own
+        // ingredients can't silently strand it behind a lock.
+        let data = data();
+        for key in STARTING_RECIPES {
+            let reaction = data.reactions.find(key).unwrap();
+            for &(reagent, _) in reaction.reactants.iter().chain(reaction.catalysts.iter()) {
+                assert!(
+                    data.reagents.get(reagent).unlock_cost.is_none(),
+                    "'{}', needed by starting recipe '{key}', is locked",
+                    data.reagents.get(reagent).key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_fresh_chemist_can_only_dispense_the_starting_reagents() {
+        let data = data();
+        let knowledge = Knowledge::new(&data);
+        let dispensable_count = data.reagents.dispensable().count();
+        let unlocked_count = knowledge.dispensable(&data).len();
+        assert!(
+            unlocked_count < dispensable_count,
+            "some dispensable reagents must start locked, or the feature does nothing"
+        );
+        for reagent in knowledge.dispensable(&data) {
+            assert!(data.reagents.get(reagent).unlock_cost.is_none());
+        }
+    }
+
+    #[test]
+    fn unlocking_spends_research_and_only_once() {
+        let data = data();
+        let mut knowledge = Knowledge::new(&data);
+        let hydrogen = data.reagent("hydrogen");
+        let cost = data.reagents.get(hydrogen).unlock_cost.unwrap();
+
+        assert!(
+            !knowledge.unlock_reagent(&data, hydrogen),
+            "cannot unlock with no research"
+        );
+        assert!(!knowledge.is_reagent_unlocked(&data, hydrogen));
+
+        knowledge.award_research(cost);
+        assert!(knowledge.unlock_reagent(&data, hydrogen));
+        assert_eq!(knowledge.research_points, 0);
+        assert!(knowledge.is_reagent_unlocked(&data, hydrogen));
+        assert_eq!(knowledge.reagent_unlock_cost(&data, hydrogen), None);
+
+        // Buying it again would be a silent double-charge.
+        knowledge.award_research(cost);
+        assert!(!knowledge.unlock_reagent(&data, hydrogen));
+        assert_eq!(knowledge.research_points, cost);
+    }
+
+    #[test]
+    fn unlocking_a_free_reagent_does_nothing() {
+        let data = data();
+        let mut knowledge = Knowledge::new(&data);
+        knowledge.award_research(100);
+        let carbon = data.reagent("carbon");
+        assert!(!knowledge.unlock_reagent(&data, carbon));
+        assert_eq!(knowledge.research_points, 100, "nothing should have been spent");
+    }
+
+    #[test]
+    fn an_unlocked_reagent_survives_a_save_round_trip() {
+        let data = data();
+        let mut original = Knowledge::new(&data);
+        let hydrogen = data.reagent("hydrogen");
+        original.award_research(10);
+        assert!(original.unlock_reagent(&data, hydrogen));
+
+        let text = ron::ser::to_string(&original.to_save(&data)).unwrap();
+        let restored = Knowledge::from_save(&data, ron::from_str(&text).unwrap());
+
+        assert!(restored.is_reagent_unlocked(&data, hydrogen));
+        // A reagent removed from a later data file must not panic on load —
+        // mirrors `a_save_survives_recipes_being_added_to_the_data_file`.
+        let save = original.to_save(&data);
+        assert!(save.unlocked_reagents.contains(&"hydrogen".to_string()));
+    }
+
+    fn learn_app() -> App {
+        let data = data();
+        let mut app = App::new();
+        app.insert_resource(Knowledge::new(&data))
+            .insert_resource(ChemDb(data))
+            .init_resource::<RadioLog>()
+            .add_message::<ReactionsFired>()
+            .add_message::<RecipeDiscovered>()
+            .add_systems(Update, learn_from_experiments);
+        app
+    }
+
+    #[test]
+    fn a_crowded_experiment_teaches_nothing_but_a_focused_one_does() {
+        let mut app = learn_app();
+        let bicaridine = app.world().resource::<ChemDb>().reactions.find("bicaridine").unwrap().id;
+        let dexalin = app.world().resource::<ChemDb>().reactions.find("dexalin").unwrap().id;
+
+        app.world_mut().write_message(ReactionsFired {
+            reactions: vec![bicaridine],
+            container: Entity::PLACEHOLDER,
+            effects: Vec::new(),
+            distinct_reagents: CROWD_THRESHOLD + 1,
+        });
+        app.update();
+        assert!(
+            !app.world().resource::<Knowledge>().is_known(bicaridine),
+            "a beaker crowded past the threshold should teach nothing"
+        );
+
+        app.world_mut().write_message(ReactionsFired {
+            reactions: vec![dexalin],
+            container: Entity::PLACEHOLDER,
+            effects: Vec::new(),
+            distinct_reagents: CROWD_THRESHOLD,
+        });
+        app.update();
+        assert!(
+            app.world().resource::<Knowledge>().is_known(dexalin),
+            "exactly at the threshold should still count as focused"
+        );
+    }
+
+    #[test]
+    fn every_reactions_reactant_and_catalyst_count_fits_under_the_crowd_threshold() {
+        // The property `CROWD_THRESHOLD` actually depends on: no single
+        // reaction should ever need more distinct reagents than the
+        // threshold allows, or a chemist could never legitimately reach it
+        // in one focused experiment. If a future recipe needs more, this is
+        // the test that should fail — raise the threshold deliberately
+        // rather than let discovery quietly go dead for one recipe.
+        let data = data();
+        for reaction in data.reactions.iter() {
+            let count = reaction.reactants.len() + reaction.catalysts.len();
+            assert!(
+                count <= CROWD_THRESHOLD,
+                "'{}' needs {count} distinct reagents at once, over the crowd threshold of {CROWD_THRESHOLD}",
+                reaction.key
+            );
+        }
+    }
+
     #[test]
     fn the_frontier_is_exactly_what_one_experiment_could_reach() {
         let data = data();
@@ -478,46 +757,18 @@ mod tests {
             .collect();
         frontier.sort();
 
-        // Arithrazine is two steps out and must NOT appear until hyronalin is
-        // learned. Phlogiston likewise, because it needs sulphuric acid first —
-        // which is the check that matters most here, since it is the one recipe
-        // that can hurt you. Of the recipes added since, `smoke_powder` is the
-        // one to watch: it is one catalyst away from `smoke` and must wait for
-        // stabilizing agent. `krokodil`/`methamphetamine`/`bath_salts` are
-        // deliberately absent too — each needs a compound (`oil`, `ammonia`,
-        // `space_drugs`) first, unlike the other three Illicit reagents below,
-        // which are one base-reagent mix away like anything else this early.
-        assert_eq!(
-            frontier,
-            vec![
-                "ammonia",
-                "bicaridine",
-                "chloral_hydrate",
-                "chlorine_trifluoride",
-                "dermaline",
-                "dexalin",
-                "flash_powder",
-                "hooch",
-                "hydrogen_peroxide",
-                "hyperzine",
-                "hyronalin",
-                "ice",
-                "mannitol",
-                "mindbreaker_toxin",
-                "oil",
-                "potassium_iodide",
-                "smoke",
-                "sodium_chloride",
-                "space_drugs",
-                "stabilizing_agent",
-                "sulphuric_acid",
-                "synaptizine",
-                "thermite",
-                "tricordrazine",
-                "unstable_mutagen",
-                "zombie_powder",
-            ]
-        );
+        // Only 6 of the 23 dispensable reagents are unlocked at career start
+        // (oxygen, carbon, sugar, silicon, nitrogen, potassium — exactly what
+        // the 3 starting recipes need), so the frontier this early is much
+        // smaller than the recipe graph alone would suggest: bicaridine
+        // (inaprovaline + carbon) and tricordrazine (inaprovaline + dylovene)
+        // are the only locked recipes buildable from starting knowledge and
+        // unlocked reagents alone. Everything else needs at least one locked
+        // reagent — dermaline needs phosphorus, hyronalin needs radium, and
+        // so on — regardless of how close it looks in the recipe graph.
+        // `every_starting_ingredients_reagent_is_unlocked_free` pins the
+        // other half of this: the 6 that must never end up locked.
+        assert_eq!(frontier, vec!["bicaridine", "tricordrazine"]);
     }
 
     #[test]
@@ -536,6 +787,16 @@ mod tests {
 
         assert!(knowledge.learn(hyronalin), "learning it should be news");
         assert!(!knowledge.learn(hyronalin), "learning it twice should not");
+
+        // Knowing the recipe and being able to make it right now are
+        // different things: `available_reagents` only counts hyronalin
+        // itself as available once *its* ingredients (radium) are unlocked
+        // too, and arithrazine additionally needs hydrogen. Neither is what
+        // this test is actually about (frontier growth on learning, not the
+        // reagent-unlock economy), so unlock both directly.
+        knowledge.award_research(100);
+        assert!(knowledge.unlock_reagent(&data, data.reagent("radium")));
+        assert!(knowledge.unlock_reagent(&data, data.reagent("hydrogen")));
 
         assert!(
             knowledge
@@ -558,7 +819,7 @@ mod tests {
             "cannot buy a hint with no research"
         );
 
-        knowledge.award_research(1);
+        knowledge.award_research(HINT_COST);
         assert!(knowledge.buy_hint(&data, bicaridine));
         assert_eq!(knowledge.research_points, 0);
         assert_eq!(
@@ -615,7 +876,7 @@ mod tests {
 
         assert!(restored.is_known(bicaridine));
         assert_eq!(restored.known_count(), original.known_count());
-        assert_eq!(restored.research_points, 3);
+        assert_eq!(restored.research_points, 4 - HINT_COST);
         assert_eq!(
             restored.visible_hints(&data, dermaline).len(),
             FREE_HINTS + 1

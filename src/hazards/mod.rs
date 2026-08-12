@@ -566,6 +566,7 @@ mod tests {
             reactions: Vec::new(),
             container,
             effects,
+            distinct_reagents: 0,
         });
         app.update();
     }

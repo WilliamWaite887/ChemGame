@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 use bevy_common_assets::ron::RonAssetPlugin;
 use bevy_replicon::prelude::*;
-use chem_sim::{ReagentId, Solution, Units};
+use chem_sim::{Category, ReagentId, Solution, Units};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +54,9 @@ impl Plugin for OrderPlugin {
                     // player's own "not accepting requests" toggle, checked
                     // inside `generate_orders` itself against `Shift`.
                     generate_orders,
+                    // Its rarer, exact-asking sibling — same sign, same
+                    // queue cap, its own much slower clock.
+                    generate_specific_orders,
                     // Deliberately not gated the same way: the sign stops new
                     // arrivals, not the clock on whoever is already waiting.
                     expire_orders,
@@ -89,6 +92,14 @@ pub struct OrderConfig {
     /// redraw it against any more, so it runs on its own clock.
     #[serde(default = "default_forecast_seconds")]
     pub forecast_seconds: (f32, f32),
+    /// Multiplied onto the *current* legitimate order gap to get the clock
+    /// between "asks for it by name" orders — the same shape
+    /// `antagonist::AntagonistScript::gap_multiplier` uses, and defaulted to
+    /// the same range, so an honest specific ask is exactly as rare as an
+    /// illicit one unless deliberately tuned apart. See
+    /// [`generate_specific_orders`].
+    #[serde(default = "default_specific_gap_multiplier")]
+    pub specific_gap_multiplier: (f32, f32),
     /// How the numbers above tighten as the career goes on.
     #[serde(default)]
     pub ramp: RampDef,
@@ -105,11 +116,21 @@ fn default_forecast_seconds() -> (f32, f32) {
     (180.0, 300.0)
 }
 
+/// Matches `antagonist.ron`'s own default — see
+/// `OrderConfig::specific_gap_multiplier`.
+fn default_specific_gap_multiplier() -> (f32, f32) {
+    (6.0, 10.0)
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct RequestDef {
     pub reagent: String,
     pub amounts: Vec<u32>,
     pub plea: String,
+    /// The plea when this same request is drawn as a specific ask instead of
+    /// a lenient category one — see [`Order::specific`]. Names the chemical
+    /// directly, the way `plea` no longer does.
+    pub specific_plea: String,
     /// What kind of briefing this request belongs to, so a forecast can lean
     /// on it. An untagged request can never be forecast — see
     /// `every_request_carries_a_theme`.
@@ -234,6 +255,16 @@ pub struct OrderSpawner {
     pub timer: Timer,
 }
 
+/// The clock between "asks for it by name" orders — separate from
+/// `OrderSpawner`'s lenient/category cadence, and matched to
+/// `antagonist::AntagonistSpawner`'s by default: an honest specific ask
+/// happens exactly as often as an illicit one, unless deliberately tuned
+/// apart. See [`generate_specific_orders`].
+#[derive(Resource)]
+pub struct SpecificOrderSpawner {
+    pub timer: Timer,
+}
+
 fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(PendingStationData {
         crew: assets.load("data/station.crew.ron"),
@@ -246,6 +277,7 @@ fn promote_station_data(
     pending: Option<Res<PendingStationData>>,
     mut crew_lists: ResMut<Assets<CrewList>>,
     mut configs: ResMut<Assets<OrderConfig>>,
+    shift: Res<Shift>,
 ) {
     let Some(pending) = pending else {
         return;
@@ -259,6 +291,17 @@ fn promote_station_data(
 
     commands.insert_resource(OrderSpawner {
         timer: Timer::from_seconds(config.first_order_delay, TimerMode::Once),
+    });
+    // The first specific ask is armed on the same ramp-scaled cadence its
+    // own re-arm uses — `Shift` is already at its tier-0 default here, so
+    // (unlike the antagonist thread's very first visit) this needs no
+    // separate flat constant.
+    let rules = current_rules(&config, &shift);
+    let mut rng = rand::rng();
+    let first_specific_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1)
+        * rng.random_range(config.specific_gap_multiplier.0..=config.specific_gap_multiplier.1);
+    commands.insert_resource(SpecificOrderSpawner {
+        timer: Timer::from_seconds(first_specific_gap, TimerMode::Once),
     });
     commands.insert_resource(StationData {
         crew: crew.0,
@@ -278,7 +321,26 @@ fn promote_station_data(
 /// co-op now see the same queue with the same countdowns.
 #[derive(Component, Clone, Serialize, Deserialize)]
 pub struct Order {
+    /// The reagent this request was authored around. For an [`IllicitOrder`]
+    /// or a [`specific`](Order::specific) order this is still the one exact
+    /// answer. For an ordinary lenient order it is only a *reference* —
+    /// grading, the delivery prompt and the order-queue HUD all read the
+    /// **category** this reagent belongs to (see [`reference_category`]) and
+    /// accept any member of it, never the literal reagent named here. See
+    /// [`grade`] and [`Wanted`].
     pub reagent: ReagentId,
+    /// Whether this order wants exactly `reagent` rather than any member of
+    /// its category — the same trade an [`IllicitOrder`] always makes, now
+    /// something an ordinary crew member does too, on its own much rarer
+    /// clock (see [`generate_specific_orders`]). Unlike `IllicitOrder` there
+    /// is nothing to hide here: the exact reagent is right there in the
+    /// prompt and the plea, so a specific order that resolves `Wrong` names
+    /// it in the report exactly as it always has, and this field is freely
+    /// replicated and queryable everywhere (contrast `IllicitOrder`'s own
+    /// doc comment). Always `false` on an `IllicitOrder` — that thread's
+    /// exactness comes from the marker, not this field, and the two never
+    /// stack.
+    pub specific: bool,
     pub amount: Units,
     pub plea: String,
     /// Seconds before a waiting crew member gives up and leaves.
@@ -350,27 +412,49 @@ impl Outcome {
 /// endpoint reproduces the flat constants this replaced exactly, so only the
 /// stale endpoint is new — a fast delivery scores the same as it always did,
 /// and everything to do with taking your time is the addition.
-pub fn reputation_delta(outcome: Outcome, waited: f32, patience: f32) -> i32 {
+///
+/// `potency` only ever adds — never subtracts — and only on `Success`
+/// (`potency.saturating_sub(1)`, so the weakest member of any category
+/// reproduces exactly today's flat reward, and a stronger choice earns more).
+/// A short, impure, overdosed, wrong or expired delivery earns no quality
+/// bonus regardless of what was in the beaker.
+pub fn reputation_delta(outcome: Outcome, waited: f32, patience: f32, potency: u32) -> i32 {
     let t = if patience > 0.0 {
         (waited / patience).clamp(0.0, 1.0)
     } else {
         1.0
     };
     let (fresh, stale) = outcome.reputation_range();
-    (fresh as f32 + (stale - fresh) as f32 * t).round() as i32
+    let base = (fresh as f32 + (stale - fresh) as f32 * t).round() as i32;
+    if outcome == Outcome::Success {
+        base + potency.saturating_sub(1) as i32
+    } else {
+        base
+    }
 }
 
 /// Emitted when an order finishes, one way or another.
 ///
-/// Nothing reads it yet: M5's radio chatter is built on top of exactly this,
-/// which is why the outcome carries the requester's name and role rather than
-/// just a score delta.
+/// M5's radio chatter is built on top of exactly this, which is why the
+/// outcome carries the requester's name and role rather than just a score
+/// delta.
 #[derive(Message)]
 #[allow(dead_code)]
 pub struct OrderResolved {
     pub name: String,
     pub role: String,
-    pub reagent: ReagentId,
+    /// The reagent to name in a report, if any. Always `Some` for an
+    /// [`IllicitOrder`] (the pretext already named the substance up front, so
+    /// there's nothing to protect) and for a legitimate order that matched
+    /// something (`Success`/`Short`/`Impure`/`Overdose`) — there it names
+    /// whatever the chemist actually delivered, which may differ from
+    /// [`Order::reagent`]. `None` only for a legitimate order that resolved
+    /// with nothing matching its category (`Wrong` or `Expired`): naming
+    /// [`Order::reagent`] there would leak the one reagent the player was
+    /// never told to look for.
+    pub reagent: Option<ReagentId>,
+    /// The category to name in a report instead, when `reagent` is `None`.
+    pub category: Option<Category>,
     pub outcome: Outcome,
     /// Whether this was secretly an antagonist's order. Never surfaced in the
     /// UI — read only by `antagonist`'s own resolution handler, which is what
@@ -517,41 +601,109 @@ fn apply_shift(mut shift: ResMut<Shift>, mut incoming: MessageReader<ShiftSync>)
     }
 }
 
-/// Decides how a delivery went.
+/// What a delivery is graded against: the one exact answer an [`IllicitOrder`]
+/// always wants, or the category a legitimate order now leniently accepts any
+/// member of.
+#[derive(Clone, Copy)]
+pub enum Wanted {
+    Exact(ReagentId),
+    Category(Category),
+}
+
+/// The category a legitimate request's reference reagent actually requires —
+/// its first-listed category, the same "first" convention `product_name` and
+/// `reaction_categories` already use in `src/knowledge/mod.rs`. `None` only
+/// for a content bug (a reference reagent with no category at all), guarded
+/// against by `every_legitimate_requests_reference_reagent_has_a_category`.
+pub fn reference_category(db: &ChemDb, reagent: ReagentId) -> Option<Category> {
+    db.reagents.get(reagent).categories.first().copied()
+}
+
+/// What an order is graded against: exact for an [`IllicitOrder`] or a
+/// [`specific`](Order::specific) one, otherwise the category its reference
+/// reagent belongs to — falling back to exact only if that reagent somehow
+/// names no category at all, a content bug, not a reason to panic.
+pub fn wanted_for(order: &Order, illicit: bool, db: &ChemDb) -> Wanted {
+    if illicit || order.specific {
+        return Wanted::Exact(order.reagent);
+    }
+    match reference_category(db, order.reagent) {
+        Some(cat) => Wanted::Category(cat),
+        None => Wanted::Exact(order.reagent),
+    }
+}
+
+/// Whether an order's exact reagent is ever named in a report or a
+/// container-matching check — true for an [`IllicitOrder`] (whose pretext
+/// already named it up front) and for a [`specific`](Order::specific) order
+/// (which named it in its own prompt/plea). Both have nothing left to
+/// protect; only a lenient order's reference reagent must stay unnamed on an
+/// unmatched resolution.
+fn is_named(order: &Order, illicit: bool) -> bool {
+    illicit || order.specific
+}
+
+/// Whether any reagent in `set` belongs to `cat` — the reachability test for
+/// a category request: it counts as reachable the moment *any* member is
+/// makeable, not only the specific reagent the request happens to be
+/// authored around.
+pub fn category_has_member_in(db: &ChemDb, cat: Category, set: &HashSet<ReagentId>) -> bool {
+    db.reagents
+        .iter()
+        .any(|r| r.categories.contains(&cat) && set.contains(&r.id))
+}
+
+/// Decides how a delivery went, and which reagent it was actually judged
+/// against.
 ///
-/// Pure and ECS-free so every branch can be tested directly. Order matters:
-/// the checks run worst-first, because a pill that is both overdosed and
-/// contaminated should be reported as the overdose.
+/// Pure and ECS-free (beyond the `ChemDb` lookup) so every branch can be
+/// tested directly. Order matters: the checks run worst-first, because a pill
+/// that is both overdosed and contaminated should be reported as the
+/// overdose. The returned `ReagentId` is `None` only for `Outcome::Wrong` —
+/// nothing in the delivery matched what was wanted, so there is nothing to
+/// name back.
 pub fn grade(
-    requested_reagent: ReagentId,
+    wanted: Wanted,
     requested_amount: Units,
     delivered: &Solution,
     kind: ContainerKind,
-    overdose_threshold: Option<Units>,
-) -> Outcome {
-    let supplied = delivered.volume_of(requested_reagent);
-    if !supplied.is_positive() {
-        return Outcome::Wrong;
-    }
+    db: &ChemDb,
+) -> (Outcome, Option<ReagentId>) {
+    let matched = match wanted {
+        Wanted::Exact(id) => {
+            let supplied = delivered.volume_of(id);
+            supplied.is_positive().then_some((id, supplied))
+        }
+        // The dominant category member present, by volume — a beaker holding
+        // more than one is still Impure below, exactly as a beaker holding
+        // the exact reagent plus something unrelated always has been.
+        Wanted::Category(cat) => delivered
+            .iter()
+            .filter(|(id, _)| db.reagents.get(*id).categories.contains(&cat))
+            .max_by_key(|(_, amount)| *amount),
+    };
+    let Some((reagent, supplied)) = matched else {
+        return (Outcome::Wrong, None);
+    };
 
     // Only single-dose forms can overdose. A beaker is bulk supply that gets
     // measured out later; a pill is swallowed whole and a syringe goes straight
     // in, which makes it the least forgiving of the three.
     if kind.is_single_dose() {
-        if let Some(threshold) = overdose_threshold {
+        if let Some(threshold) = db.reagents.get(reagent).overdose {
             if supplied > threshold {
-                return Outcome::Overdose;
+                return (Outcome::Overdose, Some(reagent));
             }
         }
     }
 
     if supplied < requested_amount {
-        return Outcome::Short;
+        return (Outcome::Short, Some(reagent));
     }
     if delivered.len() > 1 {
-        return Outcome::Impure;
+        return (Outcome::Impure, Some(reagent));
     }
-    Outcome::Success
+    (Outcome::Success, Some(reagent))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -612,14 +764,21 @@ fn generate_orders(
         .flat_map(|id| db.reactions.get(id).product_ids())
         .collect();
 
+    // A request is reachable the moment *any* member of its category is
+    // makeable — not only its specific reference reagent — since lenient
+    // grading means the player could satisfy it right now with a different
+    // chemical they already know.
+    let request_category = |request: &RequestDef| {
+        db.reagents
+            .id_of(&request.reagent)
+            .and_then(|id| reference_category(&db, id))
+    };
     let in_reach: Vec<&RequestDef> = station
         .config
         .requests
         .iter()
         .filter(|request| {
-            db.reagents
-                .id_of(&request.reagent)
-                .is_some_and(|id| makeable.contains(&id))
+            request_category(request).is_some_and(|cat| category_has_member_in(&db, cat, &makeable))
         })
         .collect();
     let just_beyond: Vec<&RequestDef> = station
@@ -627,9 +786,7 @@ fn generate_orders(
         .requests
         .iter()
         .filter(|request| {
-            db.reagents
-                .id_of(&request.reagent)
-                .is_some_and(|id| stretch.contains(&id))
+            request_category(request).is_some_and(|cat| category_has_member_in(&db, cat, &stretch))
         })
         .collect();
 
@@ -663,10 +820,18 @@ fn generate_orders(
     let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
     let crew = spawn_crew_member(&mut commands, crew_def, waiting as f32 * 0.95);
 
-    let reagent_name = db.reagents.get(reagent).name.clone();
+    // An ordinary order spawned here always describes what it needs, not
+    // the exact chemical — naming one outright is `generate_specific_orders`'
+    // job now, on its own separate clock. Falls back to the reagent's own
+    // name only if it somehow has no category (a content bug guarded by
+    // `every_legitimate_requests_reference_reagent_has_a_category`).
+    let want_label = reference_category(&db, reagent)
+        .map(|cat| cat.want_phrase().to_string())
+        .unwrap_or_else(|| db.reagents.get(reagent).name.clone());
     commands.entity(crew).insert((
         Order {
             reagent,
+            specific: false,
             amount: Units::whole(amount as i32),
             plea: request.plea.clone(),
             patience,
@@ -674,7 +839,7 @@ fn generate_orders(
         },
         Interactable::new(format!(
             "{} — hand over {}u {}",
-            crew_def.name, amount, reagent_name
+            crew_def.name, amount, want_label
         )),
     ));
 
@@ -684,6 +849,129 @@ fn generate_orders(
 
     info!(
         "{} ({}) wants {}u {}",
+        crew_def.name, crew_def.role, amount, want_label
+    );
+}
+
+/// Same shape as `generate_orders`, but rarer and exact rather than lenient:
+/// on its own clock (see [`SpecificOrderSpawner`]) it spawns a crew member
+/// who names one chemical outright — the honest counterpart to an
+/// [`IllicitOrder`]'s exactness, so a specific ask is not by itself a tell.
+///
+/// Two deliberate differences from the lenient path:
+/// - Only drawn from `in_reach` (the reference reagent itself already
+///   makeable), never `just_beyond`. A lenient stretch order can fall back to
+///   a sibling category member if the reference reagent turns out to be the
+///   unreached one; naming one exact reagent outright has no such fallback,
+///   so offering one the chemist cannot yet make at all would be a
+///   guaranteed, unfair failure.
+/// - Uses [`RequestDef::specific_plea`] and shows the reagent's real name in
+///   both the plea and the prompt, exactly as an antagonist's pretext does.
+#[allow(clippy::too_many_arguments)]
+fn generate_specific_orders(
+    mut commands: Commands,
+    time: Res<Time>,
+    db: Res<ChemDb>,
+    station: Option<Res<StationData>>,
+    mut spawner: Option<ResMut<SpecificOrderSpawner>>,
+    knowledge: Option<Res<Knowledge>>,
+    shift: Res<Shift>,
+    forecast: Option<Res<CurrentForecast>>,
+    mut radio: ResMut<RadioLog>,
+    active: Query<&CrewMember>,
+) {
+    let Some(knowledge) = knowledge else {
+        return;
+    };
+    let (Some(station), Some(spawner)) = (station, spawner.as_mut()) else {
+        return;
+    };
+    if !shift.accepting_orders {
+        return;
+    }
+
+    let rules = current_rules(&station.config, &shift);
+    let rules = &rules;
+
+    if !spawner.timer.tick(time.delta()).just_finished() {
+        return;
+    }
+
+    let waiting = active.iter().count();
+    let mut rng = rand::rng();
+    // Scaled off the *current* legitimate gap, exactly like
+    // `antagonist::generate_antagonist_orders`'s own re-arm — the two rates
+    // match by construction, not by coincidence.
+    let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
+    let multiplier = rng.random_range(
+        station.config.specific_gap_multiplier.0..=station.config.specific_gap_multiplier.1,
+    );
+    spawner.timer = Timer::from_seconds(legit_gap * multiplier, TimerMode::Once);
+
+    // Respects the same concurrent-order cap as an ordinary lenient order —
+    // this is still fundamentally an ordinary order, just a picky one, not a
+    // second antagonist-style thread that ignores the queue's capacity.
+    if waiting >= rules.max_active {
+        return;
+    }
+
+    let Some(crew_def) = station.crew.choose(&mut rng) else {
+        return;
+    };
+
+    let makeable = knowledge.available_reagents(&db);
+    let in_reach: Vec<&RequestDef> = station
+        .config
+        .requests
+        .iter()
+        .filter(|request| {
+            db.reagents
+                .id_of(&request.reagent)
+                .is_some_and(|id| makeable.contains(&id))
+        })
+        .collect();
+    if in_reach.is_empty() {
+        return;
+    }
+
+    let no_themes: &[String] = &[];
+    let themes = forecast.as_ref().map(|f| f.themes()).unwrap_or(no_themes);
+    let Some(request) =
+        weighted_pick(&in_reach, themes, rules.forecast_boost, rng.random::<f64>())
+    else {
+        return;
+    };
+    let Some(reagent) = db.reagents.id_of(&request.reagent) else {
+        warn!("order requests unknown reagent '{}'", request.reagent);
+        return;
+    };
+    let Some(&amount) = request.amounts.choose(&mut rng) else {
+        return;
+    };
+
+    let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
+    let crew = spawn_crew_member(&mut commands, crew_def, waiting as f32 * 0.95);
+
+    let reagent_name = db.reagents.get(reagent).name.clone();
+    commands.entity(crew).insert((
+        Order {
+            reagent,
+            specific: true,
+            amount: Units::whole(amount as i32),
+            plea: request.specific_plea.clone(),
+            patience,
+            waited: 0.0,
+        },
+        Interactable::new(format!(
+            "{} — hand over {}u {}",
+            crew_def.name, amount, reagent_name
+        )),
+    ));
+
+    announce_request(&mut radio, &crew_def.name, &crew_def.role, &request.specific_plea);
+
+    info!(
+        "{} ({}) specifically wants {}u {}",
         crew_def.name, crew_def.role, amount, reagent_name
     );
 }
@@ -691,6 +979,7 @@ fn generate_orders(
 fn expire_orders(
     mut commands: Commands,
     time: Res<Time>,
+    db: Res<ChemDb>,
     mut shift: ResMut<Shift>,
     mut resolved: MessageWriter<OrderResolved>,
     mut orders: Query<(Entity, &mut Order, &CrewMember, &mut CrewRoute, Has<IllicitOrder>)>,
@@ -712,10 +1001,20 @@ fn expire_orders(
             continue;
         }
 
+        // Nobody ever delivered anything, so there is nothing to match — an
+        // illicit or specific order still names its (already-known-to-the-
+        // player) reagent, but a plain lenient order falls back to naming
+        // only the category, never the reference reagent it never revealed.
+        let (reagent, category) = if is_named(&order, illicit) {
+            (Some(order.reagent), None)
+        } else {
+            (None, reference_category(&db, order.reagent))
+        };
         resolved.write(OrderResolved {
             name: crew.name.clone(),
             role: crew.role.clone(),
-            reagent: order.reagent,
+            reagent,
+            category,
             outcome: Outcome::Expired,
             illicit,
         });
@@ -724,7 +1023,10 @@ fn expire_orders(
         // always falls through to the ordinary department penalty — the same
         // shape "declining isn't specially punished" takes on the delivery
         // side, just arrived at by giving up rather than choosing to.
-        adjust_for_role(&mut shift, &crew.role, Outcome::Expired, order.waited, order.patience);
+        // Nothing was ever delivered, so there is nothing to grade for
+        // quality — `0` is inert anyway, since `reputation_delta` only ever
+        // applies a potency bonus on `Success`.
+        adjust_for_role(&mut shift, &crew.role, Outcome::Expired, order.waited, order.patience, 0);
 
         commands.entity(entity).remove::<Order>();
         route.leave();
@@ -734,12 +1036,19 @@ fn expire_orders(
 /// Applies a resolution's reputation delta to the department the crew
 /// member's role names, warning rather than panicking if it names none — a
 /// content bug in `station.crew.ron` should not take the shift down with it.
-fn adjust_for_role(shift: &mut Shift, role: &str, outcome: Outcome, waited: f32, patience: f32) {
+fn adjust_for_role(
+    shift: &mut Shift,
+    role: &str,
+    outcome: Outcome,
+    waited: f32,
+    patience: f32,
+    potency: u32,
+) {
     let Some(department) = Department::from_role(role) else {
         warn!("order resolved for unrecognised department role '{role}'");
         return;
     };
-    shift.adjust(department, reputation_delta(outcome, waited, patience));
+    shift.adjust(department, reputation_delta(outcome, waited, patience, potency));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -836,18 +1145,31 @@ fn complete_delivery(
         illicit,
     } = handover;
 
-    let outcome = grade(
-        order.reagent,
+    let (outcome, matched) = grade(
+        wanted_for(order, illicit, db),
         order.amount,
         &container.solution,
         container.kind,
-        db.reagents.get(order.reagent).overdose,
+        db,
     );
 
+    // An illicit or specific order always names its (already-known-to-the-
+    // player) reagent. A plain lenient order names whatever was actually
+    // delivered when something matched, and falls back to naming only the
+    // category — never `order.reagent` itself — when nothing did.
+    let (reported_reagent, category) = if is_named(order, illicit) {
+        (Some(order.reagent), None)
+    } else {
+        match matched {
+            Some(id) => (Some(id), None),
+            None => (None, reference_category(db, order.reagent)),
+        }
+    };
     resolved.write(OrderResolved {
         name: member.name.clone(),
         role: member.role.clone(),
-        reagent: order.reagent,
+        reagent: reported_reagent,
+        category,
         outcome,
         illicit,
     });
@@ -867,7 +1189,8 @@ fn complete_delivery(
     // declined illicit order — falls through to the ordinary path below,
     // unchanged.
     if !(illicit && outcome.is_good()) {
-        adjust_for_role(shift, &member.role, outcome, order.waited, order.patience);
+        let potency = matched.map(|id| db.reagents.get(id).potency).unwrap_or(0);
+        adjust_for_role(shift, &member.role, outcome, order.waited, order.patience, potency);
     }
 
     info!(
@@ -888,26 +1211,40 @@ fn complete_delivery(
     outcome
 }
 
+/// Whether `contents` holds anything that would satisfy `order` — the exact
+/// reagent for an illicit or specific order, any member of its category for
+/// a plain lenient one. Whether it holds *enough*, whether it is clean, and
+/// whether the dose is safe are [`grade`]'s business — this only decides
+/// whether the window should offer the beaker to this order at all.
+fn container_matches(contents: &Solution, order: &Order, illicit: bool, db: &ChemDb) -> bool {
+    if is_named(order, illicit) {
+        return contents.volume_of(order.reagent).is_positive();
+    }
+    match reference_category(db, order.reagent) {
+        Some(cat) => contents
+            .iter()
+            .any(|(id, amount)| amount.is_positive() && db.reagents.get(id).categories.contains(&cat)),
+        None => contents.volume_of(order.reagent).is_positive(),
+    }
+}
+
 /// Which order a container in the window should go to, if any.
 ///
-/// Pulled out of the system so the matching rule can be tested directly. The
-/// rule is deliberately narrow: a container matches an order when it holds
-/// *any* of the reagent asked for. Whether it holds enough, whether it is
-/// clean, and whether the dose is safe are [`grade`]'s business — the window
-/// picks a recipient, it does not vet the delivery.
+/// Pulled out of the system so the matching rule can be tested directly.
 ///
 /// Ties go to whoever is closest to giving up, matching the order queue's own
 /// sort. A beaker that could satisfy two people should go to the one about to
 /// walk out.
 fn window_recipient<'a>(
     contents: &Solution,
-    waiting: impl Iterator<Item = (Entity, &'a Order, &'a CrewRoute)>,
+    waiting: impl Iterator<Item = (Entity, &'a Order, &'a CrewRoute, bool)>,
+    db: &ChemDb,
 ) -> Option<Entity> {
     waiting
-        .filter(|(_, _, route)| route.phase == CrewPhase::Waiting)
-        .filter(|(_, order, _)| contents.volume_of(order.reagent).is_positive())
+        .filter(|(_, _, route, _)| route.phase == CrewPhase::Waiting)
+        .filter(|(_, order, _, illicit)| container_matches(contents, order, *illicit, db))
         .min_by(|a, b| a.1.remaining().total_cmp(&b.1.remaining()))
-        .map(|(entity, _, _)| entity)
+        .map(|(entity, _, _, _)| entity)
 }
 
 /// Hands over whatever is sitting in the delivery window.
@@ -949,8 +1286,8 @@ fn handle_window_delivery(
 
         let candidates = crew
             .iter()
-            .map(|(entity, _, order, route, _)| (entity, order, route));
-        let Some(recipient) = window_recipient(&container.solution, candidates) else {
+            .map(|(entity, _, order, route, illicit)| (entity, order, route, illicit));
+        let Some(recipient) = window_recipient(&container.solution, candidates, &db) else {
             continue;
         };
 
@@ -1134,6 +1471,7 @@ mod tests {
                 },
                 Order {
                     reagent,
+                    specific: false,
                     amount: Units::whole(amount),
                     plea: String::new(),
                     patience,
@@ -1374,36 +1712,41 @@ mod tests {
         assert_eq!(app.world().resource::<Shift>().botched, 1);
     }
 
+    fn db() -> ChemDb {
+        ChemDb(data())
+    }
+
     #[test]
     fn exact_pure_delivery_succeeds() {
-        let data = data();
-        let bicaridine = data.reagent("bicaridine");
-        let delivered = solution_of(&data, &[("bicaridine", 30)]);
+        let db = db();
+        let bicaridine = db.reagent("bicaridine");
+        let delivered = solution_of(&db, &[("bicaridine", 30)]);
 
-        let outcome = grade(
-            bicaridine,
+        let (outcome, matched) = grade(
+            Wanted::Exact(bicaridine),
             Units::whole(30),
             &delivered,
             ContainerKind::Beaker,
-            Some(Units::whole(15)),
+            &db,
         );
 
         assert_eq!(outcome, Outcome::Success);
+        assert_eq!(matched, Some(bicaridine));
     }
 
     #[test]
     fn contamination_is_caught_even_when_the_amount_is_right() {
         // This is the common failure: a sloppy mix leaves leftovers that keep
         // reacting, so the beaker holds the right medicine plus something else.
-        let data = data();
-        let delivered = solution_of(&data, &[("bicaridine", 30), ("inaprovaline", 5)]);
+        let db = db();
+        let delivered = solution_of(&db, &[("bicaridine", 30), ("inaprovaline", 5)]);
 
-        let outcome = grade(
-            data.reagent("bicaridine"),
+        let (outcome, _) = grade(
+            Wanted::Exact(db.reagent("bicaridine")),
             Units::whole(30),
             &delivered,
             ContainerKind::Beaker,
-            Some(Units::whole(15)),
+            &db,
         );
 
         assert_eq!(outcome, Outcome::Impure);
@@ -1411,15 +1754,15 @@ mod tests {
 
     #[test]
     fn a_beaker_is_bulk_supply_and_cannot_overdose() {
-        let data = data();
-        let delivered = solution_of(&data, &[("bicaridine", 40)]);
+        let db = db();
+        let delivered = solution_of(&db, &[("bicaridine", 40)]);
 
-        let outcome = grade(
-            data.reagent("bicaridine"),
+        let (outcome, _) = grade(
+            Wanted::Exact(db.reagent("bicaridine")),
             Units::whole(30),
             &delivered,
             ContainerKind::Beaker,
-            Some(Units::whole(15)),
+            &db,
         );
 
         assert_eq!(outcome, Outcome::Success);
@@ -1427,15 +1770,15 @@ mod tests {
 
     #[test]
     fn a_pill_over_the_threshold_is_an_overdose() {
-        let data = data();
-        let delivered = solution_of(&data, &[("bicaridine", 20)]);
+        let db = db();
+        let delivered = solution_of(&db, &[("bicaridine", 20)]);
 
-        let outcome = grade(
-            data.reagent("bicaridine"),
+        let (outcome, _) = grade(
+            Wanted::Exact(db.reagent("bicaridine")),
             Units::whole(20),
             &delivered,
             ContainerKind::Pill,
-            Some(Units::whole(15)),
+            &db,
         );
 
         assert_eq!(outcome, Outcome::Overdose);
@@ -1443,15 +1786,15 @@ mod tests {
 
     #[test]
     fn overdose_outranks_contamination() {
-        let data = data();
-        let delivered = solution_of(&data, &[("bicaridine", 20), ("oxygen", 3)]);
+        let db = db();
+        let delivered = solution_of(&db, &[("bicaridine", 20), ("oxygen", 3)]);
 
-        let outcome = grade(
-            data.reagent("bicaridine"),
+        let (outcome, _) = grade(
+            Wanted::Exact(db.reagent("bicaridine")),
             Units::whole(20),
             &delivered,
             ContainerKind::Pill,
-            Some(Units::whole(15)),
+            &db,
         );
 
         assert_eq!(outcome, Outcome::Overdose, "the worse problem must win");
@@ -1459,15 +1802,15 @@ mod tests {
 
     #[test]
     fn too_little_is_short_not_success() {
-        let data = data();
-        let delivered = solution_of(&data, &[("dylovene", 10)]);
+        let db = db();
+        let delivered = solution_of(&db, &[("dylovene", 10)]);
 
-        let outcome = grade(
-            data.reagent("dylovene"),
+        let (outcome, _) = grade(
+            Wanted::Exact(db.reagent("dylovene")),
             Units::whole(30),
             &delivered,
             ContainerKind::Beaker,
-            Some(Units::whole(20)),
+            &db,
         );
 
         assert_eq!(outcome, Outcome::Short);
@@ -1475,38 +1818,220 @@ mod tests {
 
     #[test]
     fn the_wrong_chemical_entirely_is_wrong() {
-        let data = data();
-        let delivered = solution_of(&data, &[("kelotane", 40)]);
+        let db = db();
+        let delivered = solution_of(&db, &[("kelotane", 40)]);
 
-        let outcome = grade(
-            data.reagent("bicaridine"),
+        let (outcome, matched) = grade(
+            Wanted::Exact(db.reagent("bicaridine")),
             Units::whole(30),
             &delivered,
             ContainerKind::Beaker,
-            Some(Units::whole(15)),
+            &db,
         );
 
         assert_eq!(outcome, Outcome::Wrong);
+        assert_eq!(matched, None);
     }
 
     #[test]
     fn a_reagent_with_no_overdose_threshold_never_overdoses() {
-        let data = data();
-        let inaprovaline = data.reagent("inaprovaline");
+        let db = db();
+        let inaprovaline = db.reagent("inaprovaline");
         assert!(
-            data.reagents.get(inaprovaline).overdose.is_none(),
+            db.reagents.get(inaprovaline).overdose.is_none(),
             "inaprovaline is meant to be safe at any dose"
         );
-        let delivered = solution_of(&data, &[("inaprovaline", 20)]);
+        let delivered = solution_of(&db, &[("inaprovaline", 20)]);
 
-        let outcome = grade(
-            inaprovaline,
+        let (outcome, _) = grade(
+            Wanted::Exact(inaprovaline),
             Units::whole(20),
             &delivered,
             ContainerKind::Pill,
-            None,
+            &db,
         );
 
         assert_eq!(outcome, Outcome::Success);
+    }
+
+    // -- lenient category grading --------------------------------------
+
+    #[test]
+    fn a_category_order_accepts_a_different_member_than_the_reference_reagent() {
+        // Kelotane and Dermaline are both `Category::Burns`. A legitimate
+        // order authored around Kelotane must still succeed on Dermaline —
+        // that substitution is the entire point of the feature.
+        let db = db();
+        let delivered = solution_of(&db, &[("dermaline", 20)]);
+
+        let (outcome, matched) = grade(
+            Wanted::Category(Category::Burns),
+            Units::whole(20),
+            &delivered,
+            ContainerKind::Beaker,
+            &db,
+        );
+
+        assert_eq!(outcome, Outcome::Success);
+        assert_eq!(matched, Some(db.reagent("dermaline")));
+    }
+
+    #[test]
+    fn a_category_order_with_nothing_matching_is_wrong_and_names_no_reagent() {
+        let db = db();
+        let delivered = solution_of(&db, &[("kelotane", 20)]);
+
+        let (outcome, matched) = grade(
+            Wanted::Category(Category::Trauma),
+            Units::whole(20),
+            &delivered,
+            ContainerKind::Beaker,
+            &db,
+        );
+
+        assert_eq!(outcome, Outcome::Wrong);
+        assert_eq!(matched, None, "nothing should be named back for an unmatched category order");
+    }
+
+    #[test]
+    fn a_category_order_picks_the_dominant_member_present() {
+        // Two different Burns treatments in the same beaker: the resolver
+        // grades against whichever one dominates by volume, and still flags
+        // Impure because something else was present regardless.
+        let db = db();
+        let delivered = solution_of(&db, &[("kelotane", 5), ("dermaline", 25)]);
+
+        let (outcome, matched) = grade(
+            Wanted::Category(Category::Burns),
+            Units::whole(20),
+            &delivered,
+            ContainerKind::Beaker,
+            &db,
+        );
+
+        assert_eq!(outcome, Outcome::Impure);
+        assert_eq!(matched, Some(db.reagent("dermaline")));
+    }
+
+    // -- specific (exact-asking) orders -----------------------------------
+
+    fn specific_order(db: &ChemDb, reagent: &str, amount: i32) -> Order {
+        Order {
+            reagent: db.reagent(reagent),
+            specific: true,
+            amount: Units::whole(amount),
+            plea: String::new(),
+            patience: 60.0,
+            waited: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_specific_order_refuses_a_different_member_of_the_same_category() {
+        // Kelotane and Dermaline are both `Category::Burns` — a lenient order
+        // accepts either, but a specific one asked for Kelotane by name and
+        // means it.
+        let db = db();
+        let order = specific_order(&db, "kelotane", 20);
+        let delivered = solution_of(&db, &[("dermaline", 20)]);
+
+        let (outcome, matched) = grade(
+            wanted_for(&order, false, &db),
+            order.amount,
+            &delivered,
+            ContainerKind::Beaker,
+            &db,
+        );
+
+        assert_eq!(outcome, Outcome::Wrong);
+        assert_eq!(matched, None);
+    }
+
+    #[test]
+    fn a_specific_order_succeeds_on_its_own_named_reagent() {
+        let db = db();
+        let order = specific_order(&db, "kelotane", 20);
+        let delivered = solution_of(&db, &[("kelotane", 20)]);
+
+        let (outcome, matched) = grade(
+            wanted_for(&order, false, &db),
+            order.amount,
+            &delivered,
+            ContainerKind::Beaker,
+            &db,
+        );
+
+        assert_eq!(outcome, Outcome::Success);
+        assert_eq!(matched, Some(db.reagent("kelotane")));
+    }
+
+    #[test]
+    fn a_specific_order_names_itself_even_when_wrong() {
+        // Nothing about a specific ask is secret — it named its reagent in
+        // the prompt already, so a Wrong report should still name it, unlike
+        // a plain lenient order's fall-through to a bare category.
+        let db = db();
+        let order = specific_order(&db, "kelotane", 20);
+        assert!(is_named(&order, false));
+    }
+
+    // -- content guardrails ----------------------------------------------
+
+    fn station_orders() -> OrderConfig {
+        ron::from_str(include_str!("../../assets/data/station.orders.ron"))
+            .expect("station.orders.ron should parse")
+    }
+
+    #[test]
+    fn every_legitimate_requests_reference_reagent_has_a_category() {
+        // A request with no category could never be gated into `in_reach`/
+        // `just_beyond`, nor shown a want-phrase — it would be offered as an
+        // order and then be impossible to display or fulfil.
+        let db = db();
+        let config = station_orders();
+        for request in &config.requests {
+            let reagent = db
+                .reagents
+                .id_of(&request.reagent)
+                .unwrap_or_else(|| panic!("'{}' names no real reagent", request.reagent));
+            assert!(
+                reference_category(&db, reagent).is_some(),
+                "'{}' has no category at all",
+                request.reagent
+            );
+        }
+    }
+
+    #[test]
+    fn every_legitimate_requests_category_is_orderable() {
+        // Poisons/Pyrotechnics/Precursors/Utility/Illicit are never something
+        // legitimate crew ask for — Illicit specifically is the antagonist
+        // thread's exclusive domain.
+        let db = db();
+        let config = station_orders();
+        for request in &config.requests {
+            let reagent = db.reagents.id_of(&request.reagent).unwrap();
+            let cat = reference_category(&db, reagent).unwrap();
+            assert!(
+                cat.is_legitimately_orderable(),
+                "'{}' resolves to {:?}, which nobody legitimately orders",
+                request.reagent,
+                cat
+            );
+        }
+    }
+
+    #[test]
+    fn every_request_has_a_specific_plea() {
+        // Drawn rarely but not never — a blank plea on that one occasion
+        // reads as broken rather than quiet.
+        let config = station_orders();
+        for request in &config.requests {
+            assert!(
+                !request.specific_plea.trim().is_empty(),
+                "'{}' has no specific_plea",
+                request.reagent
+            );
+        }
     }
 }

@@ -16,6 +16,7 @@ use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlo
 use crate::interaction::{
     InteractRequested, InteractionMode, LeaveMachineRequested, MachineOpened,
 };
+use crate::knowledge::Knowledge;
 use crate::net::is_authority;
 use crate::player::Chemist;
 use crate::produce::{Produce, ProduceCatalog, ProduceId};
@@ -254,6 +255,14 @@ pub struct ReactionsFired {
     /// Where it happened, so a blast lands in the right part of the room.
     pub container: Entity,
     pub effects: Vec<chem_sim::ReactionEffect>,
+    /// Distinct reagents present the instant this fired, straight from
+    /// `ResolveReport::distinct_reagents` — `knowledge::learn_from_experiments`
+    /// is the only reader, and only for deciding whether an experiment was
+    /// focused enough to actually teach something. `0` for the analyzer's own
+    /// path (below), which never runs the resolver and has nothing to be
+    /// "crowded": identifying a sample already in hand is a deliberate,
+    /// single-purpose check, not a shotgun mix, so it is always credited.
+    pub distinct_reagents: usize,
 }
 
 impl ReactionsFired {
@@ -268,6 +277,7 @@ impl ReactionsFired {
             reactions: report.fired_reactions(),
             container,
             effects: report.effects.clone(),
+            distinct_reagents: report.distinct_reagents,
         })
     }
 }
@@ -584,6 +594,7 @@ pub fn chemist_entity(chemists: &Query<(Entity, &Chemist)>, client: ClientId) ->
 fn handle_dispense(
     mut commands: Commands,
     db: Res<ChemDb>,
+    knowledge: Res<Knowledge>,
     mut requests: MessageReader<FromClient<DispenseRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
     machines: Query<&DispenseAmount>,
@@ -592,6 +603,13 @@ fn handle_dispense(
     mut containers: Query<&mut Container>,
 ) {
     for request in requests.read() {
+        // The panel only ever offers unlocked reagents as live buttons, but
+        // a request is trusted input from the network — refusing a locked
+        // one here is what actually enforces the lock rather than merely
+        // suggesting it.
+        if !knowledge.is_reagent_unlocked(&db, request.reagent) {
+            continue;
+        }
         let Ok(amount) = machines.get(request.machine) else {
             continue;
         };
@@ -773,11 +791,14 @@ fn handle_analyze(
 
         if !identified.is_empty() {
             // No effects: the analyzer identifies a sample, it does not react
-            // one. Nothing here can smoke or detonate.
+            // one. Nothing here can smoke or detonate. `distinct_reagents: 0`
+            // deliberately exempts this from the crowd-threshold check in
+            // `learn_from_experiments` — see `ReactionsFired::distinct_reagents`.
             fired.write(ReactionsFired {
                 reactions: identified,
                 container: target,
                 effects: Vec::new(),
+                distinct_reagents: 0,
             });
         }
     }
@@ -822,6 +843,11 @@ fn handle_grind(
         // reason: grinding the whole hopper is one action to the player, and
         // reporting it as several would spawn several smoke clouds.
         let mut effects = Vec::new();
+        // The worst single pass, not a sum — how crowded the beaker ever got
+        // during this action is what tells a focused grind from a dumping
+        // ground, and each pass's own count already reflects everything
+        // still sitting there from the passes before it.
+        let mut distinct_reagents = 0;
         for _ in 0..passes {
             let Some(&next) = hopper.0.first() else {
                 break;
@@ -843,6 +869,7 @@ fn handle_grind(
             });
             reactions.extend(report.fired_reactions());
             effects.extend(report.effects);
+            distinct_reagents = distinct_reagents.max(report.distinct_reagents);
         }
 
         if !reactions.is_empty() || !effects.is_empty() {
@@ -850,6 +877,7 @@ fn handle_grind(
                 reactions,
                 container: target,
                 effects,
+                distinct_reagents,
             });
         }
     }
@@ -878,8 +906,19 @@ mod tests {
             &data.reagents,
         );
 
+        // These tests exercise machine behaviour, not the reagent-unlock
+        // economy — start with everything already bought so a locked
+        // reagent is never the reason a dispense silently does nothing.
+        let mut knowledge = Knowledge::new(&data);
+        knowledge.award_research(1000);
+        let dispensable: Vec<ReagentId> = data.reagents.dispensable().map(|r| r.id).collect();
+        for reagent in dispensable {
+            knowledge.unlock_reagent(&data, reagent);
+        }
+
         let mut app = App::new();
         app.insert_resource(ChemDb(data))
+            .insert_resource(knowledge)
             .insert_resource(catalog)
             .add_message::<FromClient<DispenseRequested>>()
             .add_message::<ReactionsFired>()
@@ -994,6 +1033,42 @@ mod tests {
             "reactions must run as part of dispensing, not only on demand"
         );
         assert_eq!(container.solution.len(), 1, "reagents should be consumed");
+    }
+
+    #[test]
+    fn dispensing_a_locked_reagent_is_refused() {
+        // `test_app()` starts with everything unlocked, which is right for
+        // every other test here — this one is specifically about what a
+        // *locked* reagent does, so it overwrites that with a fresh
+        // `Knowledge`, closer to what a real career actually starts with.
+        let mut app = test_app();
+        let data = app.world().resource::<ChemDb>().0.clone();
+        app.insert_resource(Knowledge::new(&data));
+
+        let dispenser = app.world_mut().spawn(DispenseAmount(Units::whole(15))).id();
+        let beaker = app
+            .world_mut()
+            .spawn((
+                Container::new(ContainerKind::LargeBeaker),
+                InSlot(dispenser),
+            ))
+            .id();
+
+        let hydrogen = reagent(&app, "hydrogen"); // locked by default
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: DispenseRequested {
+                machine: dispenser,
+                reagent: hydrogen,
+            },
+        });
+        app.update();
+
+        let container = app.world().get::<Container>(beaker).unwrap();
+        assert!(
+            container.solution.is_empty(),
+            "a locked reagent must never be dispensed, even by a direct request"
+        );
     }
 
     #[test]
@@ -1113,7 +1188,7 @@ mod tests {
     fn ground_produce_is_impure_until_the_chemmaster_has_had_it() {
         // The whole reason the grinder is worth having *and* worth cleaning up
         // after. Fast to a useful chemical, never deliverable as it comes out.
-        use crate::orders::{grade, Outcome};
+        use crate::orders::{grade, Outcome, Wanted};
 
         let mut app = test_app();
         let ambrosia = produce(&app, "Ambrosia");
@@ -1126,14 +1201,16 @@ mod tests {
 
         let dylovene = reagent(&app, "dylovene");
         let dirty = slot_contents(&mut app, grinder);
+        let db = app.world().resource::<ChemDb>();
         assert_eq!(
             grade(
-                dylovene,
+                Wanted::Exact(dylovene),
                 Units::whole(24),
                 &dirty,
                 ContainerKind::LargeBeaker,
-                None
-            ),
+                db,
+            )
+            .0,
             Outcome::Impure,
             "plant fibre rides along, so a straight grind cannot be handed over"
         );
@@ -1143,12 +1220,13 @@ mod tests {
         let _ = clean.add(dylovene, dirty.volume_of(dylovene));
         assert_eq!(
             grade(
-                dylovene,
+                Wanted::Exact(dylovene),
                 Units::whole(24),
                 &clean,
                 ContainerKind::Beaker,
-                None
-            ),
+                db,
+            )
+            .0,
             Outcome::Success
         );
     }

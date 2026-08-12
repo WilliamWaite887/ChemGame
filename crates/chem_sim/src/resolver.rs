@@ -29,6 +29,15 @@ pub struct ResolveReport {
     /// Reactions that ran hot enough to lose yield. The chemist has already
     /// paid for these in reactants; the machine panel is how they find out.
     pub overheated: Vec<ReactionId>,
+    /// Distinct reagents present the instant this call started, before
+    /// anything reacted. `chem_sim` has no opinion on what this is *for* —
+    /// it is just a fact about the input — but it is what the game layer
+    /// uses to tell a focused experiment from a shotgun dump: a chain built
+    /// one add at a time never has more present at once than the widest
+    /// single reaction's own reactant count, because the resolver eagerly
+    /// consumes intermediates as they form. Only a pile of reagents that
+    /// *don't* react with each other can push this high.
+    pub distinct_reagents: usize,
 }
 
 impl ResolveReport {
@@ -57,7 +66,10 @@ impl ResolveReport {
 /// lets bicaridine fire in the next, so a chemist can build a multi-step
 /// recipe in a single beaker.
 pub fn resolve(solution: &mut Solution, reactions: &ReactionSet) -> ResolveReport {
-    let mut report = ResolveReport::default();
+    let mut report = ResolveReport {
+        distinct_reagents: solution.len(),
+        ..Default::default()
+    };
 
     for _ in 0..MAX_ITERATIONS {
         let Some((reaction, scale)) = best_reaction(solution, reactions) else {

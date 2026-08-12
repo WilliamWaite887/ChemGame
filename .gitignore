@@ -4,3 +4,6 @@
 # moves these into `saves/Chemist/` on the next launch.
 save.ron
 progress.ron
+
+# Local planning doc, not part of the repo
+/this-is-the-start-nested-wigderson.md
