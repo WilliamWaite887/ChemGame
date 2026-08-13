@@ -41,6 +41,14 @@ pub const HINT_COST: u32 = 3;
 /// Points earned for a clean delivery.
 pub const RESEARCH_PER_SUCCESS: u32 = 1;
 
+/// Research points to upgrade the dispenser from tier `N` to `N+1`, indexed
+/// by `N` (index 0 = tier 0→1, etc.). Each entry is the sum of what the
+/// reagents in that tier used to cost individually under the old
+/// per-reagent unlock economy (M11) — the total to fully upgrade is still
+/// 213, only the unit of purchase moved from one reagent to a whole tier.
+/// See the tier comment block in `assets/data/chem.reagents.ron`.
+pub const DISPENSER_TIER_COSTS: [u32; 7] = [24, 27, 48, 15, 54, 21, 24];
+
 /// Distinct reagents a beaker can hold when it reacts and still count as a
 /// focused experiment worth learning from — see
 /// `chem_sim::ResolveReport::distinct_reagents` for why this works at all: a
@@ -64,7 +72,7 @@ impl Plugin for KnowledgePlugin {
             // Not `add_mapped_client_message` — it carries no `Entity` at
             // all (unlocking is career-wide, not tied to a machine), so
             // there is nothing for `MapEntities` to translate.
-            .add_client_message::<UnlockReagentRequested>(Channel::Ordered)
+            .add_client_message::<UpgradeDispenserRequested>(Channel::Ordered)
             .add_systems(OnEnter(AppState::Playing), initialise_knowledge)
             .add_systems(
                 Update,
@@ -72,7 +80,7 @@ impl Plugin for KnowledgePlugin {
                     // The shared notebook belongs to the lab, so the server
                     // owns it and only the server writes the save file.
                     (
-                        handle_reagent_unlock,
+                        handle_dispenser_upgrade,
                         learn_from_experiments,
                         persist_knowledge,
                         broadcast_knowledge,
@@ -86,27 +94,26 @@ impl Plugin for KnowledgePlugin {
     }
 }
 
-/// A client asking to unlock a dispensable reagent. Deliberately not tied to
-/// a machine — unlocking is a career-wide upgrade, not something one specific
-/// dispenser owns, the same way [`RecipeDiscovered`] and buying a hint aren't
-/// either. Unlike the hint-buying button (which mutates the local
+/// A client asking to upgrade the dispenser to its next tier. Deliberately
+/// not tied to a machine — the upgrade is a career-wide upgrade, not
+/// something one specific dispenser owns, the same way [`RecipeDiscovered`]
+/// and buying a hint aren't either. Carries no payload: there is only ever
+/// one next tier. Unlike the hint-buying button (which mutates the local
 /// `Knowledge` directly and only actually sticks for whichever peer is
 /// authoritative), this crosses the network properly: the server is the only
-/// one that ever calls [`Knowledge::unlock_reagent`], via
-/// [`handle_reagent_unlock`], so a joining client's purchase is never quietly
-/// overwritten by the next [`KnowledgeSync`].
+/// one that ever calls [`Knowledge::upgrade_dispenser`], via
+/// [`handle_dispenser_upgrade`], so a joining client's purchase is never
+/// quietly overwritten by the next [`KnowledgeSync`].
 #[derive(Message, Serialize, Deserialize)]
-pub struct UnlockReagentRequested {
-    pub reagent: ReagentId,
-}
+pub struct UpgradeDispenserRequested;
 
-fn handle_reagent_unlock(
+fn handle_dispenser_upgrade(
     db: Res<ChemDb>,
-    mut requests: MessageReader<FromClient<UnlockReagentRequested>>,
+    mut requests: MessageReader<FromClient<UpgradeDispenserRequested>>,
     mut knowledge: ResMut<Knowledge>,
 ) {
-    for request in requests.read() {
-        knowledge.unlock_reagent(&db, request.reagent);
+    for _ in requests.read() {
+        knowledge.upgrade_dispenser(&db);
     }
 }
 
@@ -126,10 +133,9 @@ pub struct RecipeDiscovered {
 pub struct Knowledge {
     entries: HashMap<ReactionId, Entry>,
     pub research_points: u32,
-    /// Locked (`unlock_cost: Some(_)`) reagents that have been bought at the
-    /// dispenser. Starts empty — a reagent with no `unlock_cost` is available
-    /// unconditionally and never needs an entry here; see [`Self::dispensable`].
-    unlocked_reagents: HashSet<ReagentId>,
+    /// How many dispenser upgrades have been bought. `0` means only tier-0
+    /// (free) reagents are available; see [`Self::dispensable`].
+    dispenser_tier: u32,
 }
 
 impl Knowledge {
@@ -152,7 +158,7 @@ impl Knowledge {
         Knowledge {
             entries,
             research_points: 0,
-            unlocked_reagents: HashSet::new(),
+            dispenser_tier: 0,
         }
     }
 
@@ -210,42 +216,47 @@ impl Knowledge {
     }
 
     /// Every dispensable reagent the chemist can actually draw from right
-    /// now — the ones with no `unlock_cost`, plus whichever locked ones have
-    /// been bought. Not necessarily all of them.
+    /// now — everything at or below the current dispenser tier. Not
+    /// necessarily all of them.
     pub fn dispensable(&self, data: &ChemData) -> HashSet<ReagentId> {
         data.reagents
             .dispensable()
-            .filter(|r| r.unlock_cost.is_none() || self.unlocked_reagents.contains(&r.id))
+            .filter(|r| self.is_reagent_unlocked(data, r.id))
             .map(|r| r.id)
             .collect()
     }
 
     /// Whether the dispenser will actually hand this over right now.
     pub fn is_reagent_unlocked(&self, data: &ChemData, reagent: ReagentId) -> bool {
-        data.reagents.get(reagent).unlock_cost.is_none() || self.unlocked_reagents.contains(&reagent)
+        data.reagents.get(reagent).tier <= self.dispenser_tier
     }
 
-    /// Research points to unlock this reagent, or `None` if it needs no
-    /// unlocking at all (free from the start, or already bought).
-    pub fn reagent_unlock_cost(&self, data: &ChemData, reagent: ReagentId) -> Option<u32> {
-        if self.is_reagent_unlocked(data, reagent) {
-            return None;
-        }
-        data.reagents.get(reagent).unlock_cost
+    /// The dispenser's current upgrade tier.
+    pub fn dispenser_tier(&self) -> u32 {
+        self.dispenser_tier
     }
 
-    /// Spends research points to unlock a dispensable reagent. Returns false
-    /// if it needs no unlocking (free, or already bought) or the chemist
-    /// cannot afford it — never partially spends.
-    pub fn unlock_reagent(&mut self, data: &ChemData, reagent: ReagentId) -> bool {
-        let Some(cost) = self.reagent_unlock_cost(data, reagent) else {
+    /// Research points to upgrade the dispenser to its next tier, or `None`
+    /// if it is already at the highest tier.
+    pub fn next_upgrade_cost(&self) -> Option<u32> {
+        DISPENSER_TIER_COSTS
+            .get(self.dispenser_tier as usize)
+            .copied()
+    }
+
+    /// Spends research points to upgrade the dispenser to its next tier,
+    /// unlocking every reagent in that tier at once. Returns false if
+    /// already at the highest tier or the chemist cannot afford it — never
+    /// partially spends.
+    pub fn upgrade_dispenser(&mut self, _data: &ChemData) -> bool {
+        let Some(cost) = self.next_upgrade_cost() else {
             return false;
         };
         if self.research_points < cost {
             return false;
         }
         self.research_points -= cost;
-        self.unlocked_reagents.insert(reagent);
+        self.dispenser_tier += 1;
         true
     }
 
@@ -327,20 +338,11 @@ impl Knowledge {
             }
         }
         known.sort();
-        // Keys, not ids, for the same reason `known` uses them: ids are
-        // positions in the data file, and this must survive one shifting
-        // under it.
-        let mut unlocked_reagents: Vec<String> = self
-            .unlocked_reagents
-            .iter()
-            .map(|&id| data.reagents.get(id).key.clone())
-            .collect();
-        unlocked_reagents.sort();
         SaveData {
             known,
             hints,
             research_points: self.research_points,
-            unlocked_reagents,
+            dispenser_tier: self.dispenser_tier,
         }
     }
 
@@ -361,11 +363,7 @@ impl Knowledge {
                 }
             }
         }
-        for key in &save.unlocked_reagents {
-            if let Some(id) = data.reagents.id_of(key) {
-                knowledge.unlocked_reagents.insert(id);
-            }
-        }
+        knowledge.dispenser_tier = save.dispenser_tier;
         knowledge
     }
 }
@@ -383,7 +381,7 @@ struct SaveData {
     #[serde(default)]
     research_points: u32,
     #[serde(default)]
-    unlocked_reagents: Vec<String>,
+    dispenser_tier: u32,
 }
 
 fn initialise_knowledge(mut commands: Commands, db: Res<ChemDb>, slot: Option<Res<SaveSlot>>) {
@@ -597,21 +595,22 @@ mod tests {
         }
     }
 
-    // -- reagent unlocks ---------------------------------------------------
+    // -- dispenser tiers -----------------------------------------------------
 
     #[test]
     fn every_starting_ingredients_reagent_is_unlocked_free() {
-        // Every base reagent the 3 starting recipes need must have no
-        // unlock_cost at all, or a fresh chemist could not even make what
-        // they're supposed to already know. Derived from the data rather
-        // than hardcoded, so a future edit to a starting recipe's own
-        // ingredients can't silently strand it behind a lock.
+        // Every base reagent the 3 starting recipes need must be tier 0, or a
+        // fresh chemist could not even make what they're supposed to already
+        // know. Derived from the data rather than hardcoded, so a future edit
+        // to a starting recipe's own ingredients can't silently strand it
+        // behind a lock.
         let data = data();
         for key in STARTING_RECIPES {
             let reaction = data.reactions.find(key).unwrap();
             for &(reagent, _) in reaction.reactants.iter().chain(reaction.catalysts.iter()) {
-                assert!(
-                    data.reagents.get(reagent).unlock_cost.is_none(),
+                assert_eq!(
+                    data.reagents.get(reagent).tier,
+                    0,
                     "'{}', needed by starting recipe '{key}', is locked",
                     data.reagents.get(reagent).key
                 );
@@ -630,61 +629,62 @@ mod tests {
             "some dispensable reagents must start locked, or the feature does nothing"
         );
         for reagent in knowledge.dispensable(&data) {
-            assert!(data.reagents.get(reagent).unlock_cost.is_none());
+            assert_eq!(data.reagents.get(reagent).tier, 0);
         }
     }
 
     #[test]
-    fn unlocking_spends_research_and_only_once() {
+    fn upgrading_spends_research_and_advances_one_tier_at_a_time() {
         let data = data();
         let mut knowledge = Knowledge::new(&data);
-        let hydrogen = data.reagent("hydrogen");
-        let cost = data.reagents.get(hydrogen).unlock_cost.unwrap();
+        let hydrogen = data.reagent("hydrogen"); // tier 1
+        let cost = DISPENSER_TIER_COSTS[0];
 
         assert!(
-            !knowledge.unlock_reagent(&data, hydrogen),
-            "cannot unlock with no research"
+            !knowledge.upgrade_dispenser(&data),
+            "cannot upgrade with no research"
         );
         assert!(!knowledge.is_reagent_unlocked(&data, hydrogen));
 
         knowledge.award_research(cost);
-        assert!(knowledge.unlock_reagent(&data, hydrogen));
+        assert!(knowledge.upgrade_dispenser(&data));
         assert_eq!(knowledge.research_points, 0);
+        assert_eq!(knowledge.dispenser_tier(), 1);
         assert!(knowledge.is_reagent_unlocked(&data, hydrogen));
-        assert_eq!(knowledge.reagent_unlock_cost(&data, hydrogen), None);
 
-        // Buying it again would be a silent double-charge.
+        // The next tier is a separate purchase — this one didn't come free.
         knowledge.award_research(cost);
-        assert!(!knowledge.unlock_reagent(&data, hydrogen));
+        assert!(!knowledge.upgrade_dispenser(&data), "tier 2 costs more than tier 1 did");
         assert_eq!(knowledge.research_points, cost);
     }
 
     #[test]
-    fn unlocking_a_free_reagent_does_nothing() {
+    fn upgrading_past_the_top_tier_does_nothing() {
         let data = data();
         let mut knowledge = Knowledge::new(&data);
-        knowledge.award_research(100);
-        let carbon = data.reagent("carbon");
-        assert!(!knowledge.unlock_reagent(&data, carbon));
-        assert_eq!(knowledge.research_points, 100, "nothing should have been spent");
+        knowledge.award_research(1000);
+        for _ in 0..DISPENSER_TIER_COSTS.len() {
+            assert!(knowledge.upgrade_dispenser(&data));
+        }
+        assert_eq!(knowledge.next_upgrade_cost(), None);
+        let leftover = knowledge.research_points;
+        assert!(!knowledge.upgrade_dispenser(&data));
+        assert_eq!(knowledge.research_points, leftover, "nothing should have been spent");
     }
 
     #[test]
-    fn an_unlocked_reagent_survives_a_save_round_trip() {
+    fn a_dispenser_upgrade_survives_a_save_round_trip() {
         let data = data();
         let mut original = Knowledge::new(&data);
         let hydrogen = data.reagent("hydrogen");
-        original.award_research(10);
-        assert!(original.unlock_reagent(&data, hydrogen));
+        original.award_research(DISPENSER_TIER_COSTS[0]);
+        assert!(original.upgrade_dispenser(&data));
 
         let text = ron::ser::to_string(&original.to_save(&data)).unwrap();
         let restored = Knowledge::from_save(&data, ron::from_str(&text).unwrap());
 
         assert!(restored.is_reagent_unlocked(&data, hydrogen));
-        // A reagent removed from a later data file must not panic on load —
-        // mirrors `a_save_survives_recipes_being_added_to_the_data_file`.
-        let save = original.to_save(&data);
-        assert!(save.unlocked_reagents.contains(&"hydrogen".to_string()));
+        assert_eq!(restored.dispenser_tier(), 1);
     }
 
     fn learn_app() -> App {
@@ -793,13 +793,15 @@ mod tests {
 
         // Knowing the recipe and being able to make it right now are
         // different things: `available_reagents` only counts hyronalin
-        // itself as available once *its* ingredients (radium) are unlocked
-        // too, and arithrazine additionally needs hydrogen. Neither is what
-        // this test is actually about (frontier growth on learning, not the
-        // reagent-unlock economy), so unlock both directly.
-        knowledge.award_research(100);
-        assert!(knowledge.unlock_reagent(&data, data.reagent("radium")));
-        assert!(knowledge.unlock_reagent(&data, data.reagent("hydrogen")));
+        // itself as available once *its* ingredients (radium, tier 5) are
+        // unlocked too, and arithrazine additionally needs hydrogen (tier 1,
+        // already covered by reaching tier 5). Neither is what this test is
+        // actually about (frontier growth on learning, not the dispenser
+        // tier economy), so max out the dispenser directly.
+        knowledge.award_research(DISPENSER_TIER_COSTS.iter().sum());
+        for _ in 0..DISPENSER_TIER_COSTS.len() {
+            assert!(knowledge.upgrade_dispenser(&data));
+        }
 
         assert!(
             knowledge

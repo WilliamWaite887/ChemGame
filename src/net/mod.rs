@@ -19,7 +19,7 @@ use bevy_replicon_renet::netcode::{
     ClientAuthentication, NetcodeClientTransport, NetcodeServerTransport, ServerAuthentication,
     ServerConfig,
 };
-use bevy_replicon_renet::renet::ConnectionConfig;
+use bevy_replicon_renet::renet::{ConnectionConfig, DisconnectReason};
 // `RenetServer`/`RenetClient` come from bevy_renet's re-export, not raw renet:
 // only the bevy wrappers are resources.
 use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRenetPlugins};
@@ -122,8 +122,12 @@ pub fn apply_command_line(app: &mut App) {
     }
 }
 
-/// Parses what someone reads out loud: an IP, an IP and port, or a hostname.
-pub fn parse_address(value: &str) -> Option<SocketAddr> {
+/// The literal-syntax subset of [`parse_address`]: an IP, or an IP and port.
+/// No DNS — cheap enough to run on every keystroke, which is exactly why
+/// `menu::hint_for` uses this and not `parse_address`. A hostname typed
+/// character by character would otherwise trigger a blocking resolve on
+/// almost every partial string in between.
+pub fn parse_literal_address(value: &str) -> Option<SocketAddr> {
     value
         .parse::<SocketAddr>()
         .ok()
@@ -134,6 +138,16 @@ pub fn parse_address(value: &str) -> Option<SocketAddr> {
                 .ok()
                 .map(|ip| SocketAddr::new(ip, DEFAULT_PORT))
         })
+}
+
+/// Parses what someone reads out loud: an IP, an IP and port, or a hostname.
+///
+/// Only called once per deliberate action (the Connect click, or
+/// `LaunchMode::from_args`) — never per keystroke, since the DNS fallback
+/// below blocks. See [`parse_literal_address`] for the cheap subset that is
+/// safe to run on every keystroke.
+pub fn parse_address(value: &str) -> Option<SocketAddr> {
+    parse_literal_address(value)
         // A name, with or without a port. Worth resolving because on a home
         // network the other machine usually has one and its address is a
         // DHCP lease that changes.
@@ -224,6 +238,7 @@ fn joining_steam(mode: Option<Res<LaunchMode>>) -> bool {
 fn warn_if_steam_unavailable(
     mode: Option<Res<LaunchMode>>,
     client: Option<Res<steam::Client>>,
+    mut failed: MessageWriter<ConnectFailed>,
 ) {
     if client.is_some() {
         return;
@@ -233,10 +248,23 @@ fn warn_if_steam_unavailable(
             error!("Steam is not available, so a Steam lobby cannot be opened. Is Steam running?")
         }
         Some(LaunchMode::JoinSteam(_)) => {
-            error!("Steam is not available, so this Steam lobby cannot be joined. Is Steam running?")
+            error!("Steam is not available, so this Steam lobby cannot be joined. Is Steam running?");
+            failed.write(ConnectFailed {
+                reason: "Steam is not available. Is Steam running?".to_string(),
+            });
         }
         _ => {}
     }
+}
+
+/// A join attempt that did not end in `ClientState::Connected` — read by
+/// `menu` while `AppState::Connecting`. Without this, a failed or timed-out
+/// handshake has no way to reach the player: nothing else in this module
+/// watches for it, and the client would otherwise sit in `Connecting`
+/// forever while the socket quietly keeps retrying underneath.
+#[derive(Message, Debug, Clone)]
+pub struct ConnectFailed {
+    pub reason: String,
 }
 
 pub struct NetPlugin;
@@ -247,21 +275,84 @@ impl Plugin for NetPlugin {
         // now a menu decision, and singleplayer is the right thing to assume
         // for anything that never reaches the menu, such as a test.
         app.init_resource::<LaunchMode>()
-            .add_plugins((RepliconPlugins, RepliconRenetPlugins));
+            .add_plugins((RepliconPlugins, RepliconRenetPlugins))
+            .add_message::<ConnectFailed>();
 
         register_replication(app);
         app.add_systems(Update, resync_on_join.run_if(is_authority))
-            // Sockets open on the way into the lab rather than at startup,
-            // because until the menu is done with, this process does not yet
-            // know whether it is hosting, joining or neither.
+            // A host or singleplayer game owns the simulation immediately —
+            // there is nothing to wait for.
             .add_systems(
                 OnEnter(AppState::Playing),
                 (
                     start_hosting.run_if(hosting),
-                    start_joining.run_if(joining),
-                    warn_if_steam_unavailable.run_if(hosting_steam.or_else(joining_steam)),
+                    warn_if_steam_unavailable.run_if(hosting_steam),
                 ),
+            )
+            // A joining process stops here — see `AppState::Connecting`'s doc
+            // comment — instead of building the lab and running the full
+            // simulation against a socket that may never answer.
+            .add_systems(
+                OnEnter(AppState::Connecting),
+                (
+                    start_joining.run_if(joining),
+                    warn_if_steam_unavailable.run_if(joining_steam),
+                ),
+            )
+            // `ClientState::Connected` is produced identically by both
+            // transports (see `steam`'s module doc), so one system here
+            // covers a LAN join and a Steam join alike.
+            .add_systems(
+                OnEnter(ClientState::Connected),
+                finish_joining.run_if(in_state(AppState::Connecting)),
+            )
+            .add_systems(
+                OnEnter(ClientState::Disconnected),
+                report_join_failure.run_if(in_state(AppState::Connecting).and_then(joining)),
             );
+    }
+}
+
+/// The client's handshake finished — hand off from the waiting room to the
+/// lab.
+fn finish_joining(mut app_state: ResMut<NextState<AppState>>) {
+    app_state.set(AppState::Playing);
+}
+
+/// The direct/LAN client's handshake failed or timed out — surfaces it
+/// instead of leaving `Connecting` with nothing watching.
+///
+/// Reads this module's own `RenetClient` specifically: the Steam transport's
+/// client is a different type of the same name
+/// (`bevy_replicon_renet2::renet2::RenetClient`), so `steam` has its own
+/// copy of this system, gated on `joining_steam` instead of `joining` so the
+/// two never both fire off the one shared `ClientState` transition.
+fn report_join_failure(client: Option<Res<RenetClient>>, mut failed: MessageWriter<ConnectFailed>) {
+    let reason = match client.and_then(|client| client.disconnect_reason()) {
+        // The ordinary case: the netcode handshake's own ~15s timeout gave
+        // up with no reply, which renet reports as a transport-level
+        // disconnect rather than anything more specific.
+        Some(DisconnectReason::Transport) | None => {
+            "could not reach the host — check the address, and that it's \
+             still open"
+                .to_string()
+        }
+        Some(reason) => reason.to_string(),
+    };
+    failed.write(ConnectFailed { reason });
+}
+
+/// Drops whatever half-open connection resources exist for `mode`, so a
+/// cancelled or failed join attempt does not leave a socket or transport
+/// behind for the next one to trip over.
+pub fn abandon_connection_attempt(commands: &mut Commands, mode: LaunchMode) {
+    match mode {
+        LaunchMode::Join(_) => {
+            commands.remove_resource::<RenetClient>();
+            commands.remove_resource::<NetcodeClientTransport>();
+        }
+        LaunchMode::JoinSteam(_) => steam::abandon_join(commands),
+        _ => {}
     }
 }
 
@@ -399,11 +490,19 @@ fn start_hosting(mut commands: Commands, channels: Res<RepliconChannels>) {
     }
 }
 
-fn start_joining(mut commands: Commands, channels: Res<RepliconChannels>, mode: Res<LaunchMode>) {
+fn start_joining(
+    mut commands: Commands,
+    channels: Res<RepliconChannels>,
+    mode: Res<LaunchMode>,
+    mut failed: MessageWriter<ConnectFailed>,
+) {
     let LaunchMode::Join(address) = *mode else {
         return;
     };
     let Ok(since_epoch) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) else {
+        failed.write(ConnectFailed {
+            reason: "the system clock is set before 1970".to_string(),
+        });
         return;
     };
 
@@ -414,6 +513,10 @@ fn start_joining(mut commands: Commands, channels: Res<RepliconChannels>, mode: 
     });
     // Any local port will do; the id only needs to be unique per connection.
     let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
+        error!("could not open a local socket to join {address}");
+        failed.write(ConnectFailed {
+            reason: "could not open a local network socket".to_string(),
+        });
         return;
     };
     let authentication = ClientAuthentication::Unsecure {
@@ -424,6 +527,9 @@ fn start_joining(mut commands: Commands, channels: Res<RepliconChannels>, mode: 
     };
     let Ok(transport) = NetcodeClientTransport::new(since_epoch, authentication, socket) else {
         error!("could not reach {address}");
+        failed.write(ConnectFailed {
+            reason: format!("could not reach {address}"),
+        });
         return;
     };
 
@@ -763,5 +869,122 @@ mod tests {
             );
             assert_eq!(lan.port(), DEFAULT_PORT);
         }
+    }
+
+    #[test]
+    fn a_bare_ip_hints_without_touching_dns() {
+        // The cheap subset `menu::hint_for` runs on every keystroke — must
+        // never fall through to a resolve, or typing would block on DNS.
+        assert_eq!(
+            parse_literal_address("192.168.1.40"),
+            Some(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 40)),
+                DEFAULT_PORT
+            ))
+        );
+        assert_eq!(
+            parse_literal_address("192.168.1.40:9999"),
+            Some(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 40)),
+                9999
+            ))
+        );
+        // A hostname is not a literal — this must say so rather than resolve.
+        assert_eq!(parse_literal_address("some-machine.local"), None);
+    }
+
+    /// Records the last reason `report_join_failure` wrote, the way the real
+    /// menu-side handler reads it — reused by both cases below rather than
+    /// each reaching into `Messages<ConnectFailed>` directly.
+    #[derive(Resource, Default)]
+    struct SawFailure(Option<String>);
+
+    fn watch_failure(mut failed: MessageReader<ConnectFailed>, mut saw: ResMut<SawFailure>) {
+        if let Some(failure) = failed.read().last() {
+            saw.0 = Some(failure.reason.clone());
+        }
+    }
+
+    #[test]
+    fn a_handshake_with_no_client_at_all_is_still_reported() {
+        // The earliest failures — socket bind, transport creation — never get
+        // as far as inserting a `RenetClient`. Without this, a `None` client
+        // would have no way to report anything, and `Connecting` would hang
+        // exactly as silently as before this feature existed.
+        let mut app = App::new();
+        app.add_message::<ConnectFailed>()
+            .init_resource::<SawFailure>()
+            .add_systems(Update, (report_join_failure, watch_failure).chain());
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<SawFailure>().0.as_deref(),
+            Some("could not reach the host — check the address, and that it's still open")
+        );
+    }
+
+    #[test]
+    fn a_netcode_timeout_reads_as_the_same_friendly_message() {
+        // `renetcode`'s own ~15s connect timeout ends with the transport
+        // calling `disconnect_due_to_transport`, which renet reports as
+        // `DisconnectReason::Transport` — not anything reagent-specific. This
+        // is the ordinary case a real timed-out join actually hits, so it
+        // gets the plain-English message rather than the raw variant name.
+        let mut client = RenetClient::new(ConnectionConfig::default());
+        client.disconnect_due_to_transport();
+
+        let mut app = App::new();
+        app.insert_resource(client)
+            .add_message::<ConnectFailed>()
+            .init_resource::<SawFailure>()
+            .add_systems(Update, (report_join_failure, watch_failure).chain());
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<SawFailure>().0.as_deref(),
+            Some("could not reach the host — check the address, and that it's still open")
+        );
+    }
+
+    #[test]
+    fn a_connecting_client_only_reaches_playing_once_actually_connected() {
+        // The bug this pins: entering `Playing` — and with it building the lab
+        // and running the full simulation — before a connection exists, which
+        // is what made a stuck or slow handshake look exactly like a freeze.
+        // See `AppState::Connecting`'s doc comment.
+        let mut server = App::new();
+        let mut client = App::new();
+        for app in [&mut server, &mut client] {
+            app.add_plugins((
+                MinimalPlugins,
+                StatesPlugin,
+                RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+            ));
+            register_replication(app);
+            app.finish();
+        }
+        client.init_state::<AppState>().add_systems(
+            OnEnter(ClientState::Connected),
+            finish_joining.run_if(in_state(AppState::Connecting)),
+        );
+        client
+            .world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Connecting);
+        client.update();
+        assert_eq!(
+            *client.world().resource::<State<AppState>>().get(),
+            AppState::Connecting,
+            "must not jump to Playing before the handshake finishes"
+        );
+
+        server.connect_client(&mut client);
+        client.update();
+
+        assert_eq!(
+            *client.world().resource::<State<AppState>>().get(),
+            AppState::Playing,
+            "must reach Playing once ClientState::Connected actually fires"
+        );
     }
 }

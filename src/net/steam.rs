@@ -43,13 +43,13 @@ use bevy::prelude::*;
 use bevy_renet2::steam::{
     AccessPermission, SteamClientTransport, SteamServerConfig, SteamServerTransport,
 };
-use bevy_replicon::prelude::RepliconChannels;
-use bevy_replicon_renet2::renet2::{ConnectionConfig, RenetClient, RenetServer};
+use bevy_replicon::prelude::{ClientState, RepliconChannels};
+use bevy_replicon_renet2::renet2::{ConnectionConfig, DisconnectReason, RenetClient, RenetServer};
 use bevy_replicon_renet2::RenetChannelsExt;
 pub use bevy_steamworks::{Client, LobbyId};
 use bevy_steamworks::{CallbackResult, LobbyType, SResult, SteamworksEvent};
 
-use super::{hosting_steam, joining_steam};
+use super::{hosting_steam, joining_steam, ConnectFailed};
 use crate::AppState;
 
 /// Valve's App ID for this game, from the Steamworks partner dashboard.
@@ -95,24 +95,54 @@ impl Plugin for SteamPlugin {
         // Only ever added by `main.rs` after `SteamworksPlugin` itself
         // initialised successfully, so `SteamworksEvent` is guaranteed
         // registered by the time these systems run — see main.rs.
-        app.add_systems(
-            OnEnter(AppState::Playing),
-            (
-                start_hosting_steam.run_if(hosting_steam),
+        app.add_systems(OnEnter(AppState::Playing), start_hosting_steam.run_if(hosting_steam))
+            // A joining process stops at `AppState::Connecting` — see its doc
+            // comment on `AppState` — instead of running the full simulation
+            // against a lobby that may never answer.
+            .add_systems(
+                OnEnter(AppState::Connecting),
                 start_joining_steam.run_if(joining_steam),
-            ),
-        )
-        .add_systems(
-            Update,
-            (
-                // Not gated to any state or launch mode: an overlay invite
-                // can be accepted from the main menu, mid-game, anywhere.
-                handle_lobby_join_requested,
-                poll_lobby_creation.run_if(resource_exists::<PendingLobbyCreation>),
-                poll_lobby_join.run_if(resource_exists::<PendingLobbyJoin>),
-            ),
-        );
+            )
+            .add_systems(
+                OnEnter(ClientState::Disconnected),
+                report_join_failure_steam
+                    .run_if(in_state(AppState::Connecting).and_then(joining_steam)),
+            )
+            .add_systems(
+                Update,
+                (
+                    // Not gated to any state or launch mode: an overlay invite
+                    // can be accepted from the main menu, mid-game, anywhere.
+                    handle_lobby_join_requested,
+                    poll_lobby_creation.run_if(resource_exists::<PendingLobbyCreation>),
+                    poll_lobby_join.run_if(resource_exists::<PendingLobbyJoin>),
+                ),
+            );
     }
+}
+
+/// The Steam client's handshake failed or timed out — the Steam-typed
+/// counterpart of `net::report_join_failure`. Kept separate because the
+/// Steam transport's `RenetClient` (`bevy_replicon_renet2::renet2::
+/// RenetClient`) is a different type from the LAN transport's, despite the
+/// shared name, and each is gated so only one ever fires off the one shared
+/// `ClientState` transition.
+fn report_join_failure_steam(client: Option<Res<RenetClient>>, mut failed: MessageWriter<ConnectFailed>) {
+    let reason = match client.and_then(|client| client.disconnect_reason()) {
+        Some(DisconnectReason::Transport) | None => {
+            "could not reach the host over Steam — check that they're still hosting".to_string()
+        }
+        Some(reason) => reason.to_string(),
+    };
+    failed.write(ConnectFailed { reason });
+}
+
+/// Drops whatever half-open Steam connection resources exist, for a
+/// cancelled or failed join attempt.
+pub(crate) fn abandon_join(commands: &mut Commands) {
+    commands.remove_resource::<RenetClient>();
+    commands.remove_resource::<SteamClientTransport>();
+    commands.remove_resource::<PendingLobbyJoin>();
 }
 
 fn start_hosting_steam(client: Res<Client>, mut commands: Commands) {
@@ -185,7 +215,7 @@ fn handle_lobby_join_requested(
         };
         info!("accepting a Steam invite to lobby {:?}", request.lobby_steam_id);
         *mode = super::LaunchMode::JoinSteam(request.lobby_steam_id);
-        app_state.set(AppState::Playing);
+        app_state.set(AppState::Connecting);
     }
 }
 
@@ -206,6 +236,7 @@ fn poll_lobby_join(
     pending: Res<PendingLobbyJoin>,
     client: Res<Client>,
     channels: Res<RepliconChannels>,
+    mut failed: MessageWriter<ConnectFailed>,
 ) {
     let Ok(result) = pending.0.lock().unwrap().try_recv() else {
         return;
@@ -216,6 +247,9 @@ fn poll_lobby_join(
         Ok(lobby) => lobby,
         Err(()) => {
             error!("could not join the Steam lobby — it may be full or no longer open");
+            failed.write(ConnectFailed {
+                reason: "could not join the lobby — it may be full or no longer open".to_string(),
+            });
             return;
         }
     };
@@ -236,7 +270,12 @@ fn poll_lobby_join(
             commands.insert_resource(transport);
             info!("joining the lab over Steam (lobby {lobby:?}, host {host:?})");
         }
-        Err(e) => error!("could not reach the host over Steam: {e:?}"),
+        Err(e) => {
+            error!("could not reach the host over Steam: {e:?}");
+            failed.write(ConnectFailed {
+                reason: format!("could not reach the host over Steam: {e:?}"),
+            });
+        }
     }
 }
 

@@ -24,114 +24,33 @@
     // Most of these do nothing at all in a body, which is canon and also
     // useful: a chemist who drinks the oxygen supply learns something cheap.
     //
-    // `unlock_cost` gates the other 17 behind research points, spent at the
-    // dispenser itself (`Knowledge::unlock_reagent`). Cheap (6-9) covers
-    // reagents that feed early, common recipes (water alone unlocks hooch,
-    // hydrogen_peroxide and the saltwater chain); moderate (12-15) is more
-    // specialised or already pyro-adjacent; expensive (18-24) gates the exotic
-    // or outright dangerous end — chlorine trifluoride's fluorine, and
-    // mercury, the priciest of all, behind the illicit-adjacent
-    // mindbreaker_toxin/zombie_powder chain. Nothing here changes what a
-    // fully-unlocked career can eventually make — only how long it takes to
-    // get there. Tripled from the original 2-8 scale (M11) once a fresh
-    // career was clearing the whole 71-point tree in under an hour; the new
-    // 213-point total is meant to span several sessions, not one.
-    (
-        id: "aluminium",
-        name: "Aluminium",
-        color: (0.75, 0.76, 0.78),
-        dispensable: true,
-        unlock_cost: Some(12),
-    ),
-    // Free from the start — one of the six base reagents the three starting
-    // recipes are built from. See `every_starting_ingredient_is_unlocked_free`.
+    // `tier` gates the other 17 behind a dispenser upgrade
+    // (`Knowledge::upgrade_dispenser`): the whole tier unlocks at once for a
+    // lump research-point cost, rather than buying one reagent at a time.
+    // Listed here in tier order, tier 0 (free) first. Tier 1 (24 points)
+    // covers reagents that feed early, common recipes (water alone unlocks
+    // hooch, hydrogen_peroxide and the saltwater chain); tiers 2-3 (27/48)
+    // are more specialised or already pyro-adjacent; tiers 4-7 (15/54/21/24)
+    // gate the exotic or outright dangerous end — chlorine trifluoride's
+    // fluorine, and mercury, the priciest tier of all, behind the
+    // illicit-adjacent mindbreaker_toxin/zombie_powder chain. Nothing here
+    // changes what a fully-upgraded dispenser can eventually make — only how
+    // long it takes to get there. Per-reagent costs were tripled from the
+    // original 2-8 scale (M11) once a fresh career was clearing the whole
+    // 71-point tree in under an hour; the tier upgrade costs below are just
+    // those same per-reagent costs summed per tier, so the 213-point total to
+    // fully upgrade is unchanged — only the unit of purchase moved from one
+    // reagent to a whole tier.
+    //
+    // ---- Tier 0: free from the start ---------------------------------------
+    //
+    // One of the six base reagents the three starting recipes are built
+    // from. See `every_starting_ingredient_is_unlocked_free`.
     (id: "carbon",     name: "Carbon",     color: (0.12, 0.12, 0.13), dispensable: true),
-    (
-        id: "chlorine",
-        name: "Chlorine",
-        color: (0.82, 0.90, 0.44),
-        dispensable: true,
-        unlock_cost: Some(12),
-        effects: [Harm(Brute, 1)],
-    ),
-    (
-        id: "copper",
-        name: "Copper",
-        color: (0.72, 0.45, 0.20),
-        dispensable: true,
-        unlock_cost: Some(9),
-    ),
-    (
-        id: "ethanol",
-        name: "Ethanol",
-        color: (0.85, 0.85, 0.80),
-        dispensable: true,
-        unlock_cost: Some(12),
-        // Lingers: half the usual rate, which is what makes one drink a
-        // problem for the next twenty minutes of a shift.
-        metabolism: Some(0.2),
-        effects: [Status(kind: Drunk, seconds: 2.0, intensity: 0.65)],
-    ),
-    (
-        id: "hydrogen",
-        name: "Hydrogen",
-        color: (0.90, 0.90, 0.95),
-        dispensable: true,
-        unlock_cost: Some(6),
-    ),
-    (
-        id: "iron",
-        name: "Iron",
-        color: (0.50, 0.28, 0.24),
-        dispensable: true,
-        unlock_cost: Some(6),
-        // Iron restores blood in SS13, and blood loss is what oxygen damage
-        // represents here.
-        effects: [Heal(Oxygen, 1)],
-    ),
-    // Free from the start — see the `carbon` note above.
     (id: "nitrogen",   name: "Nitrogen",   color: (0.62, 0.70, 0.86), dispensable: true),
-    // Free from the start — see the `carbon` note above.
     (id: "oxygen",     name: "Oxygen",     color: (0.60, 0.80, 1.00), dispensable: true),
-    (
-        id: "phosphorus",
-        name: "Phosphorus",
-        color: (0.94, 0.90, 0.66),
-        dispensable: true,
-        unlock_cost: Some(9),
-    ),
-    (
-        id: "plasma",
-        name: "Plasma",
-        color: (0.72, 0.24, 0.86),
-        dispensable: true,
-        unlock_cost: Some(15),
-        // The most poisonous thing the dispenser will hand you, and it boils
-        // off at 50°C — so heating a beaker to run a hot recipe can quietly
-        // cost you the catalyst that recipe needed.
-        boils_at: Some((323.15)),
-        effects: [Harm(Toxin, 3)],
-    ),
-    // Free from the start — see the `carbon` note above.
     (id: "potassium",  name: "Potassium",  color: (0.86, 0.84, 0.72), dispensable: true),
-    (
-        id: "radium",
-        name: "Radium",
-        color: (0.44, 0.90, 0.42),
-        dispensable: true,
-        unlock_cost: Some(18),
-        effects: [Harm(Toxin, 2)],
-    ),
-    // Free from the start — see the `carbon` note above.
     (id: "silicon",    name: "Silicon",    color: (0.66, 0.68, 0.72), dispensable: true),
-    (
-        id: "sodium",
-        name: "Sodium",
-        color: (0.90, 0.88, 0.82),
-        dispensable: true,
-        unlock_cost: Some(6),
-    ),
-    // Free from the start — see the `carbon` note above.
     (
         id: "sugar",
         name: "Sugar",
@@ -143,23 +62,145 @@
         overdose: Some(120),
         overdose_effects: [Harm(Toxin, 2)],
     ),
+
+    // ---- Tier 1: 24 points --------------------------------------------------
     (
-        id: "sulfur",
-        name: "Sulfur",
-        color: (0.95, 0.90, 0.35),
+        id: "hydrogen",
+        name: "Hydrogen",
+        color: (0.90, 0.90, 0.95),
         dispensable: true,
-        unlock_cost: Some(9),
-        effects: [Harm(Toxin, 0.5)],
+        tier: 1,
+    ),
+    (
+        id: "iron",
+        name: "Iron",
+        color: (0.50, 0.28, 0.24),
+        dispensable: true,
+        tier: 1,
+        // Iron restores blood in SS13, and blood loss is what oxygen damage
+        // represents here.
+        effects: [Heal(Oxygen, 1)],
+    ),
+    (
+        id: "sodium",
+        name: "Sodium",
+        color: (0.90, 0.88, 0.82),
+        dispensable: true,
+        tier: 1,
     ),
     (
         id: "water",
         name: "Water",
         color: (0.55, 0.72, 0.90),
         dispensable: true,
-        unlock_cost: Some(6),
+        tier: 1,
         // The only thing in the lab that sobers you up.
         effects: [Counter(kind: Drunk, seconds: 2.0, intensity: 0.25)],
     ),
+
+    // ---- Tier 2: 27 points --------------------------------------------------
+    (
+        id: "copper",
+        name: "Copper",
+        color: (0.72, 0.45, 0.20),
+        dispensable: true,
+        tier: 2,
+    ),
+    (
+        id: "phosphorus",
+        name: "Phosphorus",
+        color: (0.94, 0.90, 0.66),
+        dispensable: true,
+        tier: 2,
+    ),
+    (
+        id: "sulfur",
+        name: "Sulfur",
+        color: (0.95, 0.90, 0.35),
+        dispensable: true,
+        tier: 2,
+        effects: [Harm(Toxin, 0.5)],
+    ),
+
+    // ---- Tier 3: 48 points --------------------------------------------------
+    (
+        id: "aluminium",
+        name: "Aluminium",
+        color: (0.75, 0.76, 0.78),
+        dispensable: true,
+        tier: 3,
+    ),
+    (
+        id: "chlorine",
+        name: "Chlorine",
+        color: (0.82, 0.90, 0.44),
+        dispensable: true,
+        tier: 3,
+        effects: [Harm(Brute, 1)],
+    ),
+    (
+        id: "ethanol",
+        name: "Ethanol",
+        color: (0.85, 0.85, 0.80),
+        dispensable: true,
+        tier: 3,
+        // Lingers: half the usual rate, which is what makes one drink a
+        // problem for the next twenty minutes of a shift.
+        metabolism: Some(0.2),
+        effects: [Status(kind: Drunk, seconds: 2.0, intensity: 0.65)],
+    ),
+    (
+        id: "iodine",
+        name: "Iodine",
+        color: (0.34, 0.24, 0.42),
+        dispensable: true,
+        tier: 3,
+        effects: [Harm(Toxin, 0.5)],
+    ),
+
+    // ---- Tier 4: 15 points --------------------------------------------------
+    (
+        id: "plasma",
+        name: "Plasma",
+        color: (0.72, 0.24, 0.86),
+        dispensable: true,
+        tier: 4,
+        // The most poisonous thing the dispenser will hand you, and it boils
+        // off at 50°C — so heating a beaker to run a hot recipe can quietly
+        // cost you the catalyst that recipe needed.
+        boils_at: Some((323.15)),
+        effects: [Harm(Toxin, 3)],
+    ),
+
+    // ---- Tier 5: 54 points --------------------------------------------------
+    (
+        id: "radium",
+        name: "Radium",
+        color: (0.44, 0.90, 0.42),
+        dispensable: true,
+        tier: 5,
+        effects: [Harm(Toxin, 2)],
+    ),
+    (
+        id: "lithium",
+        name: "Lithium",
+        color: (0.66, 0.68, 0.74),
+        dispensable: true,
+        tier: 5,
+        effects: [Status(kind: Unsteady, seconds: 4.0, intensity: 1.0)],
+    ),
+    (
+        id: "welding_fuel",
+        name: "Welding Fuel",
+        color: (0.58, 0.44, 0.18),
+        dispensable: true,
+        tier: 5,
+        // Drinkable in the sense that a mouthful will not kill you outright.
+        // It is still the worst decision available at the dispenser.
+        effects: [Harm(Toxin, 1)],
+    ),
+
+    // ---- Tier 6: 21 points --------------------------------------------------
     (
         id: "fluorine",
         name: "Fluorine",
@@ -168,43 +209,19 @@
         // The priciest halogen: chlorine trifluoride is the one recipe it
         // gates, and chlorine trifluoride is the one recipe that can detonate
         // harder than phlogiston.
-        unlock_cost: Some(21),
+        tier: 6,
         effects: [Harm(Toxin, 1)],
     ),
-    (
-        id: "lithium",
-        name: "Lithium",
-        color: (0.66, 0.68, 0.74),
-        dispensable: true,
-        unlock_cost: Some(18),
-        effects: [Status(kind: Unsteady, seconds: 4.0, intensity: 1.0)],
-    ),
-    (
-        id: "iodine",
-        name: "Iodine",
-        color: (0.34, 0.24, 0.42),
-        dispensable: true,
-        unlock_cost: Some(12),
-        effects: [Harm(Toxin, 0.5)],
-    ),
-    (
-        id: "welding_fuel",
-        name: "Welding Fuel",
-        color: (0.58, 0.44, 0.18),
-        dispensable: true,
-        unlock_cost: Some(18),
-        // Drinkable in the sense that a mouthful will not kill you outright.
-        // It is still the worst decision available at the dispenser.
-        effects: [Harm(Toxin, 1)],
-    ),
+
+    // ---- Tier 7: 24 points --------------------------------------------------
     (
         id: "mercury",
         name: "Mercury",
         color: (0.60, 0.62, 0.66),
         dispensable: true,
-        // The most expensive unlock in the game — it gates nothing legitimate
+        // The most expensive tier in the game — it gates nothing legitimate
         // at all, only mindbreaker_toxin and zombie_powder, both Illicit.
-        unlock_cost: Some(24),
+        tier: 7,
         // SS13's mercury does brain damage. There is no brain pool here, so it
         // maps onto toxin plus the twitching and the blurred vision that come
         // with it — the symptoms a chemist would actually notice.

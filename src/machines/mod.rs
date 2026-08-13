@@ -906,15 +906,12 @@ mod tests {
             &data.reagents,
         );
 
-        // These tests exercise machine behaviour, not the reagent-unlock
-        // economy — start with everything already bought so a locked
+        // These tests exercise machine behaviour, not the dispenser tier
+        // economy — start with the dispenser fully upgraded so a locked
         // reagent is never the reason a dispense silently does nothing.
         let mut knowledge = Knowledge::new(&data);
         knowledge.award_research(1000);
-        let dispensable: Vec<ReagentId> = data.reagents.dispensable().map(|r| r.id).collect();
-        for reagent in dispensable {
-            knowledge.unlock_reagent(&data, reagent);
-        }
+        while knowledge.upgrade_dispenser(&data) {}
 
         let mut app = App::new();
         app.insert_resource(ChemDb(data))

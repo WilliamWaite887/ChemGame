@@ -145,5 +145,13 @@ pub enum AppState {
     /// Picking how to play and which save. Skipped when the command line
     /// already said.
     MainMenu,
+    /// Dialling out, over whichever transport `LaunchMode` picked. No lab, no
+    /// gameplay systems run here — every such system is gated on `Playing`
+    /// specifically, so simply not being `Playing` yet is what keeps a
+    /// doomed or slow handshake cheap instead of running the full simulation
+    /// uncapped while nothing is connected. Only `Join`/`JoinSteam` pass
+    /// through here; `Host`/`HostSteam`/`Singleplayer` own the simulation
+    /// immediately, since they have nothing to wait for.
+    Connecting,
     Playing,
 }

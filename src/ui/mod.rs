@@ -19,7 +19,8 @@ use crate::containers::{Container, ContainerKind, InSlot};
 use crate::crew::{CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{leave_machine, InteractionMode, LeaveMachineRequested};
 use crate::knowledge::{
-    product_name, reaction_categories, Knowledge, RecipeDiscovered, UnlockReagentRequested, HINT_COST,
+    product_name, reaction_categories, Knowledge, RecipeDiscovered, UpgradeDispenserRequested,
+    HINT_COST,
 };
 use crate::machines::{
     slotted_container, AnalyzeRequested, Buffer, BufferDirection, BufferTransferRequested,
@@ -50,6 +51,10 @@ pub(crate) const PANEL_BG: Color = Color::srgba(0.07, 0.08, 0.10, 0.97);
 pub(crate) const SECTION_BG: Color = Color::srgba(0.12, 0.13, 0.16, 0.9);
 pub(crate) const TEXT: Color = Color::srgb(0.88, 0.90, 0.94);
 pub(crate) const TEXT_DIM: Color = Color::srgb(0.55, 0.59, 0.66);
+/// A failed connection attempt, shown on the mode screen after a bounce back
+/// from `AppState::Connecting` — the one place in the menu that needs to say
+/// something went wrong out loud rather than staying silent.
+pub(crate) const ERROR_TEXT: Color = Color::srgb(0.85, 0.35, 0.35);
 pub(crate) const BUTTON_IDLE: Color = Color::srgb(0.17, 0.19, 0.23);
 const BUTTON_HOVER: Color = Color::srgb(0.25, 0.29, 0.35);
 const BUTTON_ACTIVE: Color = Color::srgb(0.20, 0.45, 0.62);
@@ -108,7 +113,7 @@ pub(crate) struct Selected;
 enum PanelAction {
     SetAmount(Units),
     Dispense(ReagentId),
-    UnlockReagent(ReagentId),
+    UpgradeDispenser,
     Eject,
     Empty,
     ToBuffer(ReagentId, Units),
@@ -476,32 +481,68 @@ fn dispenser_body(
     });
 
     panel.spawn(label("Reagents", 13.0, TEXT_DIM));
-    panel.spawn(wrap_row()).with_children(|row| {
-        for reagent in db.reagents.dispensable() {
-            match knowledge.reagent_unlock_cost(db, reagent.id) {
-                // Unlocked (free from the start, or already bought): the
-                // ordinary live dispense button, unchanged.
-                None => {
+
+    // One upgrade purchase unlocks a whole tier at once, replacing the old
+    // per-reagent unlock buttons below. Same "drawn dead rather than drawn
+    // live and silently doing nothing" rule `standing_board_body` already
+    // uses for an unaffordable requisition — clicking it either way sends
+    // the same request, and `Knowledge::upgrade_dispenser` re-checks
+    // affordability server-side, so a dead button is just inert, never wrong.
+    if let Some(cost) = knowledge.next_upgrade_cost() {
+        let affordable = knowledge.research_points >= cost;
+        let caption = format!(
+            "Upgrade dispenser to tier {}  ({cost} research)",
+            knowledge.dispenser_tier() + 1
+        );
+        let mut entity = panel.spawn(button(caption, PanelAction::UpgradeDispenser));
+        if !affordable {
+            entity.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
+        }
+    }
+
+    // Grouped by tier rather than the old flat, unsorted list — locked and
+    // unlocked reagents no longer interleave, and each tier reads as one
+    // step of the dispenser's own progression rather than 17 separate
+    // purchases.
+    let mut reagents: Vec<&chem_sim::Reagent> = db.reagents.dispensable().collect();
+    reagents.sort_by(|a, b| a.tier.cmp(&b.tier).then_with(|| a.name.cmp(&b.name)));
+
+    let mut index = 0;
+    while index < reagents.len() {
+        let tier = reagents[index].tier;
+        let end = reagents[index..].partition_point(|r| r.tier == tier) + index;
+        let unlocked = knowledge.dispenser_tier() >= tier;
+
+        panel.spawn(label(
+            if tier == 0 {
+                "Starting".to_string()
+            } else {
+                format!("Tier {tier}")
+            },
+            12.0,
+            TEXT_DIM,
+        ));
+        // Only the very next tier previews its reagents by name — a chemist
+        // can see what the *next* upgrade buys, but anything further out
+        // stays a mystery until they've climbed that far, so the tier list
+        // reads as a roadmap rather than a spoiler.
+        let revealed = tier <= knowledge.dispenser_tier() + 1;
+        panel.spawn(wrap_row()).with_children(|row| {
+            for reagent in &reagents[index..end] {
+                if unlocked {
                     row.spawn(button(reagent.name.clone(), PanelAction::Dispense(reagent.id)));
-                }
-                // Locked: same "drawn dead rather than drawn live and
-                // silently doing nothing" rule `standing_board_body` already
-                // uses for an unaffordable requisition. Clicking it either
-                // way sends the same request — `Knowledge::unlock_reagent`
-                // re-checks affordability server-side, so a dead button is
-                // just inert, never wrong.
-                Some(cost) => {
-                    let affordable = knowledge.research_points >= cost;
-                    let caption = format!("{} ({cost})", reagent.name);
-                    let mut entity =
-                        row.spawn(button(caption, PanelAction::UnlockReagent(reagent.id)));
-                    if !affordable {
-                        entity.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
-                    }
+                } else {
+                    // Not yet unlocked at this dispenser tier: shown so a
+                    // chemist can see what's coming, but inert — upgrading
+                    // is the only way to reach it, not a per-reagent buy.
+                    let caption = if revealed { reagent.name.clone() } else { "???".to_string() };
+                    let mut entity = row.spawn(button(caption, PanelAction::Dispense(reagent.id)));
+                    entity.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
                 }
             }
-        }
-    });
+        });
+        index = end;
+    }
 
     container_readout(panel, db, loaded, true);
 }
@@ -1301,14 +1342,12 @@ fn render_ingredient_node(
     pane.spawn((node, BackgroundColor(SECTION_BG), BorderColor::from(TEXT_DIM)))
         .with_children(|entry| {
             entry.spawn(label(line, 14.0, TEXT_DIM));
-            if definition.dispensable {
-                if let Some(cost) = knowledge.reagent_unlock_cost(db, reagent) {
-                    entry.spawn(label(
-                        format!("locked at dispenser  ({cost} research)"),
-                        12.0,
-                        Color::srgb(0.80, 0.60, 0.45),
-                    ));
-                }
+            if definition.dispensable && !knowledge.is_reagent_unlocked(db, reagent) {
+                entry.spawn(label(
+                    format!("locked at dispenser  (tier {})", definition.tier),
+                    12.0,
+                    Color::srgb(0.80, 0.60, 0.45),
+                ));
             }
         });
 }
@@ -2278,7 +2317,7 @@ struct PanelMessages<'w> {
     toggle_accepting: MessageWriter<'w, ToggleAcceptingOrders>,
     requisition: MessageWriter<'w, RequisitionRequested>,
     leave_machine: MessageWriter<'w, LeaveMachineRequested>,
-    unlock_reagent: MessageWriter<'w, UnlockReagentRequested>,
+    upgrade_dispenser: MessageWriter<'w, UpgradeDispenserRequested>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2313,8 +2352,8 @@ fn handle_panel_clicks(
                 knowledge.buy_hint(&db, *reaction);
                 continue;
             }
-            PanelAction::UnlockReagent(reagent) => {
-                out.unlock_reagent.write(UnlockReagentRequested { reagent: *reagent });
+            PanelAction::UpgradeDispenser => {
+                out.upgrade_dispenser.write(UpgradeDispenserRequested);
                 continue;
             }
             PanelAction::ShowCategory(category) => {
@@ -2414,7 +2453,7 @@ fn handle_panel_clicks(
             }
             // Handled above, before the machine guard.
             PanelAction::BuyHint(_)
-            | PanelAction::UnlockReagent(_)
+            | PanelAction::UpgradeDispenser
             | PanelAction::ShowCategory(_)
             | PanelAction::OpenRecipe(_)
             | PanelAction::CloseRecipe

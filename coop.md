@@ -21,3 +21,40 @@ Two more surfaced from tests rather than the run: chemist body parts needed an e
 Worth knowing: you committed mid-session as ec8ac49 work on coop, so everything above is already in that commit. I also updated the plan file's M7 section.
 
 Two things I did not do: there's still no in-game host/join menu, so your friend needs a terminal — say the word and I'll add one. And nobody has played a full shift with two humans yet; connection, visibility and input are confirmed, but the order → fabricate → hand off → radio loop hasn't been run by two people at once.
+
+## The in-game menu, and what broke when Steam arrived
+
+The in-game host/join menu did get built, alongside Steam Networking Sockets
+support (`src/net/steam.rs`) — Steam is what a real player actually uses: no
+address to type, no port to forward, no NAT problem. The CLI flags above still
+work exactly as documented and are the direct/LAN transport, kept around
+specifically for two-terminal testing without Steam running.
+
+What broke: the menu's **Host** button was wired to Steam, but **Join**
+(typed address) was left on the old direct/LAN transport. Click Host, have a
+friend type your IP into Join, and the friend's packets dial a UDP port your
+process never opened — Steam and direct/LAN are two separate, non-interoperable
+transports that happened to share one menu. The host saw no logs at all
+(nothing was listening), and the joining client sat on "attempting to join"
+forever, with no timeout ever surfacing and the full simulation already
+running client-side against a connection that didn't exist — which is what
+made it look like a freeze and spike CPU.
+
+Fixed by:
+- Reworded the Join screen so it reads as the LAN/dev path it actually is,
+  paired with `--host`, not with the menu's Steam-backed Host button.
+- Added `AppState::Connecting`: clicking Connect (or accepting a Steam
+  invite) no longer jumps straight into `Playing`. It waits — with a
+  lightweight "Connecting…" screen and a Cancel button, no lab, no gameplay
+  systems running — until `ClientState::Connected` actually fires, which
+  both transports produce identically.
+- A failed or timed-out handshake (`ClientState::Disconnected`, or Steam
+  unavailable, or a synchronous socket/transport error) now writes a
+  `ConnectFailed` message that bounces the player back to the mode screen
+  with the reason on screen, instead of leaving `Connecting` with nothing
+  watching it.
+- `menu::hint_for` (the live "connects to …" line while typing an address)
+  stopped calling DNS resolution on every keystroke — it was blocking the
+  whole app on `getaddrinfo` for nearly every partial string typed. It now
+  only recognises literal IPs live; a hostname resolves once, on the actual
+  Connect click, same as before.

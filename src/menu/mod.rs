@@ -15,10 +15,11 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 
-use crate::net::{parse_address, LaunchMode};
+use crate::net::{self, parse_address, parse_literal_address, ConnectFailed, LaunchMode};
 use crate::saves::{self, SaveSlot};
 use crate::ui::{
-    button, button_feedback, heading, label, row, BUTTON_IDLE, PANEL_BG, SECTION_BG, TEXT, TEXT_DIM,
+    button, button_feedback, heading, label, row, BUTTON_IDLE, ERROR_TEXT, PANEL_BG, SECTION_BG,
+    TEXT, TEXT_DIM,
 };
 use crate::AppState;
 
@@ -38,6 +39,8 @@ pub enum MenuScreen {
     Save,
     /// The address to dial.
     Join,
+    /// Waiting on `AppState::Connecting` to resolve — see its doc comment.
+    Connecting,
 }
 
 pub struct MenuPlugin;
@@ -47,24 +50,30 @@ impl Plugin for MenuPlugin {
         app.init_state::<MenuScreen>()
             .init_resource::<AddressInput>()
             .init_resource::<PendingMode>()
+            .init_resource::<ConnectError>()
             .add_systems(OnEnter(AppState::MainMenu), open_menu)
             .add_systems(OnExit(AppState::MainMenu), close_menu)
+            .add_systems(OnEnter(AppState::Connecting), open_connecting)
+            .add_systems(OnExit(AppState::Connecting), close_menu)
             .add_systems(OnEnter(MenuScreen::Mode), show_mode_screen)
             .add_systems(OnEnter(MenuScreen::Save), show_save_screen)
             .add_systems(OnEnter(MenuScreen::Join), show_join_screen)
+            .add_systems(OnEnter(MenuScreen::Connecting), show_connecting_screen)
             .add_systems(OnExit(MenuScreen::Mode), clear_screen)
             .add_systems(OnExit(MenuScreen::Save), clear_screen)
             .add_systems(OnExit(MenuScreen::Join), clear_screen)
+            .add_systems(OnExit(MenuScreen::Connecting), clear_screen)
             .add_systems(
                 Update,
                 (
                     type_address.run_if(in_state(MenuScreen::Join)),
                     show_typed_address.run_if(in_state(MenuScreen::Join)),
                     handle_menu_clicks,
+                    handle_connect_failure.run_if(in_state(AppState::Connecting)),
                     button_feedback,
                 )
                     .chain()
-                    .run_if(in_state(AppState::MainMenu)),
+                    .run_if(in_state(AppState::MainMenu).or_else(in_state(AppState::Connecting))),
             );
     }
 }
@@ -84,6 +93,15 @@ struct MenuCamera;
 /// Host or Solo, remembered while the player picks a save.
 #[derive(Resource, Default, Clone, Copy)]
 struct PendingMode(LaunchMode);
+
+/// Why the last join attempt failed, if it did.
+///
+/// Shown on the mode screen after `handle_connect_failure` bounces back from
+/// `AppState::Connecting` — the one place in the menu that has to say
+/// something went wrong out loud, since silence is exactly the failure mode
+/// this whole feature exists to fix.
+#[derive(Resource, Default)]
+struct ConnectError(Option<String>);
 
 /// The address being typed on the join screen.
 #[derive(Resource, Default)]
@@ -110,6 +128,8 @@ enum MenuAction {
     NewSave,
     LoadSave(String),
     Connect,
+    /// Gives up on a `Connecting` attempt and returns to the mode screen.
+    Cancel,
     Back,
     Quit,
 }
@@ -120,6 +140,22 @@ fn open_menu(mut commands: Commands, mut screen: ResMut<NextState<MenuScreen>>) 
     saves::migrate_legacy_saves();
     commands.spawn((Camera2d, MenuCamera));
     screen.set(MenuScreen::Mode);
+}
+
+/// Opens the waiting-room screen on the way into `AppState::Connecting`.
+///
+/// Mirrors `open_menu`: a fresh `MenuCamera` (the previous one, if any, was
+/// just despawned by `close_menu` on the way out of `MainMenu`), and clears
+/// any error left over from an earlier attempt so a successful retry does not
+/// show a stale failure the moment it lands back on the mode screen.
+fn open_connecting(
+    mut commands: Commands,
+    mut screen: ResMut<NextState<MenuScreen>>,
+    mut error: ResMut<ConnectError>,
+) {
+    error.0 = None;
+    commands.spawn((Camera2d, MenuCamera));
+    screen.set(MenuScreen::Connecting);
 }
 
 fn close_menu(
@@ -147,12 +183,15 @@ fn clear_screen(mut commands: Commands, roots: Query<Entity, With<MenuRoot>>) {
 // Screens
 // ---------------------------------------------------------------------------
 
-fn show_mode_screen(mut commands: Commands) {
+fn show_mode_screen(mut commands: Commands, error: Res<ConnectError>) {
     menu_shell(
         &mut commands,
         "ChemGame",
         "A shift in the chemistry lab.",
         |panel| {
+            if let Some(reason) = &error.0 {
+                panel.spawn(label(format!("Could not connect: {reason}"), 13.0, ERROR_TEXT));
+            }
             panel.spawn(choice(
                 "Solo",
                 "One chemist. No networking.",
@@ -165,7 +204,9 @@ fn show_mode_screen(mut commands: Commands) {
             ));
             panel.spawn(choice(
                 "Join",
-                "Work someone else's lab. Their save, their shift.",
+                "Work someone else's lab. Their save, their shift. \
+                 If they clicked Host here, accept their Steam invite \
+                 instead — you don't need this screen.",
                 MenuAction::ChooseJoin,
             ));
             panel.spawn(row()).with_children(|row| {
@@ -217,7 +258,9 @@ fn show_join_screen(mut commands: Commands, mut input: ResMut<AddressInput>) {
     menu_shell(
         &mut commands,
         "Join a lab",
-        "The host's game prints the address to type.",
+        "For a host running chemgame --host on the same network. \
+         A host who clicked Host in the menu is using Steam, not this — \
+         accept their overlay invite instead.",
         |panel| {
             panel
                 .spawn((
@@ -250,6 +293,27 @@ fn show_join_screen(mut commands: Commands, mut input: ResMut<AddressInput>) {
     );
 }
 
+/// The waiting-room screen for `AppState::Connecting`.
+///
+/// No lab, no gameplay systems, just this — the whole point of the state (see
+/// its doc comment on `AppState`) is that a slow or doomed handshake costs
+/// nothing more than sitting here with a Cancel button.
+fn show_connecting_screen(mut commands: Commands, mode: Res<LaunchMode>) {
+    let detail = match *mode {
+        LaunchMode::Join(address) => format!("Dialling {address}…"),
+        LaunchMode::JoinSteam(_) => "Joining over Steam…".to_string(),
+        // Host/HostSteam/Singleplayer never reach this screen; kept only so
+        // the match is exhaustive rather than a state nothing should show.
+        _ => "Connecting…".to_string(),
+    };
+
+    menu_shell(&mut commands, "Joining a lab", &detail, |panel| {
+        panel.spawn(row()).with_children(|row| {
+            row.spawn(button("Cancel", MenuAction::Cancel));
+        });
+    });
+}
+
 /// The field's contents, with a caret so an empty field still looks typeable.
 fn field_text(typed: &str) -> String {
     format!("{typed}_")
@@ -260,11 +324,18 @@ fn field_text(typed: &str) -> String {
 /// Shown live rather than on submit because the interesting part is the port
 /// being filled in, and because "that is not an address yet" is worth knowing
 /// before clicking rather than after a silent failure to connect.
+///
+/// Uses [`parse_literal_address`], not the full [`parse_address`]: this runs
+/// on every keystroke, and `parse_address`'s DNS fallback is a blocking
+/// `getaddrinfo` call that would otherwise stall the whole app while typing a
+/// hostname one character at a time. A hostname's hint stays "not an address
+/// yet" until Connect actually resolves it — that one blocking call, on a
+/// deliberate click, is fine.
 fn hint_for(typed: &str) -> String {
     if typed.trim().is_empty() {
         return "for example 192.168.1.40".to_string();
     }
-    match parse_address(typed.trim()) {
+    match parse_literal_address(typed.trim()) {
         Some(address) => format!("connects to {address}"),
         None => "not an address yet".to_string(),
     }
@@ -402,8 +473,16 @@ fn handle_menu_clicks(
                 // No save slot: a guest reads the host's notebook and career,
                 // and writing either locally would be writing someone else's.
                 *mode = LaunchMode::Join(address);
-                app_state.set(AppState::Playing);
-                screen.set(MenuScreen::Hidden);
+                // Not `Playing` — `open_connecting`'s own `OnEnter` owns the
+                // screen from here, the same way `open_menu` alone decides
+                // the screen on entering `MainMenu`. The lab is not built,
+                // and the full simulation does not run, until the handshake
+                // actually finishes; see `AppState::Connecting`'s doc comment.
+                app_state.set(AppState::Connecting);
+            }
+            MenuAction::Cancel => {
+                net::abandon_connection_attempt(&mut commands, *mode);
+                app_state.set(AppState::MainMenu);
             }
             MenuAction::Back => screen.set(MenuScreen::Mode),
             MenuAction::Quit => {
@@ -411,6 +490,26 @@ fn handle_menu_clicks(
             }
         }
     }
+}
+
+/// Bounces a failed or timed-out join attempt back to the mode screen with a
+/// reason on display, instead of leaving `Connecting` with nothing watching.
+fn handle_connect_failure(
+    mut failed: MessageReader<ConnectFailed>,
+    mut commands: Commands,
+    mode: Res<LaunchMode>,
+    mut app_state: ResMut<NextState<AppState>>,
+    mut error: ResMut<ConnectError>,
+) {
+    // `.last()`: if several arrive the same frame, only the final word matters
+    // — but the read still has to drain the whole reader, or an earlier one
+    // would still look unread next frame and fire this again for nothing.
+    let Some(failure) = failed.read().last() else {
+        return;
+    };
+    net::abandon_connection_attempt(&mut commands, *mode);
+    error.0 = Some(failure.reason.clone());
+    app_state.set(AppState::MainMenu);
 }
 
 /// Opens a save in whichever mode was picked on the first screen.
@@ -528,9 +627,14 @@ mod tests {
             .init_resource::<AddressInput>()
             .init_resource::<PendingMode>()
             .init_resource::<LaunchMode>()
+            .init_resource::<ConnectError>()
             .add_message::<AppExit>()
             .add_message::<KeyboardInput>()
-            .add_systems(Update, (type_address, handle_menu_clicks).chain());
+            .add_message::<ConnectFailed>()
+            .add_systems(
+                Update,
+                (type_address, handle_menu_clicks, handle_connect_failure).chain(),
+            );
         app
     }
 
@@ -628,7 +732,10 @@ mod tests {
         app.update();
         app.update();
 
-        assert_eq!(state(&app), AppState::Playing);
+        // Not `Playing` yet — Connect only starts dialling; the lab and the
+        // full simulation wait for `AppState::Connecting` to resolve. See its
+        // doc comment.
+        assert_eq!(state(&app), AppState::Connecting);
         assert!(
             app.world().get_resource::<SaveSlot>().is_none(),
             "a guest must not open a save of their own"
@@ -654,6 +761,44 @@ mod tests {
             "an unparseable address must not start the game"
         );
         assert_eq!(screen(&app), MenuScreen::Join, "and must leave you here");
+    }
+
+    #[test]
+    fn cancel_drops_the_attempt_and_returns_to_the_mode_screen() {
+        // The escape hatch that did not exist before this feature: a doomed
+        // or just slow handshake used to have no way out but force-quitting.
+        let mut app = menu_app();
+        click(&mut app, MenuAction::ChooseJoin);
+        type_line(&mut app, "192.168.1.40");
+        click(&mut app, MenuAction::Connect);
+        assert_eq!(state(&app), AppState::Connecting);
+
+        click(&mut app, MenuAction::Cancel);
+        assert_eq!(state(&app), AppState::MainMenu);
+    }
+
+    #[test]
+    fn a_connect_failure_bounces_back_with_a_reason_on_display() {
+        // Without this, a failed or timed-out handshake has nothing watching
+        // it: the whole point of `ConnectFailed` is that `Connecting` never
+        // just hangs with no way for the player to find out why.
+        let mut app = menu_app();
+        click(&mut app, MenuAction::ChooseJoin);
+        type_line(&mut app, "192.168.1.40");
+        click(&mut app, MenuAction::Connect);
+        assert_eq!(state(&app), AppState::Connecting);
+
+        app.world_mut().write_message(ConnectFailed {
+            reason: "could not reach the host".to_string(),
+        });
+        app.update();
+        app.update();
+
+        assert_eq!(state(&app), AppState::MainMenu);
+        assert_eq!(
+            app.world().resource::<ConnectError>().0.as_deref(),
+            Some("could not reach the host")
+        );
     }
 
     #[test]

@@ -177,14 +177,14 @@ pub struct ReagentDef {
     /// Whether the base chemical dispenser can produce it directly.
     #[serde(default)]
     pub dispensable: bool,
-    /// Research points to unlock this at the dispenser. `None` means it is
-    /// available from the start (or is not `dispensable` at all, where this
-    /// is simply unused). `chem_sim` has no opinion on what "unlocked" means
-    /// — that state lives in `Knowledge` on the game side, the same split
+    /// The dispenser upgrade tier this reagent requires, `0` meaning
+    /// available from the start (or not `dispensable` at all, where this is
+    /// simply unused). `chem_sim` has no opinion on what "unlocked" means —
+    /// that state lives in `Knowledge` on the game side, the same split
     /// `Category`'s book-organising role already draws. See
-    /// `Knowledge::unlock_reagent`.
+    /// `Knowledge::upgrade_dispenser`.
     #[serde(default)]
-    pub unlock_cost: Option<u32>,
+    pub tier: u32,
     /// Whether it comes out of ground produce rather than the dispenser.
     ///
     /// The sibling of `dispensable`: both mean "obtainable without a
@@ -252,7 +252,7 @@ pub struct Reagent {
     pub color: [f32; 3],
     pub overdose: Option<Units>,
     pub dispensable: bool,
-    pub unlock_cost: Option<u32>,
+    pub tier: u32,
     pub from_produce: bool,
     pub treats: Option<String>,
     pub categories: Vec<Category>,
@@ -313,7 +313,7 @@ impl ReagentRegistry {
             color: def.color,
             overdose: def.overdose,
             dispensable: def.dispensable,
-            unlock_cost: def.unlock_cost,
+            tier: def.tier,
             from_produce: def.from_produce,
             treats: def.treats,
             categories: def.categories,

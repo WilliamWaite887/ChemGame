@@ -58,6 +58,7 @@ fn finish_loading(
     mut reaction_lists: ResMut<Assets<ReactionList>>,
     mut next: ResMut<NextState<AppState>>,
     from_args: Option<Res<crate::net::LaunchedFromArgs>>,
+    mode: Res<crate::net::LaunchMode>,
 ) {
     let (Some(reagents), Some(reactions)) = (
         reagent_lists.remove(&pending.reagents),
@@ -78,10 +79,16 @@ fn finish_loading(
             commands.remove_resource::<PendingChemData>();
             // The menu needs the chemistry loaded before it can show a save's
             // recipe count, so it opens here rather than at startup.
-            next.set(if from_args.is_some() {
-                AppState::Playing
-            } else {
+            next.set(if from_args.is_none() {
                 AppState::MainMenu
+            } else if matches!(*mode, crate::net::LaunchMode::Join(_) | crate::net::LaunchMode::JoinSteam(_)) {
+                // `--join`/`--join-steam`-equivalent launches wait here too —
+                // see `AppState::Connecting`'s doc comment — instead of
+                // running the full simulation against a handshake that has
+                // not finished (or may never).
+                AppState::Connecting
+            } else {
+                AppState::Playing
             });
         }
         Err(error) => {
