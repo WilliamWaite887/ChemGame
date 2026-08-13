@@ -7,16 +7,20 @@
 //! patching individual nodes. At this size that is far simpler to keep correct,
 //! and it only happens on user action.
 
+use std::collections::HashSet;
+
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use chem_sim::{Category, DamageKind, Kelvin, ReagentId, Units};
+use chem_sim::{Category, DamageKind, Kelvin, ReactionId, ReagentId, Units};
 
 use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, InSlot};
 use crate::crew::{CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{leave_machine, InteractionMode, LeaveMachineRequested};
-use crate::knowledge::{reaction_categories, Knowledge, RecipeDiscovered, UnlockReagentRequested, HINT_COST};
+use crate::knowledge::{
+    product_name, reaction_categories, Knowledge, RecipeDiscovered, UnlockReagentRequested, HINT_COST,
+};
 use crate::machines::{
     slotted_container, AnalyzeRequested, Buffer, BufferDirection, BufferTransferRequested,
     DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested, GrindRequested, Hopper,
@@ -114,8 +118,10 @@ enum PanelAction {
     Grind { all: bool },
     SetTarget(Kelvin),
     TogglePower,
-    BuyHint(chem_sim::ReactionId),
+    BuyHint(ReactionId),
     ShowCategory(Option<Category>),
+    OpenRecipe(ReactionId),
+    CloseRecipe,
     ToggleAcceptingOrders,
     Requisition(RequisitionKind),
     Close,
@@ -129,6 +135,8 @@ enum PanelAction {
 #[derive(Resource, Default)]
 struct BookView {
     category: Option<Category>,
+    /// The recipe whose tree screen is open, if any. `None` is the list.
+    open_recipe: Option<ReactionId>,
 }
 
 /// Everything the open panel displays, flattened for comparison.
@@ -155,6 +163,9 @@ struct PanelSignature {
     /// switching tab is exactly the same kind of change as any other: it
     /// alters what the panel shows, so it rebuilds the panel.
     book_category: Option<Category>,
+    /// The recipe whose tree screen is open, if any — same rationale as
+    /// `book_category`: opening or closing it changes what the panel shows.
+    book_recipe: Option<ReactionId>,
     /// The standing board draws entirely from these, so without them its
     /// panel would freeze on whatever it happened to show first.
     department_standing: Vec<(Department, i32)>,
@@ -185,6 +196,7 @@ impl Default for PanelSignature {
             amount: None,
             known_recipes: usize::MAX,
             book_category: None,
+            book_recipe: None,
             department_standing: Vec::new(),
             // Neither `true` nor `false` alone is guaranteed to differ from
             // the first real frame's value, so the vector above carries the
@@ -265,6 +277,7 @@ fn sync_panel(
             .map(|a| a.0),
         known_recipes: knowledge.known_count(),
         book_category: book.category,
+        book_recipe: book.open_recipe,
         department_standing: Department::ALL
             .into_iter()
             .map(|dept| (dept, shift.standing(dept)))
@@ -295,7 +308,7 @@ fn sync_panel(
     }
 
     if mode == InteractionMode::ReadingBook {
-        spawn_reference_book(&mut commands, &db, &knowledge, book.category);
+        spawn_reference_book(&mut commands, &db, &knowledge, book.category, book.open_recipe);
         return;
     }
     if open_machine.is_none() {
@@ -902,6 +915,7 @@ fn spawn_reference_book(
     db: &ChemDb,
     knowledge: &Knowledge,
     selected: Option<Category>,
+    open_recipe: Option<ReactionId>,
 ) {
     commands
         .spawn((
@@ -949,9 +963,12 @@ fn spawn_reference_book(
                         align_items: AlignItems::Start,
                         ..default()
                     })
-                    .with_children(|columns| {
-                        book_sidebar(columns, db, knowledge, selected);
-                        book_entries(columns, db, knowledge, selected);
+                    .with_children(|columns| match open_recipe {
+                        Some(id) => spawn_recipe_tree(columns, db, knowledge, db.reactions.get(id)),
+                        None => {
+                            book_sidebar(columns, db, knowledge, selected);
+                            book_entries(columns, db, knowledge, selected);
+                        }
                     });
                 });
         });
@@ -1038,7 +1055,10 @@ fn book_entries(
         });
 }
 
-/// One recipe, as much of it as the chemist has worked out.
+/// One recipe, as a compact clickable row. Tap it to open the full formula
+/// tree — that is where the method, hints and "Study further" purchase now
+/// live, so this only needs enough to help a chemist recognise what they're
+/// looking for.
 fn book_entry(
     pane: &mut ChildSpawnerCommands,
     db: &ChemDb,
@@ -1046,21 +1066,17 @@ fn book_entry(
     reaction: &chem_sim::Reaction,
 ) {
     let known = knowledge.is_known(reaction.id);
-    // Name the entry after what it makes, not the reaction id — that is how
-    // the crew ask for it.
+    let title = product_name(db, reaction.id);
     let product = reaction
         .products
         .first()
         .map(|(id, _)| db.reagents.get(*id));
-    let title = product
-        .map(|p| p.name.clone())
-        .unwrap_or_else(|| reaction.key.clone());
 
-    pane.spawn((section(), BackgroundColor(SECTION_BG)))
+    pane.spawn((Button, section(), PanelAction::OpenRecipe(reaction.id)))
         .with_children(|entry| {
             entry.spawn(label(
                 if known {
-                    title
+                    title.clone()
                 } else {
                     format!("{title}   —   not yet worked out")
                 },
@@ -1070,6 +1086,120 @@ fn book_entry(
 
             if let Some(treats) = product.and_then(|p| p.treats.as_ref()) {
                 entry.spawn(label(treats.clone(), 13.0, TEXT_DIM));
+            }
+
+            entry.spawn(label(
+                if known {
+                    "Tap to see the formula.".to_string()
+                } else {
+                    format!("{} ingredients — tap to research.", reaction.reactants.len())
+                },
+                12.0,
+                TEXT_DIM,
+            ));
+        });
+}
+
+/// How many levels of "what feeds this" the tree draws before giving up and
+/// saying so. Current data's deepest chain (arithrazine ← hyronalin ←
+/// dylovene) is 2; this leaves generous headroom without being unbounded.
+const MAX_TREE_DEPTH: usize = 8;
+/// Horizontal shift per nesting level.
+const TREE_INDENT: f32 = 22.0;
+
+/// The formula screen for one recipe: itself, then — only while known, so a
+/// locked step's own ingredients stay the same spoiler the hint system
+/// already withholds everywhere else — everything that feeds it, one level
+/// deeper per step back through the chain.
+fn spawn_recipe_tree(
+    columns: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    knowledge: &Knowledge,
+    root: &chem_sim::Reaction,
+) {
+    columns
+        .spawn(Node {
+            flex_direction: FlexDirection::Column,
+            flex_grow: 1.0,
+            row_gap: px(8),
+            ..default()
+        })
+        .with_children(|screen| {
+            screen.spawn(row()).with_children(|row| {
+                row.spawn(button("‹ Back to list", PanelAction::CloseRecipe));
+            });
+            screen
+                .spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(6),
+                        max_height: vh(60),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    ScrollPosition::default(),
+                    BookScroll,
+                ))
+                .with_children(|pane| {
+                    let mut visited = HashSet::new();
+                    render_recipe_node(pane, db, knowledge, root, 0, &mut visited);
+                });
+        });
+}
+
+/// One node in the formula tree: itself, then its ingredients one level
+/// deeper if it's known.
+///
+/// `visited` tracks reactions open on the *current branch* only (inserted on
+/// entry, removed before returning) — not the whole tree, since two branches
+/// legitimately sharing an ingredient (bicaridine and tricordrazine both need
+/// dylovene) must both still render it. Nothing in `chem_sim`'s types rules
+/// out an actual cycle, so this must not panic if one appears; it prints a
+/// line and stops instead.
+fn render_recipe_node(
+    pane: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    knowledge: &Knowledge,
+    reaction: &chem_sim::Reaction,
+    depth: usize,
+    visited: &mut HashSet<ReactionId>,
+) {
+    if depth > MAX_TREE_DEPTH {
+        pane.spawn(label("…chain too deep to show.", 12.0, TEXT_DIM));
+        return;
+    }
+    if !visited.insert(reaction.id) {
+        pane.spawn(label("…already shown further up this branch.", 12.0, TEXT_DIM));
+        return;
+    }
+
+    let known = knowledge.is_known(reaction.id);
+    let title = product_name(db, reaction.id);
+    let product = reaction
+        .products
+        .first()
+        .map(|(id, _)| db.reagents.get(*id));
+
+    let mut node = section();
+    node.margin.left = px(depth as f32 * TREE_INDENT);
+    node.border = UiRect::left(px(2.0));
+
+    pane.spawn((node, BackgroundColor(SECTION_BG), BorderColor::from(TEXT_DIM)))
+        .with_children(|entry| {
+            entry.spawn(label(
+                if known {
+                    title.clone()
+                } else {
+                    format!("{title}   —   not yet worked out")
+                },
+                16.0,
+                if known { TEXT } else { TEXT_DIM },
+            ));
+
+            if depth == 0 {
+                if let Some(treats) = product.and_then(|p| p.treats.as_ref()) {
+                    entry.spawn(label(treats.clone(), 13.0, TEXT_DIM));
+                }
             }
 
             if known {
@@ -1114,6 +1244,71 @@ fn book_entry(
                         ));
                     }
                 });
+            }
+        });
+
+    // A locked node's own ingredients stay hidden — the same spoiler
+    // discipline the hint system already enforces everywhere else.
+    if known {
+        for &(reagent_id, amount) in &reaction.reactants {
+            render_ingredient_node(pane, db, knowledge, reagent_id, amount, false, depth + 1, visited);
+        }
+        for &(reagent_id, amount) in &reaction.catalysts {
+            render_ingredient_node(pane, db, knowledge, reagent_id, amount, true, depth + 1, visited);
+        }
+    }
+
+    visited.remove(&reaction.id);
+}
+
+/// One ingredient row under a known node: recurses one level deeper if
+/// something produces it, otherwise a leaf naming the raw reagent and,
+/// read-only, whether it's still locked at the Dispenser — unlocking still
+/// only happens there, so this is a note, not a button.
+#[allow(clippy::too_many_arguments)]
+fn render_ingredient_node(
+    pane: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    knowledge: &Knowledge,
+    reagent: ReagentId,
+    amount: Units,
+    catalyst: bool,
+    depth: usize,
+    visited: &mut HashSet<ReactionId>,
+) {
+    if let Some(producer) = db.reactions.producer_of(reagent) {
+        if catalyst {
+            let mut note = section();
+            note.margin.left = px(depth as f32 * TREE_INDENT);
+            pane.spawn(note).with_children(|entry| {
+                entry.spawn(label("catalyst, not consumed:", 11.0, TEXT_DIM));
+            });
+        }
+        render_recipe_node(pane, db, knowledge, producer, depth, visited);
+        return;
+    }
+
+    let definition = db.reagents.get(reagent);
+    let mut line = format!("{amount} {}", definition.name);
+    if catalyst {
+        line.push_str("   (catalyst, not consumed)");
+    }
+
+    let mut node = section();
+    node.margin.left = px(depth as f32 * TREE_INDENT);
+    node.border = UiRect::left(px(2.0));
+
+    pane.spawn((node, BackgroundColor(SECTION_BG), BorderColor::from(TEXT_DIM)))
+        .with_children(|entry| {
+            entry.spawn(label(line, 14.0, TEXT_DIM));
+            if definition.dispensable {
+                if let Some(cost) = knowledge.reagent_unlock_cost(db, reagent) {
+                    entry.spawn(label(
+                        format!("locked at dispenser  ({cost} research)"),
+                        12.0,
+                        Color::srgb(0.80, 0.60, 0.45),
+                    ));
+                }
             }
         });
 }
@@ -2126,6 +2321,14 @@ fn handle_panel_clicks(
                 book.category = *category;
                 continue;
             }
+            PanelAction::OpenRecipe(reaction) => {
+                book.open_recipe = Some(*reaction);
+                continue;
+            }
+            PanelAction::CloseRecipe => {
+                book.open_recipe = None;
+                continue;
+            }
             PanelAction::Close => {
                 leave_machine(player, &mut mode, &mut machines, &mut out.leave_machine);
                 return;
@@ -2210,7 +2413,12 @@ fn handle_panel_clicks(
                 });
             }
             // Handled above, before the machine guard.
-            PanelAction::BuyHint(_) | PanelAction::UnlockReagent(_) | PanelAction::ShowCategory(_) | PanelAction::Close => {}
+            PanelAction::BuyHint(_)
+            | PanelAction::UnlockReagent(_)
+            | PanelAction::ShowCategory(_)
+            | PanelAction::OpenRecipe(_)
+            | PanelAction::CloseRecipe
+            | PanelAction::Close => {}
         }
     }
 }

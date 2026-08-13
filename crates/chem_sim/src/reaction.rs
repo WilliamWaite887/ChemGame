@@ -233,6 +233,19 @@ impl ReactionSet {
     pub fn find(&self, key: &str) -> Option<&Reaction> {
         self.reactions.iter().find(|r| r.key == key)
     }
+
+    /// The reaction that produces `reagent` as one of its products, if any.
+    ///
+    /// Returns the first match if more than one reaction claims the same
+    /// product — the data does not do this today (every reagent name appears
+    /// in a `products` list at most once across `chem.reactions.ron`), but
+    /// nothing in the type system enforces it, so this must never panic if
+    /// it stops holding.
+    pub fn producer_of(&self, reagent: ReagentId) -> Option<&Reaction> {
+        self.reactions
+            .iter()
+            .find(|reaction| reaction.products.iter().any(|(id, _)| *id == reagent))
+    }
 }
 
 /// Something wrong with the chemistry data files.

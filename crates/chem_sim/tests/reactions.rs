@@ -952,3 +952,43 @@ fn solution_colour_blends_by_volume() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Reverse lookup (recipe tree)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn producer_of_finds_the_reaction_that_makes_a_reagent() {
+    let data = data();
+    let bicaridine = data.reagent("bicaridine");
+    let producer = data
+        .reactions
+        .producer_of(bicaridine)
+        .expect("bicaridine should be producible");
+    assert_eq!(producer.key, "bicaridine");
+}
+
+#[test]
+fn producer_of_returns_none_for_a_raw_reagent() {
+    let data = data();
+    assert!(data.reactions.producer_of(data.reagent("carbon")).is_none());
+}
+
+#[test]
+fn every_reagent_is_produced_by_at_most_one_reaction() {
+    // The recipe tree picks the first match defensively rather than assuming
+    // this, but the data really does hold it today — catch a future edit
+    // that breaks it here rather than have the tree silently pick one
+    // arbitrarily.
+    let data = data();
+    let mut seen = HashSet::new();
+    for reaction in data.reactions.iter() {
+        for &(reagent, _) in &reaction.products {
+            assert!(
+                seen.insert(reagent),
+                "'{}' is produced by more than one reaction",
+                data.reagents.get(reagent).key
+            );
+        }
+    }
+}
