@@ -79,22 +79,83 @@ fn finish_loading(
             commands.remove_resource::<PendingChemData>();
             // The menu needs the chemistry loaded before it can show a save's
             // recipe count, so it opens here rather than at startup.
-            next.set(if from_args.is_none() {
-                AppState::MainMenu
-            } else if matches!(*mode, crate::net::LaunchMode::Join(_) | crate::net::LaunchMode::JoinSteam(_)) {
-                // `--join`/`--join-steam`-equivalent launches wait here too —
-                // see `AppState::Connecting`'s doc comment — instead of
-                // running the full simulation against a handshake that has
-                // not finished (or may never).
-                AppState::Connecting
-            } else {
-                AppState::Playing
-            });
+            next.set(next_state_after_loading(from_args.is_some(), *mode));
         }
         Err(error) => {
             // Bad data is a content bug, not something to limp along with:
             // every recipe downstream would misbehave in confusing ways.
             panic!("chemistry data is invalid: {error}");
         }
+    }
+}
+
+/// Where a launch goes once the chemistry has parsed.
+///
+/// Split out of [`finish_loading`] purely so it can be tested: reaching that
+/// system otherwise needs the whole asset pipeline.
+///
+/// The joining check comes *first*, ahead of the "did the command line say
+/// anything" one, because a Steam invite can set the launch mode while this
+/// is still loading — `steam::handle_lobby_join_requested` deliberately
+/// leaves the state alone in that case, since moving it would strand this
+/// very system, and this is where that deferred hand-off lands. `--join` and
+/// Steam's `+connect_lobby` reach the same branch by the ordinary route.
+fn next_state_after_loading(from_args: bool, mode: crate::net::LaunchMode) -> AppState {
+    if matches!(
+        mode,
+        crate::net::LaunchMode::Join(_) | crate::net::LaunchMode::JoinSteam(_)
+    ) {
+        // A guest waits here — see `AppState::Connecting`'s doc comment —
+        // instead of running the full simulation against a handshake that has
+        // not finished, or may never.
+        AppState::Connecting
+    } else if from_args {
+        AppState::Playing
+    } else {
+        AppState::MainMenu
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::{steam::LobbyId, LaunchMode};
+
+    #[test]
+    fn a_guest_waits_in_connecting_however_they_were_launched() {
+        // The Steam case is the one with teeth: an invite accepted during
+        // `Loading` sets the mode without touching the state, so this branch
+        // is the *only* thing that ever moves that launch onwards. Getting
+        // the order wrong sends it to `MainMenu` and the invite evaporates.
+        for mode in [
+            LaunchMode::Join("127.0.0.1:5327".parse().unwrap()),
+            LaunchMode::JoinSteam(LobbyId::from_raw(1)),
+        ] {
+            for from_args in [true, false] {
+                assert_eq!(
+                    next_state_after_loading(from_args, mode),
+                    AppState::Connecting,
+                    "{mode:?} launched from_args={from_args} must wait for the handshake"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_on_the_command_line_still_means_the_menu() {
+        assert_eq!(
+            next_state_after_loading(false, LaunchMode::Singleplayer),
+            AppState::MainMenu
+        );
+        // ...and a flag still skips it, which is what keeps two-terminal
+        // co-op testing bearable.
+        assert_eq!(
+            next_state_after_loading(true, LaunchMode::Singleplayer),
+            AppState::Playing
+        );
+        assert_eq!(
+            next_state_after_loading(true, LaunchMode::HostSteam),
+            AppState::Playing
+        );
     }
 }

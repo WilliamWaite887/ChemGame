@@ -1,0 +1,65 @@
+// Habits — see `src/addiction/mod.rs`.
+//
+// The bargain this file tunes: a crew member you keep dosing with something
+// off the Illicit shelf becomes a repeat customer who pays in research points,
+// and an addict who is visibly high in the lab while Security is standing
+// there raises suspicion for every second of it. Which reagents can hook
+// anyone at all is authored per-reagent in `chem.reagents.ron` (`addictive`),
+// not here — this is only the economy around them.
+(
+    // Accumulated `addictive` weight before someone is a customer rather than
+    // a person who took something once. Space Drugs are 1.0 a dose, so this is
+    // three or four real doses — enough that one mis-delivered beaker never
+    // creates a customer by accident, and a deliberate campaign does.
+    hooked_at: 3.5,
+
+    // Units in the bloodstream before a read counts as a dose at all. Without
+    // this, a whiff of a smoke cloud drifting across the room would slowly
+    // hook the entire crew, and the player would have no idea why.
+    dose_threshold: 5,
+
+    // Bloodstreams are read every four seconds, not every frame. At 60fps an
+    // ungated read would count one delivery as several hundred doses.
+    dose_interval_seconds: 4.0,
+
+    // Return visits are rarer than legitimate orders but much more frequent
+    // than an antagonist's (6.0-10.0): the whole point is that a customer is
+    // a *reliable* income, and a lottery would not read as one.
+    gap_multiplier: (3.0, 5.0),
+    amounts: [10, 15, 20],
+
+    // Six points a sale, against `RESEARCH_PER_SUCCESS`'s one for an honest
+    // delivery. Deliberately a wide gap: the full tech tree costs 213 points
+    // (M11), so two or three regulars visibly change how fast a career opens
+    // up. That gap is the temptation, and without it the risk below would just
+    // be a punishment for nothing.
+    research_per_sale: 6,
+
+    // A third of a suspicion point per second of overlap. `station.security.ron`
+    // raids at a threshold in the tens, so leaving an addict swaying in front
+    // of an officer for a full visit is roughly one successful illicit
+    // delivery's worth of exposure — real, but recoverable, and entirely
+    // avoidable by anyone watching the room.
+    suspicion_per_second: 0.34,
+
+    // Five minutes dry. Long enough that an ordinary gap between visits never
+    // trips it, short enough that deciding to stop dealing has a consequence
+    // inside the same session you decided it in.
+    withdrawal_after: 300.0,
+    withdrawal_penalty: -2,
+
+    pleas: [
+        "Look, I know. Just — the usual. Same as before. I'll owe you.",
+        "You've got some left, right? You always have some left.",
+        "I'm not here about an order. You know what I'm here about.",
+        "Quick one. Nobody has to write it down.",
+        "Same again. Don't make me say it out loud in here.",
+    ],
+
+    withdrawal_lines: [
+        "{name} has been shaking through their whole shift. Somebody should look at them.",
+        "{name} walked off the job an hour ago and nobody can find them.",
+        "Medbay's asking why {name} came in sweating and couldn't say what for.",
+        "{name} put their fist through a locker in the hall. That's not like them.",
+    ],
+)

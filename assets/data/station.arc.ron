@@ -1,0 +1,321 @@
+// The campaign arc — see `src/arc/mod.rs`.
+//
+// Every save draws exactly one of the antagonists below and never tells the
+// player which. What they get instead is the plot meter's *effects*: two
+// escalating clue lines, a counter-track opening up, and eventually a
+// confrontation. The meter itself is never displayed.
+//
+// A counter step's `reagent` is a **reference** reagent, not a demand. The
+// spawned order is not `specific`, so `orders::reference_category` derives the
+// category from that reagent's own first-listed category and any member of it
+// is accepted — exactly the leniency an ordinary request already has. This is
+// also why the first step of every track below references something reachable
+// from `knowledge::STARTING_RECIPES` (inaprovaline / dylovene / kelotane): a
+// counter-track that opened with a category the player has no route to would
+// be an ending they could not reach.
+(
+    // One point a minute. The arc is meant to span sessions, not an evening:
+    // pure idling reaches `suspected_at` in ~25 minutes, `named_at` in ~50,
+    // and the showdown in ~75. Every other source below is much faster, which
+    // is the point — the drift is the floor, not the pace.
+    drift_per_minute: 1,
+
+    // A fulfilled illicit order. Five points means roughly fifteen deliveries
+    // would hand the antagonist the whole game on their own — dealing is
+    // supposed to be the fastest way to lose an arc, and `addiction`'s repeat
+    // customers make it easy to do without noticing.
+    plot_per_aid: 5,
+
+    // A department minor left to get on with it. Small: the minors are
+    // shenanigans, not the plot, and this is the thread tying them to the
+    // spine rather than a second full-strength source.
+    plot_per_ignored_shenanigan: 2,
+
+    // A delivered counter step. Larger than three fulfilled illicit orders, so
+    // a chemist who deals *and* supplies the departments can still come out
+    // ahead — the arc is a tug of war, not a ratchet.
+    plot_per_counter_step: -15,
+
+    suspected_at: 25,
+    named_at: 50,
+    showdown_at: 75,
+
+    // Rarer than an ordinary order but far more common than an antagonist
+    // visit (6.0-10.0): the counter-track is a route the player is meant to be
+    // able to actually walk once it opens, not a lottery.
+    counter_gap_multiplier: (2.5, 4.0),
+
+    // The confrontation, once `showdown_at` is crossed. One shared block:
+    // what differs between antagonists is the *form* it takes, not how hard
+    // it hits.
+    showdown: (
+        // Three minutes. Long enough to run a synthesis you have not done in
+        // a while, short enough that standing still loses.
+        deadline_seconds: 180.0,
+        // Siege: a vent every twelve seconds, which overlaps the existing
+        // 8-second cloud lifetime — the room never fully clears while it runs.
+        gas_every_seconds: 12.0,
+        gas_units: 8,
+        // Siege: roughly two full beakers of anything in the cure's category.
+        cure_units_needed: 40,
+        // Assailant: a hit every three seconds at 12 brute means about
+        // twenty-five seconds of standing still before a chemist goes down.
+        // Survivable, and unmistakably losing.
+        hit_every_seconds: 3.0,
+        hit_brute: 12,
+        // Under the chemist's own 2.1 m/s: you can back away from it, but not
+        // while also standing at a dispenser.
+        speed: 1.55,
+    ),
+
+    antagonists: [
+        // -- The Blood Cult ------------------------------------------------
+        //
+        // The one already half-built: `src/cult` has been running an
+        // escalating ritual chain since M13. Its finale asks for a reagent
+        // that only exists as the product of a genuinely hazardous reaction,
+        // so the danger has always been in *preparing* the ask.
+        (
+            id: Cult,
+            display: "The Blood Cult",
+            // The ritual completes in your lab. There is no one to punch —
+            // the room is what turns on you.
+            showdown: Siege(
+                gas_reagent: "chloral_hydrate",
+                cure_reagent: "dylovene",
+            ),
+            showdown_line: "It's HERE. The marks are burning through the lab wall and the air is going wrong.",
+            suspected_line: "Chapel's reporting graffiti again. Third time this week, same symbol.",
+            named_line: "Command: confirmed cult activity aboard. If someone asks you for something strange, log it.",
+            victory_line: "The lights went out across the whole deck. Whatever they were building, it's finished.",
+            thwarted_line: "They pulled six of them out of maintenance this morning. It's over.",
+            counter_steps: [
+                (
+                    role: "Medical",
+                    reagent: "dylovene",
+                    amount: 30,
+                    plea: "We've got four of them in here and whatever they drank isn't leaving on its own. I need something that flushes it.",
+                    delivered_line: "Medbay's got the acolytes stable. Two of them are talking.",
+                ),
+                (
+                    role: "Service",
+                    reagent: "space_cleaner",
+                    amount: 25,
+                    plea: "They're painting the walls in the back halls and it doesn't come off with water. Give me something that bites.",
+                    delivered_line: "The markings are off the walls. Whatever they were for, they aren't for it any more.",
+                ),
+                (
+                    role: "Security",
+                    reagent: "kelotane",
+                    amount: 25,
+                    plea: "Whatever they lit down there went up faster than it should have. Two of mine are burned.",
+                    delivered_line: "Security's back on their feet and they know which hatch to kick.",
+                ),
+                (
+                    role: "Engineering",
+                    reagent: "thermite",
+                    amount: 20,
+                    plea: "They've sealed the chamber from inside and it's a metre of plating. I'm not cutting that with a torch.",
+                    delivered_line: "Engineering burned the door off. Security went in behind them.",
+                ),
+            ],
+        ),
+
+        // -- The Syndicate Spy ---------------------------------------------
+        //
+        // The hidden illicit thread in `src/antagonist` is already this: a
+        // buyer under an ordinary-sounding pretext, with a `sting_chance` that
+        // can turn one deal into an immediate raid.
+        (
+            id: Spy,
+            display: "A Syndicate Agent",
+            // Someone comes to close the loose end personally.
+            showdown: Assailant(
+                name: "A Quiet Man",
+                color: (0.22, 0.24, 0.30),
+            ),
+            showdown_line: "Someone just came through the lab door and they are not on the roster.",
+            suspected_line: "Cargo's manifest doesn't add up again. Second crate this month that arrived lighter than it left.",
+            named_line: "Command: we have an agent aboard. Treat unfamiliar requests as hostile until told otherwise.",
+            victory_line: "Comms are down and the vault's open. Whoever it was, they're gone and so is the disk.",
+            thwarted_line: "They caught him at the docking arm with half of Cargo in his bag. Good work.",
+            counter_steps: [
+                (
+                    role: "Security",
+                    reagent: "dylovene",
+                    amount: 30,
+                    plea: "Someone's been putting things in drinks. I want antidote stock behind the desk before it happens again.",
+                    delivered_line: "Security's holding antidote stock now. That trick won't work twice.",
+                ),
+                (
+                    role: "Medical",
+                    reagent: "bicaridine",
+                    amount: 25,
+                    plea: "Two crew found something they shouldn't have and got put down hard for it. Patch them up and they'll testify.",
+                    delivered_line: "Both witnesses are up and talking. Security has a description now.",
+                ),
+                (
+                    role: "Security",
+                    reagent: "hyperzine",
+                    amount: 20,
+                    plea: "We're watching four airlocks with three people. I need my shift standing through a double.",
+                    delivered_line: "Every airlock's covered around the clock. He can't move without being seen.",
+                ),
+                (
+                    role: "Engineering",
+                    reagent: "space_cleaner",
+                    amount: 20,
+                    plea: "There's residue in the vent he's been using and I want it lifted clean enough to match.",
+                    delivered_line: "The residue matched. They know exactly which vent, and where it goes.",
+                ),
+            ],
+        ),
+
+        // -- The Changeling ------------------------------------------------
+        //
+        // No bespoke visit thread yet — plays through the generic arc systems.
+        // Its identity is a screening problem: the tell is a crew member
+        // asking for something that makes no sense for their department.
+        (
+            id: Changeling,
+            display: "Something Wearing The Crew",
+            showdown: Assailant(
+                name: "Nurse Okonkwo?",
+                color: (0.52, 0.74, 0.62),
+            ),
+            showdown_line: "Okonkwo just walked into the lab. Medbay says Okonkwo has been with them for an hour.",
+            suspected_line: "Anyone seen Okonkwo? Because I just did, and she's also on the other end of this line.",
+            named_line: "Command: do not travel alone. Confirm who you are speaking to. We have an impostor aboard.",
+            victory_line: "Roll call came back forty-one for a crew of thirty-eight. Nobody knows which is which any more.",
+            thwarted_line: "It dropped the face in front of six witnesses and didn't get another one. Done.",
+            counter_steps: [
+                (
+                    role: "Medical",
+                    reagent: "dylovene",
+                    amount: 30,
+                    plea: "I need a baseline screen I can run on the whole shift. Something a person passes and a thing doesn't.",
+                    delivered_line: "Medbay's screening the shift. Two people came back wrong on the first pass.",
+                ),
+                (
+                    role: "Medical",
+                    reagent: "inaprovaline",
+                    amount: 25,
+                    plea: "It leaves them half-finished. They stop breathing on the table and I need them not to.",
+                    delivered_line: "Everyone it touched is still breathing. That's three more people who can say what they saw.",
+                ),
+                (
+                    role: "Security",
+                    reagent: "bicaridine",
+                    amount: 25,
+                    plea: "It went through two officers to get out of the dorms. I need them back on shift, not in a bed.",
+                    delivered_line: "Both officers are up. It won't get through that corridor a second time.",
+                ),
+                (
+                    role: "Service",
+                    reagent: "space_cleaner",
+                    amount: 20,
+                    plea: "There's something in the walk-in that came off it, and I'd like it gone before it's anything else.",
+                    delivered_line: "The kitchen's clean. Whatever it was going to grow into, it isn't.",
+                ),
+            ],
+        ),
+
+        // -- The Malfunctioning AI -----------------------------------------
+        //
+        // No bespoke thread yet. Reads as the station's own systems turning:
+        // the siege form is a good fit because the threat is the room, not a
+        // person in it.
+        (
+            id: Ai,
+            display: "The Station's Own Systems",
+            showdown: Siege(
+                gas_reagent: "chlorine",
+                cure_reagent: "dylovene",
+            ),
+            showdown_line: "The lab's own scrubber just reversed. It is pumping the vent line straight at you.",
+            suspected_line: "Atmos says the mix in Dorm Three changed on its own. Nobody touched the console.",
+            named_line: "Command: the AI is not answering correctly. Assume every door and vent is hostile.",
+            victory_line: "Every bulkhead on the station just closed at once. It has the whole ring now.",
+            thwarted_line: "They got into the core and pulled it. The doors are ours again.",
+            counter_steps: [
+                (
+                    role: "Engineering",
+                    reagent: "kelotane",
+                    amount: 30,
+                    plea: "It cooked a whole shift in the turbine room before anyone could get the door open.",
+                    delivered_line: "Atmos are back on their feet, and they're routing around the AI now.",
+                ),
+                (
+                    role: "Medical",
+                    reagent: "inaprovaline",
+                    amount: 25,
+                    plea: "It vented a section with people in it. I need them breathing long enough to get out.",
+                    delivered_line: "Everyone in the vented section made it. Nobody is going to let it happen twice.",
+                ),
+                (
+                    role: "Engineering",
+                    reagent: "thermite",
+                    amount: 25,
+                    plea: "The core's behind a bulkhead it won't open and we're not asking it nicely again.",
+                    delivered_line: "The bulkhead's gone. There's a way into the core that the AI doesn't control.",
+                ),
+                (
+                    role: "Cargo",
+                    reagent: "ammonia",
+                    amount: 20,
+                    plea: "Half our supply lines run through doors it's holding shut. Give me something I can make the rest with.",
+                    delivered_line: "Cargo's running on their own stock now. It can hold every door it likes.",
+                ),
+            ],
+        ),
+
+        // -- The Blob ------------------------------------------------------
+        //
+        // No bespoke thread yet, and the purest "the departments need
+        // chemistry" antagonist of the five: there is nothing to talk to and
+        // nothing to catch, only something to burn back.
+        (
+            id: Blob,
+            display: "The Growth In Maintenance",
+            showdown: Siege(
+                gas_reagent: "unstable_mutagen",
+                cure_reagent: "dylovene",
+            ),
+            showdown_line: "It is through the lab wall. It came through the wall.",
+            suspected_line: "Something's blocking the crawlway on deck two and it wasn't there yesterday.",
+            named_line: "Command: there is a biomass aboard and it is spreading. Do not touch it. Do not breathe near it.",
+            victory_line: "It's through the maintenance ring and into the halls. There's no getting ahead of it now.",
+            thwarted_line: "They burned the last of it out of the crawlway this morning. Nothing left but scoring.",
+            counter_steps: [
+                (
+                    role: "Medical",
+                    reagent: "dylovene",
+                    amount: 30,
+                    plea: "Anyone who gets near it comes back coughing something up. I need to be able to treat that.",
+                    delivered_line: "Medbay can treat the spores now. People can actually get close enough to fight it.",
+                ),
+                (
+                    role: "Cargo",
+                    reagent: "sulphuric_acid",
+                    amount: 25,
+                    plea: "It's eaten through two crates and it's working on the third. Give me something that eats back.",
+                    delivered_line: "Cargo's holding the line at the loading bay. It isn't growing that way any more.",
+                ),
+                (
+                    role: "Engineering",
+                    reagent: "thermite",
+                    amount: 25,
+                    plea: "It's in the crawlway and I can't get a torch in there. I need something that burns on its own.",
+                    delivered_line: "The crawlway's burned clear. They've cut it off from the rest of the deck.",
+                ),
+                (
+                    role: "Medical",
+                    reagent: "kelotane",
+                    amount: 20,
+                    plea: "Everyone who burned it back got burned doing it. I'd like my volunteers to stay volunteers.",
+                    delivered_line: "The burn crews are patched and going back in. This is nearly done.",
+                ),
+            ],
+        ),
+    ],
+)

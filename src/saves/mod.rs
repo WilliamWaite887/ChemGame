@@ -15,6 +15,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
+
+use crate::arc::AntagId;
 
 const SAVES_DIR: &str = "saves";
 const KNOWLEDGE_FILE: &str = "save.ron";
@@ -93,6 +96,32 @@ pub struct SlotSummary {
     pub botched: u32,
     /// Recipes in the notebook. `None` if the notebook is missing or unreadable.
     pub known: Option<usize>,
+    /// What this save's arc has come to, if it is safe to say. `None` for a
+    /// save with no campaign *and* for one whose antagonist the player has not
+    /// worked out yet — see [`ArcStanding`].
+    pub arc: Option<ArcStanding>,
+}
+
+/// What the load list is allowed to say about a save's campaign.
+///
+/// Deliberately narrower than the campaign itself. A save whose antagonist is
+/// still [`crate::arc::Reveal::Hidden`] produces `None` here: naming it in the
+/// menu would hand the player, for free and before they have even loaded the
+/// game, the exact answer the whole arc is built to make them work out.
+pub struct ArcStanding {
+    pub antag: AntagId,
+    /// `None` while the arc is still live.
+    pub won: Option<bool>,
+}
+
+impl ArcStanding {
+    fn phrase(&self) -> String {
+        match self.won {
+            Some(true) => format!("{} thwarted", self.antag.label()),
+            Some(false) => format!("{} won", self.antag.label()),
+            None => format!("hunting {}", self.antag.label()),
+        }
+    }
 }
 
 impl SlotSummary {
@@ -103,8 +132,12 @@ impl SlotSummary {
             Some(count) => format!(" · {count} recipes"),
             None => String::new(),
         };
+        let arc = match &self.arc {
+            Some(standing) => format!(" · {}", standing.phrase()),
+            None => String::new(),
+        };
         format!(
-            "{} delivered, {} botched{recipes}",
+            "{} delivered, {} botched{recipes}{arc}",
             self.delivered, self.botched
         )
     }
@@ -137,6 +170,7 @@ pub fn list_slots() -> Vec<SlotSummary> {
                 touched,
                 SlotSummary {
                     known: crate::knowledge::known_count_in(&slot.knowledge_path()),
+                    arc: crate::shift::arc_standing(&slot.progress_path()),
                     name: slot.name,
                     delivered,
                     botched,
@@ -161,6 +195,81 @@ pub fn next_slot_name() -> String {
         .map(|n| format!("Chemist {n}"))
         .find(|name| !taken.contains(name))
         .expect("an unused name exists in an unbounded sequence")
+}
+
+// ---------------------------------------------------------------------------
+// Cross-save unlocks
+// ---------------------------------------------------------------------------
+
+/// Which main antagonists this machine has beaten.
+///
+/// Alongside the saves rather than inside one, for exactly the reason
+/// [`last_host_path`] gives for the address file: this belongs to the player,
+/// not to a career. Beating the Cult in one save is what unlocks playing *as*
+/// the Cult in the next one, so a per-slot file would make the unlock
+/// unreachable by design.
+const CAMPAIGN_FILE: &str = "campaign.ron";
+
+#[derive(Serialize, Deserialize, Default)]
+struct CampaignUnlocks {
+    #[serde(default)]
+    thwarted: Vec<String>,
+}
+
+fn campaign_path() -> PathBuf {
+    Path::new(SAVES_DIR).join(CAMPAIGN_FILE)
+}
+
+/// Every antagonist beaten on this machine, in no particular order.
+///
+/// Unknown keys are dropped rather than treated as an error: the file is
+/// hand-editable like every other save in this game, and a typo should cost
+/// one unlock, not the launch.
+pub fn thwarted_antags() -> Vec<AntagId> {
+    let Ok(text) = std::fs::read_to_string(campaign_path()) else {
+        // No file yet is the normal first-run reading, not a problem.
+        return Vec::new();
+    };
+    match ron::from_str::<CampaignUnlocks>(&text) {
+        Ok(unlocks) => unlocks
+            .thwarted
+            .iter()
+            .filter_map(|key| AntagId::from_key(key))
+            .collect(),
+        Err(error) => {
+            warn!("ignoring unreadable {}: {error}", campaign_path().display());
+            Vec::new()
+        }
+    }
+}
+
+/// Records an antagonist as beaten, if it is not already.
+///
+/// Re-reads the file rather than writing a cached list: a second copy of the
+/// game, or the same player finishing two saves in one sitting, must not
+/// silently drop the other's unlock.
+pub fn record_thwarted(antag: AntagId) {
+    let mut thwarted = thwarted_antags();
+    if thwarted.contains(&antag) {
+        return;
+    }
+    thwarted.push(antag);
+
+    if let Err(error) = std::fs::create_dir_all(SAVES_DIR) {
+        warn!("could not create {SAVES_DIR}: {error}");
+        return;
+    }
+    let unlocks = CampaignUnlocks {
+        thwarted: thwarted.iter().map(|id| id.key().to_string()).collect(),
+    };
+    let Ok(text) = ron::ser::to_string_pretty(&unlocks, default()) else {
+        return;
+    };
+    if let Err(error) = std::fs::write(campaign_path(), text) {
+        warn!("could not record the unlock: {error}");
+        return;
+    }
+    info!("{} thwarted — antagonist runs unlocked", antag.label());
 }
 
 /// Where the last address joined is remembered.
@@ -253,6 +362,7 @@ mod tests {
             delivered: 9,
             botched: 2,
             known: Some(9),
+            arc: None,
         };
         assert_eq!(summary.detail(), "9 delivered, 2 botched · 9 recipes");
 
@@ -262,6 +372,7 @@ mod tests {
             delivered: 0,
             botched: 0,
             known: None,
+            arc: None,
         };
         assert_eq!(fresh.detail(), "0 delivered, 0 botched");
 
@@ -271,7 +382,72 @@ mod tests {
             delivered: 5,
             botched: 1,
             known: Some(1),
+            arc: None,
         };
         assert_eq!(one.detail(), "5 delivered, 1 botched · 1 recipe");
+    }
+
+    #[test]
+    fn a_resolved_arc_is_named_in_the_load_list() {
+        let won = SlotSummary {
+            name: "Chemist".into(),
+            delivered: 40,
+            botched: 3,
+            known: Some(12),
+            arc: Some(ArcStanding {
+                antag: AntagId::Cult,
+                won: Some(true),
+            }),
+        };
+        assert_eq!(
+            won.detail(),
+            "40 delivered, 3 botched · 12 recipes · the Cult thwarted"
+        );
+
+        let lost = SlotSummary {
+            name: "Chemist 2".into(),
+            delivered: 12,
+            botched: 9,
+            known: Some(4),
+            arc: Some(ArcStanding {
+                antag: AntagId::Blob,
+                won: Some(false),
+            }),
+        };
+        assert_eq!(
+            lost.detail(),
+            "12 delivered, 9 botched · 4 recipes · the Blob won"
+        );
+    }
+
+    #[test]
+    fn a_live_arc_reads_as_a_hunt_rather_than_a_result() {
+        let live = SlotSummary {
+            name: "Chemist".into(),
+            delivered: 20,
+            botched: 1,
+            known: Some(8),
+            arc: Some(ArcStanding {
+                antag: AntagId::Spy,
+                won: None,
+            }),
+        };
+        assert_eq!(
+            live.detail(),
+            "20 delivered, 1 botched · 8 recipes · hunting the Syndicate"
+        );
+    }
+
+    #[test]
+    fn an_unknown_antagonist_key_costs_one_unlock_not_the_launch() {
+        // The file is hand-editable like every other save in this game.
+        let unlocks: CampaignUnlocks =
+            ron::from_str(r#"(thwarted: ["Cult", "Nobody", "Blob"])"#).unwrap();
+        let ids: Vec<AntagId> = unlocks
+            .thwarted
+            .iter()
+            .filter_map(|key| AntagId::from_key(key))
+            .collect();
+        assert_eq!(ids, vec![AntagId::Cult, AntagId::Blob]);
     }
 }

@@ -1,0 +1,49 @@
+// Cargo's minor antagonist — see `src/smuggler/mod.rs`.
+//
+// Runs in every save, alongside whichever main antagonist was drawn. The asks
+// themselves are ordinary; the thread is in what happens when you ignore one.
+(
+    name: "Deckhand Prewitt",
+    role: "Cargo",
+    color: (0.70, 0.54, 0.30),
+
+    // Rarer than an ordinary order, more frequent than a main antagonist's
+    // thread — a minor should be background you get used to, not an event.
+    gap_multiplier: (4.0, 7.0),
+
+    // Ordered, and escalating in how openly they say what it is for.
+    visits: [
+        (
+            reagent: "space_cleaner",
+            amount: 20,
+            plea: "Bay Three's got a spill and the requisition takes a week. Off the books?",
+        ),
+        (
+            reagent: "ethanol",
+            amount: 25,
+            plea: "Same as last time. Don't write this one down either, eh?",
+        ),
+        (
+            reagent: "hooch",
+            amount: 20,
+            plea: "There's a shuttle crew who'd pay well for a crate of this. Cut you in.",
+        ),
+        (
+            reagent: "welding_fuel",
+            amount: 25,
+            plea: "Don't ask what it's for. You don't want it in your log anyway.",
+        ),
+        (
+            reagent: "sulphuric_acid",
+            amount: 20,
+            plea: "Last one, I promise. After this I'm out of the business entirely.",
+        ),
+    ],
+
+    theft_lines: [
+        "Cargo says a crate of glassware turned up in Bay Three that nobody ordered.",
+        "Something's gone off the chem lab counter. Prewitt was signing for freight all shift, apparently.",
+        "There's a beaker missing and the manifest has an extra line on it.",
+        "Whatever was sitting out in the lab isn't sitting out in the lab any more.",
+    ],
+)

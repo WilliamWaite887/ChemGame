@@ -40,6 +40,13 @@ impl Plugin for CultPlugin {
                 (promote_script, generate_cult_visit, handle_cult_resolution)
                     .chain()
                     .run_if(is_authority)
+                    // Only in a save that actually drew the Cult. This thread
+                    // was a standalone Cargo curiosity before the campaign
+                    // arc existed; it is now the Cult's on-station presence,
+                    // and a save fighting the Syndicate should never see an
+                    // acolyte at the counter. Department minors deliberately
+                    // carry no equivalent gate — they run in every save.
+                    .run_if(crate::arc::is_active(crate::arc::AntagId::Cult))
                     .run_if(in_state(AppState::Playing)),
             );
     }
@@ -190,6 +197,8 @@ fn generate_cult_visit(
 /// the ritual simply never moves.
 fn handle_cult_resolution(
     script: Option<Res<Script>>,
+    arc_script: Option<Res<crate::arc::Script>>,
+    campaign: Option<ResMut<crate::arc::Campaign>>,
     mut resolved: MessageReader<OrderResolved>,
     mut progress: ResMut<CultProgress>,
     mut radio: ResMut<RadioLog>,
@@ -198,6 +207,7 @@ fn handle_cult_resolution(
         resolved.clear();
         return;
     };
+    let mut campaign = campaign;
     for report in resolved.read() {
         if report.name != script.name || !report.outcome.is_good() {
             continue;
@@ -211,6 +221,14 @@ fn handle_cult_resolution(
             });
         }
         progress.0 = (progress.0 + 1).min(script.stages.len().saturating_sub(1));
+
+        // A fulfilled stage is the ritual moving forward, so it moves the
+        // campaign the same distance a fulfilled illicit order does. Without
+        // this the Cult could run its entire authored chain to the finale
+        // while its own plot meter sat wherever ambient drift had left it.
+        if let (Some(arc_script), Some(campaign)) = (arc_script.as_deref(), campaign.as_mut()) {
+            crate::arc::nudge_plot(campaign, arc_script.plot_per_aid);
+        }
     }
 }
 
@@ -299,8 +317,7 @@ mod tests {
             reagent: None,
             category: None,
             outcome,
-            illicit: false,
-            crisis: false,
+            kind: crate::orders::OrderKind::Normal,
         });
         app.update();
     }
@@ -337,5 +354,81 @@ mod tests {
         resolve(&mut app, "Someone Else", Outcome::Success);
 
         assert_eq!(app.world().resource::<CultProgress>().0, 0);
+    }
+
+    // -- the campaign arc --------------------------------------------------
+
+    /// `resolution_app` with a live Cult campaign attached.
+    fn campaign_app() -> App {
+        let arc_script: crate::arc::ArcScript =
+            ron::from_str(include_str!("../../assets/data/station.arc.ron")).unwrap();
+        let steps = arc_script
+            .antagonist(crate::arc::AntagId::Cult)
+            .unwrap()
+            .counter_steps
+            .len();
+
+        let mut app = resolution_app();
+        app.insert_resource(crate::arc::Script(arc_script))
+            .insert_resource(crate::arc::Campaign::new(
+                crate::arc::AntagId::Cult,
+                crate::arc::Mode::Chemist,
+                steps,
+            ));
+        app
+    }
+
+    #[test]
+    fn a_fulfilled_stage_moves_the_ritual_toward_its_end() {
+        let mut app = campaign_app();
+        let name = app.world().resource::<Script>().0.name.clone();
+        let per_aid = app.world().resource::<crate::arc::Script>().plot_per_aid;
+
+        resolve(&mut app, &name, Outcome::Success);
+
+        assert_eq!(
+            app.world().resource::<crate::arc::Campaign>().plot,
+            per_aid,
+            "the ritual advancing is the Cult advancing — otherwise the whole \
+             authored chain could run with the plot meter untouched"
+        );
+    }
+
+    #[test]
+    fn declining_a_stage_moves_nothing_at_all() {
+        let mut app = campaign_app();
+        let name = app.world().resource::<Script>().0.name.clone();
+
+        resolve(&mut app, &name, Outcome::Wrong);
+
+        assert_eq!(app.world().resource::<crate::arc::Campaign>().plot, 0);
+        assert_eq!(app.world().resource::<CultProgress>().0, 0);
+    }
+
+    #[test]
+    fn the_ritual_is_silent_in_a_save_that_drew_someone_else() {
+        // The gate this thread gained when it was promoted from a Cargo
+        // curiosity to one of the five main antagonists.
+        let mut app = App::new();
+        app.insert_resource(crate::arc::Campaign::new(
+            crate::arc::AntagId::Spy,
+            crate::arc::Mode::Chemist,
+            4,
+        ));
+        assert!(
+            !app.world_mut().run_system_cached(cult_runs).unwrap(),
+            "a save fighting the Syndicate should never see an acolyte"
+        );
+
+        app.insert_resource(crate::arc::Campaign::new(
+            crate::arc::AntagId::Cult,
+            crate::arc::Mode::Chemist,
+            4,
+        ));
+        assert!(app.world_mut().run_system_cached(cult_runs).unwrap());
+    }
+
+    fn cult_runs(campaign: Option<Res<crate::arc::Campaign>>) -> bool {
+        crate::arc::is_active(crate::arc::AntagId::Cult)(campaign)
     }
 }

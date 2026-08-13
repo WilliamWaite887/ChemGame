@@ -241,6 +241,14 @@ pub struct ReagentDef {
     /// Write `Some((323.15))`, never `Some((323))`.
     #[serde(default)]
     pub boils_at: Option<Kelvin>,
+    /// How readily repeated doses build a habit, `0.0` for anything that never
+    /// does. Read by the station layer (`src/addiction`), never by this crate:
+    /// addiction is not something that happens on a metabolism tick, it is a
+    /// fact about a *person aboard the station*, tracked across visits long
+    /// after any particular body has left the lab. `chem_sim` only carries the
+    /// number so it lives next to the reagent it describes.
+    #[serde(default)]
+    pub addictive: f64,
 }
 
 /// A loaded reagent.
@@ -263,6 +271,8 @@ pub struct Reagent {
     pub critical_overdose: Option<Units>,
     pub critical_effects: Vec<ReagentEffect>,
     pub boils_at: Option<Kelvin>,
+    /// See [`ReagentDef::addictive`].
+    pub addictive: f64,
 }
 
 impl Reagent {
@@ -324,6 +334,7 @@ impl ReagentRegistry {
             critical_overdose: def.critical_overdose,
             critical_effects: def.critical_effects,
             boils_at: def.boils_at,
+            addictive: def.addictive,
         });
         id
     }

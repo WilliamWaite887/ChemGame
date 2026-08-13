@@ -461,7 +461,11 @@
 
     // ---- Stimulants -------------------------------------------------------
     (
+        // Not Illicit, and legitimately orderable — which is exactly what
+        // makes a habit built on it awkward: the deliveries that started it
+        // were all above board.
         id: "hyperzine",
+        addictive: 0.4,
         name: "Hyperzine",
         color: (0.95, 0.35, 0.62),
         overdose: Some(10),
@@ -490,6 +494,7 @@
     // ---- Drink ------------------------------------------------------------
     (
         id: "hooch",
+        addictive: 0.3,
         name: "Hooch",
         color: (0.62, 0.42, 0.20),
         overdose: Some(30),
@@ -641,7 +646,13 @@
     // way Poisons are: mix into one by accident at the test bench, or deduce
     // it from hints.
     (
+        // `addictive` (see `src/addiction`): how readily repeated doses build
+        // a habit in whoever takes them. The whole Illicit shelf carries one,
+        // because a repeat customer is the only reason to deal at all — and
+        // an addict who is visibly high while Security is in the room is the
+        // price. Zero, and absent, for everything else.
         id: "space_drugs",
+        addictive: 1.0,
         name: "Space Drugs",
         color: (0.72, 0.30, 0.86),
         overdose: Some(20),
@@ -652,6 +663,7 @@
     ),
     (
         id: "bath_salts",
+        addictive: 1.2,
         name: "Bath Salts",
         color: (0.90, 0.42, 0.58),
         overdose: Some(15),
@@ -664,7 +676,10 @@
         overdose_effects: [Harm(Toxin, 3), Harm(Brute, 1)],
     ),
     (
+        // The worst of them: it heals just enough that someone can tell
+        // themselves it is medicine.
         id: "krokodil",
+        addictive: 1.6,
         name: "Krokodil",
         color: (0.52, 0.62, 0.40),
         overdose: Some(15),
@@ -675,6 +690,7 @@
     ),
     (
         id: "methamphetamine",
+        addictive: 1.4,
         name: "Methamphetamine",
         color: (0.88, 0.92, 0.96),
         overdose: Some(10),
@@ -685,6 +701,7 @@
     ),
     (
         id: "mindbreaker_toxin",
+        addictive: 0.8,
         name: "Mindbreaker Toxin",
         color: (0.58, 0.30, 0.68),
         overdose: Some(12),
@@ -697,7 +714,10 @@
         overdose_effects: [Harm(Toxin, 2)],
     ),
     (
+        // Low, not zero: nobody enjoys this one, but people still come back
+        // for it.
         id: "zombie_powder",
+        addictive: 0.5,
         name: "Zombie Powder",
         color: (0.40, 0.44, 0.30),
         overdose: Some(10),

@@ -13,6 +13,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use chem_sim::{Category, DamageKind, Kelvin, ReactionId, ReagentId, Units};
 
+use crate::arc::{ArcScript, Campaign, Reveal};
 use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, InSlot};
@@ -55,6 +56,9 @@ pub(crate) const TEXT_DIM: Color = Color::srgb(0.55, 0.59, 0.66);
 /// from `AppState::Connecting` — the one place in the menu that needs to say
 /// something went wrong out loud rather than staying silent.
 pub(crate) const ERROR_TEXT: Color = Color::srgb(0.85, 0.35, 0.35);
+/// The counterpart to [`ERROR_TEXT`], for the one notice on the standing board
+/// that can carry good news: an arc that ended with the station still standing.
+pub(crate) const GOOD_TEXT: Color = Color::srgb(0.45, 0.80, 0.50);
 pub(crate) const BUTTON_IDLE: Color = Color::srgb(0.17, 0.19, 0.23);
 const BUTTON_HOVER: Color = Color::srgb(0.25, 0.29, 0.35);
 const BUTTON_ACTIVE: Color = Color::srgb(0.20, 0.45, 0.62);
@@ -176,6 +180,12 @@ struct PanelSignature {
     department_standing: Vec<(Department, i32)>,
     accepting_orders: bool,
     research_points: u32,
+    /// What the standing board says about the campaign. Same reasoning as
+    /// `department_standing`: the board draws from it, so without it here the
+    /// board would freeze on whatever the arc happened to be when it first
+    /// opened. Deliberately *not* the plot number — that is never shown, and
+    /// tracking it would rebuild the panel every time the meter ticked.
+    arc: Option<ArcHeadline>,
     /// Chamber state. The sample's temperature is **rounded to 5K** for exactly
     /// the reason the countdown above is absent: while a chamber runs it moves
     /// every frame, and comparing the raw value would rebuild the panel every
@@ -209,11 +219,53 @@ impl Default for PanelSignature {
             // *a* starting value.
             accepting_orders: false,
             research_points: u32::MAX,
+            arc: None,
             temperature: Some(i32::MAX),
             target: Some(i32::MAX),
             powered: true,
         }
     }
+}
+
+/// Everything the standing board is allowed to say about the campaign.
+///
+/// Built once, in [`arc_headline`], so the rule about what may be shown at
+/// which [`Reveal`] tier lives in exactly one place rather than being spread
+/// through the panel-drawing code.
+#[derive(PartialEq, Eq, Clone)]
+struct ArcHeadline {
+    /// `None` until [`Reveal::Named`] — before that the board can say
+    /// something is wrong, but not what.
+    name: Option<String>,
+    /// Counter-track progress, once the track has opened.
+    countered: usize,
+    total: usize,
+    resolved: Option<bool>,
+}
+
+/// What the board may show, given how much the station has worked out.
+///
+/// `None` while the antagonist is still [`Reveal::Hidden`]: the board is a
+/// public notice, and the whole arc depends on it not being one yet.
+fn arc_headline(campaign: &Campaign, script: Option<&ArcScript>) -> Option<ArcHeadline> {
+    if campaign.reveal == Reveal::Hidden && campaign.outcome.is_none() {
+        return None;
+    }
+    let named = campaign.reveal == Reveal::Named || campaign.outcome.is_some();
+    Some(ArcHeadline {
+        name: named
+            .then(|| {
+                script
+                    .and_then(|script| script.antagonist(campaign.antag))
+                    .map(|def| def.display.clone())
+                    // The script is an asset; if it somehow is not loaded, the
+                    // short menu label still names the right thing.
+                    .unwrap_or_else(|| campaign.antag.label().to_string())
+            }),
+        countered: campaign.countered.iter().filter(|done| **done).count(),
+        total: campaign.countered.len(),
+        resolved: campaign.player_won(),
+    })
 }
 
 /// Rounds a temperature to the granularity [`PanelSignature`] compares at.
@@ -248,6 +300,8 @@ fn sync_panel(
     knowledge: Res<Knowledge>,
     book: Res<BookView>,
     catalog: Option<Res<ProduceCatalog>>,
+    campaign: Option<Res<Campaign>>,
+    arc_script: Option<Res<crate::arc::Script>>,
     shift: Res<Shift>,
     mut previous: Local<PanelSignature>,
 ) {
@@ -261,6 +315,12 @@ fn sync_panel(
     let loaded = slot_contents.map(|(container, _)| container);
     let test_stock = slot_contents.is_some_and(|(_, practice)| practice);
     let machine_parts = open_machine.and_then(|machine| machines.get(machine).ok());
+
+    // Built before the signature so both the comparison and the panel body can
+    // read it — the signature itself is moved into `previous` on the way past.
+    let arc = campaign
+        .as_deref()
+        .and_then(|campaign| arc_headline(campaign, arc_script.as_deref().map(|s| &s.0)));
 
     let signature = PanelSignature {
         mode,
@@ -289,6 +349,7 @@ fn sync_panel(
             .collect(),
         accepting_orders: shift.accepting_orders,
         research_points: knowledge.research_points,
+        arc: arc.clone(),
         // Only tracked while a chamber panel is open, so no other machine pays
         // for the extra comparison.
         temperature: machine_parts
@@ -371,7 +432,7 @@ fn sync_panel(
                             delivery_window_body(panel, &db, loaded, test_stock);
                         }
                         MachineKind::StandingBoard => {
-                            standing_board_body(panel, &shift);
+                            standing_board_body(panel, &shift, arc.as_ref());
                         }
                         MachineKind::ReactionChamber => {
                             heater_body(panel, &db, thermostat, loaded);
@@ -390,7 +451,19 @@ fn sync_panel(
 /// One panel rather than a modal, exactly like the old shift board: this is
 /// per-player `InteractionMode`, and a modal would trap one chemist on a
 /// summary screen while the other was still working the counter.
-fn standing_board_body(panel: &mut ChildSpawnerCommands, shift: &Shift) {
+fn standing_board_body(
+    panel: &mut ChildSpawnerCommands,
+    shift: &Shift,
+    arc: Option<&ArcHeadline>,
+) {
+    // The campaign notice goes above the standing table, because once there is
+    // one it is the most important thing on the board — and because a player
+    // who has just been told what they are dealing with should not have to
+    // scroll past five departments' requisitions to read it.
+    if let Some(arc) = arc {
+        draw_arc_notice(panel, arc);
+    }
+
     panel.spawn(label(
         if shift.accepting_orders {
             "Taking requests."
@@ -449,6 +522,38 @@ fn standing_board_body(panel: &mut ChildSpawnerCommands, shift: &Shift) {
             ));
         }
     }
+}
+
+/// The campaign notice at the top of the standing board.
+///
+/// Says as little as the station actually knows. At [`Reveal::Suspected`] that
+/// is only "something is wrong" — [`ArcHeadline::name`] is `None` and there is
+/// nothing here that could give the answer away early.
+fn draw_arc_notice(panel: &mut ChildSpawnerCommands, arc: &ArcHeadline) {
+    let (heading, tone) = match (arc.resolved, &arc.name) {
+        (Some(true), Some(name)) => (format!("STOOD DOWN — {name}"), GOOD_TEXT),
+        (Some(false), Some(name)) => (format!("STATION LOST — {name}"), ERROR_TEXT),
+        (Some(true), None) => ("STOOD DOWN".to_string(), GOOD_TEXT),
+        (Some(false), None) => ("STATION LOST".to_string(), ERROR_TEXT),
+        (None, Some(name)) => (format!("ALERT — {name}"), ERROR_TEXT),
+        (None, None) => ("ALERT — SOMETHING IS ABOARD".to_string(), ERROR_TEXT),
+    };
+    panel.spawn(label(heading, 16.0, tone));
+
+    let detail = match arc.resolved {
+        Some(true) => "Whatever they were building, it isn't happening. Command sends thanks.".to_string(),
+        Some(false) => "Command has stopped answering. There is nothing left to fill.".to_string(),
+        None if arc.name.is_none() => {
+            "Command won't say what. Departments are filing requests they won't explain."
+                .to_string()
+        }
+        None if arc.total > 0 => format!(
+            "Departments have {} of {} countermeasures in hand. They are asking you for the rest.",
+            arc.countered, arc.total
+        ),
+        None => "Departments are working on it.".to_string(),
+    };
+    panel.spawn(label(detail, 12.0, TEXT_DIM));
 }
 
 fn dispenser_body(
@@ -2543,5 +2648,64 @@ mod tests {
 
         assert_eq!(total, db.reactions.len());
         assert_eq!(known, knowledge.known_count());
+    }
+
+    // -- the standing board's campaign notice ------------------------------
+
+    fn campaign_at(reveal: Reveal) -> Campaign {
+        let mut campaign =
+            Campaign::new(crate::arc::AntagId::Cult, crate::arc::Mode::Chemist, 4);
+        campaign.reveal = reveal;
+        campaign
+    }
+
+    #[test]
+    fn the_board_says_nothing_while_the_antagonist_is_hidden() {
+        // The board is a public notice. Before the station has worked anything
+        // out, there is nothing public to post — and posting early would hand
+        // the player the answer the whole arc is built around.
+        assert!(arc_headline(&campaign_at(Reveal::Hidden), None).is_none());
+    }
+
+    #[test]
+    fn a_suspected_antagonist_is_announced_without_being_named() {
+        let headline = arc_headline(&campaign_at(Reveal::Suspected), None)
+            .expect("something is on the board once the station suspects");
+        assert!(
+            headline.name.is_none(),
+            "suspecting something is not the same as knowing what it is"
+        );
+    }
+
+    #[test]
+    fn a_named_antagonist_is_named() {
+        let headline = arc_headline(&campaign_at(Reveal::Named), None)
+            .expect("a named antagonist belongs on the board");
+        assert_eq!(
+            headline.name.as_deref(),
+            Some("the Cult"),
+            "with no script loaded it should still fall back to the short label"
+        );
+    }
+
+    #[test]
+    fn a_resolved_arc_is_always_safe_to_post() {
+        // Even one that ended while still officially hidden: it is over, and
+        // the board has to be able to say how it went.
+        let mut lost = campaign_at(Reveal::Hidden);
+        lost.outcome = Some(crate::arc::ArcOutcome::PlotSucceeded);
+
+        let headline = arc_headline(&lost, None).expect("a finished arc is public");
+        assert_eq!(headline.resolved, Some(false));
+        assert!(headline.name.is_some(), "there is nothing left to protect");
+    }
+
+    #[test]
+    fn the_board_counts_the_counter_track() {
+        let mut campaign = campaign_at(Reveal::Named);
+        campaign.countered = vec![true, true, false, false];
+
+        let headline = arc_headline(&campaign, None).unwrap();
+        assert_eq!((headline.countered, headline.total), (2, 4));
     }
 }

@@ -310,7 +310,7 @@ fn handle_crisis_resolutions(
         return;
     };
     for report in resolved.read() {
-        if !report.crisis {
+        if !report.kind.is_crisis() {
             continue;
         }
         let Some(department) = Department::from_role(&report.role) else {
@@ -570,8 +570,7 @@ mod tests {
             reagent: Some(dylovene),
             category: None,
             outcome: crate::orders::Outcome::Success,
-            illicit: false,
-            crisis: true,
+            kind: crate::orders::OrderKind::Crisis,
         });
         app.update();
 
@@ -598,8 +597,7 @@ mod tests {
             reagent: None,
             category: None,
             outcome: crate::orders::Outcome::Expired,
-            illicit: false,
-            crisis: true,
+            kind: crate::orders::OrderKind::Crisis,
         });
         app.update();
 
@@ -629,8 +627,7 @@ mod tests {
             reagent: Some(dylovene),
             category: None,
             outcome: crate::orders::Outcome::Success,
-            illicit: false,
-            crisis: false,
+            kind: crate::orders::OrderKind::Normal,
         });
         app.update();
 

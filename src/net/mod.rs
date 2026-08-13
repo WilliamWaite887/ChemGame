@@ -29,10 +29,11 @@ use crate::containers::{Container, HeldBy, InSlot};
 use crate::crew::CrewMember;
 use crate::hazards::{ActiveHazard, SmokeCloud, SmokePayload};
 use crate::machines::{Buffer, DispenseAmount, Hopper, Machine, Thermostat};
-use crate::orders::{CrisisOrder, Order};
+use crate::orders::{CounterOrder, CrisisOrder, Order};
 use crate::player::Player;
 use crate::produce::Produce;
 use crate::rogue_security::Deterrent;
+use crate::showdown::{Assailant, Breach};
 use crate::AppState;
 
 pub mod steam;
@@ -68,17 +69,28 @@ pub enum LaunchMode {
 }
 
 impl LaunchMode {
-    /// Reads `--solo`, `--host`, `--join [addr]` or `--host-steam` from the
-    /// command line.
+    /// Reads `--solo`, `--host`, `--join [addr]`, `--host-steam` or Steam's
+    /// own `+connect_lobby <id>` from this process's command line.
     ///
     /// `None` means the command line said nothing, which is the signal to show
     /// the menu instead of guessing.
     ///
-    /// No `--join-steam` equivalent: there is no address or code to type for
-    /// the Steam path, only a lobby id, which is not something a person
+    /// No `--join-steam` flag of our own: there is no address or code to type
+    /// for the Steam path, only a lobby id, which is not something a person
     /// reads out loud the way an IP is — see `steam`'s module doc.
+    /// `+connect_lobby` is not that flag under another name; it is Steam
+    /// talking to us, never a human.
     pub fn from_args() -> Option<Self> {
-        let args: Vec<String> = std::env::args().skip(1).collect();
+        Self::parse_args(std::env::args().skip(1))
+    }
+
+    /// The testable half of [`from_args`].
+    ///
+    /// Split for the same reason [`parse_literal_address`] was split out of
+    /// [`parse_address`]: `std::env::args()` is process-global, so anything
+    /// that reads it directly cannot be pinned by a test.
+    pub fn parse_args(args: impl IntoIterator<Item = String>) -> Option<Self> {
+        let args: Vec<String> = args.into_iter().collect();
         let mut iter = args.iter();
         while let Some(arg) = iter.next() {
             match arg.as_str() {
@@ -91,6 +103,24 @@ impl LaunchMode {
                         .and_then(|value| parse_address(value))
                         .unwrap_or_else(loopback_address);
                     return Some(LaunchMode::Join(address));
+                }
+                // Steam's argument, not ours — no leading `--`, and never
+                // typed by hand. Steam appends this when a friend accepts an
+                // overlay invite (or hits Join in the friends list) while the
+                // game is *not* already running; when it is running there is
+                // no relaunch and `steam::handle_lobby_join_requested` gets a
+                // callback instead. Both routes have to exist, or accepting an
+                // invite works only when the game happens to be open — which
+                // is not something the player is thinking about when they
+                // click it.
+                "+connect_lobby" => {
+                    let Some(lobby) = iter.next().and_then(|value| value.parse::<u64>().ok())
+                    else {
+                        // Falling through to the menu beats dialling lobby 0.
+                        warn!("ignoring a malformed +connect_lobby argument");
+                        return None;
+                    };
+                    return Some(LaunchMode::JoinSteam(steam::LobbyId::from_raw(lobby)));
                 }
                 _ => {}
             }
@@ -110,7 +140,8 @@ pub struct LaunchedFromArgs;
 ///
 /// Also picks the save, because `--host` and `--solo` have no menu to pick one
 /// in and would otherwise start a brand new career on every launch. A `--join`
-/// gets no slot: the guest reads the host's notebook and career.
+/// or a `+connect_lobby` gets no slot: the guest reads the host's notebook and
+/// career.
 pub fn apply_command_line(app: &mut App) {
     let Some(mode) = LaunchMode::from_args() else {
         return;
@@ -274,12 +305,23 @@ impl Plugin for NetPlugin {
         // Only if the command line has not already inserted one: the mode is
         // now a menu decision, and singleplayer is the right thing to assume
         // for anything that never reaches the menu, such as a test.
+        //
+        // `RepliconRenetPlugins` here is the direct/LAN backend *only*. The
+        // Steam backend has its own, identically-named group
+        // (`bevy_replicon_renet2::RepliconRenetPlugins`), added by
+        // `steam::SteamPlugin` — forgetting it is precisely the bug that let
+        // a Steam host open a lobby and then ignore every incoming
+        // connection without a word.
         app.init_resource::<LaunchMode>()
             .add_plugins((RepliconPlugins, RepliconRenetPlugins))
             .add_message::<ConnectFailed>();
 
         register_replication(app);
         app.add_systems(Update, resync_on_join.run_if(is_authority))
+            // Backend-agnostic: whichever group above is live sets
+            // `ServerState`, so this line appearing is proof the transport is
+            // actually running. Its absence is what a silent host looks like.
+            .add_systems(OnEnter(ServerState::Running), announce_serving)
             // A host or singleplayer game owns the simulation immediately —
             // there is nothing to wait for.
             .add_systems(
@@ -317,6 +359,18 @@ impl Plugin for NetPlugin {
 /// lab.
 fn finish_joining(mut app_state: ResMut<NextState<AppState>>) {
     app_state.set(AppState::Playing);
+}
+
+/// Says out loud that the transport is up and listening.
+///
+/// Worth a line of its own because the hardest part of every co-op bug this
+/// project has hit was a host that printed *nothing*: "lab open" only means
+/// a socket was bound or a lobby was created, which both happened perfectly
+/// well while the backend that answers connections was missing entirely.
+/// `ServerState::Running` is set by whichever backend is actually installed,
+/// so this is the line that distinguishes the two.
+fn announce_serving() {
+    info!("the lab is accepting connections");
 }
 
 /// The direct/LAN client's handshake failed or timed out — surfaces it
@@ -378,6 +432,10 @@ fn resync_on_join(
     if joined.is_empty() {
         return;
     }
+    // `AuthorizedClient` only ever appears on a real server, so singleplayer
+    // stays quiet. See `announce_serving` for why the host saying anything at
+    // all matters this much.
+    info!("a chemist joined the lab");
     // A client can authorise before the lab has finished loading, so none of
     // these are guaranteed to exist yet.
     if let Some(mut knowledge) = knowledge {
@@ -415,6 +473,10 @@ fn register_replication(app: &mut App) {
         // doc comment. Replicated so `crisis::pulse_alert_lighting` reads the
         // same "is one active" answer on every peer with no sync message.
         .replicate::<CrisisOrder>()
+        // Same reasoning as `CrisisOrder`: a department's countermeasure
+        // request is public by design, and both peers need to see the same
+        // one open so either chemist can fill it.
+        .replicate::<CounterOrder>()
         .replicate::<Produce>()
         .replicate::<CrewMember>()
         // The marker itself, so a client can tell a chemist from any other
@@ -435,7 +497,13 @@ fn register_replication(app: &mut App) {
         .replicate::<Bloodstream>()
         // Rogue Security's reward — a pickable prop, shared lab state like
         // any other, so both peers see it appear on the counter.
-        .replicate::<Deterrent>();
+        .replicate::<Deterrent>()
+        // The showdown, both forms. A breach needs its own marker because it
+        // is not crew and `dress_crew` cannot draw it; the assailant needs one
+        // so a guest is not watching an ordinary-looking crew member walk
+        // through the lab taking chemical damage for no visible reason.
+        .replicate::<Breach>()
+        .replicate::<Assailant>();
 }
 
 fn start_hosting(mut commands: Commands, channels: Res<RepliconChannels>) {
@@ -747,6 +815,64 @@ mod tests {
             client.world().get_entity(occupant).is_ok(),
             "the mapped entity must exist on the client, not dangle at the server's id"
         );
+    }
+
+    /// `parse_args` takes owned `String`s, the way `std::env::args()` yields
+    /// them.
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn steams_own_connect_lobby_argument_is_a_join() {
+        // Accepting an invite with the game closed is not a callback at all:
+        // Steam relaunches the executable with this argument and fires
+        // nothing. Ignoring it — which is what an unknown flag used to do —
+        // drops the player on the main menu having clicked Join, with no
+        // indication anything was even attempted.
+        assert_eq!(
+            LaunchMode::parse_args(args(&["+connect_lobby", "109775241234567890"])),
+            Some(LaunchMode::JoinSteam(steam::LobbyId::from_raw(
+                109775241234567890
+            )))
+        );
+        // A lobby id that is not a number is not a reason to dial lobby 0.
+        assert_eq!(
+            LaunchMode::parse_args(args(&["+connect_lobby", "not-a-lobby"])),
+            None
+        );
+        assert_eq!(LaunchMode::parse_args(args(&["+connect_lobby"])), None);
+    }
+
+    #[test]
+    fn the_existing_flags_still_parse() {
+        // A regression net around splitting `from_args` in two.
+        assert_eq!(
+            LaunchMode::parse_args(args(&["--solo"])),
+            Some(LaunchMode::Singleplayer)
+        );
+        assert_eq!(
+            LaunchMode::parse_args(args(&["--host"])),
+            Some(LaunchMode::Host)
+        );
+        assert_eq!(
+            LaunchMode::parse_args(args(&["--host-steam"])),
+            Some(LaunchMode::HostSteam)
+        );
+        assert_eq!(
+            LaunchMode::parse_args(args(&["--join", "192.168.1.40"])),
+            Some(LaunchMode::Join(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 40)),
+                DEFAULT_PORT
+            )))
+        );
+        // `--join` with nothing after it is the second-window case.
+        assert_eq!(
+            LaunchMode::parse_args(args(&["--join"])),
+            Some(LaunchMode::Join(loopback_address()))
+        );
+        assert_eq!(LaunchMode::parse_args(args(&[])), None);
+        assert_eq!(LaunchMode::parse_args(args(&["--unrecognised"])), None);
     }
 
     #[test]

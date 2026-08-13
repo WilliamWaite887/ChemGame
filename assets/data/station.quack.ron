@@ -1,0 +1,57 @@
+// Medical's minor antagonist — see `src/quack/mod.rs`.
+//
+// Runs in every save. The asks read as a doctor cutting corners; the thread is
+// in what they do when nobody stops them cutting one more.
+(
+    name: "Dr. Halloway",
+    role: "Medical",
+    color: (0.40, 0.68, 0.88),
+
+    gap_multiplier: (4.0, 7.0),
+
+    // Ordered, and escalating from "harried" to "should not be practising".
+    visits: [
+        (
+            reagent: "inaprovaline",
+            amount: 30,
+            plea: "Double what the chart says. I'd rather have it and not need it.",
+        ),
+        (
+            reagent: "chloral_hydrate",
+            amount: 20,
+            plea: "For a patient who won't stay still. It's easier for everyone this way.",
+        ),
+        (
+            reagent: "hyperzine",
+            amount: 25,
+            plea: "Not for a patient. For me. It's a double shift and I'm not asking twice.",
+        ),
+        (
+            reagent: "synaptizine",
+            amount: 25,
+            plea: "I have a theory about combining these. Don't put that in the log.",
+        ),
+        (
+            reagent: "mindbreaker_toxin",
+            amount: 15,
+            plea: "It's therapeutic at the right dose. I've worked out what the right dose is.",
+        ),
+    ],
+
+    // What they reach for when nobody fills the order. Chloral Hydrate is a
+    // sedative with a real overdose threshold, so an improvised dose is
+    // genuinely a bad time for whoever is standing at the counter — and it is
+    // visible, because it drives a Sluggish status that `fx` draws as a slump.
+    improvised: "chloral_hydrate",
+    improvised_units: 18,
+
+    // One notch, not three. This is malpractice on one patient, not a raid.
+    malpractice_penalty: -1,
+
+    malpractice_lines: [
+        "{name} came out of the chem lab waiting area unable to stand. Halloway was 'helping'.",
+        "Halloway treated {name} without a chart, without a consult, and without asking.",
+        "Medbay's asking who authorised what {name} was given. Nobody did.",
+        "{name} is sleeping it off in the corridor. Halloway says it was indicated.",
+    ],
+)

@@ -326,8 +326,7 @@ mod tests {
             reagent: None,
             category: None,
             outcome: Outcome::Success,
-            illicit: false,
-            crisis: false,
+            kind: crate::orders::OrderKind::Normal,
         });
         app.update();
     }

@@ -389,6 +389,70 @@ pub struct IllicitOrder;
 #[derive(Component, Serialize, Deserialize)]
 pub struct CrisisOrder;
 
+/// Marks a crew visit as a department's countermeasure against the save's
+/// main antagonist — see `crate::arc`.
+///
+/// Follows [`CrisisOrder`], not [`IllicitOrder`]: a counter-track request is
+/// public by design (the whole point is that the departments have worked out
+/// what they need and are asking you for it), so it is replicated and free to
+/// be queried anywhere.
+#[derive(Component, Serialize, Deserialize)]
+pub struct CounterOrder;
+
+/// Which thread, if any, owns an order's consequences.
+///
+/// Replaces the pair of `illicit`/`crisis` booleans this used to be. That pair
+/// grew one flag per thread and could express states that were never
+/// meaningful (`illicit && crisis`); with a third thread arriving there would
+/// have been three mutually-exclusive bools travelling together. An order
+/// belongs to exactly one thread, so it is one value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum OrderKind {
+    #[default]
+    Normal,
+    Illicit,
+    Crisis,
+    Counter,
+}
+
+impl OrderKind {
+    /// Reads the kind off the marker components an order entity carries.
+    ///
+    /// The markers are mutually exclusive by construction — each is inserted
+    /// by exactly one spawner — so the order of these checks only decides what
+    /// a content bug would degrade to, never ordinary behaviour.
+    pub fn of(illicit: bool, crisis: bool, counter: bool) -> OrderKind {
+        match (illicit, crisis, counter) {
+            (true, _, _) => OrderKind::Illicit,
+            (_, true, _) => OrderKind::Crisis,
+            (_, _, true) => OrderKind::Counter,
+            _ => OrderKind::Normal,
+        }
+    }
+
+    /// Whether the order's exact reagent was already named to the player up
+    /// front, so repeating it in a report leaks nothing.
+    ///
+    /// True for an illicit order (the pretext named the substance) — the
+    /// property [`is_named`] and [`wanted_for`] actually care about, which is
+    /// why they take this rather than the whole kind.
+    pub fn names_its_reagent(self) -> bool {
+        matches!(self, OrderKind::Illicit)
+    }
+
+    pub fn is_illicit(self) -> bool {
+        matches!(self, OrderKind::Illicit)
+    }
+
+    pub fn is_crisis(self) -> bool {
+        matches!(self, OrderKind::Crisis)
+    }
+
+    pub fn is_counter(self) -> bool {
+        matches!(self, OrderKind::Counter)
+    }
+}
+
 /// How a delivery went.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
 pub enum Outcome {
@@ -476,16 +540,14 @@ pub struct OrderResolved {
     /// The category to name in a report instead, when `reagent` is `None`.
     pub category: Option<Category>,
     pub outcome: Outcome,
-    /// Whether this was secretly an antagonist's order. Never surfaced in the
-    /// UI — read only by `antagonist`'s own resolution handler, which is what
-    /// keeps the "no visible tell" guarantee intact even downstream of
-    /// grading.
-    pub illicit: bool,
-    /// Whether this was a `crisis::CrisisOrder` — read only by `crisis`'s own
-    /// resolution handler, the same shape `illicit` already takes. Unlike an
-    /// antagonist's order, a crisis has nothing to hide: the radio alarm and
-    /// the afflicted crew member's own reeling are the tell.
-    pub crisis: bool,
+    /// Which thread owns this order's consequences.
+    ///
+    /// Each thread reads only its own variant, off its own cursor into this
+    /// message queue: `antagonist` reacts to [`OrderKind::Illicit`], `crisis`
+    /// to `Crisis`, `arc` to `Counter`. `Illicit` is never surfaced in the UI
+    /// — that is what keeps the "no visible tell" guarantee intact downstream
+    /// of grading. The other variants have nothing to hide.
+    pub kind: OrderKind,
 }
 
 /// A station department whose standing rises and falls with how you treat its
@@ -648,8 +710,8 @@ pub fn reference_category(db: &ChemDb, reagent: ReagentId) -> Option<Category> {
 /// [`specific`](Order::specific) one, otherwise the category its reference
 /// reagent belongs to — falling back to exact only if that reagent somehow
 /// names no category at all, a content bug, not a reason to panic.
-pub fn wanted_for(order: &Order, illicit: bool, db: &ChemDb) -> Wanted {
-    if illicit || order.specific {
+pub fn wanted_for(order: &Order, kind: OrderKind, db: &ChemDb) -> Wanted {
+    if kind.names_its_reagent() || order.specific {
         return Wanted::Exact(order.reagent);
     }
     match reference_category(db, order.reagent) {
@@ -664,8 +726,8 @@ pub fn wanted_for(order: &Order, illicit: bool, db: &ChemDb) -> Wanted {
 /// (which named it in its own prompt/plea). Both have nothing left to
 /// protect; only a lenient order's reference reagent must stay unnamed on an
 /// unmatched resolution.
-fn is_named(order: &Order, illicit: bool) -> bool {
-    illicit || order.specific
+fn is_named(order: &Order, kind: OrderKind) -> bool {
+    kind.names_its_reagent() || order.specific
 }
 
 /// Whether any reagent in `set` belongs to `cat` — the reachability test for
@@ -1015,6 +1077,7 @@ fn expire_orders(
         &mut CrewRoute,
         Has<IllicitOrder>,
         Has<CrisisOrder>,
+        Has<CounterOrder>,
     )>,
 ) {
     // Deliberately *not* gated on `accepting_orders`. The sign stops new
@@ -1023,7 +1086,8 @@ fn expire_orders(
     // were still up.
     let dt = time.delta_secs();
 
-    for (entity, mut order, crew, mut route, illicit, crisis) in &mut orders {
+    for (entity, mut order, crew, mut route, illicit, crisis, counter) in &mut orders {
+        let kind = OrderKind::of(illicit, crisis, counter);
         // Patience only runs down once they have actually arrived, so a slow
         // walk in never counts against the player.
         if route.phase != CrewPhase::Waiting {
@@ -1038,7 +1102,7 @@ fn expire_orders(
         // illicit or specific order still names its (already-known-to-the-
         // player) reagent, but a plain lenient order falls back to naming
         // only the category, never the reference reagent it never revealed.
-        let (reagent, category) = if is_named(&order, illicit) {
+        let (reagent, category) = if is_named(&order, kind) {
             (Some(order.reagent), None)
         } else {
             (None, reference_category(&db, order.reagent))
@@ -1049,8 +1113,7 @@ fn expire_orders(
             reagent,
             category,
             outcome: Outcome::Expired,
-            illicit,
-            crisis,
+            kind,
         });
         shift.botched += 1;
         // An abandoned illicit order is not a chaos-causing success, so it
@@ -1099,6 +1162,7 @@ fn handle_delivery(
         &mut CrewRoute,
         Has<IllicitOrder>,
         Has<CrisisOrder>,
+        Has<CounterOrder>,
     )>,
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
     containers: Query<(Entity, &Container, &HeldBy, Has<TestBenchStock>)>,
@@ -1109,7 +1173,9 @@ fn handle_delivery(
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
-        let Ok((member, order, mut route, illicit, crisis)) = crew.get_mut(request.target) else {
+        let Ok((member, order, mut route, illicit, crisis, counter)) =
+            crew.get_mut(request.target)
+        else {
             continue;
         };
         let body = bodies
@@ -1150,8 +1216,7 @@ fn handle_delivery(
                 route: &mut route,
                 container_entity,
                 container,
-                illicit,
-                crisis,
+                kind: OrderKind::of(illicit, crisis, counter),
                 body,
             },
         );
@@ -1166,9 +1231,8 @@ struct Handover<'a> {
     route: &'a mut CrewRoute,
     container_entity: Entity,
     container: &'a Container,
-    illicit: bool,
-    /// Whether this is a `crisis::CrisisOrder` — see `OrderResolved::crisis`.
-    crisis: bool,
+    /// Which thread owns this order — see [`OrderResolved::kind`].
+    kind: OrderKind,
     /// The recipient's body, so `complete_delivery` can route what was
     /// actually handed over into them — every crew member has had one since
     /// M12. `Option` because this struct already follows the "the caller
@@ -1197,13 +1261,12 @@ fn complete_delivery(
         route,
         container_entity,
         container,
-        illicit,
-        crisis,
+        kind,
         body,
     } = handover;
 
     let (outcome, matched) = grade(
-        wanted_for(order, illicit, db),
+        wanted_for(order, kind, db),
         order.amount,
         &container.solution,
         container.kind,
@@ -1214,7 +1277,7 @@ fn complete_delivery(
     // player) reagent. A plain lenient order names whatever was actually
     // delivered when something matched, and falls back to naming only the
     // category — never `order.reagent` itself — when nothing did.
-    let (reported_reagent, category) = if is_named(order, illicit) {
+    let (reported_reagent, category) = if is_named(order, kind) {
         (Some(order.reagent), None)
     } else {
         match matched {
@@ -1228,8 +1291,7 @@ fn complete_delivery(
         reagent: reported_reagent,
         category,
         outcome,
-        illicit,
-        crisis,
+        kind,
     });
 
     if outcome.is_good() {
@@ -1246,7 +1308,7 @@ fn complete_delivery(
     // `OrderResolved` this just wrote. Every other case — including a
     // declined illicit order — falls through to the ordinary path below,
     // unchanged.
-    if !(illicit && outcome.is_good()) {
+    if !(kind.is_illicit() && outcome.is_good()) {
         let potency = matched.map(|id| db.reagents.get(id).potency).unwrap_or(0);
         adjust_for_role(shift, &member.role, outcome, order.waited, order.patience, potency);
     }
@@ -1285,7 +1347,11 @@ fn complete_delivery(
         // and blocked the next crisis from arming — for the whole walk to the
         // door. `IllicitOrder` is deliberately left in place: it is never read
         // after resolution, and the antagonist's own tests count it.
-        .remove::<CrisisOrder>();
+        .remove::<CrisisOrder>()
+        // Same reasoning as `CrisisOrder`: `arc::generate_counter_orders`
+        // reads `Has<CounterOrder>` as "a counter-track request is live", so
+        // it has to come off when the request closes.
+        .remove::<CounterOrder>();
     route.leave();
     outcome
 }
@@ -1295,8 +1361,8 @@ fn complete_delivery(
 /// a plain lenient one. Whether it holds *enough*, whether it is clean, and
 /// whether the dose is safe are [`grade`]'s business — this only decides
 /// whether the window should offer the beaker to this order at all.
-fn container_matches(contents: &Solution, order: &Order, illicit: bool, db: &ChemDb) -> bool {
-    if is_named(order, illicit) {
+fn container_matches(contents: &Solution, order: &Order, kind: OrderKind, db: &ChemDb) -> bool {
+    if is_named(order, kind) {
         return contents.volume_of(order.reagent).is_positive();
     }
     match reference_category(db, order.reagent) {
@@ -1316,12 +1382,12 @@ fn container_matches(contents: &Solution, order: &Order, illicit: bool, db: &Che
 /// walk out.
 fn window_recipient<'a>(
     contents: &Solution,
-    waiting: impl Iterator<Item = (Entity, &'a Order, &'a CrewRoute, bool)>,
+    waiting: impl Iterator<Item = (Entity, &'a Order, &'a CrewRoute, OrderKind)>,
     db: &ChemDb,
 ) -> Option<Entity> {
     waiting
         .filter(|(_, _, route, _)| route.phase == CrewPhase::Waiting)
-        .filter(|(_, order, _, illicit)| container_matches(contents, order, *illicit, db))
+        .filter(|(_, order, _, kind)| container_matches(contents, order, *kind, db))
         .min_by(|a, b| a.1.remaining().total_cmp(&b.1.remaining()))
         .map(|(entity, _, _, _)| entity)
 }
@@ -1350,6 +1416,7 @@ fn handle_window_delivery(
         &mut CrewRoute,
         Has<IllicitOrder>,
         Has<CrisisOrder>,
+        Has<CounterOrder>,
     )>,
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
 ) {
@@ -1371,14 +1438,14 @@ fn handle_window_delivery(
             continue;
         }
 
-        let candidates = crew
-            .iter()
-            .map(|(entity, _, order, route, illicit, _)| (entity, order, route, illicit));
+        let candidates = crew.iter().map(|(entity, _, order, route, illicit, crisis, counter)| {
+            (entity, order, route, OrderKind::of(illicit, crisis, counter))
+        });
         let Some(recipient) = window_recipient(&container.solution, candidates, &db) else {
             continue;
         };
 
-        let Ok((crew_entity, member, order, mut route, illicit, crisis)) =
+        let Ok((crew_entity, member, order, mut route, illicit, crisis, counter)) =
             crew.get_mut(recipient)
         else {
             continue;
@@ -1400,8 +1467,7 @@ fn handle_window_delivery(
                 route: &mut route,
                 container_entity,
                 container,
-                illicit,
-                crisis,
+                kind: OrderKind::of(illicit, crisis, counter),
                 body,
             },
         );
@@ -2086,7 +2152,7 @@ mod tests {
         let delivered = solution_of(&db, &[("dermaline", 20)]);
 
         let (outcome, matched) = grade(
-            wanted_for(&order, false, &db),
+            wanted_for(&order, OrderKind::Normal, &db),
             order.amount,
             &delivered,
             ContainerKind::Beaker,
@@ -2104,7 +2170,7 @@ mod tests {
         let delivered = solution_of(&db, &[("kelotane", 20)]);
 
         let (outcome, matched) = grade(
-            wanted_for(&order, false, &db),
+            wanted_for(&order, OrderKind::Normal, &db),
             order.amount,
             &delivered,
             ContainerKind::Beaker,
@@ -2122,7 +2188,36 @@ mod tests {
         // a plain lenient order's fall-through to a bare category.
         let db = db();
         let order = specific_order(&db, "kelotane", 20);
-        assert!(is_named(&order, false));
+        assert!(is_named(&order, OrderKind::Normal));
+    }
+
+    // -- order kind -------------------------------------------------------
+
+    #[test]
+    fn an_order_belongs_to_exactly_one_thread() {
+        // The whole reason this is an enum and not three booleans: the pair it
+        // replaced could express `illicit && crisis`, which never meant
+        // anything. Reading the markers can only ever produce one answer.
+        assert_eq!(OrderKind::of(false, false, false), OrderKind::Normal);
+        assert_eq!(OrderKind::of(true, false, false), OrderKind::Illicit);
+        assert_eq!(OrderKind::of(false, true, false), OrderKind::Crisis);
+        assert_eq!(OrderKind::of(false, false, true), OrderKind::Counter);
+    }
+
+    #[test]
+    fn only_an_illicit_order_has_already_named_its_reagent() {
+        // `is_named`/`wanted_for` hang off this, and it is what keeps a
+        // lenient order's reference reagent unnamed on a bad resolution. A
+        // crisis or counter request is public but still *lenient* — it accepts
+        // any member of its category, so it must not name the reagent it was
+        // built from.
+        assert!(OrderKind::Illicit.names_its_reagent());
+        for kind in [OrderKind::Normal, OrderKind::Crisis, OrderKind::Counter] {
+            assert!(
+                !kind.names_its_reagent(),
+                "{kind:?} would leak the reference reagent it was never told to reveal"
+            );
+        }
     }
 
     // -- content guardrails ----------------------------------------------

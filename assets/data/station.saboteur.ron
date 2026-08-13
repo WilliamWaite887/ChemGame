@@ -1,0 +1,55 @@
+// Engineering's minor antagonist — see `src/saboteur/mod.rs`.
+//
+// Runs in every save. The asks are plausible maintenance requests; the thread
+// is in what they do with their hands while nobody is filling one.
+(
+    name: "Tech Boyle",
+    role: "Engineering",
+    color: (0.86, 0.66, 0.28),
+
+    gap_multiplier: (4.0, 7.0),
+
+    // Ordered, and escalating in how obviously the "repair" is a pretext.
+    visits: [
+        (
+            reagent: "space_cleaner",
+            amount: 20,
+            plea: "Vent's gummed up in the maintenance crawl. Give me something that shifts it.",
+        ),
+        (
+            reagent: "oil",
+            amount: 20,
+            plea: "Bearing's screaming on the deck two fan. Won't take a minute.",
+        ),
+        (
+            reagent: "welding_fuel",
+            amount: 25,
+            plea: "Torch is dry and the requisition's three days out. You'd be doing me a favour.",
+        ),
+        (
+            reagent: "thermite",
+            amount: 20,
+            plea: "There's a panel that won't come off any other way. Don't worry about it.",
+        ),
+        (
+            reagent: "chlorine_trifluoride",
+            amount: 15,
+            plea: "I know what it is. I know what it does. I still need it.",
+        ),
+    ],
+
+    // Water: it reacts with plenty in this game's tree, it visibly changes the
+    // colour of whatever it lands in, and — critically — it dilutes. A batch
+    // that was exactly 30u of Kelotane is now 30u of Kelotane in a bigger
+    // volume, which grades `Impure` at the window without ever looking like
+    // an obvious act of vandalism.
+    contaminant: "water",
+    contaminant_units: 12,
+
+    meddling_lines: [
+        "Boyle says he 'checked' the glassware on his way past. Nobody asked him to.",
+        "Someone's been at the counter. There's a wet ring where nothing was spilled.",
+        "Boyle was seen leaning over the chem lab counter with a bottle in his hand.",
+        "Engineering logged a maintenance visit to the chem lab. Nobody in the chem lab logged one.",
+    ],
+)

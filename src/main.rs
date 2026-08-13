@@ -1,6 +1,8 @@
 //! ChemGame — a focused recreation of the Space Station 13/14 chemist.
 
+mod addiction;
 mod antagonist;
+mod arc;
 mod body;
 mod chem_data;
 mod containers;
@@ -21,9 +23,12 @@ mod player;
 mod produce;
 mod radio;
 mod rogue_security;
+mod saboteur;
 mod saves;
 mod security;
+mod showdown;
 mod shift;
+mod smuggler;
 mod ui;
 
 use bevy::prelude::*;
@@ -90,10 +95,19 @@ fn main() {
             produce::ProducePlugin,
             radio::RadioPlugin,
             (
+                // The campaign spine. First in this tuple: it owns the
+                // `Campaign` every thread below either gates on or feeds, and
+                // `arc::is_active` has to see an assigned campaign before a
+                // main antagonist's own thread decides whether to run.
+                arc::ArcPlugin,
                 // The hidden antagonist thread. After orders/shift/radio,
                 // since it leans on `Order`, `current_rules` and
                 // `PendingBroadcasts`.
                 antagonist::AntagonistPlugin,
+                // What dealing actually buys you, and what it costs. After
+                // `antagonist`, whose illicit-resolution handler it leans on
+                // for every consequence except the payment itself.
+                addiction::AddictionPlugin,
                 // Security's response to it. After antagonist, since it
                 // reads the suspicion antagonist builds, and since
                 // antagonist's Spy-flavoured sting arms its `RaidSchedule`
@@ -106,10 +120,20 @@ fn main() {
                 // antagonist thread, arming off `Department::Security`
                 // standing rather than anything hidden.
                 rogue_security::RogueSecurityPlugin,
-                // Two more crew-visit archetypes, same shape as antagonist,
-                // each independent of every other in this tuple.
+                // The department minors: one per department, running in
+                // every save regardless of which main antagonist was drawn.
+                // `obsessed` is Service's, `rogue_security` above is
+                // Security's. Each is independent of every other here.
                 obsessed::ObsessedPlugin,
+                smuggler::SmugglerPlugin,
+                saboteur::SaboteurPlugin,
+                // A main antagonist, not a minor: gated on the save having
+                // drawn the Cult. Cargo's minor is `smuggler`, above.
                 cult::CultPlugin,
+                // The arc's third ending. After `arc`, which owns the meter it
+                // arms off, and after `hazards`-adjacent threads since a siege
+                // vents through the ordinary smoke pipeline.
+                showdown::ShowdownPlugin,
             ),
             // The chemist themselves: who they are, what they are looking at,
             // and what the chemistry is doing to them.

@@ -376,7 +376,7 @@ fn handle_illicit_resolutions(
     };
 
     for report in resolved.read() {
-        if !report.illicit || !report.outcome.is_good() {
+        if !report.kind.is_illicit() || !report.outcome.is_good() {
             continue;
         }
         // An illicit order is always exact-match (see `orders::wanted_for`),
@@ -387,17 +387,28 @@ fn handle_illicit_resolutions(
             continue;
         };
         let reagent_key = &db.reagents.get(reagent).key;
+
+        // The meters move for *any* successful illicit delivery, whether or
+        // not this file happens to author a request for that reagent.
+        //
+        // They used to be inside the lookup below, which was fine while this
+        // module was the only thing that ever created an `IllicitOrder`. Since
+        // `crate::addiction`, it is not: a returning addict asks for whatever
+        // they are hooked on, which may have no `station.antagonist.ron` entry
+        // at all — and every sale to them would silently have cost nothing.
+        underworld.0 += UNDERWORLD_PER_DELIVERY;
+        suspicion.0 += SUSPICION_PER_DELIVERY;
+
+        // Only the *flavour* needs an authored request. No entry simply means
+        // no chaos line and no sting for this one, which is exactly right for
+        // a private sale to a regular: there is no story to report.
         let Some(request) = script
             .requests
             .iter()
             .find(|request| &request.reagent == reagent_key)
         else {
-            warn!("no antagonist request script found for '{reagent_key}'");
             continue;
         };
-
-        underworld.0 += UNDERWORLD_PER_DELIVERY;
-        suspicion.0 += SUSPICION_PER_DELIVERY;
 
         let mut rng = rand::rng();
         // A sting skips the delayed chaos report entirely — the raid it
@@ -621,8 +632,7 @@ mod tests {
             reagent: Some(id),
             category: None,
             outcome: crate::orders::Outcome::Success,
-            illicit: true,
-            crisis: false,
+            kind: crate::orders::OrderKind::Illicit,
         });
         app.update();
     }
@@ -634,6 +644,44 @@ mod tests {
 
         assert_eq!(app.world().resource::<PendingBroadcasts>().len(), 1);
         assert!(app.world().resource::<crate::radio::RadioLog>().entries.is_empty());
+    }
+
+    #[test]
+    fn a_sale_of_something_this_file_never_authored_still_costs_you() {
+        // The regression guard for `crate::addiction`. A returning addict asks
+        // for whatever they are hooked on, which may have no request authored
+        // here at all — and the meters used to sit *inside* the script lookup,
+        // so every sale to a regular silently cost nothing: no underworld
+        // standing, no suspicion, no plot. The flavour (a chaos line, a sting)
+        // still needs an authored request; the consequences do not.
+        let mut app = resolution_app();
+        let unauthored = "hooch";
+        assert!(
+            !script()
+                .requests
+                .iter()
+                .any(|request| request.reagent == unauthored),
+            "this test is pointless if '{unauthored}' gains a request entry — \
+             pick another reagent nobody asks for"
+        );
+
+        resolve_illicit(&mut app, unauthored);
+
+        assert_eq!(
+            app.world().resource::<UnderworldStanding>().0,
+            UNDERWORLD_PER_DELIVERY,
+            "the underworld notices a sale whether or not this file scripted it"
+        );
+        assert_eq!(
+            app.world().resource::<SecuritySuspicion>().0,
+            SUSPICION_PER_DELIVERY,
+            "and so does Security"
+        );
+        assert_eq!(
+            app.world().resource::<PendingBroadcasts>().len(),
+            0,
+            "but with nothing authored there is no story to report"
+        );
     }
 
     #[test]

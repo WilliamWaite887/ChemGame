@@ -508,14 +508,18 @@ impl Plugin for ProgressPlugin {
         )
         .add_systems(
             Update,
-            persist_progress
+            (persist_progress, record_thwarting)
                 .run_if(in_state(AppState::Playing))
                 .run_if(is_authority),
         );
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
+/// `Eq` is deliberately absent: `addictions` carries the float weights that
+/// make a habit build gradually, and `persist_progress` only ever needs
+/// `PartialEq` — it compares a value against a clone of itself to decide
+/// whether anything actually changed, which floats answer correctly.
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
 struct ProgressSave {
     #[serde(default)]
     succeeded: u32,
@@ -540,18 +544,41 @@ struct ProgressSave {
     /// reached. See `cult::CultProgress`.
     #[serde(default)]
     cult_progress: usize,
+    /// This save's campaign — which main antagonist it drew, how far along
+    /// they are, and how it ended if it has. See `arc::Campaign`.
+    ///
+    /// `Option` rather than a defaulted struct so that a `progress.ron`
+    /// written before campaigns existed loads cleanly and simply rolls a
+    /// fresh one, instead of resuming a career against a Cult it never met.
+    #[serde(default)]
+    campaign: Option<crate::arc::Campaign>,
+    /// Who on the station has a habit. A career fact like the rest of this
+    /// file: an addict is a person who remembers you, and forgetting them
+    /// between sessions would quietly delete the only reason dealing pays.
+    /// See `addiction::Addictions`.
+    #[serde(default)]
+    addictions: crate::addiction::Addictions,
 }
 
 /// Restores the career on launch.
 #[allow(clippy::too_many_arguments)]
 fn load_progress(
+    mut commands: Commands,
     mut shift: ResMut<Shift>,
     underworld: Option<ResMut<crate::antagonist::UnderworldStanding>>,
     rogue_redeemed: Option<ResMut<crate::rogue_security::RogueRedeemed>>,
     obsessed_progress: Option<ResMut<crate::obsessed::ObsessedProgress>>,
     cult_progress: Option<ResMut<crate::cult::CultProgress>>,
+    mut thwarted: ResMut<crate::arc::ThwartedAntags>,
+    mut addictions: ResMut<crate::addiction::Addictions>,
     slot: Option<Res<SaveSlot>>,
 ) {
+    // Cross-save, so it is read whether or not this session has a slot at all
+    // — and before the `let else` below, which returns early for a brand new
+    // save, the exact case where knowing what has already been beaten decides
+    // which antagonist gets drawn.
+    thwarted.0 = crate::saves::thwarted_antags();
+
     // No slot means a new game with nothing to restore, or a guest whose career
     // is the host's and arrives replicated.
     let Some(save) = slot.and_then(|slot| read_progress(&slot.progress_path())) else {
@@ -573,6 +600,14 @@ fn load_progress(
     if let Some(mut progress) = cult_progress {
         progress.0 = save.cult_progress;
     }
+    // Inserted rather than assigned: this runs `OnEnter(Playing)`, before the
+    // first `Update`, so `arc::assign_campaign` sees a campaign already here
+    // and leaves it alone. A save from before campaigns existed carries `None`
+    // and gets a fresh one rolled instead.
+    if let Some(campaign) = save.campaign {
+        commands.insert_resource(campaign);
+    }
+    *addictions = save.addictions;
     info!(
         "resuming with {} delivered, {} botched",
         shift.succeeded, shift.botched
@@ -607,6 +642,19 @@ pub fn progress_summary(path: &std::path::Path) -> Option<(u32, u32)> {
     Some((save.succeeded, save.botched))
 }
 
+/// What the load list may say about a save's campaign, read the same way and
+/// for the same reason as [`progress_summary`].
+///
+/// Returns `None` for a save whose antagonist is still
+/// [`crate::arc::Reveal::Hidden`], not just for one with no campaign. The menu
+/// is the one place that could hand the player the answer before they have
+/// even loaded the save, so the filter lives here rather than being left to
+/// each caller to remember.
+pub fn arc_standing(path: &std::path::Path) -> Option<crate::saves::ArcStanding> {
+    let (antag, won) = read_progress(path)?.campaign?.menu_standing()?;
+    Some(crate::saves::ArcStanding { antag, won })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn persist_progress(
     shift: Res<Shift>,
@@ -614,6 +662,8 @@ fn persist_progress(
     rogue_redeemed: Option<Res<crate::rogue_security::RogueRedeemed>>,
     obsessed_progress: Option<Res<crate::obsessed::ObsessedProgress>>,
     cult_progress: Option<Res<crate::cult::CultProgress>>,
+    campaign: Option<Res<crate::arc::Campaign>>,
+    addictions: Res<crate::addiction::Addictions>,
     slot: Option<Res<SaveSlot>>,
     mut written: Local<Option<ProgressSave>>,
 ) {
@@ -628,6 +678,8 @@ fn persist_progress(
         rogue_redeemed: rogue_redeemed.map(|r| r.0).unwrap_or(false),
         obsessed_progress: obsessed_progress.map(|p| p.0).unwrap_or(0),
         cult_progress: cult_progress.map(|p| p.0).unwrap_or(0),
+        campaign: campaign.map(|c| c.clone()),
+        addictions: addictions.clone(),
     };
     if written.as_ref() == Some(&save) {
         return;
@@ -637,6 +689,33 @@ fn persist_progress(
     };
     *written = Some(save);
     slot.write_progress(&text);
+}
+
+/// Writes a beaten antagonist into the cross-save unlock file, once.
+///
+/// Only a **chemist** run counts. Winning an antagonist run means the
+/// antagonist got what they wanted, which is the opposite of having stopped
+/// them — unlocking on that would let a player unlock the whole roster by
+/// losing on purpose from the one side that rewards it.
+///
+/// Its own system rather than a branch inside [`persist_progress`] because it
+/// writes a different file, on a different trigger (once, on resolution)
+/// rather than continuously.
+fn record_thwarting(
+    campaign: Option<Res<crate::arc::Campaign>>,
+    mut recorded: Local<bool>,
+) {
+    if *recorded {
+        return;
+    }
+    let Some(campaign) = campaign else {
+        return;
+    };
+    if campaign.mode != crate::arc::Mode::Chemist || campaign.player_won() != Some(true) {
+        return;
+    }
+    crate::saves::record_thwarted(campaign.antag);
+    *recorded = true;
 }
 
 #[cfg(test)]
@@ -1135,6 +1214,82 @@ mod tests {
             roster.iter().any(|member| member.name == supply.courier),
             "no crew member named '{}' to bring glassware",
             supply.courier
+        );
+    }
+
+    // -- the save format ---------------------------------------------------
+
+    #[test]
+    fn a_progress_file_written_before_campaigns_still_loads() {
+        // Every field on `ProgressSave` is `#[serde(default)]` precisely so
+        // that adding one never costs an existing player their career. This is
+        // the guard on that: the literal shape a save had before the arc
+        // existed must still parse, and must roll a fresh campaign rather than
+        // resuming one it never had.
+        let legacy = r#"(
+            succeeded: 41,
+            botched: 7,
+            department_standing: {},
+            underworld_standing: 6,
+            rogue_redeemed: true,
+            obsessed_progress: 2,
+            cult_progress: 1,
+        )"#;
+
+        let save: ProgressSave = ron::from_str(legacy).expect("an older save must still parse");
+
+        assert_eq!(save.succeeded, 41);
+        assert_eq!(save.underworld_standing, 6);
+        assert_eq!(save.cult_progress, 1);
+        assert!(
+            save.campaign.is_none(),
+            "an older save has no campaign, so `arc::assign_campaign` should roll one"
+        );
+    }
+
+    #[test]
+    fn a_campaign_survives_a_round_trip_through_the_save_file() {
+        let mut campaign = crate::arc::Campaign::new(
+            crate::arc::AntagId::Blob,
+            crate::arc::Mode::Antagonist,
+            3,
+        );
+        campaign.plot = 62;
+        campaign.reveal = crate::arc::Reveal::Named;
+        campaign.countered = vec![true, false, true];
+
+        let save = ProgressSave {
+            campaign: Some(campaign.clone()),
+            ..default()
+        };
+        let text = ron::ser::to_string_pretty(&save, default()).unwrap();
+        let back: ProgressSave = ron::from_str(&text).unwrap();
+
+        assert_eq!(back.campaign, Some(campaign));
+    }
+
+    #[test]
+    fn the_load_list_never_names_an_antagonist_the_player_has_not_worked_out() {
+        // `menu_standing` is the one place the menu could hand the player the
+        // answer before they have even loaded the save.
+        let hidden =
+            crate::arc::Campaign::new(crate::arc::AntagId::Cult, crate::arc::Mode::Chemist, 2);
+        assert!(
+            hidden.menu_standing().is_none(),
+            "a save whose antagonist is still hidden must say nothing"
+        );
+
+        let mut suspected = hidden.clone();
+        suspected.reveal = crate::arc::Reveal::Suspected;
+        assert!(suspected.menu_standing().is_some());
+
+        // A resolved arc is always safe to name, whatever the reveal reached:
+        // it is over, and the load list has to be able to say so.
+        let mut lost = hidden.clone();
+        lost.outcome = Some(crate::arc::ArcOutcome::PlotSucceeded);
+        assert_eq!(
+            lost.menu_standing(),
+            Some((crate::arc::AntagId::Cult, Some(false)))
         );
     }
 

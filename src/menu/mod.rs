@@ -15,6 +15,7 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 
+use crate::arc::{AntagId, CampaignChoice, Mode};
 use crate::net::{self, parse_address, parse_literal_address, ConnectFailed, LaunchMode};
 use crate::saves::{self, SaveSlot};
 use crate::ui::{
@@ -37,6 +38,9 @@ pub enum MenuScreen {
     Mode,
     /// New save, or one of the existing ones.
     Save,
+    /// Which side to play a brand new save from. Only ever reached when at
+    /// least one antagonist has been thwarted — see [`show_campaign_screen`].
+    Campaign,
     /// The address to dial.
     Join,
     /// Waiting on `AppState::Connecting` to resolve — see its doc comment.
@@ -57,10 +61,12 @@ impl Plugin for MenuPlugin {
             .add_systems(OnExit(AppState::Connecting), close_menu)
             .add_systems(OnEnter(MenuScreen::Mode), show_mode_screen)
             .add_systems(OnEnter(MenuScreen::Save), show_save_screen)
+            .add_systems(OnEnter(MenuScreen::Campaign), show_campaign_screen)
             .add_systems(OnEnter(MenuScreen::Join), show_join_screen)
             .add_systems(OnEnter(MenuScreen::Connecting), show_connecting_screen)
             .add_systems(OnExit(MenuScreen::Mode), clear_screen)
             .add_systems(OnExit(MenuScreen::Save), clear_screen)
+            .add_systems(OnExit(MenuScreen::Campaign), clear_screen)
             .add_systems(OnExit(MenuScreen::Join), clear_screen)
             .add_systems(OnExit(MenuScreen::Connecting), clear_screen)
             .add_systems(
@@ -126,6 +132,13 @@ enum MenuAction {
     ChooseSolo,
     ChooseJoin,
     NewSave,
+    /// A new save played the ordinary way: a hidden antagonist, rolled for
+    /// you. Only ever reached from the campaign screen — with nothing
+    /// unlocked, [`MenuAction::NewSave`] starts one of these directly.
+    NewChemistRun,
+    /// A new save played from the other side, working for an antagonist this
+    /// machine has already beaten.
+    NewAntagonistRun(AntagId),
     LoadSave(String),
     Connect,
     /// Gives up on a `Connecting` attempt and returns to the mode screen.
@@ -243,6 +256,44 @@ fn show_save_screen(mut commands: Commands, pending: Res<PendingMode>) {
             row.spawn(button("Back", MenuAction::Back));
         });
     });
+}
+
+/// Which side to play a new save from.
+///
+/// Only reached once at least one antagonist has been thwarted — see the
+/// `MenuAction::NewSave` arm in [`handle_menu_clicks`]. A first-time player
+/// never sees this screen at all, because seeing it would give away that
+/// there is something behind the ordinary game to find.
+fn show_campaign_screen(mut commands: Commands) {
+    let unlocked = saves::thwarted_antags();
+
+    menu_shell(
+        &mut commands,
+        "A new career",
+        "You have stopped one of them before. That door swings both ways now.",
+        |panel| {
+            panel.spawn(choice(
+                "Chemistry lab",
+                "Work the counter. Something is moving on the station and nobody \
+                 has told you what.",
+                MenuAction::NewChemistRun,
+            ));
+
+            for antag in unlocked {
+                panel.spawn(choice(
+                    format!("Work for {}", antag.label()),
+                    "You know exactly what they want, because you stopped them \
+                     doing it once. Supply them, and keep Security off your back \
+                     long enough for it to matter.",
+                    MenuAction::NewAntagonistRun(antag),
+                ));
+            }
+
+            panel.spawn(row()).with_children(|row| {
+                row.spawn(button("Back", MenuAction::Back));
+            });
+        },
+    );
 }
 
 fn show_join_screen(mut commands: Commands, mut input: ResMut<AddressInput>) {
@@ -409,6 +460,7 @@ fn show_typed_address(
 fn handle_menu_clicks(
     buttons: Query<(&Interaction, &MenuAction), Changed<Interaction>>,
     mut commands: Commands,
+    current: Res<State<MenuScreen>>,
     mut screen: ResMut<NextState<MenuScreen>>,
     mut app_state: ResMut<NextState<AppState>>,
     mut mode: ResMut<LaunchMode>,
@@ -444,10 +496,49 @@ fn handle_menu_clicks(
                 screen.set(MenuScreen::Save);
             }
             MenuAction::ChooseJoin => screen.set(MenuScreen::Join),
-            MenuAction::NewSave => start(
+            // With nothing unlocked there is only one kind of new save, and a
+            // one-option screen asking which kind you want would both waste a
+            // click and imply the existence of something the player has not
+            // earned yet.
+            MenuAction::NewSave => {
+                if saves::thwarted_antags().is_empty() {
+                    start(
+                        &mut commands,
+                        SaveSlot::new(saves::next_slot_name()),
+                        pending.0,
+                        None,
+                        &mut mode,
+                        &mut app_state,
+                        &mut screen,
+                    );
+                } else {
+                    screen.set(MenuScreen::Campaign);
+                }
+            }
+            MenuAction::NewChemistRun => start(
                 &mut commands,
                 SaveSlot::new(saves::next_slot_name()),
                 pending.0,
+                // No forced antagonist: `arc::assign_campaign` rolls a hidden
+                // one, preferring whoever this machine has not beaten.
+                Some(CampaignChoice {
+                    mode: Mode::Chemist,
+                    antag: None,
+                }),
+                &mut mode,
+                &mut app_state,
+                &mut screen,
+            ),
+            MenuAction::NewAntagonistRun(antag) => start(
+                &mut commands,
+                SaveSlot::new(saves::next_slot_name()),
+                pending.0,
+                // Named, not rolled — you are choosing who you are working
+                // for, so there is nothing to hide.
+                Some(CampaignChoice {
+                    mode: Mode::Antagonist,
+                    antag: Some(antag),
+                }),
                 &mut mode,
                 &mut app_state,
                 &mut screen,
@@ -456,6 +547,9 @@ fn handle_menu_clicks(
                 &mut commands,
                 SaveSlot::new(name),
                 pending.0,
+                // The save carries its own campaign; forcing one here would
+                // overwrite the arc already in progress.
+                None,
                 &mut mode,
                 &mut app_state,
                 &mut screen,
@@ -484,7 +578,13 @@ fn handle_menu_clicks(
                 net::abandon_connection_attempt(&mut commands, *mode);
                 app_state.set(AppState::MainMenu);
             }
-            MenuAction::Back => screen.set(MenuScreen::Mode),
+            // Back goes up one level, not all the way out: the campaign screen
+            // is reached *through* the save list, so leaving it should land
+            // back on the save list.
+            MenuAction::Back => screen.set(match current.get() {
+                MenuScreen::Campaign => MenuScreen::Save,
+                _ => MenuScreen::Mode,
+            }),
             MenuAction::Quit => {
                 quit.write(AppExit::Success);
             }
@@ -520,12 +620,19 @@ fn start(
     commands: &mut Commands,
     slot: SaveSlot,
     pending: LaunchMode,
+    campaign: Option<CampaignChoice>,
     mode: &mut LaunchMode,
     app_state: &mut NextState<AppState>,
     screen: &mut NextState<MenuScreen>,
 ) {
     info!("opening save '{}'", slot.name());
     commands.insert_resource(slot);
+    // Only for a brand new save. Loading one leaves this absent, so
+    // `arc::assign_campaign` sees the campaign `shift::load_progress` restored
+    // and never rolls over the top of it.
+    if let Some(campaign) = campaign {
+        commands.insert_resource(campaign);
+    }
     *mode = pending;
     app_state.set(AppState::Playing);
     screen.set(MenuScreen::Hidden);
@@ -715,6 +822,73 @@ mod tests {
             app.world().resource::<SaveSlot>().name(),
             "Chemist",
             "the lab both chemists work is the save the host picked"
+        );
+    }
+
+    // -- campaigns ---------------------------------------------------------
+
+    #[test]
+    fn an_antagonist_run_carries_its_choice_into_the_session() {
+        let mut app = menu_app();
+        click(&mut app, MenuAction::ChooseSolo);
+        click(&mut app, MenuAction::NewAntagonistRun(AntagId::Blob));
+
+        assert_eq!(state(&app), AppState::Playing);
+        let choice = app.world().resource::<CampaignChoice>();
+        assert_eq!(choice.mode, Mode::Antagonist);
+        assert_eq!(
+            choice.antag,
+            Some(AntagId::Blob),
+            "an antagonist run names who you are working for — there is nothing to hide"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_new_save_never_names_its_antagonist() {
+        let mut app = menu_app();
+        click(&mut app, MenuAction::ChooseSolo);
+        click(&mut app, MenuAction::NewChemistRun);
+
+        let choice = app.world().resource::<CampaignChoice>();
+        assert_eq!(choice.mode, Mode::Chemist);
+        assert_eq!(
+            choice.antag, None,
+            "the menu must not decide, or the whole reveal is spoiled before the lab loads"
+        );
+    }
+
+    #[test]
+    fn loading_a_save_never_forces_a_campaign_over_the_one_it_has() {
+        let mut app = menu_app();
+        click(&mut app, MenuAction::ChooseSolo);
+        click(&mut app, MenuAction::LoadSave("Chemist".into()));
+
+        assert!(
+            app.world().get_resource::<CampaignChoice>().is_none(),
+            "a loaded save's own arc must survive being loaded"
+        );
+    }
+
+    #[test]
+    fn back_from_the_campaign_screen_returns_to_the_save_list() {
+        let mut app = menu_app();
+        click(&mut app, MenuAction::ChooseSolo);
+        assert_eq!(screen(&app), MenuScreen::Save);
+
+        // Reached directly rather than through `NewSave`, which branches on
+        // what is on disk — the trap `menu_app` exists to stay clear of.
+        app.world_mut()
+            .resource_mut::<NextState<MenuScreen>>()
+            .set(MenuScreen::Campaign);
+        app.update();
+        assert_eq!(screen(&app), MenuScreen::Campaign);
+
+        click(&mut app, MenuAction::Back);
+
+        assert_eq!(
+            screen(&app),
+            MenuScreen::Save,
+            "back should go up one level, not all the way out"
         );
     }
 
