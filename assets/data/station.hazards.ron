@@ -29,6 +29,10 @@
             // arithrazine 3.0, so standing in it costs you a steady drip of one
             // or the other.
             intensity: 2.0,
+            // Sickly green, matching the screen flash `fx` already gives an
+            // irradiated chemist, so the sphere and the symptom read as the
+            // same event.
+            color: (0.45, 0.95, 0.35),
         ),
         (
             id: "coolant_vent",
@@ -42,6 +46,9 @@
             warning: "Atmos here — we've got a coolant line weeping near your chamber.",
             onset: "The air by the reaction chamber turns sharp and cold.",
             intensity: 1.0,
+            // Cold blue-white, so a vent is never mistaken for the rad leak at
+            // a glance across the hall.
+            color: (0.55, 0.80, 1.0),
         ),
     ],
 )

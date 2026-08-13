@@ -12,7 +12,7 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::containers::{Container, ContainerKind, HeldBy};
-use crate::hazards::SmokeVisual;
+use crate::hazards::{HazardVisual, SmokeVisual};
 use crate::lab::MachineScreen;
 use crate::machines::Machine;
 use crate::player::{LocalPlayer, PlayerCamera};
@@ -238,29 +238,51 @@ pub struct InteractRequested {
 }
 
 /// Casts a ray from each player's camera and records what it hits.
+///
+/// Only while roaming. A player inside a machine panel or the reference book
+/// has a released cursor and a frozen camera, so the cast can only ever return
+/// the answer they already have — and every reader of [`Focus`] is either
+/// roaming-gated already ([`request_interaction`], `body::request_apply_held`)
+/// or presentational. Skipping it drops a triangle-level scene raycast per
+/// camera per frame for the whole time a panel is open, and clearing the target
+/// on the way in stops a stale "[E] …" prompt sitting behind the panel.
+#[allow(clippy::too_many_arguments)]
 fn update_focus(
     mut ray_cast: MeshRayCast,
     cameras: Query<(&GlobalTransform, &PlayerCamera)>,
-    mut players: Query<&mut Focus>,
+    mut players: Query<(&mut Focus, &InteractionMode)>,
     interactables: Query<(), With<Interactable>>,
     screens: Query<(), With<MachineScreen>>,
     held: Query<(), With<HeldBy>>,
     smoke: Query<(), With<SmokeVisual>>,
+    hazards: Query<(), With<HazardVisual>>,
 ) {
     for (camera_transform, camera) in &cameras {
-        let Ok(mut focus) = players.get_mut(camera.chemist) else {
+        let Ok((mut focus, mode)) = players.get_mut(camera.chemist) else {
             continue;
         };
+
+        if !mode.is_roaming() {
+            if focus.target.is_some() {
+                focus.target = None;
+            }
+            continue;
+        }
 
         let ray = Ray3d::new(camera_transform.translation(), camera_transform.forward());
         // Machine screens sit a hair proud of their casing, so without this
         // filter every machine would be permanently blocked by its own screen.
         // A carried beaker rides in front of the camera and would do the same.
         // A smoke cloud is a sphere metres wide and would block the entire room
-        // for as long as it hung there. Everything else stays in the cast, so
-        // walls and benches still occlude properly.
+        // for as long as it hung there — and a hazard sphere is bigger still,
+        // 4.5m centred on the dispenser for a rad leak, so it would take the
+        // dispenser and half the hall with it. Everything else stays in the
+        // cast, so walls and benches still occlude properly.
         let filter = |entity: Entity| {
-            !screens.contains(entity) && !held.contains(entity) && !smoke.contains(entity)
+            !screens.contains(entity)
+                && !held.contains(entity)
+                && !smoke.contains(entity)
+                && !hazards.contains(entity)
         };
         let settings = MeshRayCastSettings::default().with_filter(&filter);
 

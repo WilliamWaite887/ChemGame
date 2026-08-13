@@ -308,11 +308,50 @@ fn animate_chemist_body(
             continue;
         };
         let (offset, roll) = gait_offset(&blood.0, t);
-        transform.translation = part.rest + offset;
-        transform.rotation = Quat::from_rotation_z(roll);
-        if let Some(mut handle) = materials.get_mut(&material.0) {
-            handle.base_color = status_tint(part.base_color, &blood.0);
-        }
+        apply_part_pose(&mut transform, part.rest, offset, roll);
+        apply_part_tint(&mut materials, &material.0, part.base_color, &blood.0);
+    }
+}
+
+/// Writes a body part's pose only when it actually moved.
+///
+/// The common case is an untouched bloodstream, where `gait_offset` returns
+/// `(Vec3::ZERO, 0.0)` every frame. Writing that unconditionally marked the
+/// part `Changed<Transform>` and re-ran propagation for the whole body
+/// hierarchy on every peer, every frame, for a pose that had not moved.
+fn apply_part_pose(transform: &mut Transform, rest: Vec3, offset: Vec3, roll: f32) {
+    let translation = rest + offset;
+    if transform.translation != translation {
+        transform.translation = translation;
+    }
+    let rotation = Quat::from_rotation_z(roll);
+    if transform.rotation != rotation {
+        transform.rotation = rotation;
+    }
+}
+
+/// Writes a body part's tint only when the colour actually changed.
+///
+/// `Assets::get_mut` emits `AssetEvent::Modified` unconditionally, which forces
+/// the render world to re-extract and re-prepare that `StandardMaterial` — a
+/// uniform write plus a bind group — every frame. Materials are deliberately
+/// per-chemist rather than shared (see `player::ChemistBody::base_color`), so
+/// that cost scaled with everyone in the room, overwhelmingly to re-upload a
+/// colour identical to the one already there.
+fn apply_part_tint(
+    materials: &mut Assets<StandardMaterial>,
+    handle: &Handle<StandardMaterial>,
+    base_color: Color,
+    blood: &chem_sim::Bloodstream,
+) {
+    let tint = status_tint(base_color, blood);
+    // Peeked through the immutable getter first: reaching for `get_mut` at all
+    // is what dirties the asset, so the comparison has to happen before it.
+    if materials.get(handle).is_some_and(|m| m.base_color == tint) {
+        return;
+    }
+    if let Some(mut material) = materials.get_mut(handle) {
+        material.base_color = tint;
     }
 }
 
@@ -328,11 +367,8 @@ fn animate_crew_body(
             continue;
         };
         let (offset, roll) = gait_offset(&blood.0, t);
-        transform.translation = part.rest + offset;
-        transform.rotation = Quat::from_rotation_z(roll);
-        if let Some(mut handle) = materials.get_mut(&material.0) {
-            handle.base_color = status_tint(part.base_color, &blood.0);
-        }
+        apply_part_pose(&mut transform, part.rest, offset, roll);
+        apply_part_tint(&mut materials, &material.0, part.base_color, &blood.0);
     }
 }
 

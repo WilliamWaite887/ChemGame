@@ -1278,7 +1278,14 @@ fn complete_delivery(
     commands
         .entity(crew)
         .remove::<Order>()
-        .remove::<Interactable>();
+        .remove::<Interactable>()
+        // Comes off with the order it marks. Both `crisis::schedule_crisis`
+        // and `crisis::pulse_alert_lighting` read `Has<CrisisOrder>` as "is a
+        // crisis live", so leaving it on a cured victim kept the lab red-lit —
+        // and blocked the next crisis from arming — for the whole walk to the
+        // door. `IllicitOrder` is deliberately left in place: it is never read
+        // after resolution, and the antagonist's own tests count it.
+        .remove::<CrisisOrder>();
     route.leave();
     outcome
 }
@@ -1577,6 +1584,31 @@ mod tests {
             .read(messages)
             .map(|report| (report.name.clone(), report.outcome))
             .collect()
+    }
+
+    #[test]
+    fn curing_a_crisis_victim_takes_the_crisis_marker_off_with_the_order() {
+        // `crisis::schedule_crisis` and `crisis::pulse_alert_lighting` both read
+        // `Has<CrisisOrder>` as "is a crisis live". `complete_delivery` used to
+        // strip only `Order` and `Interactable`, so a cured victim went on
+        // reading as a live crisis for the whole walk to the door — keeping the
+        // lab red-lit and blocking the next crisis from arming.
+        let mut app = window_app();
+        let (_window, _beaker) = window_with(&mut app, &[("dylovene", 30)], false);
+        let victim = waiting_crew(&mut app, "Dr. Vance", "dylovene", 20, 90.0, true);
+        app.world_mut().entity_mut(victim).insert(CrisisOrder);
+
+        app.update();
+
+        assert_eq!(
+            outcomes(&app),
+            vec![("Dr. Vance".to_string(), Outcome::Success)],
+            "the cure itself should still land"
+        );
+        assert!(
+            app.world().get::<CrisisOrder>(victim).is_none(),
+            "the crisis marker must come off with the order it marks"
+        );
     }
 
     // -- expiry, and the accepting-orders sign -------------------------

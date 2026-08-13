@@ -202,6 +202,22 @@ pub struct ContainerSlot {
 #[derive(Component, Serialize, Deserialize)]
 pub struct Buffer(pub Solution);
 
+/// Set on a ChemMaster whose buffer currently holds test-bench stock.
+///
+/// [`TestBenchStock`] marks *glassware*, which was enough right up until the
+/// buffer got involved: practice stock could be pushed into the buffer, and
+/// then either drawn back into a clean beaker or packaged into a pill, and both
+/// of those are containers that never touched the test bench and so carried no
+/// mark. That laundered practice stock into deliverable product and bypassed
+/// the whole "experimenting costs time, not materials" economy. The taint has
+/// to live on the buffer for the same reason it lives on the container rather
+/// than the reagent: it must survive being reacted and repackaged.
+///
+/// Cleared when the buffer runs dry, matching how rinsing a beaker clears
+/// `TestBenchStock` — nothing is contaminated by association once it is empty.
+#[derive(Component)]
+pub struct BufferPracticeStock;
+
 /// Produce waiting to be ground.
 ///
 /// Separate from the machine's [`ContainerSlot`], which holds the beaker the
@@ -634,21 +650,22 @@ fn handle_dispense(
 }
 
 fn handle_buffer_transfer(
+    mut commands: Commands,
     db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<BufferTransferRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
-    mut buffers: Query<&mut Buffer>,
+    mut buffers: Query<(&mut Buffer, Has<BufferPracticeStock>)>,
     slotted: Query<(Entity, &InSlot)>,
-    mut containers: Query<&mut Container>,
+    mut containers: Query<(&mut Container, Has<TestBenchStock>)>,
 ) {
     for request in requests.read() {
-        let Ok(mut buffer) = buffers.get_mut(request.machine) else {
+        let Ok((mut buffer, buffer_practice)) = buffers.get_mut(request.machine) else {
             continue;
         };
         let Some(target) = slotted_container(request.machine, &slotted) else {
             continue;
         };
-        let Ok(mut container) = containers.get_mut(target) else {
+        let Ok((mut container, container_practice)) = containers.get_mut(target) else {
             continue;
         };
 
@@ -662,6 +679,11 @@ fn handle_buffer_transfer(
                 if overflow.is_positive() {
                     let _ = container.solution.add(request.reagent, overflow);
                 }
+                // Practice stock taints the buffer it lands in — see
+                // `BufferPracticeStock`.
+                if container_practice && (moved - overflow).is_positive() {
+                    commands.entity(request.machine).insert(BufferPracticeStock);
+                }
             }
             BufferDirection::ToContainer => {
                 let moved = buffer.0.remove(request.reagent, request.amount);
@@ -673,7 +695,18 @@ fn handle_buffer_transfer(
                 if let Some(message) = ReactionsFired::from_report(target, &report) {
                     fired.write(message);
                 }
+                // ...and back out again into whatever glassware receives it,
+                // which is the half of the round trip that used to launder it.
+                if buffer_practice && (moved - overflow).is_positive() {
+                    commands.entity(target).insert(TestBenchStock);
+                }
             }
+        }
+
+        if buffer.0.total_volume().is_zero() {
+            commands
+                .entity(request.machine)
+                .remove::<BufferPracticeStock>();
         }
     }
 }
@@ -681,10 +714,10 @@ fn handle_buffer_transfer(
 fn handle_package(
     mut commands: Commands,
     mut requests: MessageReader<FromClient<PackageRequested>>,
-    mut machines: Query<(&mut Buffer, &Transform)>,
+    mut machines: Query<(&mut Buffer, &Transform, Has<BufferPracticeStock>)>,
 ) {
     for request in requests.read() {
-        let Ok((mut buffer, transform)) = machines.get_mut(request.machine) else {
+        let Ok((mut buffer, transform, practice)) = machines.get_mut(request.machine) else {
             continue;
         };
         if !buffer.0.total_volume().is_positive() {
@@ -700,6 +733,18 @@ fn handle_package(
 
         let drop_at = transform.translation + Vec3::new(0.0, 0.95, 0.45);
         let package = spawn_container(&mut commands, request.kind, drop_at);
+
+        // A pill pressed from practice stock is still practice stock. Without
+        // this the packaging step minted brand-new, unmarked glassware and was
+        // the shortest route around the test bench's whole restriction.
+        if practice {
+            commands.entity(package).insert(TestBenchStock);
+        }
+        if buffer.0.total_volume().is_zero() {
+            commands
+                .entity(request.machine)
+                .remove::<BufferPracticeStock>();
+        }
 
         // The container was only just queued for spawn, so its `Container`
         // component is not readable yet; fill it in on the command queue.
@@ -924,6 +969,7 @@ mod tests {
             .add_message::<FromClient<GrindRequested>>()
             .add_message::<FromClient<SetTargetTemperature>>()
             .add_message::<FromClient<SetHeaterPower>>()
+            .add_message::<FromClient<PackageRequested>>()
             // What the server tells a client when it grants them a machine.
             // Headless there is nobody to tell, but the writer still has to
             // exist for the system to run.
@@ -935,6 +981,7 @@ mod tests {
                     handle_machine_interact,
                     handle_dispense,
                     handle_buffer_transfer,
+                    handle_package,
                     handle_grind,
                     handle_thermostat_controls,
                     apply_thermostats,
@@ -1672,6 +1719,133 @@ mod tests {
             slot_contents(&mut app, machine).volume_of(reagent(&app, "cold")),
             Units::ZERO,
             "and the reactants go in full regardless — that is what overheating costs"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test-bench stock cannot be laundered through the buffer
+    // -----------------------------------------------------------------------
+
+    /// A ChemMaster with a beaker of practice stock already loaded, and the
+    /// reagent that beaker holds.
+    fn chemmaster_with_practice_stock(app: &mut App) -> (Entity, Entity, ReagentId) {
+        let machine = app
+            .world_mut()
+            .spawn((
+                Machine::new(MachineKind::ChemMaster),
+                Buffer(Solution::unbounded()),
+                Transform::default(),
+            ))
+            .id();
+        let sugar = reagent(app, "sugar");
+        let mut container = Container::new(ContainerKind::LargeBeaker);
+        let _ = container.solution.add(sugar, Units::whole(60));
+        let beaker = app
+            .world_mut()
+            .spawn((container, InSlot(machine), TestBenchStock))
+            .id();
+        (machine, beaker, sugar)
+    }
+
+    fn transfer(app: &mut App, machine: Entity, reagent: ReagentId, direction: BufferDirection) {
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: BufferTransferRequested {
+                machine,
+                reagent,
+                amount: Units::whole(60),
+                direction,
+            },
+        });
+        app.update();
+    }
+
+    #[test]
+    fn practice_stock_taints_the_buffer_it_is_pushed_into() {
+        let mut app = test_app();
+        let (machine, _beaker, sugar) = chemmaster_with_practice_stock(&mut app);
+
+        transfer(&mut app, machine, sugar, BufferDirection::ToBuffer);
+
+        assert!(
+            app.world().get::<BufferPracticeStock>(machine).is_some(),
+            "the buffer has to carry the mark, or the container is the only \
+             thing that does and packaging mints a clean one"
+        );
+    }
+
+    #[test]
+    fn practice_stock_survives_a_round_trip_through_the_buffer() {
+        // The laundering route that used to work: push practice stock into the
+        // buffer, then draw it back out into a *different*, unmarked beaker.
+        let mut app = test_app();
+        let (machine, beaker, sugar) = chemmaster_with_practice_stock(&mut app);
+        transfer(&mut app, machine, sugar, BufferDirection::ToBuffer);
+
+        // Swap the marked beaker out for a clean one, exactly as a player
+        // would by ejecting and loading another.
+        app.world_mut().entity_mut(beaker).despawn();
+        let clean = app
+            .world_mut()
+            .spawn((Container::new(ContainerKind::LargeBeaker), InSlot(machine)))
+            .id();
+
+        transfer(&mut app, machine, sugar, BufferDirection::ToContainer);
+
+        assert!(
+            app.world().get::<TestBenchStock>(clean).is_some(),
+            "a clean beaker filled from a tainted buffer is still practice stock"
+        );
+    }
+
+    #[test]
+    fn a_pill_pressed_from_practice_stock_is_still_practice_stock() {
+        // The shorter laundering route: practice stock into the buffer, then
+        // straight into a pill. `handle_package` spawns brand-new glassware
+        // that never touched the test bench, so it carried no mark at all.
+        let mut app = test_app();
+        let (machine, _beaker, sugar) = chemmaster_with_practice_stock(&mut app);
+        transfer(&mut app, machine, sugar, BufferDirection::ToBuffer);
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: PackageRequested {
+                machine,
+                kind: ContainerKind::Pill,
+            },
+        });
+        app.update();
+        // The container is filled on the command queue, one frame behind.
+        app.update();
+
+        let pill = app
+            .world_mut()
+            .query_filtered::<Entity, (With<Container>, Without<InSlot>)>()
+            .iter(app.world())
+            .next()
+            .expect("packaging should have spawned a pill");
+        assert!(
+            app.world().get::<TestBenchStock>(pill).is_some(),
+            "packaging must not launder practice stock into deliverable product"
+        );
+    }
+
+    #[test]
+    fn draining_the_buffer_clears_the_practice_mark() {
+        // Same rule rinsing a beaker already follows: nothing stays
+        // contaminated by association once it is empty.
+        let mut app = test_app();
+        let (machine, beaker, sugar) = chemmaster_with_practice_stock(&mut app);
+        transfer(&mut app, machine, sugar, BufferDirection::ToBuffer);
+        assert!(app.world().get::<BufferPracticeStock>(machine).is_some());
+
+        // Everything back out again leaves the buffer dry.
+        let _ = beaker;
+        transfer(&mut app, machine, sugar, BufferDirection::ToContainer);
+
+        assert!(
+            app.world().get::<BufferPracticeStock>(machine).is_none(),
+            "an empty buffer is clean again"
         );
     }
 }

@@ -7,8 +7,12 @@
 //! ordinary delivery already moves, rather than a bespoke hidden counter:
 //! treat Security badly (botched deliveries, a raid or two) and their
 //! standing sinks low enough to turn one of their own against you; treat
-//! them well for long enough afterwards and they turn back, permanently,
-//! with a reward.
+//! them well for long enough afterwards and they turn back, with a reward.
+//!
+//! Standing is the only gate, in both directions — the reward is not an
+//! ending. Let Security's opinion sour a second time and the visits resume,
+//! which is what the [`Deterrent`] earned on the way out is *for*. The reward
+//! itself is still once per career.
 //!
 //! A visit is a shakedown: hand over product to make them go away cheaply,
 //! or refuse and pay a steeper standing cost — occasionally, if you refuse
@@ -117,10 +121,13 @@ pub struct RogueSecurityScript {
     pub officer_name: String,
     pub gap_multiplier: (f32, f32),
     /// At or below this [`Department::Security`] standing, visits start
-    /// arming. Above it, this whole module is silent.
+    /// arming. Above it, this whole module is silent. Checked live every time,
+    /// so a career that sours again after being redeemed re-arms here.
     pub hostile_below: i32,
-    /// At or above this standing, the reward fires once and the module
-    /// disarms for the rest of the career.
+    /// At or above this standing, the reward fires — once per career, bounded
+    /// by [`RogueRedeemed`]. It does not disarm the visits: only standing
+    /// climbing back above `hostile_below` does that, and only for as long as
+    /// it stays there.
     pub redeemed_at: i32,
     /// Chance a refused, `physical: true` encounter actually turns violent —
     /// the third of three independent gates (see
@@ -210,14 +217,21 @@ fn schedule_rogue_encounter(
     script: Option<Res<Script>>,
     mut spawner: Option<ResMut<RogueSpawner>>,
     shift: Res<Shift>,
-    redeemed: Res<RogueRedeemed>,
     mut radio: ResMut<RadioLog>,
     active: Query<(), With<RogueOfficer>>,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
     };
-    if !shift.accepting_orders || !active.is_empty() || redeemed.0 {
+    // Deliberately not gated on `RogueRedeemed`. Standing is the only gate —
+    // see the check below — so losing Security's trust a second time brings
+    // them back, and the [`Deterrent`] earned the first time round is the
+    // insurance against exactly that. Disarming permanently here is what used
+    // to make the reward unreachable by construction: it could only appear at
+    // `redeemed_at`, and appearing guaranteed no officer would ever exist to
+    // point it at. `RogueRedeemed` still bounds the *reward* to one per career
+    // — see [`check_redemption`] and the flag's own doc comment.
+    if !shift.accepting_orders || !active.is_empty() {
         return;
     }
     if !spawner.timer.tick(time.delta()).just_finished() {
@@ -605,6 +619,48 @@ mod tests {
 
         let mut officers = app.world_mut().query::<&RogueOfficer>();
         assert_eq!(officers.iter(app.world()).count(), 1);
+    }
+
+    #[test]
+    fn standing_souring_again_after_redemption_brings_them_back() {
+        // The reward used to be unreachable by construction: `check_redemption`
+        // spawns the `Deterrent` at `redeemed_at` (+15) and set a flag that
+        // stopped `schedule_rogue_encounter` forever, while the item only works
+        // pointed at a live officer — which could then never exist again. Now
+        // standing is the only gate in both directions, so the deterrent earned
+        // on the way out is insurance against the next fall.
+        let mut app = schedule_app();
+        app.insert_resource(RogueRedeemed(true));
+        app.world_mut()
+            .resource_mut::<Shift>()
+            .adjust(Department::Security, -20);
+
+        tick(&mut app, 0.1);
+
+        let mut officers = app.world_mut().query::<&RogueOfficer>();
+        assert_eq!(
+            officers.iter(app.world()).count(),
+            1,
+            "a redeemed career that sours again must be able to see an officer, \
+             or the reward it earned can never be used"
+        );
+    }
+
+    #[test]
+    fn redemption_still_keeps_them_away_while_standing_holds_up() {
+        // The other half of the same rule: redemption is not what stops the
+        // visits, good standing is — so a redeemed career in good standing
+        // stays quiet exactly as before.
+        let mut app = schedule_app();
+        app.insert_resource(RogueRedeemed(true));
+        app.world_mut()
+            .resource_mut::<Shift>()
+            .adjust(Department::Security, 20);
+
+        tick(&mut app, 0.1);
+
+        let mut officers = app.world_mut().query::<&RogueOfficer>();
+        assert_eq!(officers.iter(app.world()).count(), 0);
     }
 
     #[test]

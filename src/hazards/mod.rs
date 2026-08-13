@@ -59,7 +59,9 @@ impl Plugin for HazardPlugin {
                     (schedule_incidents, run_incidents)
                         .chain()
                         .run_if(is_authority),
-                    build_smoke_visuals,
+                    // Both presentation, so neither is authority-gated: a
+                    // joining client builds its own from the replicated data.
+                    (build_smoke_visuals, build_hazard_visuals),
                 )
                     .run_if(in_state(AppState::Playing)),
             );
@@ -91,6 +93,16 @@ pub struct IncidentDef {
     pub warning: String,
     pub onset: String,
     pub intensity: f32,
+    /// The tint of the sphere the player actually sees, so a radiation leak and
+    /// a coolant vent are told apart at a glance rather than by reading the
+    /// radio. Defaulted so an incident that omits it still parses.
+    #[serde(default = "default_hazard_color")]
+    pub color: (f32, f32, f32),
+}
+
+/// Hazard amber, for an incident whose data does not pick a colour.
+fn default_hazard_color() -> (f32, f32, f32) {
+    (0.95, 0.65, 0.15)
 }
 
 #[derive(Resource)]
@@ -114,6 +126,11 @@ pub struct ActiveHazard {
     pub radius: f32,
     pub remaining: f32,
     pub intensity: f32,
+    /// Carried on the replicated component rather than looked up from the
+    /// script, so a joining client can build the sphere from the entity alone —
+    /// it has no `IncidentDef` to consult, and the authority is the only peer
+    /// that ever reads the hazard script.
+    pub color: (f32, f32, f32),
 }
 
 fn start_loading_hazards(mut commands: Commands, assets: Res<AssetServer>) {
@@ -168,6 +185,7 @@ fn schedule_incidents(
                 radius: def.radius,
                 remaining: def.duration,
                 intensity: def.intensity,
+                color: def.color,
             },
             Transform::from_xyz(def.origin.0, def.origin.1, def.origin.2),
             Visibility::default(),
@@ -539,6 +557,55 @@ fn build_smoke_visuals(
     }
 }
 
+/// Marks the sphere drawn for an [`ActiveHazard`].
+///
+/// Excluded from the interaction raycast for exactly the reason `SmokeVisual`
+/// is: the rad leak is a 4.5m sphere centred on the dispenser, so without this
+/// an incident would make the dispenser — and half the hall behind it —
+/// unusable for the whole forty seconds it runs.
+#[derive(Component)]
+pub struct HazardVisual;
+
+/// Builds the sphere for a scripted incident, locally on each client.
+///
+/// The counterpart to [`build_smoke_visuals`], and missing until now: an
+/// `ActiveHazard` was spawned with a `Transform` and a `Visibility` but no mesh
+/// at all, so the radiation leak and the coolant vent were unmarked volumes.
+/// The player got a radio warning naming a rough location in prose and then a
+/// green screen flash once they were already standing in it — the intended
+/// counterplay, "walk out of it", had nothing to walk out of.
+///
+/// Runs on every peer with no authority gate, keyed on `Added<ActiveHazard>`:
+/// replication carries the data, each end builds its own meshes and materials.
+fn build_hazard_visuals(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    new_hazards: Query<(Entity, &ActiveHazard), Added<ActiveHazard>>,
+) {
+    for (entity, hazard) in &new_hazards {
+        let (r, g, b) = hazard.color;
+        let material = materials.add(StandardMaterial {
+            base_color: Color::srgba(r, g, b, 0.16),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            // Visible from inside as well as outside. Backface culling would
+            // make the boundary vanish the moment you stepped through it,
+            // which is precisely when you most need to see where it is.
+            cull_mode: None,
+            double_sided: true,
+            ..default()
+        });
+        commands.spawn((
+            Mesh3d(meshes.add(Sphere::new(hazard.radius))),
+            MeshMaterial3d(material),
+            Transform::default(),
+            HazardVisual,
+            ChildOf(entity),
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Headless: an effect goes in, something happens in the room.
@@ -858,6 +925,7 @@ mod tests {
                 radius: 4.5,
                 remaining: 40.0,
                 intensity: 2.0,
+                color: default_hazard_color(),
             },
             Transform::default(),
         ));
@@ -889,6 +957,7 @@ mod tests {
                 radius: 4.5,
                 remaining: 2.0,
                 intensity: 2.0,
+                color: default_hazard_color(),
             },
             Transform::default(),
         ));
@@ -902,6 +971,52 @@ mod tests {
 
         let mut query = app.world_mut().query::<&ActiveHazard>();
         assert_eq!(query.iter(app.world()).count(), 0);
+    }
+
+    #[test]
+    fn an_incident_gets_a_sphere_the_player_can_actually_see() {
+        // The zone used to be spawned with a `Transform` and a `Visibility` and
+        // no mesh at all, which made the intended counterplay — "walk out of
+        // it" — impossible to aim: you learned where the edge was by the screen
+        // going green. Keyed on `Added`, unauthored by the authority, so a
+        // joining client builds its own from the replicated component.
+        let mut app = test_app();
+        app.add_plugins(AssetPlugin::default())
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .add_systems(Update, build_hazard_visuals);
+
+        let hazard = app
+            .world_mut()
+            .spawn((
+                ActiveHazard {
+                    radius: 4.5,
+                    remaining: 40.0,
+                    intensity: 2.0,
+                    color: (0.45, 0.95, 0.35),
+                },
+                Transform::default(),
+            ))
+            .id();
+
+        app.update();
+
+        let mut visuals = app.world_mut().query::<(&HazardVisual, &ChildOf)>();
+        let parents: Vec<Entity> = visuals
+            .iter(app.world())
+            .map(|(_, parent)| parent.parent())
+            .collect();
+        assert_eq!(
+            parents,
+            vec![hazard],
+            "the hazard should carry exactly one visual, parented to it so it \
+             despawns with the incident"
+        );
+
+        // Twice must not build it twice — `Added` is the guard.
+        app.update();
+        let mut visuals = app.world_mut().query::<&HazardVisual>();
+        assert_eq!(visuals.iter(app.world()).count(), 1);
     }
 
     #[test]

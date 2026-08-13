@@ -407,10 +407,24 @@ fn mouse_look(
     }
 }
 
+/// How long an unchanged movement command may go unsent.
+///
+/// `MoveInput` rides [`Channel::Unreliable`], which makes "only send it when it
+/// changes" a trap on its own: the single packet carrying "I let go of W" can
+/// be dropped, and the server would go on walking a chemist who has stopped,
+/// with nothing to correct it. Re-asserting the current command at this cadence
+/// bounds how long any such loss can last, while still cutting a genuinely idle
+/// client — nobody moving, nobody looking around, someone reading the reference
+/// book — from a packet every frame to ten a second.
+const MOVE_INPUT_RESEND_SECONDS: f32 = 0.1;
+
 fn send_move_input(
+    time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     players: Query<(&Look, &InteractionMode), With<LocalPlayer>>,
     mut outgoing: MessageWriter<MoveInput>,
+    mut last: Local<Option<(Vec2, f32)>>,
+    mut since_send: Local<f32>,
 ) {
     let Ok((look, mode)) = players.single() else {
         return;
@@ -431,9 +445,20 @@ fn send_move_input(
             direction.x += 1.0;
         }
     }
+    let direction = direction.normalize_or_zero();
+
+    // Any change goes out the same frame, so this costs no responsiveness —
+    // note that includes mouse-look, since `yaw` is part of the command.
+    *since_send += time.delta_secs();
+    let command = (direction, look.yaw);
+    if *last == Some(command) && *since_send < MOVE_INPUT_RESEND_SECONDS {
+        return;
+    }
+    *last = Some(command);
+    *since_send = 0.0;
 
     outgoing.write(MoveInput {
-        direction: direction.normalize_or_zero(),
+        direction,
         yaw: look.yaw,
     });
 }
@@ -494,8 +519,19 @@ fn apply_move_input(
     solids: Query<(&Transform, &Solid), Without<Chemist>>,
 ) {
     for (mut transform, mut look, intent, body, blood) in &mut chemists {
-        look.yaw = intent.yaw;
-        transform.rotation = Quat::from_rotation_y(intent.yaw);
+        // Compared before writing. `Transform` is replicated and `Look` drives
+        // the camera, so an unconditional write here re-broadcast a chemist
+        // standing perfectly still at frame rate and re-ran transform
+        // propagation for their whole body hierarchy every frame. This cannot
+        // simply move below the idle guard instead — turning on the spot has
+        // `direction == ZERO` and must still rotate.
+        let facing = Quat::from_rotation_y(intent.yaw);
+        if transform.rotation != facing {
+            transform.rotation = facing;
+        }
+        if look.yaw != intent.yaw {
+            look.yaw = intent.yaw;
+        }
         if intent.direction == Vec2::ZERO {
             continue;
         }

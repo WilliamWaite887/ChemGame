@@ -8,7 +8,15 @@ use crate::thermal::Overheat;
 use crate::units::{Kelvin, Units};
 
 /// Index of a reaction within a [`ReactionSet`].
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+///
+/// Serialisable for the same reason — and under the same contract — as
+/// [`crate::ReagentId`]: co-op clients name a recipe over the wire when they
+/// ask to buy a hint for it. The id is a position in the loaded reaction list,
+/// so both ends must agree on the data files, which replicon's protocol hash
+/// enforces rather than us.
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize,
+)]
 pub struct ReactionId(pub u32);
 
 impl ReactionId {

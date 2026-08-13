@@ -19,8 +19,8 @@ use crate::containers::{Container, ContainerKind, InSlot};
 use crate::crew::{CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{leave_machine, InteractionMode, LeaveMachineRequested};
 use crate::knowledge::{
-    product_name, reaction_categories, Knowledge, RecipeDiscovered, UpgradeDispenserRequested,
-    HINT_COST,
+    product_name, reaction_categories, BuyHintRequested, Knowledge, RecipeDiscovered,
+    UpgradeDispenserRequested, HINT_COST,
 };
 use crate::machines::{
     slotted_container, AnalyzeRequested, Buffer, BufferDirection, BufferTransferRequested,
@@ -2318,6 +2318,7 @@ struct PanelMessages<'w> {
     requisition: MessageWriter<'w, RequisitionRequested>,
     leave_machine: MessageWriter<'w, LeaveMachineRequested>,
     upgrade_dispenser: MessageWriter<'w, UpgradeDispenserRequested>,
+    buy_hint: MessageWriter<'w, BuyHintRequested>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2328,9 +2329,12 @@ fn handle_panel_clicks(
     mut amounts: Query<&mut DispenseAmount>,
     mut out: PanelMessages,
     thermostats: Query<&Thermostat>,
-    mut knowledge: ResMut<Knowledge>,
+    // No `ResMut<Knowledge>`/`Res<ChemDb>` here any more: buying a hint was the
+    // only thing that needed them, and it now goes through the authority like
+    // every other career-wide purchase. Holding a `ResMut` every frame for one
+    // rare branch was also an exclusive-access constraint against every system
+    // that merely reads the notebook.
     mut book: ResMut<BookView>,
-    db: Res<ChemDb>,
 ) {
     let Some((player, mut mode)) = modes.iter_mut().next() else {
         return;
@@ -2349,7 +2353,9 @@ fn handle_panel_clicks(
         // controls, and closing whatever is up.
         match action {
             PanelAction::BuyHint(reaction) => {
-                knowledge.buy_hint(&db, *reaction);
+                out.buy_hint.write(BuyHintRequested {
+                    reaction: *reaction,
+                });
                 continue;
             }
             PanelAction::UpgradeDispenser => {

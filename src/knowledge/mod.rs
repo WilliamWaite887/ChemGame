@@ -73,6 +73,9 @@ impl Plugin for KnowledgePlugin {
             // all (unlocking is career-wide, not tied to a machine), so
             // there is nothing for `MapEntities` to translate.
             .add_client_message::<UpgradeDispenserRequested>(Channel::Ordered)
+            // Same reasoning as the line above: career-wide, carries no
+            // `Entity`, so nothing for `MapEntities` to translate.
+            .add_client_message::<BuyHintRequested>(Channel::Ordered)
             .add_systems(OnEnter(AppState::Playing), initialise_knowledge)
             .add_systems(
                 Update,
@@ -81,6 +84,7 @@ impl Plugin for KnowledgePlugin {
                     // owns it and only the server writes the save file.
                     (
                         handle_dispenser_upgrade,
+                        handle_hint_purchase,
                         learn_from_experiments,
                         persist_knowledge,
                         broadcast_knowledge,
@@ -98,12 +102,11 @@ impl Plugin for KnowledgePlugin {
 /// not tied to a machine — the upgrade is a career-wide upgrade, not
 /// something one specific dispenser owns, the same way [`RecipeDiscovered`]
 /// and buying a hint aren't either. Carries no payload: there is only ever
-/// one next tier. Unlike the hint-buying button (which mutates the local
-/// `Knowledge` directly and only actually sticks for whichever peer is
-/// authoritative), this crosses the network properly: the server is the only
-/// one that ever calls [`Knowledge::upgrade_dispenser`], via
-/// [`handle_dispenser_upgrade`], so a joining client's purchase is never
-/// quietly overwritten by the next [`KnowledgeSync`].
+/// one next tier. Like [`BuyHintRequested`], this crosses the network properly:
+/// the server is the only one that ever calls
+/// [`Knowledge::upgrade_dispenser`], via [`handle_dispenser_upgrade`], so a
+/// joining client's purchase is never quietly overwritten by the next
+/// [`KnowledgeSync`].
 #[derive(Message, Serialize, Deserialize)]
 pub struct UpgradeDispenserRequested;
 
@@ -114,6 +117,35 @@ fn handle_dispenser_upgrade(
 ) {
     for _ in requests.read() {
         knowledge.upgrade_dispenser(&db);
+    }
+}
+
+/// A client asking to spend [`HINT_COST`] on the next hint for one recipe.
+///
+/// Career-wide like [`UpgradeDispenserRequested`], and for the same reason: the
+/// notebook belongs to the lab, not to whoever happens to be clicking. This
+/// button used to mutate the local `Knowledge` directly, which worked on the
+/// host and did nothing at all for a guest — their purchase was silently
+/// overwritten by the very next [`KnowledgeSync`], costing them the hint and
+/// visibly refunding points that had never actually been spent. Routing it
+/// through the authority the way every other career-wide purchase already does
+/// is the whole fix.
+#[derive(Message, Serialize, Deserialize)]
+pub struct BuyHintRequested {
+    pub reaction: ReactionId,
+}
+
+fn handle_hint_purchase(
+    db: Res<ChemDb>,
+    mut requests: MessageReader<FromClient<BuyHintRequested>>,
+    mut knowledge: ResMut<Knowledge>,
+) {
+    for request in requests.read() {
+        // `buy_hint` re-checks affordability and availability itself, so an
+        // out-of-date or hand-crafted request buys nothing rather than going
+        // into debt — the same trust boundary every other client message here
+        // sits behind.
+        knowledge.buy_hint(&db, request.reaction);
     }
 }
 

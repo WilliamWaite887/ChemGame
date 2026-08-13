@@ -357,10 +357,6 @@ fn handle_crisis_resolutions(
 // Presentation: the room itself reacting
 // ---------------------------------------------------------------------------
 
-/// Pulls every `LabLight` toward red while a crisis is live, and back to its
-/// own room tint once it isn't. Reads `Has<CrisisOrder>` directly rather than
-/// a bespoke resource — see the plugin doc for why that is enough to stay in
-/// sync across a co-op session with no new replicated state.
 /// Component-wise lerp between two colours, done by hand rather than
 /// reaching for a `Color`/`Srgba` blend method this project hasn't already
 /// verified exists in Bevy 0.19 — plain arithmetic on four `f32`s needs no
@@ -376,6 +372,33 @@ fn lerp_color(from: Color, to: Color, t: f32) -> Color {
     )
 }
 
+/// How close a colour must get to its target before the pulse snaps it there
+/// and stops writing.
+///
+/// The lerp approaches asymptotically and never exactly arrives, so without a
+/// snap there is no settled state to detect at all: every light would sit a
+/// hair off its target and be rewritten forever. One part in four hundred is
+/// far below what the eye resolves on a lamp.
+const ALERT_SETTLE_EPSILON: f32 = 0.0025;
+
+fn colors_match(a: Color, b: Color) -> bool {
+    let (a, b) = (a.to_srgba(), b.to_srgba());
+    (a.red - b.red).abs() < ALERT_SETTLE_EPSILON
+        && (a.green - b.green).abs() < ALERT_SETTLE_EPSILON
+        && (a.blue - b.blue).abs() < ALERT_SETTLE_EPSILON
+}
+
+/// Pulls every `LabLight` toward red while a crisis is live, and back to its
+/// own room tint once it isn't. Reads `Has<CrisisOrder>` directly rather than
+/// a bespoke resource — see the plugin doc for why that is enough to stay in
+/// sync across a co-op session with no new replicated state.
+///
+/// Settles rather than lerping forever. This runs on every peer with no
+/// authority gate (it is presentation), and the overwhelmingly common state is
+/// "no crisis, every lamp already at its own tint" — where an unconditional
+/// write marked all eleven `PointLight`s plus the global ambient as changed
+/// every frame, for the entire session, to assign them the colour they already
+/// had.
 fn pulse_alert_lighting(
     time: Res<Time>,
     active: Query<(), With<CrisisOrder>>,
@@ -388,12 +411,24 @@ fn pulse_alert_lighting(
 
     for (light, mut point) in &mut lights {
         let target = lerp_color(light.base_color, alarm, target_alert);
+        if colors_match(point.color, target) {
+            if point.color != target {
+                point.color = target;
+            }
+            continue;
+        }
         point.color = lerp_color(point.color, target, t);
     }
 
     if let Some(ambient) = ambient.as_mut() {
         let base = Color::srgb(0.62, 0.68, 0.80);
         let target = lerp_color(base, alarm, target_alert * 0.6);
+        if colors_match(ambient.color, target) {
+            if ambient.color != target {
+                ambient.color = target;
+            }
+            return;
+        }
         ambient.color = lerp_color(ambient.color, target, t);
     }
 }
