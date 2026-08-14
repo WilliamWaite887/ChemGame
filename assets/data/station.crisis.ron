@@ -1,24 +1,24 @@
-// Station-wide crises. `UnderworldStanding`'s only reader — the fallout of
+// Station-wide crises. `UnderworldStanding`'s only reader â€” the fallout of
 // fulfilling illicit orders, made real and put in front of the chemist
 // directly, instead of sitting silently in a hidden career-total forever.
 //
-// `cure_reagent` doubles as the crisis order's *reference* reagent — the
+// `cure_reagent` doubles as the crisis order's *reference* reagent â€” the
 // same trick every lenient order already uses (`orders::reference_category`
 // derives the category from a reagent's own `categories.first()`), so
 // grading needs no new logic: any member of that reagent's category, in
 // sufficient quantity, resolves it. Every case below references "dylovene"
-// on purpose — it is one of the three `STARTING_RECIPES`, made from base
+// on purpose â€” it is one of the three `STARTING_RECIPES`, made from base
 // reagents that are free from the very first minute of a career (see
 // `knowledge::STARTING_RECIPES`), so a crisis can never demand a category
 // the player has no way to reach yet.
 (
     // Roughly four fulfilled illicit deliveries (`UNDERWORLD_PER_DELIVERY`
     // is 2 each) before the first crisis can fire. Declining or reporting
-    // never adds to this at all — it only ever moves on a *successful*
+    // never adds to this at all â€” it only ever moves on a *successful*
     // illicit delivery, in `antagonist::handle_illicit_resolutions`.
     underworld_threshold: 8,
     warning_seconds: (20.0, 30.0),
-    // Reused directly as the crisis order's `patience` — generous enough to
+    // Reused directly as the crisis order's `patience` â€” generous enough to
     // synthesize a fresh batch of dylovene from scratch (it needs nothing
     // that isn't unlocked from minute one), tight enough to read as an
     // emergency rather than an ordinary order.
@@ -29,9 +29,10 @@
             harm_reagent: "krokodil",
             harm_amount: 20,
             afflicted_role: "Medical",
+            responders: ["Medical"],
             cure_reagent: "dylovene",
             cure_amount: 20,
-            alarm_line: "MEDICAL EMERGENCY, Chemistry — whatever's in their system is not slowing down.",
+            alarm_line: "MEDICAL EMERGENCY, Chemistry â€” whatever's in their system is not slowing down.",
             plea: "It's eating them alive. I need an antitoxin, now, I don't care which one.",
             resolved_line: "Chemistry got there in time. Krokodil's ugly, but it's treatable if you're fast.",
             unresolved_line: "We lost that one. Whoever's been dealing Krokodil just cost someone their shift, or worse.",
@@ -41,11 +42,12 @@
             harm_reagent: "bath_salts",
             harm_amount: 22,
             afflicted_role: "Security",
+            responders: ["Medical", "Security"],
             cure_reagent: "dylovene",
             cure_amount: 20,
-            alarm_line: "Chemistry, Security's got an officer down and combative — we need something in them fast.",
+            alarm_line: "Chemistry, Security's got an officer down and combative â€” we need something in them fast.",
             plea: "Everything's too loud and my hands won't stop shaking. Give me anything for it.",
-            resolved_line: "Officer's stable. Whatever you gave them, it worked — Security won't forget it.",
+            resolved_line: "Officer's stable. Whatever you gave them, it worked â€” Security won't forget it.",
             unresolved_line: "That officer's still not right. Security's asking hard questions about where this came from.",
         ),
         (
@@ -53,6 +55,7 @@
             harm_reagent: "methamphetamine",
             harm_amount: 18,
             afflicted_role: "Engineering",
+            responders: ["Medical"],
             cure_reagent: "dylovene",
             cure_amount: 20,
             alarm_line: "Chemistry, we've got someone in Engineering who hasn't slept in two shifts and is seizing up.",
@@ -65,6 +68,7 @@
             harm_reagent: "mindbreaker_toxin",
             harm_amount: 20,
             afflicted_role: "Cargo",
+            responders: ["Medical", "Security"],
             cure_reagent: "dylovene",
             cure_amount: 20,
             alarm_line: "Chemistry, Cargo's got someone screaming that the crates are talking. This is not a drill.",

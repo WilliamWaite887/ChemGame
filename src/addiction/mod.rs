@@ -310,7 +310,11 @@ fn notice_the_high(
     addictions: Res<Addictions>,
     mut suspicion: ResMut<SecuritySuspicion>,
     mut carried: Local<f32>,
-    crew: Query<(&CrewMember, &CrewRoute, Option<&Bloodstream>)>,
+    // Residents excluded on purpose: this mechanic is about the chem lab, and
+    // the design turns on the player being able to *see* the addict who is
+    // raising suspicion and stall until they leave. A resident getting high in
+    // a corridor two departments away would raise it invisibly.
+    crew: Query<(&CrewMember, &CrewRoute, Option<&Bloodstream>), crate::crew::NotResident>,
 ) {
     let Some(script) = script else {
         return;
@@ -374,7 +378,7 @@ fn generate_addict_visits(
     mut spawner: Option<ResMut<AddictSpawner>>,
     addictions: Res<Addictions>,
     shift: Res<Shift>,
-    active: Query<&CrewMember>,
+    active: Query<&CrewMember, crate::crew::NotResident>,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;

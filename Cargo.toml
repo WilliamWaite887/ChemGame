@@ -53,12 +53,9 @@ opt-level = 3
 
 [dev-dependencies]
 ron = "0.11"
-# Only used by the one-way `.map` exporter, to write solid-colour placeholder
-# textures. Already in the tree via bevy, so it costs nothing to build.
-image = { version = "0.25", default-features = false, features = ["png"] }
 # The same parser `bevy_trenchbroom` loads maps with, pinned to the version it
-# depends on. Used to check the exported map against the real thing rather than
-# against our own idea of the format.
+# depends on, so `lab::tb_map` validates the map against the real thing rather
+# than against our own idea of the format.
 quake-map = "0.6"
 
 [profile.dev]

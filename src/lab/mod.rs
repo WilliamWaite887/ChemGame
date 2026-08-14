@@ -11,11 +11,11 @@
 //! room moved in `ROOMS` takes its floor, its lights and its walkable footprint
 //! with it.
 
-// Under the `trenchbroom` feature the map builds the shell, so the floor plan
-// below is reachable only from the exporter — which is test-only, and so reads
-// as dead code in a normal build. The tables are kept rather than cfg'd out
-// because the point of the prototype is to run the two side by side: `contain`
-// still uses them, and so does every test in this module.
+// Under the `trenchbroom` feature the map builds the shell, so the builders
+// below go unused and read as dead code. The floor plan is kept rather than
+// cfg'd out because `contain` still reads it, and so does every test in this
+// module — retiring it is Stage 1 of the station plan, once `func_walkable`
+// volumes in the map can answer "where may a body stand?" on their own.
 #![cfg_attr(feature = "trenchbroom", allow(dead_code))]
 
 use bevy::prelude::*;
@@ -29,10 +29,10 @@ use crate::machines::{
 use crate::net::is_authority;
 use crate::AppState;
 
-/// Writes the floor plan out as a Quake `.map` for TrenchBroom. Test-only: it
-/// is a one-way export used to seed the map, not part of the running game.
+/// Checks on the hand-edited TrenchBroom map. Test-only, and unconditional: the
+/// map is in the repo whether or not the feature that loads it is on.
 #[cfg(test)]
-mod tb_export;
+mod tb_map;
 
 /// The TrenchBroom-driven alternative to [`spawn_shell`]. Behind a feature flag
 /// so the const-table lab stays the default while the two are compared.
@@ -41,14 +41,13 @@ pub mod tb;
 
 pub const ROOM_HEIGHT: f32 = 3.2;
 
-/// TrenchBroom units per metre, shared by the exporter and the loader.
+/// TrenchBroom units per metre. Must match what the map was drawn at.
 ///
 /// 40 rather than `bevy_trenchbroom`'s default 39.37 (one unit per inch): every
 /// coordinate in the floor plan is a multiple of 0.025 m, so at 40 every brush
 /// lands on an integer and almost all on TrenchBroom's default 8-unit grid. At
 /// 39.37 the whole lab sits on fractional coordinates and is miserable to edit.
-// Read by the exporter (test-only) and the loader (feature-gated), so a plain
-// default build legitimately never touches it.
+// Only the feature-gated loader reads it, so a plain build never touches it.
 #[cfg_attr(not(feature = "trenchbroom"), allow(dead_code))]
 pub const TB_SCALE: f32 = 40.0;
 
@@ -311,14 +310,6 @@ impl WallRun {
     }
 }
 
-/// Which room a point stands in, if any.
-///
-/// Returns `None` in a doorway or a wall: rooms are the open floor between the
-/// walls, and a threshold belongs to neither of the rooms it joins.
-pub fn room_at(point: Vec3) -> Option<&'static Room> {
-    ROOMS.iter().find(|room| room.inset(0.0).holds(point))
-}
-
 /// Every doorway in the suite, as (the run it is cut into, its centre).
 fn doorways() -> impl Iterator<Item = (&'static WallRun, f32)> {
     WALLS
@@ -332,6 +323,15 @@ impl Plugin for LabPlugin {
     fn build(&self, app: &mut App) {
         #[cfg(feature = "trenchbroom")]
         app.add_plugins(tb::LabTrenchBroomPlugin);
+
+        // Where a body may stand. Under the `trenchbroom` feature this is
+        // filled from the map's `func_walkable` volumes instead — see
+        // [`tb::collect_walkable_volumes`].
+        app.init_resource::<WalkableAreas>();
+        #[cfg(not(feature = "trenchbroom"))]
+        app.add_systems(OnEnter(AppState::Playing), |mut commands: Commands| {
+            commands.insert_resource(WalkableAreas::from_floor_plan());
+        });
 
         // The room itself is scenery: identical on both ends, derived from
         // constants, and nothing about it is worth a packet. Under the
@@ -382,7 +382,10 @@ pub struct Solid {
 pub struct MachineScreen;
 
 /// An axis-aligned rectangle of floor, in world XZ.
-#[derive(Clone, Copy, Debug)]
+///
+/// `Reflect` because the map backend measures these inside a loaded scene, and
+/// the scene spawner refuses any component it cannot find in the type registry.
+#[derive(Clone, Copy, Debug, Default, Reflect)]
 pub struct Bounds {
     pub min_x: f32,
     pub max_x: f32,
@@ -391,7 +394,7 @@ pub struct Bounds {
 }
 
 impl Bounds {
-    fn holds(&self, point: Vec3) -> bool {
+    pub fn holds(&self, point: Vec3) -> bool {
         point.x >= self.min_x
             && point.x <= self.max_x
             && point.z >= self.min_z
@@ -399,7 +402,7 @@ impl Bounds {
     }
 
     /// The nearest point inside, at the same height.
-    fn nearest(&self, point: Vec3) -> Vec3 {
+    pub fn nearest(&self, point: Vec3) -> Vec3 {
         Vec3::new(
             point.x.clamp(self.min_x, self.max_x),
             point.y,
@@ -407,71 +410,174 @@ impl Bounds {
         )
     }
 
+    /// This rectangle held `margin` clear of its own edges.
+    pub fn inset(&self, margin: f32) -> Bounds {
+        Bounds {
+            min_x: self.min_x + margin,
+            max_x: self.max_x - margin,
+            min_z: self.min_z + margin,
+            max_z: self.max_z - margin,
+        }
+    }
+
+    /// Whether two rectangles share any floor. Navigation treats this as an
+    /// edge: if a body can be in both, it can walk from one to the other.
+    pub fn overlaps(&self, other: &Bounds) -> bool {
+        self.min_x <= other.max_x
+            && other.min_x <= self.max_x
+            && self.min_z <= other.max_z
+            && other.min_z <= self.max_z
+    }
+
+    /// The rectangle two overlapping regions share, or `None` if they do not.
+    /// Navigation walks a body through the middle of this.
+    pub fn intersection(&self, other: &Bounds) -> Option<Bounds> {
+        self.overlaps(other).then(|| Bounds {
+            min_x: self.min_x.max(other.min_x),
+            max_x: self.max_x.min(other.max_x),
+            min_z: self.min_z.max(other.min_z),
+            max_z: self.max_z.min(other.max_z),
+        })
+    }
+
+    /// The middle of the rectangle, on the floor.
+    pub fn center(&self) -> Vec3 {
+        Vec3::new(
+            (self.min_x + self.max_x) * 0.5,
+            0.0,
+            (self.min_z + self.max_z) * 0.5,
+        )
+    }
+
     /// A region with no interior is one a margin has collapsed — a room too
     /// small to stand in, or a doorway narrower than the player. Skipped rather
     /// than clamped into, because clamping into an inverted rectangle throws the
     /// player at a corner.
-    fn is_standable(&self) -> bool {
+    pub fn is_standable(&self) -> bool {
         self.min_x <= self.max_x && self.min_z <= self.max_z
     }
 }
 
-/// Every region a body of the given radius can occupy: each room held clear of
-/// its walls, plus a slab bridging each doorway.
+/// The widest body containment has to work for. The chemist is 0.35.
+const MAX_BODY_RADIUS: f32 = 0.4;
+
+/// How far a doorway bridge reaches past a wall's centre-line into each room.
 ///
-/// The slabs are what make this work. Two rooms inset from their shared wall
-/// leave a gap wider than the wall itself, so without a region spanning the
-/// opening a chemist would be sealed into whichever room they started in.
-fn walkable(radius: f32) -> impl Iterator<Item = Bounds> {
-    let rooms = ROOMS.iter().map(move |room| room.inset(radius));
+/// A bridge has to still overlap both rooms' floors *after* all three have been
+/// inset by the body radius. Each room's floor pulls back by one radius and the
+/// bridge by another, so anything under twice the radius leaves a gap and seals
+/// the two rooms apart — which is exactly the bug `contain` was written to fix,
+/// reintroduced from the other direction.
+const DOOR_BRIDGE_REACH: f32 = 2.0 * MAX_BODY_RADIUS + WALL_THICKNESS * 0.5;
 
-    let thresholds = doorways().map(move |(run, center)| {
-        // Along the run: the opening, held clear of the frame. Across it: far
-        // enough either side to overlap both rooms' inset floors, which is what
-        // joins the three regions into a continuous path.
-        let half_open = DOOR_WIDTH * 0.5 - radius;
-        let half_deep = radius + WALL_THICKNESS * 0.5;
-        let (half_x, half_z) = if run.along_x {
-            (half_open, half_deep)
-        } else {
-            (half_deep, half_open)
-        };
-        let at = run.point(center);
-        Bounds {
-            min_x: at.x - half_x,
-            max_x: at.x + half_x,
-            min_z: at.z - half_z,
-            max_z: at.z + half_z,
-        }
-    });
-
-    rooms.chain(thresholds)
+/// A rectangle of standable floor.
+#[derive(Debug, Clone)]
+pub struct Region {
+    pub bounds: Bounds,
+    /// Which room this is part of, or `None` for a doorway bridge: a threshold
+    /// belongs to neither of the rooms it joins.
+    pub room: Option<String>,
 }
 
-/// Keeps `position` on the lab floor.
+/// Every place a body may stand.
 ///
-/// The solid walls do the real work; this is the backstop that stops a body
-/// leaving the suite through a corner or a seam between two wall runs. It
-/// replaced a single rectangular clamp, which was correct only while the lab was
-/// one room and would have sealed every side room off the moment it was not.
-pub fn contain(position: Vec3, radius: f32) -> Vec3 {
-    let mut best: Option<(f32, Vec3)> = None;
+/// The single answer to "may I be here?", and what navigation is built from.
+/// Filled by whichever backend owns the floor plan — [`ROOMS`]/[`WALLS`] in a
+/// plain build, `func_walkable` volumes out of the map under the `trenchbroom`
+/// feature — and read by code that knows about neither.
+///
+/// Regions are stored *raw*, un-inset. Callers pass the radius of the body they
+/// are asking about, because the chemist and a crew member are not the same
+/// size and the floor plan should not have to be rebuilt to say so.
+#[derive(Resource, Default)]
+pub struct WalkableAreas {
+    regions: Vec<Region>,
+}
 
-    for region in walkable(radius) {
-        if !region.is_standable() {
-            continue;
+impl WalkableAreas {
+    /// Builds the areas from the const floor plan.
+    pub fn from_floor_plan() -> Self {
+        let mut areas = Self::default();
+
+        for room in &ROOMS {
+            areas.push(room.inset(0.0), Some(room.name.to_string()));
         }
-        if region.holds(position) {
-            return position;
+
+        // A slab bridging each doorway. These are what make the suite one
+        // space: two rooms inset from their shared wall leave a gap wider than
+        // the wall itself, so without a region spanning the opening a chemist
+        // would be sealed into whichever room they started in.
+        for (run, center) in doorways() {
+            let (half_x, half_z) = if run.along_x {
+                (DOOR_WIDTH * 0.5, DOOR_BRIDGE_REACH)
+            } else {
+                (DOOR_BRIDGE_REACH, DOOR_WIDTH * 0.5)
+            };
+            let at = run.point(center);
+            areas.push(
+                Bounds {
+                    min_x: at.x - half_x,
+                    max_x: at.x + half_x,
+                    min_z: at.z - half_z,
+                    max_z: at.z + half_z,
+                },
+                None,
+            );
         }
-        let candidate = region.nearest(position);
-        let distance = candidate.distance_squared(position);
-        if best.is_none_or(|(nearest, _)| distance < nearest) {
-            best = Some((distance, candidate));
-        }
+
+        areas
     }
 
-    best.map_or(position, |(_, point)| point)
+    pub fn push(&mut self, bounds: Bounds, room: Option<String>) {
+        self.regions.push(Region { bounds, room });
+    }
+
+    pub fn regions(&self) -> &[Region] {
+        &self.regions
+    }
+
+    /// Keeps `position` on the floor.
+    ///
+    /// The solid walls do the real work; this is the backstop that stops a body
+    /// leaving through a corner or a seam between two wall runs. It replaced a
+    /// single rectangular clamp, which was correct only while the lab was one
+    /// room and would have sealed every side room off the moment it was not.
+    ///
+    /// An empty set of areas returns `position` untouched rather than dragging
+    /// the body to the origin — under the map backend there is a frame or two
+    /// before the scene has loaded, and a chemist must not be flung across the
+    /// station while waiting for it.
+    pub fn contain(&self, position: Vec3, radius: f32) -> Vec3 {
+        let mut best: Option<(f32, Vec3)> = None;
+
+        for region in &self.regions {
+            let inset = region.bounds.inset(radius);
+            if !inset.is_standable() {
+                continue;
+            }
+            if inset.holds(position) {
+                return position;
+            }
+            let candidate = inset.nearest(position);
+            let distance = candidate.distance_squared(position);
+            if best.is_none_or(|(nearest, _)| distance < nearest) {
+                best = Some((distance, candidate));
+            }
+        }
+
+        best.map_or(position, |(_, point)| point)
+    }
+
+    /// Which room a point stands in, if any.
+    ///
+    /// Returns `None` in a doorway or a wall: rooms are the open floor between
+    /// the walls, and a threshold belongs to neither of the rooms it joins.
+    pub fn room_at(&self, point: Vec3) -> Option<&str> {
+        self.regions
+            .iter()
+            .find(|region| region.room.is_some() && region.bounds.holds(point))
+            .and_then(|region| region.room.as_deref())
+    }
 }
 
 /// Spawns a scaled cube that blocks movement.
@@ -787,43 +893,43 @@ pub(crate) fn load_machine_assets(
     });
 }
 
-/// Every plain bench in the suite, as (centre, size).
-///
-/// Split out from the spawner so the TrenchBroom exporter can emit the same
-/// boxes as brushes without restating their positions — the moment there are
-/// two lists of fixtures, one of them is wrong.
-pub(crate) fn fixtures() -> Vec<(Vec3, Vec3)> {
-    let mut all = Vec::new();
-
-    // An island down the middle of the hall. Standing off the walls is the
-    // point: it gives the room a route around it instead of a single lane, and
-    // somewhere to put a beaker down that is not on top of a machine.
-    for x in [-3.5f32, 2.0] {
-        all.push((Vec3::new(x, 0.45, -2.2), Vec3::new(2.6, 0.9, 0.9)));
-    }
-
-    // Shelving down the storeroom's west wall.
-    for z in [3.1f32, 4.9] {
-        all.push((
-            Vec3::new(ROOMS[PREP].min_x + 0.5, 0.45, z),
-            Vec3::new(1.0, 0.9, 1.4),
-        ));
-    }
-
-    // A bench under the analysis room's west wall, for staging samples.
-    all.push((Vec3::new(9.0, 0.45, -1.4), Vec3::new(2.2, 0.9, 0.8)));
-
-    all
-}
-
 /// Plain benches, so the rooms are not just corridors.
 ///
 /// Scenery rather than equipment: no state, nothing to replicate, and the
 /// server needs them present to collide against.
 fn spawn_fixtures(mut commands: Commands, assets: Res<MachineAssets>) {
-    for (center, size) in fixtures() {
-        solid_box(&mut commands, &assets.cube, &assets.bench, center, size);
+    // An island down the middle of the hall. Standing off the walls is the
+    // point: it gives the room a route around it instead of a single lane, and
+    // somewhere to put a beaker down that is not on top of a machine.
+    for x in [-3.5f32, 2.0] {
+        solid_box(
+            &mut commands,
+            &assets.cube,
+            &assets.bench,
+            Vec3::new(x, 0.45, -2.2),
+            Vec3::new(2.6, 0.9, 0.9),
+        );
     }
+
+    // Shelving down the storeroom's west wall.
+    for z in [3.1f32, 4.9] {
+        solid_box(
+            &mut commands,
+            &assets.cube,
+            &assets.bench,
+            Vec3::new(ROOMS[PREP].min_x + 0.5, 0.45, z),
+            Vec3::new(1.0, 0.9, 1.4),
+        );
+    }
+
+    // A bench under the analysis room's west wall, for staging samples.
+    solid_box(
+        &mut commands,
+        &assets.cube,
+        &assets.bench,
+        Vec3::new(9.0, 0.45, -1.4),
+        Vec3::new(2.2, 0.9, 0.8),
+    );
 }
 
 /// Creates the machines and their state. Authority only.
@@ -962,8 +1068,15 @@ mod tests {
     }
 
     /// The name of the room a point stands in, for readable assertion messages.
+    ///
+    /// Reads the const plan directly rather than going through
+    /// [`WalkableAreas`], so these tests keep asserting against the floor plan
+    /// as written even once the map is what fills the resource at runtime.
     fn room_name(point: Vec3) -> Option<&'static str> {
-        room_at(point).map(|room| room.name)
+        ROOMS
+            .iter()
+            .find(|room| room.inset(0.0).holds(point))
+            .map(|room| room.name)
     }
 
     #[test]
@@ -1183,40 +1296,21 @@ mod tests {
     }
 
     #[test]
-    fn every_room_can_be_walked_to_from_the_spawn_point() {
-        // The whole reason `contain` exists. The old single-rectangle clamp
-        // would have passed every other test in this file and still left four
-        // of the five rooms unreachable, because a body outside the one
-        // rectangle was snapped back into it.
-        //
-        // Flood-fills the walkable regions: two regions are connected if they
-        // overlap, and every room must be reachable from the hall.
-        let regions: Vec<Bounds> = walkable(BODY).filter(Bounds::is_standable).collect();
-        let overlaps = |a: &Bounds, b: &Bounds| {
-            a.min_x <= b.max_x && b.min_x <= a.max_x && a.min_z <= b.max_z && b.min_z <= a.max_z
-        };
+    fn every_room_has_somewhere_to_stand() {
+        // That the rooms are *connected* is `nav`'s to prove, against the graph
+        // crew actually walk — this only checks the floor plan gives each room a
+        // region wide enough for a body once its walls are held clear.
+        let areas = WalkableAreas::from_floor_plan();
 
-        let start = regions
-            .iter()
-            .position(|region| region.holds(SPAWN_SPOT))
-            .expect("a chemist must spawn somewhere they can stand");
-
-        let mut reached = vec![false; regions.len()];
-        reached[start] = true;
-        let mut frontier = vec![start];
-        while let Some(current) = frontier.pop() {
-            for (index, region) in regions.iter().enumerate() {
-                if !reached[index] && overlaps(&regions[current], region) {
-                    reached[index] = true;
-                    frontier.push(index);
-                }
-            }
-        }
-
-        for (index, room) in ROOMS.iter().enumerate() {
+        for room in &ROOMS {
+            let region = areas
+                .regions()
+                .iter()
+                .find(|region| region.room.as_deref() == Some(room.name))
+                .unwrap_or_else(|| panic!("{} has no walkable region at all", room.name));
             assert!(
-                reached[index],
-                "{} cannot be walked to from the spawn point",
+                region.bounds.inset(BODY).is_standable(),
+                "{} is too narrow for a chemist to stand in",
                 room.name
             );
         }

@@ -68,7 +68,7 @@ pub fn leave_machine(
     machines: &mut Query<&mut Machine>,
     leaving: &mut MessageWriter<LeaveMachineRequested>,
 ) {
-    if matches!(*mode, InteractionMode::UsingMachine(_)) {
+    if mode.claimed_machine().is_some() {
         leaving.write(LeaveMachineRequested);
     }
     release_claim(player, mode, machines);
@@ -86,7 +86,7 @@ pub fn release_claim(
     mode: &mut InteractionMode,
     machines: &mut Query<&mut Machine>,
 ) {
-    if let InteractionMode::UsingMachine(machine) = *mode {
+    if let Some(machine) = mode.claimed_machine() {
         if let Ok(mut machine) = machines.get_mut(machine) {
             if machine.in_use_by == Some(player) {
                 machine.in_use_by = None;
@@ -146,18 +146,35 @@ fn panel_input(
     let mut panel_open = false;
 
     for (player, mut mode) in &mut players {
-        // The book opens and closes on the same key from either direction.
-        if book && (mode.is_roaming() || *mode == InteractionMode::ReadingBook) {
-            *mode = if mode.is_roaming() {
-                InteractionMode::ReadingBook
-            } else {
-                InteractionMode::Roaming
+        // The book opens and closes on the same key from anywhere it can be
+        // read: on the floor, or over an open machine panel. Looking a recipe
+        // up mid-batch is the common case, and having to close the dispenser
+        // to do it — losing the claim, and the beaker's place in the queue —
+        // was the wrong answer.
+        if book {
+            *mode = match *mode {
+                InteractionMode::Roaming => InteractionMode::ReadingBook(None),
+                InteractionMode::UsingMachine(machine) => {
+                    InteractionMode::ReadingBook(Some(machine))
+                }
+                InteractionMode::ReadingBook(from) => {
+                    from.map_or(InteractionMode::Roaming, InteractionMode::UsingMachine)
+                }
             };
         }
 
         if mode.is_roaming() {
             // fall through to the roaming cursor handling below
         } else if escape {
+            // Escape steps back one screen rather than straight to the floor:
+            // out of the book onto the panel it was opened over, and only then
+            // out of the machine. Closing both at once would silently drop a
+            // claim the player only meant to stop reading over.
+            if let InteractionMode::ReadingBook(Some(machine)) = *mode {
+                *mode = InteractionMode::UsingMachine(machine);
+                panel_open = true;
+                continue;
+            }
             leave_machine(player, &mut mode, &mut machines, &mut leaving);
             released.0 = false;
             continue;
@@ -197,12 +214,32 @@ pub enum InteractionMode {
     /// Reading the reference book. Modelled as a mode rather than a separate
     /// flag so it inherits the cursor and camera handling machines already
     /// have — otherwise the view keeps turning while you read.
-    ReadingBook,
+    ///
+    /// Carries the machine it was opened over, if any. A chemist checking a
+    /// recipe halfway through a batch has not walked away from the dispenser,
+    /// so the claim is deliberately kept while they read and the book closes
+    /// back onto the panel they came from.
+    ReadingBook(Option<Entity>),
 }
 
 impl InteractionMode {
     pub fn is_roaming(&self) -> bool {
         matches!(self, InteractionMode::Roaming)
+    }
+
+    /// The machine this chemist is holding, whether they are working it or
+    /// reading over the top of it.
+    ///
+    /// Every release path goes through this rather than matching
+    /// `UsingMachine` directly: a book opened at a machine still owns the
+    /// claim, and a path that forgot would strand it in-use for the rest of
+    /// the shift.
+    pub fn claimed_machine(&self) -> Option<Entity> {
+        match *self {
+            InteractionMode::UsingMachine(machine) => Some(machine),
+            InteractionMode::ReadingBook(machine) => machine,
+            InteractionMode::Roaming => None,
+        }
     }
 }
 

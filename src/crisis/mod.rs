@@ -97,6 +97,16 @@ pub struct CrisisCaseDef {
     pub harm_reagent: String,
     pub harm_amount: u32,
     pub afflicted_role: String,
+    /// Which departments would actually be any use here. Crew of these roles
+    /// converge on the casualty; everyone else clears the area and sits it out
+    /// at home.
+    ///
+    /// Not derivable from `afflicted_role`: that says who is *hurt*, and the
+    /// department that treats an overdose is rarely the one that suffered it.
+    /// `serde(default)` so a case that names nobody means "nobody can help"
+    /// rather than a failed parse of the whole script.
+    #[serde(default)]
+    pub responders: Vec<String>,
     /// Doubles as the crisis order's reference reagent — see the module doc.
     pub cure_reagent: String,
     pub cure_amount: u32,
@@ -108,6 +118,16 @@ pub struct CrisisCaseDef {
     pub plea: String,
     pub resolved_line: String,
     pub unresolved_line: String,
+}
+
+/// Which departments would be any use to this casualty.
+///
+/// Lives on the victim, and dies with them, so "is there a crisis and where" is
+/// answered by a query rather than by bookkeeping that has to be kept in step
+/// with the order expiring.
+#[derive(Component)]
+pub struct CrisisResponse {
+    pub responders: Vec<String>,
 }
 
 #[derive(Resource)]
@@ -275,6 +295,13 @@ fn afflict_victim(
             waited: 0.0,
         },
         CrisisOrder,
+        // Carried on the casualty rather than held in a "current crisis"
+        // resource: the thing crew need to know is *where* to converge, and the
+        // casualty already is that. It also means a second crisis would simply
+        // work, with each drawing its own responders.
+        CrisisResponse {
+            responders: case.responders.clone(),
+        },
         Interactable::new(format!("{} — {}", crew_def.name, case.name)),
     ));
 

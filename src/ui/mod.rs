@@ -199,10 +199,13 @@ struct PanelSignature {
 impl Default for PanelSignature {
     fn default() -> Self {
         PanelSignature {
-            // Deliberately not `Roaming`: the default must differ from any
-            // real state, or the first frame with no panel open would compare
-            // equal and skip the despawn of a panel left over from last frame.
-            mode: InteractionMode::ReadingBook,
+            // Deliberately unreachable: the default must differ from any real
+            // state, or the first frame with no panel open would compare equal
+            // and skip the despawn of a panel left over from last frame. A
+            // placeholder machine is the one mode no player can ever be in —
+            // `ReadingBook(None)` is a real state a chemist can start a frame
+            // in, so it would not do.
+            mode: InteractionMode::UsingMachine(Entity::PLACEHOLDER),
             container: None,
             contents: Vec::new(),
             buffer: Vec::new(),
@@ -373,8 +376,18 @@ fn sync_panel(
         commands.entity(panel).despawn();
     }
 
-    if mode == InteractionMode::ReadingBook {
-        spawn_reference_book(&mut commands, &db, &knowledge, book.category, book.open_recipe);
+    // The book covers the machine panel rather than sitting beside it: there is
+    // one screen's worth of room, and a chemist reading a recipe is reading,
+    // not dispensing. The claim is still theirs, so it comes straight back.
+    if let InteractionMode::ReadingBook(at_machine) = mode {
+        spawn_reference_book(
+            &mut commands,
+            &db,
+            &knowledge,
+            book.category,
+            book.open_recipe,
+            at_machine.is_some(),
+        );
         return;
     }
     if open_machine.is_none() {
@@ -586,6 +599,15 @@ fn dispenser_body(
     });
 
     panel.spawn(label("Reagents", 13.0, TEXT_DIM));
+
+    // The balance, next to the thing it buys. Research is *spent* here, so
+    // reading it should not mean closing the dispenser and opening the book to
+    // check the header — by which point the tier cost below is off screen.
+    panel.spawn(label(
+        format!("{} research banked", knowledge.research_points),
+        14.0,
+        TEXT,
+    ));
 
     // One upgrade purchase unlocks a whole tier at once, replacing the old
     // per-reagent unlock buttons below. Same "drawn dead rather than drawn
@@ -1062,6 +1084,10 @@ fn spawn_reference_book(
     knowledge: &Knowledge,
     selected: Option<Category>,
     open_recipe: Option<ReactionId>,
+    // Opened over a machine panel, which the same key closes back onto. Only
+    // the header line differs, but it is the line that tells the player they
+    // have not just walked away from the dispenser.
+    at_machine: bool,
 ) {
     commands
         .spawn((
@@ -1095,10 +1121,15 @@ fn spawn_reference_book(
                     book.spawn(label(
                         format!(
                             "{} of {} recipes recorded   ·   {} research   ·   \
-                             scroll to read   ·   B or Esc to close",
+                             scroll to read   ·   B or Esc to {}",
                             knowledge.known_count(),
                             db.reactions.len(),
-                            knowledge.research_points
+                            knowledge.research_points,
+                            if at_machine {
+                                "go back to the machine"
+                            } else {
+                                "close"
+                            }
                         ),
                         13.0,
                         TEXT_DIM,
@@ -2196,6 +2227,7 @@ fn spawn_room_label(mut commands: Commands) {
 fn update_room_label(
     chemists: Query<&Transform, With<LocalPlayer>>,
     mut labels: Query<&mut Text, With<RoomLabel>>,
+    areas: Res<crate::lab::WalkableAreas>,
 ) {
     let Ok(chemist) = chemists.single() else {
         return;
@@ -2203,12 +2235,12 @@ fn update_room_label(
     // Doorways fall outside every room rectangle, so mid-stride there is no
     // room to name. Holding the last one beats blinking the label off and on
     // every time the player crosses a threshold.
-    let Some(room) = crate::lab::room_at(chemist.translation) else {
+    let Some(room) = areas.room_at(chemist.translation) else {
         return;
     };
     for mut text in &mut labels {
-        if text.0 != room.name {
-            text.0 = room.name.to_string();
+        if text.0 != room {
+            text.0 = room.to_string();
         }
     }
 }

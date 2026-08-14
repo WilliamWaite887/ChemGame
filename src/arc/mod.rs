@@ -629,7 +629,7 @@ fn generate_counter_orders(
     shift: Res<Shift>,
     mut radio: ResMut<RadioLog>,
     active: Query<(), With<CounterOrder>>,
-    waiting: Query<&CrewMember>,
+    waiting: Query<&CrewMember, crate::crew::NotResident>,
 ) {
     let (Some(station), Some(script), Some(campaign)) = (station, script, campaign) else {
         return;

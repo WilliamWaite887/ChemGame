@@ -314,7 +314,7 @@ fn deliver_produce(
     catalog: Option<Res<ProduceCatalog>>,
     station: Option<Res<StationData>>,
     mut schedule: Option<ResMut<DeliverySchedule>>,
-    present: Query<&CrewMember>,
+    present: Query<&CrewMember, crate::crew::NotResident>,
 ) {
     let (Some(catalog), Some(station), Some(schedule)) = (catalog, station, schedule.as_mut())
     else {

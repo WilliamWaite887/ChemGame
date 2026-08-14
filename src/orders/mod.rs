@@ -800,7 +800,7 @@ fn generate_orders(
     shift: Res<Shift>,
     forecast: Option<Res<CurrentForecast>>,
     mut radio: ResMut<RadioLog>,
-    active: Query<&CrewMember>,
+    active: Query<&CrewMember, crate::crew::NotResident>,
 ) {
     let Some(knowledge) = knowledge else {
         return;
@@ -961,7 +961,7 @@ fn generate_specific_orders(
     shift: Res<Shift>,
     forecast: Option<Res<CurrentForecast>>,
     mut radio: ResMut<RadioLog>,
-    active: Query<&CrewMember>,
+    active: Query<&CrewMember, crate::crew::NotResident>,
 ) {
     let Some(knowledge) = knowledge else {
         return;

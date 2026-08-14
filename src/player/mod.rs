@@ -517,6 +517,7 @@ fn apply_move_input(
         With<Chemist>,
     >,
     solids: Query<(&Transform, &Solid), Without<Chemist>>,
+    areas: Res<lab::WalkableAreas>,
 ) {
     for (mut transform, mut look, intent, body, blood) in &mut chemists {
         // Compared before writing. `Transform` is replicated and `Look` drives
@@ -554,7 +555,7 @@ fn apply_move_input(
         // correct while the lab was a single room: against the five-room suite
         // it would have snapped anyone who stepped through a doorway straight
         // back into the hall.
-        position = lab::contain(position, PLAYER_RADIUS);
+        position = areas.contain(position, PLAYER_RADIUS);
 
         transform.translation = position;
     }
@@ -752,6 +753,10 @@ mod tests {
     fn move_app() -> App {
         let mut app = App::new();
         app.init_resource::<Time>()
+            // Seeded from the const floor plan rather than left empty, so these
+            // walk against the same containment the real game uses. Empty areas
+            // are a no-op, which would quietly stop testing it at all.
+            .insert_resource(lab::WalkableAreas::from_floor_plan())
             .add_message::<FromClient<MoveInput>>()
             .add_systems(Update, (receive_move_input, apply_move_input).chain());
         app

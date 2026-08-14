@@ -152,7 +152,7 @@ fn dispatch_glassware(
     mut commands: Commands,
     mut pending: ResMut<PendingRestock>,
     station: Option<Res<StationData>>,
-    present: Query<&CrewMember>,
+    present: Query<&CrewMember, crate::crew::NotResident>,
 ) {
     let Some(needed) = pending.0 else {
         return;

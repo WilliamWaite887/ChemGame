@@ -23,7 +23,8 @@ pub struct CrewPlugin;
 
 impl Plugin for CrewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::Playing), load_crew_assets)
+        app.init_resource::<Departments>()
+            .add_systems(OnEnter(AppState::Playing), load_crew_assets)
             .add_systems(
                 Update,
                 (
@@ -32,7 +33,17 @@ impl Plugin for CrewPlugin {
                     // reads `Body`, which only the server ever mutates
                     // (metabolism, smoke, a delivered dose), so it belongs on
                     // the same side.
-                    (walk_route, handle_crew_collapse).run_if(is_authority),
+                    (
+                        start_crew_at_their_department,
+                        // Ambient crew decide where to be, then everyone walks.
+                        populate_departments
+                            .run_if(resource_exists_and_changed::<Departments>),
+                        ambient_behaviour,
+                        walk_route,
+                        handle_crew_collapse,
+                    )
+                        .chain()
+                        .run_if(is_authority),
                     // Runs everywhere: a crew member who arrived by
                     // replication needs a body drawing just as much as one
                     // spawned locally.
@@ -40,6 +51,57 @@ impl Plugin for CrewPlugin {
                 )
                     .run_if(in_state(AppState::Playing)),
             );
+    }
+}
+
+/// Where each department's crew belong, from the map's `department_spot`
+/// markers.
+///
+/// Empty in a build without the map, and every read here falls back — which is
+/// what keeps crew arriving out of the patch of nothing south of the lobby
+/// exactly as they always have. Keyed on the `role` that is already on every
+/// [`CrewMember`], so a department needs no second roster to exist.
+#[derive(Resource, Default)]
+pub struct Departments {
+    homes: std::collections::HashMap<String, Vec3>,
+}
+
+impl Departments {
+    // Only the map backend has anywhere to put a department, so a plain build
+    // fills this from nothing and never calls it outside tests.
+    #[cfg_attr(not(feature = "trenchbroom"), allow(dead_code))]
+    pub fn set(&mut self, department: String, at: Vec3) {
+        self.homes.insert(department, at);
+    }
+
+    /// Where someone of this role lives, if the station has somewhere for them.
+    pub fn home(&self, role: &str) -> Option<Vec3> {
+        self.homes.get(role).copied()
+    }
+
+    /// Somewhere on the station to go next — another department if there is
+    /// one, otherwise their own. Keeps idle crew crossing the corridor instead
+    /// of pacing a single room.
+    pub fn somewhere_else(&self, role: &str) -> Option<Vec3> {
+        if self.homes.is_empty() {
+            return None;
+        }
+        let elsewhere: Vec<&Vec3> = self
+            .homes
+            .iter()
+            .filter(|(department, _)| department.as_str() != role)
+            .map(|(_, at)| at)
+            .collect();
+
+        // Two thirds of the time go visiting, otherwise stay in your own
+        // department — a station where everybody is always somewhere else reads
+        // as odd as one where nobody moves.
+        if elsewhere.is_empty() || rand::random_range(0..3) == 0 {
+            return self.home(role);
+        }
+        elsewhere
+            .get(rand::random_range(0..elsewhere.len()))
+            .map(|at| **at)
     }
 }
 
@@ -70,29 +132,32 @@ pub struct CrewRoute {
     waypoints: Vec<Vec3>,
     index: usize,
     pub phase: CrewPhase,
+    /// Where they are headed, before anyone has worked out how to get there.
+    ///
+    /// Destinations are set from `orders` and `addiction`, which have no
+    /// business knowing about navigation, so the route records the *goal* and
+    /// [`walk_route`] turns it into waypoints once — it is the system that can
+    /// see the nav graph.
+    pending: Option<Vec3>,
 }
 
 impl CrewRoute {
-    /// The walk in: through the door, then across to the counter.
+    /// The walk in: to their place at the counter.
     pub fn arrival(lane: f32) -> Self {
         CrewRoute {
-            waypoints: vec![
-                Vec3::new(door_x(), 0.0, COUNTER_SPOT.z),
-                Vec3::new(COUNTER_SPOT.x + lane, 0.0, COUNTER_SPOT.z),
-            ],
+            waypoints: Vec::new(),
             index: 0,
             phase: CrewPhase::Arriving,
+            pending: Some(Vec3::new(COUNTER_SPOT.x + lane, 0.0, COUNTER_SPOT.z)),
         }
     }
 
-    /// Sends them back out the way they came.
+    /// Sends them back out to the station.
     pub fn leave(&mut self) {
-        self.waypoints = vec![
-            Vec3::new(door_x(), 0.0, COUNTER_SPOT.z),
-            Vec3::new(door_x(), 0.0, spawn_z()),
-        ];
+        self.waypoints.clear();
         self.index = 0;
         self.phase = CrewPhase::Leaving;
+        self.pending = Some(Vec3::new(door_x(), 0.0, spawn_z()));
     }
 }
 
@@ -285,12 +350,182 @@ fn handle_crew_collapse(
 
 /// Advances each crew member along their waypoints, and despawns them once
 /// they are back outside.
+/// A crew member who lives on the station rather than visiting the lab.
+///
+/// Ambient crew never queue and never carry an [`Order`](crate::orders::Order):
+/// they walk between their department and the corridor, and they are what makes
+/// the place feel inhabited rather than a shop with a door. In every other
+/// respect they are ordinary [`CrewMember`]s — `dress_crew` draws them, smoke
+/// reaches them, they can get hooked — which is the point. Reacting to a crisis
+/// is only interesting if the people reacting were already there.
+///
+/// Every query that hunts for a customer at the counter excludes them by this
+/// marker; see the `Without<Ambient>` filters in `orders`, `produce`, `quack`
+/// and `rogue_security`.
+#[derive(Component)]
+pub struct Ambient {
+    /// Seconds to stand still before picking somewhere new to be.
+    dwell: f32,
+}
+
+/// Query filter for crew who are *visiting* the lab, excluding the residents
+/// who simply live on the station.
+///
+/// Every gate that counts how busy the counter is has to use this. Counting
+/// bare [`CrewMember`]s instead includes the residents — already more than
+/// `orders::max_active_cap` on its own — and orders stop arriving entirely,
+/// with no error and nothing in the log. That is exactly how it broke the first
+/// time.
+pub type NotResident = Without<Ambient>;
+
+/// How long an idle crew member lingers before moving on.
+const DWELL_SECONDS: (f32, f32) = (4.0, 11.0);
+
+/// Gives every department someone to be in it.
+///
+/// Runs when [`Departments`] is filled, which only ever happens under the map —
+/// a build without one has nowhere for anybody to live, and gets the old
+/// visit-only crew exactly as before.
+fn populate_departments(
+    mut commands: Commands,
+    departments: Res<Departments>,
+    station: Option<Res<crate::orders::StationData>>,
+    resident: Query<&CrewMember, With<Ambient>>,
+) {
+    let Some(station) = station else {
+        return;
+    };
+
+    for def in &station.crew {
+        let Some(home) = departments.home(&def.role) else {
+            continue;
+        };
+        // One resident per person on the roster, not per department: the roster
+        // is already the cast, and spawning a second Dr. Vance would put the
+        // same named individual in two places.
+        if resident.iter().any(|member| member.name == def.name) {
+            continue;
+        }
+
+        let crew = spawn_crew_member(&mut commands, def, 0.0);
+        commands.entity(crew).insert(Ambient {
+            dwell: rand::random_range(DWELL_SECONDS.0..=DWELL_SECONDS.1),
+        });
+        // Overwrite the arrival route: they are not coming to the counter.
+        commands.entity(crew).insert(CrewRoute {
+            waypoints: Vec::new(),
+            index: 0,
+            phase: CrewPhase::Arriving,
+            pending: Some(home),
+        });
+    }
+}
+
+/// Sends idle crew somewhere new, and sends everyone to their post when a
+/// casualty turns up.
+///
+/// The rule is the whole of the station's mood in one branch: if your
+/// department could do something about it you go *to* it, and if it could not
+/// you get out of the way. Nobody runs for the escape pod — that is the end of
+/// a campaign, not a bad afternoon.
+fn ambient_behaviour(
+    time: Res<Time>,
+    departments: Res<Departments>,
+    crisis: Query<(&Transform, &crate::crisis::CrisisResponse)>,
+    mut residents: Query<(&CrewMember, &mut Ambient, &mut CrewRoute, &Transform)>,
+) {
+    let emergency = crisis.iter().next();
+
+    for (member, mut ambient, mut route, transform) in &mut residents {
+        // Mid-walk. Leave them to it.
+        if route.pending.is_some() || route.index < route.waypoints.len() {
+            continue;
+        }
+
+        if let Some((casualty, response)) = emergency {
+            let wanted = response
+                .responders
+                .iter()
+                .any(|role| role == &member.role);
+            let post = if wanted {
+                Some(casualty.translation)
+            } else {
+                departments.home(&member.role)
+            };
+
+            if let Some(post) = post {
+                // Only walk if they are not already standing there, or they
+                // shuffle on the spot for the whole crisis.
+                let flat = Vec3::new(post.x, transform.translation.y, post.z);
+                if transform.translation.distance(flat) > 1.5 {
+                    route.pending = Some(post);
+                    route.phase = CrewPhase::Arriving;
+                }
+                continue;
+            }
+        }
+
+        ambient.dwell -= time.delta_secs();
+        if ambient.dwell > 0.0 {
+            continue;
+        }
+        ambient.dwell = rand::random_range(DWELL_SECONDS.0..=DWELL_SECONDS.1);
+
+        // Somewhere else on the station: another department, or their own.
+        if let Some(next) = departments.somewhere_else(&member.role) {
+            route.pending = Some(next);
+            route.phase = CrewPhase::Arriving;
+        }
+    }
+}
+
+/// Puts a newly spawned crew member at their department, if the station has one
+/// for them.
+///
+/// A system rather than an argument to [`spawn_crew_member`], which has fourteen
+/// call sites across thirteen modules — none of which should have to learn about
+/// the station's layout to ask for a customer. They spawn off-screen either way,
+/// so moving them the same frame is invisible.
+fn start_crew_at_their_department(
+    departments: Res<Departments>,
+    mut arriving: Query<(&CrewMember, &mut Transform), Added<CrewRoute>>,
+) {
+    for (member, mut transform) in &mut arriving {
+        if let Some(home) = departments.home(&member.role) {
+            transform.translation.x = home.x;
+            transform.translation.z = home.z;
+        }
+    }
+}
+
 fn walk_route(
     mut commands: Commands,
     time: Res<Time>,
-    mut crew: Query<(Entity, &mut Transform, &mut CrewRoute)>,
+    nav: Res<crate::nav::NavGraph>,
+    departments: Res<Departments>,
+    mut crew: Query<(Entity, &mut Transform, &mut CrewRoute, Option<&CrewMember>)>,
 ) {
-    for (entity, mut transform, mut route) in &mut crew {
+    for (entity, mut transform, mut route, member) in &mut crew {
+        // Turn a new destination into a path, once, the frame it is set.
+        if let Some(goal) = route.pending.take() {
+            // Someone leaving heads for their own department when the station
+            // has one, rather than the generic spot outside the lobby door.
+            let goal = match (route.phase, member) {
+                (CrewPhase::Leaving, Some(member)) => {
+                    departments.home(&member.role).unwrap_or(goal)
+                }
+                _ => goal,
+            };
+            // Straight there if navigation has nothing to say. The graph is
+            // empty for a frame or two while the map loads, and a crew member
+            // must not stand in the doorway waiting for it — which is also what
+            // kept this working before there was any pathfinding at all.
+            route.waypoints = nav
+                .path(transform.translation, goal)
+                .unwrap_or_else(|| vec![goal]);
+            route.index = 0;
+        }
+
         let Some(target) = route.waypoints.get(route.index).copied() else {
             // Route finished. Arriving crew wait; leaving crew are done.
             if route.phase == CrewPhase::Leaving {
@@ -329,6 +564,380 @@ mod tests {
             .init_resource::<RadioLog>()
             .add_systems(Update, handle_crew_collapse);
         app
+    }
+
+    /// A crew member walking a real lab, with the nav graph they route on.
+    fn walking_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Departments>()
+            .insert_resource(crate::nav::NavGraph::build(
+                &crate::lab::WalkableAreas::from_floor_plan(),
+                crate::nav::NAV_RADIUS,
+            ))
+            .add_systems(
+                Update,
+                (start_crew_at_their_department, walk_route).chain(),
+            );
+        app
+    }
+
+    fn walker(app: &mut App, at: Vec3, route: CrewRoute) -> Entity {
+        app.world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Tester".into(),
+                    role: "Medical".into(),
+                },
+                Transform::from_translation(at),
+                route,
+            ))
+            .id()
+    }
+
+    fn tick(app: &mut App, seconds: f32) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(seconds));
+        app.update();
+    }
+
+    #[test]
+    fn a_crew_member_walks_all_the_way_to_the_counter() {
+        // The end-to-end of the whole navigation change: set a destination,
+        // walk, arrive. Before pathfinding this was two hardcoded waypoints; the
+        // observable behaviour must not have changed.
+        let mut app = walking_app();
+        let crew = walker(
+            &mut app,
+            Vec3::new(door_x(), 0.93, spawn_z()),
+            CrewRoute::arrival(0.0),
+        );
+
+        for _ in 0..400 {
+            tick(&mut app, 0.05);
+            if app.world().get::<CrewRoute>(crew).unwrap().phase == CrewPhase::Waiting {
+                break;
+            }
+        }
+
+        let route = app.world().get::<CrewRoute>(crew).unwrap();
+        assert_eq!(
+            route.phase,
+            CrewPhase::Waiting,
+            "never finished the walk to the counter",
+        );
+
+        let at = app.world().get::<Transform>(crew).unwrap().translation;
+        let counter = Vec3::new(COUNTER_SPOT.x, at.y, COUNTER_SPOT.z);
+        assert!(
+            at.distance(counter) < 0.5,
+            "stopped {:.2}m short of the counter, at {at:?}",
+            at.distance(counter),
+        );
+    }
+
+    #[test]
+    fn a_walk_across_the_suite_is_routed_rather_than_straight_through_walls() {
+        // What pathfinding buys that the hardcoded route could not: someone
+        // standing in the reaction bay is two rooms and two doorways from the
+        // counter. A straight line there crosses three walls, so the route must
+        // contain intermediate waypoints — and none of them may be the goal.
+        let mut app = walking_app();
+        let from = crate::lab::ROOMS[crate::lab::REACTION_BAY].center();
+        let crew = walker(
+            &mut app,
+            Vec3::new(from.x, 0.93, from.z),
+            CrewRoute::arrival(0.0),
+        );
+
+        tick(&mut app, 0.01);
+
+        let route = app.world().get::<CrewRoute>(crew).unwrap();
+        assert!(
+            route.waypoints.len() >= 3,
+            "expected a route through the hall and lobby, got {:?}",
+            route.waypoints,
+        );
+        assert!(
+            route.pending.is_none(),
+            "the destination should have been resolved on the first update",
+        );
+    }
+
+    #[test]
+    fn crew_come_from_and_return_to_their_own_department() {
+        // What the station's wings are for. A Medical crew member starts in
+        // Medical rather than the void south of the lobby, and heads back there
+        // when they are done — the whole visible difference between a lab with
+        // a corridor attached and a station with people in it.
+        let mut app = walking_app();
+        let medical = Vec3::new(-21.0, 0.0, 18.0);
+        app.world_mut()
+            .resource_mut::<Departments>()
+            .set("Medical".into(), medical);
+
+        let crew = walker(
+            &mut app,
+            Vec3::new(door_x(), 0.93, spawn_z()),
+            CrewRoute::arrival(0.0),
+        );
+        tick(&mut app, 0.01);
+
+        // Loose on purpose: they are placed and then immediately take their
+        // first step towards the counter in the same tick. Medical is thirty
+        // metres from the old spawn spot, so a quarter of a metre still tells
+        // the two apart unambiguously.
+        let at = app.world().get::<Transform>(crew).unwrap().translation;
+        assert!(
+            at.distance(Vec3::new(medical.x, at.y, medical.z)) < 0.25,
+            "started at {at:?}, not in Medical",
+        );
+
+        app.world_mut().get_mut::<CrewRoute>(crew).unwrap().leave();
+        tick(&mut app, 0.01);
+
+        let heading_for = *app
+            .world()
+            .get::<CrewRoute>(crew)
+            .unwrap()
+            .waypoints
+            .last()
+            .expect("a route home");
+        assert!(
+            (heading_for.x - medical.x).abs() < 0.01
+                && (heading_for.z - medical.z).abs() < 0.01,
+            "left towards {heading_for:?} instead of back to Medical",
+        );
+    }
+
+    #[test]
+    fn a_department_the_station_has_no_room_for_changes_nothing() {
+        // Every build without the map has an empty `Departments`, and so does a
+        // map missing a wing. Crew must keep arriving and leaving the way they
+        // did before any of this existed.
+        let mut app = walking_app();
+        let start = Vec3::new(door_x(), 0.93, spawn_z());
+        let crew = walker(&mut app, start, CrewRoute::arrival(0.0));
+
+        tick(&mut app, 0.01);
+        let at = app.world().get::<Transform>(crew).unwrap().translation;
+        assert!(
+            (at.x - start.x).abs() < 0.5,
+            "moved to a department that does not exist",
+        );
+
+        app.world_mut().get_mut::<CrewRoute>(crew).unwrap().leave();
+        tick(&mut app, 0.01);
+
+        let heading_for = *app
+            .world()
+            .get::<CrewRoute>(crew)
+            .unwrap()
+            .waypoints
+            .last()
+            .expect("a route out");
+        assert!(
+            (heading_for.z - spawn_z()).abs() < 0.01,
+            "left towards {heading_for:?} instead of off-station",
+        );
+    }
+
+    /// A station with two departments and residents idling in them.
+    fn station_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Departments>()
+            .insert_resource(crate::nav::NavGraph::build(
+                &crate::lab::WalkableAreas::from_floor_plan(),
+                crate::nav::NAV_RADIUS,
+            ))
+            .add_systems(Update, (ambient_behaviour, walk_route).chain());
+
+        let mut departments = app.world_mut().resource_mut::<Departments>();
+        departments.set("Medical".into(), Vec3::new(-21.0, 0.0, 18.0));
+        departments.set("Cargo".into(), Vec3::new(-5.0, 0.0, 18.0));
+        app
+    }
+
+    /// Someone standing around in the corridor, with nothing to do.
+    fn resident(app: &mut App, role: &str, at: Vec3) -> Entity {
+        app.world_mut()
+            .spawn((
+                CrewMember {
+                    name: format!("{role} Resident"),
+                    role: role.into(),
+                },
+                Transform::from_translation(at),
+                CrewRoute {
+                    waypoints: Vec::new(),
+                    index: 0,
+                    phase: CrewPhase::Waiting,
+                    pending: None,
+                },
+                // Long dwell, so any movement in these tests is the crisis
+                // talking and never the idle wander.
+                Ambient { dwell: 1_000.0 },
+            ))
+            .id()
+    }
+
+    fn casualty(app: &mut App, at: Vec3, responders: &[&str]) {
+        app.world_mut().spawn((
+            Transform::from_translation(at),
+            crate::crisis::CrisisResponse {
+                responders: responders.iter().map(|role| role.to_string()).collect(),
+            },
+        ));
+    }
+
+    fn destination(app: &App, crew: Entity) -> Vec3 {
+        *app.world()
+            .get::<CrewRoute>(crew)
+            .unwrap()
+            .waypoints
+            .last()
+            .expect("somewhere to be")
+    }
+
+    #[test]
+    fn residents_never_count_towards_how_busy_the_counter_is() {
+        // The regression this exists to stop happening twice: `generate_orders`
+        // counts crew to decide whether there is room for another customer, and
+        // `max_active_cap` is 5. Eight residents living on the station is
+        // already over it, so every order-spawning gate in the game closed
+        // permanently — no error, nothing in the log, orders simply stopped.
+        let mut app = App::new();
+
+        for role in ["Medical", "Cargo", "Security"] {
+            app.world_mut().spawn((
+                CrewMember {
+                    name: format!("{role} Resident"),
+                    role: role.into(),
+                },
+                Ambient { dwell: 1.0 },
+            ));
+        }
+        let visitor = app.world_mut().spawn(CrewMember {
+            name: "Customer".into(),
+            role: "Service".into(),
+        });
+        let visitor = visitor.id();
+
+        let mut all = app.world_mut().query::<&CrewMember>();
+        assert_eq!(all.iter(app.world()).count(), 4, "four crew exist");
+
+        let mut visiting = app.world_mut().query_filtered::<Entity, (
+            With<CrewMember>,
+            NotResident,
+        )>();
+        let counted: Vec<Entity> = visiting.iter(app.world()).collect();
+        assert_eq!(
+            counted,
+            vec![visitor],
+            "only the customer may count towards the counter being busy",
+        );
+    }
+
+    #[test]
+    fn a_department_that_can_help_walks_towards_the_casualty() {
+        // The user's rule, first half: if your department would be any use, you
+        // go to it.
+        let mut app = station_app();
+        let medic = resident(&mut app, "Medical", Vec3::new(-21.0, 0.93, 18.0));
+        let hurt = Vec3::new(4.0, 0.0, 5.6);
+        casualty(&mut app, hurt, &["Medical"]);
+
+        tick(&mut app, 0.01);
+
+        let heading_for = destination(&app, medic);
+        assert!(
+            heading_for.distance(hurt) < 0.01,
+            "a medic headed for {heading_for:?} instead of the casualty at {hurt:?}",
+        );
+    }
+
+    #[test]
+    fn a_department_that_cannot_help_goes_home_instead() {
+        // The second half: if you would be no use, you get out of the way. Note
+        // *not* the escape pod — that is the end of a campaign, not a bad shift.
+        let mut app = station_app();
+        let hauler = resident(&mut app, "Cargo", Vec3::new(0.0, 0.93, 0.0));
+        casualty(&mut app, Vec3::new(4.0, 0.0, 5.6), &["Medical"]);
+
+        tick(&mut app, 0.01);
+
+        let heading_for = destination(&app, hauler);
+        let home = Vec3::new(-5.0, 0.0, 18.0);
+        assert!(
+            heading_for.distance(home) < 0.01,
+            "a hauler headed for {heading_for:?} instead of home to Cargo",
+        );
+    }
+
+    #[test]
+    fn a_responder_already_at_the_casualty_does_not_shuffle_on_the_spot() {
+        // Without the "close enough" check, a responder standing over the
+        // casualty re-routes to their own position every frame, which reads as
+        // twitching and never stops.
+        let mut app = station_app();
+        let hurt = Vec3::new(4.0, 0.0, 5.6);
+        let medic = resident(&mut app, "Medical", Vec3::new(hurt.x, 0.93, hurt.z));
+        casualty(&mut app, hurt, &["Medical"]);
+
+        tick(&mut app, 0.01);
+
+        assert!(
+            app.world()
+                .get::<CrewRoute>(medic)
+                .unwrap()
+                .waypoints
+                .is_empty(),
+            "re-routed despite already standing on the casualty",
+        );
+    }
+
+    #[test]
+    fn with_no_casualty_nobody_is_summoned_anywhere() {
+        // Idle crew wander on their own clock; a long dwell means they stay put.
+        let mut app = station_app();
+        let medic = resident(&mut app, "Medical", Vec3::new(0.0, 0.93, 0.0));
+
+        tick(&mut app, 0.01);
+
+        assert!(
+            app.world()
+                .get::<CrewRoute>(medic)
+                .unwrap()
+                .waypoints
+                .is_empty(),
+            "went somewhere with no crisis to go to",
+        );
+    }
+
+    #[test]
+    fn a_crew_member_still_walks_when_the_station_has_no_nav_graph() {
+        // Under the map backend the graph is empty for a frame or two while the
+        // scene loads. Crew asking for a route in that window must head for the
+        // door anyway rather than stand still forever.
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Departments>()
+            .init_resource::<crate::nav::NavGraph>()
+            .add_systems(Update, walk_route);
+
+        let start = Vec3::new(door_x(), 0.93, spawn_z());
+        let crew = walker(&mut app, start, CrewRoute::arrival(0.0));
+
+        for _ in 0..20 {
+            tick(&mut app, 0.05);
+        }
+
+        let at = app.world().get::<Transform>(crew).unwrap().translation;
+        assert!(
+            at.distance(start) > 0.5,
+            "stood still with an empty nav graph",
+        );
     }
 
     fn flatten(app: &mut App, crew: Entity) {

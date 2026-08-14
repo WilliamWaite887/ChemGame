@@ -244,7 +244,7 @@ fn generate_antagonist_orders(
     shift: Res<Shift>,
     underworld: Res<UnderworldStanding>,
     mut broadcasts: ResMut<PendingBroadcasts>,
-    active: Query<&CrewMember>,
+    active: Query<&CrewMember, crate::crew::NotResident>,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;

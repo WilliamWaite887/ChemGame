@@ -490,7 +490,10 @@ fn handle_leave_machine(
         let Ok(mut mode) = modes.get_mut(player) else {
             continue;
         };
-        if let InteractionMode::UsingMachine(machine) = *mode {
+        // Not a bare `UsingMachine` match: on a listening host this component
+        // *is* the local player's, so it can be `ReadingBook` over a machine
+        // the claim is still theirs.
+        if let Some(machine) = mode.claimed_machine() {
             if let Ok(mut machine) = machines.get_mut(machine) {
                 if machine.in_use_by == Some(player) {
                     machine.in_use_by = None;

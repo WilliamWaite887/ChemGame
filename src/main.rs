@@ -16,6 +16,7 @@ mod knowledge;
 mod lab;
 mod machines;
 mod menu;
+mod nav;
 mod net;
 mod obsessed;
 mod orders;
@@ -81,6 +82,8 @@ fn main() {
             net::NetPlugin,
             chem_data::ChemDataPlugin,
             lab::LabPlugin,
+            // After the lab: it rebuilds off `WalkableAreas`, which the lab owns.
+            nav::NavPlugin,
             machines::MachinePlugin,
             containers::ContainerPlugin,
             crew::CrewPlugin,

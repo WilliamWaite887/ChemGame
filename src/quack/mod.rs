@@ -208,7 +208,13 @@ fn handle_quack_resolution(
     mut progress: ResMut<QuackProgress>,
     mut shift: ResMut<Shift>,
     mut radio: ResMut<RadioLog>,
-    mut patients: Query<(&CrewMember, &CrewRoute, &mut Body, &mut Bloodstream)>,
+    // `Without<Ambient>`: the joke only lands if the player can see it happen.
+    // Ambient crew idle all over the station, and a quack dosing someone two
+    // departments away is a mechanic that fires into an empty room.
+    mut patients: Query<
+        (&CrewMember, &CrewRoute, &mut Body, &mut Bloodstream),
+        Without<crate::crew::Ambient>,
+    >,
 ) {
     let Some(script) = script else {
         resolved.clear();
