@@ -445,9 +445,10 @@ fn value_at(knob: Knob, fraction: f32) -> f32 {
 /// once you are pulling toward one end — would otherwise stop dead the moment
 /// the cursor crossed the edge.
 ///
-/// This is the one screen in the game where a drag is the right control: the
-/// cursor is free here. `machines::TEMPERATURE_PRESETS` stays buttons for the
-/// opposite reason — that panel is worked with a crosshair.
+/// The cursor is free here, same as it is over any open machine panel (see
+/// `interaction::panel_input`) — `ui::drag_thermostat_slider` on the reaction
+/// chamber's dial is built the same way, just scoped to a machine over the
+/// network instead of a local resource.
 fn drag_sliders(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,

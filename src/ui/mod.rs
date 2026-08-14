@@ -16,7 +16,7 @@ use chem_sim::{Category, DamageKind, Kelvin, ReactionId, ReagentId, Units};
 use crate::arc::{ArcScript, Campaign, Reveal};
 use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
-use crate::containers::{Container, ContainerKind, InSlot, Stored};
+use crate::containers::{Container, ContainerKind, InSlot, InSlotB, Stored};
 use crate::crew::{CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{leave_machine, InteractionMode, Interactable, LeaveMachineRequested};
 use crate::knowledge::{
@@ -24,11 +24,11 @@ use crate::knowledge::{
     UpgradeDispenserRequested, HINT_COST,
 };
 use crate::machines::{
-    slotted_container, stored_in, AnalyzeRequested, Buffer, BufferDirection,
+    slotted_container, slotted_container_b, stored_in, AnalyzeRequested, Buffer, BufferDirection,
     BufferTransferRequested, DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested,
-    GrindRequested, Hopper, Machine, MachineKind, PackageRequested, SetHeaterPower,
-    SetTargetTemperature, TakeRequested, TestBenchStock, Thermostat, LOCKER_CAPACITY,
-    TEMPERATURE_PRESETS,
+    GrindRequested, Hopper, Machine, MachineKind, MachineSlot, PackageRequested, SetHeaterPower,
+    SetTargetTemperature, TakeRequested, Thermostat, LOCKER_CAPACITY, TEMPERATURE_MARKS,
+    TEMPERATURE_MAX, TEMPERATURE_MIN,
 };
 use crate::orders::{reference_category, Department, Order, Shift};
 use crate::player::LocalPlayer;
@@ -86,8 +86,14 @@ impl Plugin for UiPlugin {
             Update,
             (
                 handle_panel_clicks,
+                drag_thermostat_slider,
                 button_feedback,
                 sync_panel,
+                // After the rebuild, so a track drawn this frame has its fill
+                // patched in this frame rather than sitting one frame stale —
+                // the same ordering `settings::sync_sliders` uses and for the
+                // same reason.
+                sync_thermostat_slider,
                 update_phase_banner,
                 update_order_queue,
                 update_vitals_panel,
@@ -105,6 +111,7 @@ impl Plugin for UiPlugin {
         .init_resource::<BookView>()
         .init_resource::<LastPanel>()
         .init_resource::<LastSignState>()
+        .init_resource::<ThermostatDrag>()
         .add_message::<ShowToast>();
     }
 }
@@ -126,17 +133,19 @@ enum PanelAction {
     SetAmount(Units),
     Dispense(ReagentId),
     UpgradeDispenser,
-    Eject,
+    /// Which slot to act on. Every machine but the Mixing Chamber only ever
+    /// has slot `A`; the panel bodies for those simply never build a `B`
+    /// button.
+    Eject(MachineSlot),
     /// Take one named item out of the open locker. Carries the item because a
     /// locker holds many, unlike every slot in the lab, which holds one.
     Take(Entity),
-    Empty,
-    ToBuffer(ReagentId, Units),
-    ToContainer(ReagentId, Units),
+    Empty(MachineSlot),
+    ToBuffer(ReagentId, Units, MachineSlot),
+    ToContainer(ReagentId, Units, MachineSlot),
     Package(ContainerKind),
     Analyze,
     Grind { all: bool },
-    SetTarget(Kelvin),
     TogglePower,
     BuyHint(ReactionId),
     ShowCategory(Option<Category>),
@@ -184,6 +193,10 @@ struct PanelSignature {
     mode: InteractionMode,
     container: Option<Entity>,
     contents: Vec<(ReagentId, Units)>,
+    /// The Mixing Chamber's second beaker. `None` for every other machine,
+    /// which never has one.
+    container_b: Option<Entity>,
+    contents_b: Vec<(ReagentId, Units)>,
     buffer: Vec<(ReagentId, Units)>,
     hopper: Vec<ProduceId>,
     /// What the open locker holds, already rendered to the lines the panel
@@ -191,9 +204,6 @@ struct PanelSignature {
     /// a beaker's *contents* can change while it sits on the shelf, and the ids
     /// alone would not notice.
     stored: Vec<StoredItem>,
-    /// The loaded container is practice stock. Tracked separately because the
-    /// delivery window has to explain why it will not take it.
-    test_stock: bool,
     /// A batch is still running in the loaded container. Here so the readout
     /// stops saying so the moment it finishes; the *numbers* moving while it
     /// runs are already covered by `contents` above, which is what actually
@@ -230,8 +240,14 @@ struct PanelSignature {
     /// every frame, and comparing the raw value would rebuild the panel every
     /// frame with it. Five kelvin is fine enough to watch a batch climb and
     /// coarse enough to cost one rebuild every second or so.
+    ///
+    /// The *target* is deliberately **not** here any more — it used to be,
+    /// rounded the same way, but that meant every ~5K of dragging the slider
+    /// rebuilt the whole panel out from under the mouse. The live target is
+    /// patched in place by `sync_thermostat_slider` instead, the same
+    /// "rebuild on structure, patch on value" split `settings::sync_sliders`
+    /// uses for exactly the same reason.
     temperature: Option<i32>,
-    target: Option<i32>,
     powered: bool,
 }
 
@@ -247,10 +263,11 @@ impl Default for PanelSignature {
             mode: InteractionMode::UsingMachine(Entity::PLACEHOLDER),
             container: None,
             contents: Vec::new(),
+            container_b: None,
+            contents_b: Vec::new(),
             buffer: Vec::new(),
             hopper: Vec::new(),
             stored: Vec::new(),
-            test_stock: false,
             reacting: false,
             amount: None,
             known_recipes: usize::MAX,
@@ -268,7 +285,6 @@ impl Default for PanelSignature {
             research_points: u32::MAX,
             arc: None,
             temperature: Some(i32::MAX),
-            target: Some(i32::MAX),
             powered: true,
         }
     }
@@ -363,8 +379,8 @@ type MachineParts<'w, 's> = Query<
     ),
 >;
 
-/// Whatever a container is holding, and whether it came off the test bench.
-type SlotContents<'w, 's> = Query<'w, 's, (&'static Container, Has<TestBenchStock>)>;
+/// Whatever a container is holding.
+type SlotContents<'w, 's> = Query<'w, 's, &'static Container>;
 
 /// What a locker's panel reads. Bundled because `sync_panel` is already close
 /// to Bevy's sixteen-parameter ceiling, and because these two are only ever
@@ -447,7 +463,7 @@ fn stored_items(
     stored_in(locker, &view.stored)
         .into_iter()
         .map(|item| {
-            let container = containers.get(item).ok().map(|(container, ..)| container);
+            let container = containers.get(item).ok();
             let name = container
                 .map(|container| container.kind.label().to_string())
                 .or_else(|| view.labels.get(item).ok().map(|label| label.label.clone()))
@@ -479,6 +495,7 @@ fn sync_panel(
     modes: Query<&InteractionMode, With<LocalPlayer>>,
     machines: MachineParts,
     slotted: Query<(Entity, &InSlot)>,
+    slotted_b: Query<(Entity, &InSlotB)>,
     containers: SlotContents,
     storage: StorageView,
     knowledge: Res<Knowledge>,
@@ -496,9 +513,13 @@ fn sync_panel(
         _ => None,
     };
     let loaded_entity = open_machine.and_then(|machine| slotted_container(machine, &slotted));
-    let slot_contents = loaded_entity.and_then(|entity| containers.get(entity).ok());
-    let loaded = slot_contents.map(|(container, _)| container);
-    let test_stock = slot_contents.is_some_and(|(_, practice)| practice);
+    let loaded = loaded_entity.and_then(|entity| containers.get(entity).ok());
+    // The Mixing Chamber's second beaker. `slotted_container_b` simply never
+    // matches for any other machine, since only the Mixing Chamber ever gets
+    // an `InSlotB` in the first place.
+    let loaded_entity_b =
+        open_machine.and_then(|machine| slotted_container_b(machine, &slotted_b));
+    let loaded_b = loaded_entity_b.and_then(|entity| containers.get(entity).ok());
     // Derived from the beaker and the chemistry rather than read off a marker
     // component, so a guest can answer it too. `machines::Reacting` is the
     // authority's own bookkeeping and is deliberately not on the wire; a
@@ -534,6 +555,10 @@ fn sync_panel(
         contents: loaded
             .map(|container| container.solution.iter().collect())
             .unwrap_or_default(),
+        container_b: loaded_entity_b,
+        contents_b: loaded_b
+            .map(|container| container.solution.iter().collect())
+            .unwrap_or_default(),
         buffer: machine_parts
             .and_then(|(_, _, buffer, _, _)| buffer)
             .map(|buffer| buffer.0.iter().collect())
@@ -543,7 +568,6 @@ fn sync_panel(
             .map(|hopper| hopper.0.clone())
             .unwrap_or_default(),
         stored: stored.clone(),
-        test_stock,
         reacting,
         amount: machine_parts
             .and_then(|(_, amount, _, _, _)| amount)
@@ -565,9 +589,6 @@ fn sync_panel(
             .filter(|(machine, ..)| machine.kind == MachineKind::ReactionChamber)
             .and(loaded)
             .map(|container| panel_temperature(container.solution.temperature)),
-        target: machine_parts
-            .and_then(|(_, _, _, _, thermostat)| thermostat)
-            .map(|thermostat| panel_temperature(thermostat.target)),
         powered: machine_parts
             .and_then(|(_, _, _, _, thermostat)| thermostat)
             .is_some_and(|thermostat| thermostat.powered),
@@ -636,19 +657,11 @@ fn sync_panel(
                     panel.spawn(heading(machine.kind.label()));
 
                     match machine.kind {
-                        MachineKind::Dispenser | MachineKind::TestBench => {
-                            dispenser_body(
-                                panel,
-                                &db,
-                                &knowledge,
-                                machine.kind,
-                                amount,
-                                loaded,
-                                reacting,
-                            );
+                        MachineKind::ChemMaster5000 => {
+                            dispenser_body(panel, &db, &knowledge, amount, loaded, reacting);
                         }
-                        MachineKind::ChemMaster => {
-                            chemmaster_body(panel, &db, buffer, loaded);
+                        MachineKind::MixingChamber => {
+                            mixing_chamber_body(panel, &db, buffer, loaded, loaded_b);
                         }
                         MachineKind::Analyzer => {
                             analyzer_body(panel, &db, &knowledge, loaded);
@@ -657,7 +670,7 @@ fn sync_panel(
                             grinder_body(panel, &db, catalog.as_deref(), hopper, loaded, reacting);
                         }
                         MachineKind::DeliveryWindow => {
-                            delivery_window_body(panel, &db, loaded, reacting, test_stock);
+                            delivery_window_body(panel, &db, loaded, reacting);
                         }
                         MachineKind::StandingBoard => {
                             standing_board_body(panel, shift, &stage, arc.as_ref());
@@ -909,20 +922,11 @@ fn dispenser_body(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
     knowledge: &Knowledge,
-    kind: MachineKind,
     amount: Option<&DispenseAmount>,
     loaded: Option<&Container>,
     reacting: bool,
 ) {
     let selected = amount.map(|a| a.0).unwrap_or(Units::whole(10));
-
-    if kind == MachineKind::TestBench {
-        panel.spawn(label(
-            "Free reagents. Anything made here cannot be delivered for credit.",
-            13.0,
-            TEXT_DIM,
-        ));
-    }
 
     panel.spawn(label("Dispense amount", 13.0, TEXT_DIM));
     panel.spawn(row()).with_children(|row| {
@@ -1011,6 +1015,40 @@ fn dispenser_body(
     container_readout(panel, db, loaded, reacting, true);
 }
 
+/// The reaction chamber's target-temperature dial.
+///
+/// Only one is ever alive: a client only ever has one panel open, unlike
+/// `settings::Knob`, which has to tell several simultaneous sliders apart.
+#[derive(Component)]
+struct TempSlider;
+
+/// The filled portion of [`TempSlider`], resized to match the live target.
+#[derive(Component)]
+struct TempSliderFill;
+
+/// The number printed above [`TempSlider`].
+#[derive(Component)]
+struct TempSliderReadout;
+
+/// The value a chemist is currently dragging the dial to, before the server
+/// has echoed it back — so their own view never fights their own input
+/// waiting on a round trip. `None` the rest of the time, when the track just
+/// shows whatever `Thermostat.target` has replicated.
+#[derive(Resource, Default)]
+struct ThermostatDrag(Option<f32>);
+
+const TEMP_SLIDER_TRACK_HEIGHT: f32 = 18.0;
+
+/// Where `kelvin` sits along the dial, as 0..=1.
+fn temp_fraction_of(kelvin: f32) -> f32 {
+    ((kelvin - TEMPERATURE_MIN) / (TEMPERATURE_MAX - TEMPERATURE_MIN)).clamp(0.0, 1.0)
+}
+
+/// The temperature `fraction` of the way along the dial.
+fn temp_at_fraction(fraction: f32) -> f32 {
+    TEMPERATURE_MIN + (TEMPERATURE_MAX - TEMPERATURE_MIN) * fraction.clamp(0.0, 1.0)
+}
+
 /// The reaction chamber: a dial, a switch, and a thermometer.
 ///
 /// Deliberately spare. The machine does nothing on its own — everything
@@ -1053,19 +1091,65 @@ fn heater_body(
         },
     ));
 
-    panel.spawn(label("Target temperature", 13.0, TEXT_DIM));
-    panel.spawn(row()).with_children(|row| {
-        for kelvin in TEMPERATURE_PRESETS {
-            let target = Kelvin(kelvin);
-            let mut entity = row.spawn(button(
-                format!("{kelvin:.0}K"),
-                PanelAction::SetTarget(target),
+    panel
+        .spawn(Node {
+            width: percent(100),
+            justify_content: JustifyContent::SpaceBetween,
+            margin: UiRect::top(px(10)),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn(label("Target temperature", 14.0, TEXT));
+            row.spawn((
+                Text::new(format!("{:.0}K", thermostat.target.0)),
+                TextFont::from_font_size(14.0),
+                TextColor(TEXT_DIM),
+                TempSliderReadout,
             ));
-            if (thermostat.target.0 - kelvin).abs() < 0.5 {
-                entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
+        });
+
+    // `Button` so `Interaction` is tracked for it — that is what tells
+    // `drag_thermostat_slider` a press started on the track at all.
+    panel
+        .spawn((
+            Button,
+            Node {
+                width: percent(100),
+                height: px(TEMP_SLIDER_TRACK_HEIGHT),
+                margin: UiRect::bottom(px(4)),
+                border_radius: BorderRadius::all(px(TEMP_SLIDER_TRACK_HEIGHT / 2.0)),
+                ..default()
+            },
+            BackgroundColor(SECTION_BG),
+            TempSlider,
+        ))
+        .with_children(|track| {
+            track.spawn((
+                Node {
+                    width: percent(temp_fraction_of(thermostat.target.0) * 100.0),
+                    height: percent(100),
+                    border_radius: BorderRadius::all(px(TEMP_SLIDER_TRACK_HEIGHT / 2.0)),
+                    ..default()
+                },
+                BackgroundColor(BUTTON_ACTIVE),
+                TempSliderFill,
+            ));
+            // Non-interactive tick marks at the real recipe thresholds — not
+            // buttons any more, just a hint of where the meaningful
+            // temperatures sit along an otherwise plain dial.
+            for kelvin in TEMPERATURE_MARKS {
+                track.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: percent(temp_fraction_of(kelvin) * 100.0),
+                        width: px(2),
+                        height: percent(100),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
+                ));
             }
-        }
-    });
+        });
 
     panel.spawn(row()).with_children(|row| {
         let mut entity = row.spawn(button(
@@ -1079,48 +1163,118 @@ fn heater_body(
         if thermostat.powered {
             entity.insert(BackgroundColor(BUTTON_ACTIVE));
         }
-        row.spawn(button("Eject container", PanelAction::Eject));
+        row.spawn(button("Eject container", PanelAction::Eject(MachineSlot::A)));
     });
 
     container_readout(panel, db, loaded, reacting, false);
 }
 
-fn chemmaster_body(
+/// Drags the reaction chamber's dial while the mouse is held on it.
+///
+/// The same shape as `settings::drag_sliders`, but scoped to a specific
+/// machine over the network rather than a local resource: dragging writes
+/// `SetTargetTemperature` requests, and the server — not this system — is
+/// what actually moves `Thermostat.target`. Only one [`TempSlider`] is ever
+/// alive at once, so unlike `drag_sliders` this never has to work out *which*
+/// track a press landed on.
+fn drag_thermostat_slider(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    track: Query<(&Interaction, &ComputedNode, &UiGlobalTransform), With<TempSlider>>,
+    modes: Query<&InteractionMode, With<LocalPlayer>>,
+    mut held: Local<bool>,
+    mut drag: ResMut<ThermostatDrag>,
+    mut set_target: MessageWriter<SetTargetTemperature>,
+) {
+    if !mouse.pressed(MouseButton::Left) {
+        *held = false;
+        drag.0 = None;
+        return;
+    }
+    let Ok((interaction, node, transform)) = track.single() else {
+        // No slider on screen — the panel is closed, or showing a different
+        // machine — so there is nothing to drag and nothing to keep held.
+        *held = false;
+        drag.0 = None;
+        return;
+    };
+    if !*held {
+        *held = *interaction != Interaction::None;
+    }
+    if !*held {
+        return;
+    }
+    let Some(InteractionMode::UsingMachine(machine)) = modes.iter().next().copied() else {
+        return;
+    };
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Some(local) = node.normalize_point(*transform, cursor) else {
+        return;
+    };
+    let value = temp_at_fraction(local.x + 0.5);
+    if drag.0 != Some(value) {
+        drag.0 = Some(value);
+        set_target.write(SetTargetTemperature {
+            machine,
+            target: Kelvin(value),
+        });
+    }
+}
+
+/// Keeps the dial's fill and printed value on the live target.
+///
+/// Reads the locally-held drag value first, so the dragging chemist's own
+/// view never fights their own input while it waits on a round trip to the
+/// server; falls back to the replicated `Thermostat.target` otherwise, which
+/// is what draws it correctly the instant the panel opens, before any drag
+/// has happened at all.
+fn sync_thermostat_slider(
+    drag: Res<ThermostatDrag>,
+    thermostats: Query<&Thermostat>,
+    modes: Query<&InteractionMode, With<LocalPlayer>>,
+    mut fills: Query<&mut Node, With<TempSliderFill>>,
+    mut readouts: Query<&mut Text, With<TempSliderReadout>>,
+) {
+    let value = match drag.0 {
+        Some(value) => Some(value),
+        None => match modes.iter().next().copied() {
+            Some(InteractionMode::UsingMachine(machine)) => {
+                thermostats.get(machine).ok().map(|thermostat| thermostat.target.0)
+            }
+            _ => None,
+        },
+    };
+    let Some(value) = value else {
+        return;
+    };
+    for mut node in &mut fills {
+        node.width = percent(temp_fraction_of(value) * 100.0);
+    }
+    for mut text in &mut readouts {
+        let wanted = format!("{value:.0}K");
+        if text.0 != wanted {
+            text.0 = wanted;
+        }
+    }
+}
+
+/// Two beaker slots sharing one buffer, rather than the single slot every
+/// other machine has: pull a reagent from Beaker A into the buffer, then push
+/// it into Beaker B, without ejecting one to swap the other in.
+fn mixing_chamber_body(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
     buffer: Option<&Buffer>,
-    loaded: Option<&Container>,
+    loaded_a: Option<&Container>,
+    loaded_b: Option<&Container>,
 ) {
-    panel.spawn(label("Loaded container", 13.0, TEXT_DIM));
-    panel
-        .spawn((section(), BackgroundColor(SECTION_BG)))
-        .with_children(|section| {
-            let Some(container) = loaded else {
-                section.spawn(label(
-                    "No container loaded. Carry a beaker over and press E.",
-                    14.0,
-                    TEXT_DIM,
-                ));
-                return;
-            };
-            if container.solution.is_empty() {
-                section.spawn(label("Empty.", 14.0, TEXT_DIM));
-                return;
-            }
-            for (reagent, quantity) in container.solution.iter() {
-                section.spawn(row()).with_children(|row| {
-                    row.spawn(reagent_name(db, reagent, quantity));
-                    for step in [5, 10] {
-                        let units = Units::whole(step);
-                        row.spawn(button(
-                            format!("▸{step}"),
-                            PanelAction::ToBuffer(reagent, units),
-                        ));
-                    }
-                    row.spawn(button("▸All", PanelAction::ToBuffer(reagent, quantity)));
-                });
-            }
-        });
+    mixing_chamber_beaker(panel, db, "Beaker A", loaded_a, MachineSlot::A);
+    mixing_chamber_beaker(panel, db, "Beaker B", loaded_b, MachineSlot::B);
 
     panel.spawn(label("Buffer", 13.0, TEXT_DIM));
     panel
@@ -1136,7 +1290,14 @@ fn chemmaster_body(
             for (reagent, quantity) in buffer.0.iter() {
                 section.spawn(row()).with_children(|row| {
                     row.spawn(reagent_name(db, reagent, quantity));
-                    row.spawn(button("◂All", PanelAction::ToContainer(reagent, quantity)));
+                    row.spawn(button(
+                        "◂A",
+                        PanelAction::ToContainer(reagent, quantity, MachineSlot::A),
+                    ));
+                    row.spawn(button(
+                        "◂B",
+                        PanelAction::ToContainer(reagent, quantity, MachineSlot::B),
+                    ));
                 });
             }
         });
@@ -1158,10 +1319,56 @@ fn chemmaster_body(
             PanelAction::Package(ContainerKind::Syringe),
         ));
     });
+}
 
-    panel.spawn(row()).with_children(|row| {
-        row.spawn(button("Eject container", PanelAction::Eject));
-    });
+/// One of the Mixing Chamber's two beaker slots: its contents, a way to pull
+/// each reagent into the shared buffer, and its own eject button — ejecting
+/// is per slot, so pulling one beaker never disturbs the other.
+fn mixing_chamber_beaker(
+    panel: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    heading_text: &str,
+    loaded: Option<&Container>,
+    slot: MachineSlot,
+) {
+    panel.spawn(label(heading_text, 13.0, TEXT_DIM));
+    panel
+        .spawn((section(), BackgroundColor(SECTION_BG)))
+        .with_children(|section| {
+            match loaded {
+                None => {
+                    section.spawn(label(
+                        "No container loaded. Carry a beaker over and press E.",
+                        14.0,
+                        TEXT_DIM,
+                    ));
+                }
+                Some(container) if container.solution.is_empty() => {
+                    section.spawn(label("Empty.", 14.0, TEXT_DIM));
+                }
+                Some(container) => {
+                    for (reagent, quantity) in container.solution.iter() {
+                        section.spawn(row()).with_children(|row| {
+                            row.spawn(reagent_name(db, reagent, quantity));
+                            for step in [5, 10] {
+                                let units = Units::whole(step);
+                                row.spawn(button(
+                                    format!("▸{step}"),
+                                    PanelAction::ToBuffer(reagent, units, slot),
+                                ));
+                            }
+                            row.spawn(button(
+                                "▸All",
+                                PanelAction::ToBuffer(reagent, quantity, slot),
+                            ));
+                        });
+                    }
+                }
+            }
+            section.spawn(row()).with_children(|row| {
+                row.spawn(button("Eject", PanelAction::Eject(slot)));
+            });
+        });
 }
 
 fn analyzer_body(
@@ -1223,7 +1430,7 @@ fn analyzer_body(
 
             section.spawn(row()).with_children(|row| {
                 row.spawn(button("Identify method", PanelAction::Analyze));
-                row.spawn(button("Eject", PanelAction::Eject));
+                row.spawn(button("Eject", PanelAction::Eject(MachineSlot::A)));
             });
 
             section.spawn(label(
@@ -1252,7 +1459,7 @@ fn grinder_body(
 ) {
     panel.spawn(label(
         "Extracts produce straight into the beaker. Fast, and never clean — \
-         what comes out still has to go through the ChemMaster.",
+         what comes out still has to go through the Mixing Chamber.",
         13.0,
         TEXT_DIM,
     ));
@@ -1365,7 +1572,6 @@ fn delivery_window_body(
     db: &ChemDb,
     loaded: Option<&Container>,
     reacting: bool,
-    test_stock: bool,
 ) {
     panel.spawn(label(
         "Anything left here goes to the next crew member at the counter who \
@@ -1381,14 +1587,7 @@ fn delivery_window_body(
     };
 
     // Worst news first, same order the grading runs in.
-    let (message, color) = if test_stock {
-        (
-            "Test bench stock. Nobody will take this — rinse it out and make \
-             the real thing."
-                .to_string(),
-            Color::srgb(0.95, 0.55, 0.45),
-        )
-    } else if container.solution.is_empty() {
+    let (message, color) = if container.solution.is_empty() {
         (
             "Empty. Put a finished batch in and it will go out on its own.".to_string(),
             TEXT_DIM,
@@ -1469,9 +1668,9 @@ fn container_readout(
             }
 
             section.spawn(row()).with_children(|row| {
-                row.spawn(button("Eject", PanelAction::Eject));
+                row.spawn(button("Eject", PanelAction::Eject(MachineSlot::A)));
                 if show_empty_button {
-                    row.spawn(button("Empty", PanelAction::Empty));
+                    row.spawn(button("Empty", PanelAction::Empty(MachineSlot::A)));
                 }
             });
         });
@@ -1852,8 +2051,8 @@ fn render_recipe_node(
 
 /// One ingredient row under a known node: recurses one level deeper if
 /// something produces it, otherwise a leaf naming the raw reagent and,
-/// read-only, whether it's still locked at the Dispenser — unlocking still
-/// only happens there, so this is a note, not a button.
+/// read-only, whether it's still locked at the ChemMaster 5000 — unlocking
+/// still only happens there, so this is a note, not a button.
 #[allow(clippy::too_many_arguments)]
 fn render_ingredient_node(
     pane: &mut ChildSpawnerCommands,
@@ -2889,7 +3088,6 @@ struct PanelMessages<'w> {
     package: MessageWriter<'w, PackageRequested>,
     analyze: MessageWriter<'w, AnalyzeRequested>,
     grind: MessageWriter<'w, GrindRequested>,
-    set_target: MessageWriter<'w, SetTargetTemperature>,
     set_power: MessageWriter<'w, SetHeaterPower>,
     toggle_accepting: MessageWriter<'w, ToggleAcceptingOrders>,
     call_it: MessageWriter<'w, CallItAShift>,
@@ -2975,8 +3173,11 @@ fn handle_panel_clicks(
                     reagent: *reagent,
                 });
             }
-            PanelAction::Eject => {
-                out.eject.write(EjectRequested { machine });
+            PanelAction::Eject(slot) => {
+                out.eject.write(EjectRequested {
+                    machine,
+                    slot: *slot,
+                });
             }
             PanelAction::Take(item) => {
                 out.take.write(TakeRequested {
@@ -2984,23 +3185,28 @@ fn handle_panel_clicks(
                     item: *item,
                 });
             }
-            PanelAction::Empty => {
-                out.empty.write(EmptyRequested { machine });
+            PanelAction::Empty(slot) => {
+                out.empty.write(EmptyRequested {
+                    machine,
+                    slot: *slot,
+                });
             }
-            PanelAction::ToBuffer(reagent, amount) => {
+            PanelAction::ToBuffer(reagent, amount, slot) => {
                 out.transfer.write(BufferTransferRequested {
                     machine,
                     reagent: *reagent,
                     amount: *amount,
                     direction: BufferDirection::ToBuffer,
+                    slot: *slot,
                 });
             }
-            PanelAction::ToContainer(reagent, amount) => {
+            PanelAction::ToContainer(reagent, amount, slot) => {
                 out.transfer.write(BufferTransferRequested {
                     machine,
                     reagent: *reagent,
                     amount: *amount,
                     direction: BufferDirection::ToContainer,
+                    slot: *slot,
                 });
             }
             PanelAction::Package(kind) => {
@@ -3014,14 +3220,6 @@ fn handle_panel_clicks(
             }
             PanelAction::Grind { all } => {
                 out.grind.write(GrindRequested { machine, all: *all });
-            }
-            // Requests, not writes: the server owns the temperature, and a
-            // client that set it locally would be corrected a frame later.
-            PanelAction::SetTarget(target) => {
-                out.set_target.write(SetTargetTemperature {
-                    machine,
-                    target: *target,
-                });
             }
             PanelAction::TogglePower => {
                 let on = thermostats
@@ -3063,6 +3261,40 @@ fn handle_panel_clicks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dial_reads_back_what_was_dragged_onto_it() {
+        // Mirrors `settings::a_dial_reads_back_what_was_dragged_onto_it`: the
+        // reaction chamber's dial is the same fraction-of-a-range shape, just
+        // scoped to a machine over the network instead of a local resource.
+        for fraction in [0.0, 0.25, 0.5, 1.0] {
+            let value = temp_at_fraction(fraction);
+            assert!(
+                (temp_fraction_of(value) - fraction).abs() < 1e-5,
+                "the dial lost the value at {fraction}"
+            );
+        }
+    }
+
+    #[test]
+    fn dragging_past_either_end_of_the_dial_clamps() {
+        // The drag reads a raw cursor position, which is routinely outside
+        // the track — pulling toward an end is how you reach it.
+        assert_eq!(temp_at_fraction(-3.0), TEMPERATURE_MIN);
+        assert_eq!(temp_at_fraction(4.0), TEMPERATURE_MAX);
+    }
+
+    #[test]
+    fn the_dial_range_covers_every_recipe_threshold_with_margin() {
+        // The whole reason 173-600K was chosen: 100K of headroom past the
+        // lowest and highest temperatures anything in the data gates on.
+        for kelvin in TEMPERATURE_MARKS {
+            assert!(
+                kelvin > TEMPERATURE_MIN && kelvin < TEMPERATURE_MAX,
+                "{kelvin}K threshold sits outside the dial's own range"
+            );
+        }
+    }
 
     #[test]
     fn the_banner_reads_the_accepting_sign() {

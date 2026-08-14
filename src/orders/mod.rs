@@ -19,7 +19,7 @@ use crate::crew::{spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{InteractRequested, Interactable};
 use crate::knowledge::{research_for_delivery, Knowledge};
 use crate::lab::COUNTER_SPOT;
-use crate::machines::{chemist_entity, slotted_container, Machine, MachineKind, TestBenchStock};
+use crate::machines::{chemist_entity, slotted_container, Machine, MachineKind};
 use crate::net::is_authority;
 use crate::player::Chemist;
 use crate::radio::{announce_request, channel_for, RadioEntry, RadioLog};
@@ -1270,7 +1270,6 @@ fn handle_delivery(
     db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<InteractRequested>>,
     mut shift: ResMut<Shift>,
-    mut radio: ResMut<RadioLog>,
     mut resolved: MessageWriter<OrderResolved>,
     mut crew: Query<(
         &CrewMember,
@@ -1281,7 +1280,7 @@ fn handle_delivery(
         Has<CounterOrder>,
     )>,
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
-    containers: Query<(Entity, &Container, &HeldBy, Has<TestBenchStock>)>,
+    containers: Query<(Entity, &Container, &HeldBy)>,
     chemists: Query<(Entity, &Chemist)>,
     mut knowledge: ResMut<Knowledge>,
 ) {
@@ -1298,26 +1297,11 @@ fn handle_delivery(
             .get_mut(request.target)
             .ok()
             .map(|(b, blood)| (b.into_inner(), blood.into_inner()));
-        let Some((container_entity, container, _, test_stock)) = containers
-            .iter()
-            .find(|(_, _, holder, _)| holder.0 == player)
+        let Some((container_entity, container, _)) =
+            containers.iter().find(|(_, _, holder)| holder.0 == player)
         else {
             continue;
         };
-
-        // Practice stock is refused at the counter rather than graded. The
-        // order stays open, so this is a correction rather than a punishment.
-        if test_stock {
-            radio.push(RadioEntry {
-                channel: channel_for(&member.role),
-                text: format!(
-                    "{}: that's off the test bench. I need the real thing.",
-                    member.name
-                ),
-                good: false,
-            });
-            continue;
-        }
 
         complete_delivery(
             &mut commands,
@@ -1528,7 +1512,7 @@ fn handle_window_delivery(
     mut knowledge: ResMut<Knowledge>,
     windows: Query<(Entity, &Machine)>,
     slotted: Query<(Entity, &InSlot)>,
-    containers: Query<(&Container, Has<TestBenchStock>)>,
+    containers: Query<&Container>,
     mut crew: Query<(
         Entity,
         &CrewMember,
@@ -1547,25 +1531,20 @@ fn handle_window_delivery(
         let Some(container_entity) = slotted_container(window, &slotted) else {
             continue;
         };
-        let Ok((container, test_stock)) = containers.get(container_entity) else {
+        let Ok(container) = containers.get(container_entity) else {
             continue;
         };
-        // Practice stock is refused by every route, or the test bench would
-        // just be a dispenser that costs nothing. Refused quietly here rather
-        // than over the radio — the panel explains it, and a line every frame
-        // would bury the feed.
-        //
-        // A batch still running is refused for a different reason and the same
-        // way. This tray hands over the instant *anything* in the beaker
-        // matches, and a rated recipe passes through a stage where it is half
-        // reactant and half product — so without this, parking a beaker here
-        // and walking away would deliver a half-made batch and grade it
-        // `Impure`, which reads as the window having stolen it early.
+        // A batch still running is refused: this tray hands over the instant
+        // *anything* in the beaker matches, and a rated recipe passes through
+        // a stage where it is half reactant and half product — so without
+        // this, parking a beaker here and walking away would deliver a
+        // half-made batch and grade it `Impure`, which reads as the window
+        // having stolen it early.
         //
         // Asked of the chemistry rather than of `machines::Reacting`, so the
         // panel drawing the same answer on a guest and the authority acting on
         // it here are the same question, not two that could disagree.
-        if test_stock || chem_sim::is_reacting(&container.solution, &db.reactions) {
+        if chem_sim::is_reacting(&container.solution, &db.reactions) {
             continue;
         }
 
@@ -1777,7 +1756,7 @@ mod tests {
     }
 
     /// A delivery window with `contents` sitting in its slot.
-    fn window_with(app: &mut App, contents: &[(&str, i32)], practice: bool) -> (Entity, Entity) {
+    fn window_with(app: &mut App, contents: &[(&str, i32)]) -> (Entity, Entity) {
         let data = app.world().resource::<ChemDb>().0.clone();
         let window = app
             .world_mut()
@@ -1790,10 +1769,7 @@ mod tests {
                 .solution
                 .add(data.reagent(key), Units::whole(*amount));
         }
-        let mut entity = app.world_mut().spawn((container, InSlot(window)));
-        if practice {
-            entity.insert(TestBenchStock);
-        }
+        let entity = app.world_mut().spawn((container, InSlot(window)));
         (window, entity.id())
     }
 
@@ -1849,7 +1825,7 @@ mod tests {
         // reading as a live crisis for the whole walk to the door — keeping the
         // lab red-lit and blocking the next crisis from arming.
         let mut app = window_app();
-        let (_window, _beaker) = window_with(&mut app, &[("dylovene", 30)], false);
+        let (_window, _beaker) = window_with(&mut app, &[("dylovene", 30)]);
         let victim = waiting_crew(&mut app, "Dr. Vance", "dylovene", 20, 90.0, true);
         app.world_mut().entity_mut(victim).insert(CrisisOrder);
 
@@ -1943,7 +1919,7 @@ mod tests {
         // is where the real consequences live; this only proves grading
         // itself stays out of the way.
         let mut app = window_app();
-        let (_, beaker) = window_with(&mut app, &[("dylovene", 30)], false);
+        let (_, beaker) = window_with(&mut app, &[("dylovene", 30)]);
         let crew = waiting_crew(&mut app, "Dr. Vance", "dylovene", 30, 60.0, true);
         app.world_mut().entity_mut(crew).insert(IllicitOrder);
 
@@ -1988,7 +1964,7 @@ mod tests {
     #[test]
     fn the_window_hands_over_to_whoever_is_waiting_for_it() {
         let mut app = window_app();
-        let (_, beaker) = window_with(&mut app, &[("dylovene", 30)], false);
+        let (_, beaker) = window_with(&mut app, &[("dylovene", 30)]);
         let crew = waiting_crew(&mut app, "Dr. Vance", "dylovene", 30, 60.0, true);
 
         app.update();
@@ -2018,7 +1994,7 @@ mod tests {
         // into a felt `Drunk` status is `run_metabolism`'s job, already
         // covered in `body::mod::tests`, not this module's to re-prove.
         let mut app = window_app();
-        window_with(&mut app, &[("hooch", 10)], false);
+        window_with(&mut app, &[("hooch", 10)]);
         let crew = waiting_crew(&mut app, "Mx. Sample", "hooch", 10, 60.0, true);
         app.world_mut()
             .entity_mut(crew)
@@ -2043,7 +2019,7 @@ mod tests {
         // A batch that could satisfy two people goes to whoever is closest to
         // walking out, matching how the order queue itself is sorted.
         let mut app = window_app();
-        window_with(&mut app, &[("dylovene", 30)], false);
+        window_with(&mut app, &[("dylovene", 30)]);
         waiting_crew(&mut app, "Patient", "dylovene", 30, 200.0, true);
         waiting_crew(&mut app, "Desperate", "dylovene", 30, 12.0, true);
 
@@ -2060,7 +2036,7 @@ mod tests {
         // Handing a beaker through the window to someone still coming in the
         // door would be nonsense; the tray just holds it until they arrive.
         let mut app = window_app();
-        let (_, beaker) = window_with(&mut app, &[("dylovene", 30)], false);
+        let (_, beaker) = window_with(&mut app, &[("dylovene", 30)]);
         waiting_crew(&mut app, "En route", "dylovene", 30, 60.0, false);
 
         app.update();
@@ -2073,23 +2049,9 @@ mod tests {
     }
 
     #[test]
-    fn the_window_refuses_test_bench_stock() {
-        // Otherwise the bench is just a dispenser that costs nothing, and the
-        // window is the way round the refusal at the counter.
-        let mut app = window_app();
-        let (_, beaker) = window_with(&mut app, &[("dylovene", 30)], true);
-        waiting_crew(&mut app, "Dr. Vance", "dylovene", 30, 60.0, true);
-
-        app.update();
-
-        assert!(outcomes(&app).is_empty());
-        assert!(app.world().get_entity(beaker).is_ok());
-    }
-
-    #[test]
     fn the_window_leaves_a_batch_nobody_asked_for() {
         let mut app = window_app();
-        let (_, beaker) = window_with(&mut app, &[("kelotane", 30)], false);
+        let (_, beaker) = window_with(&mut app, &[("kelotane", 30)]);
         waiting_crew(&mut app, "Dr. Vance", "dylovene", 30, 60.0, true);
 
         app.update();
@@ -2105,7 +2067,7 @@ mod tests {
         // in it — so putting a dirty batch in the tray is a real mistake and
         // not silently prevented.
         let mut app = window_app();
-        window_with(&mut app, &[("dylovene", 30), ("plant_fibre", 20)], false);
+        window_with(&mut app, &[("dylovene", 30), ("plant_fibre", 20)]);
         waiting_crew(&mut app, "Dr. Vance", "dylovene", 30, 60.0, true);
 
         app.update();

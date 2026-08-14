@@ -165,7 +165,7 @@ fn request_consume(
 /// **F** — use the thing in your hand on the thing you are looking at.
 ///
 /// Deliberately not `E`. `E` already means "pick up, or load this machine", and
-/// walking up to the ChemMaster holding a syringe would make it ambiguous
+/// walking up to the Mixing Chamber holding a syringe would make it ambiguous
 /// whether you meant to load the syringe or inject the machine.
 fn request_apply_held(
     keys: Res<ButtonInput<KeyCode>>,
@@ -922,7 +922,7 @@ mod tests {
         let machine = app
             .world_mut()
             .spawn(crate::machines::Machine::new(
-                crate::machines::MachineKind::Dispenser,
+                crate::machines::MachineKind::ChemMaster5000,
             ))
             .id();
         app.world_mut().entity_mut(player).insert((

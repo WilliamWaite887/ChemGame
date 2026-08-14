@@ -248,7 +248,7 @@ fn collect_walkable_volumes(
 #[derive(Debug, Clone, Default)]
 pub struct MachineSpot {
     /// Must match a [`MachineKind`](crate::machines::MachineKind) variant name,
-    /// e.g. `Dispenser`, `ChemMaster`, `ReactionChamber`.
+    /// e.g. `ChemMaster5000`, `MixingChamber`, `ReactionChamber`.
     pub kind: String,
 }
 

@@ -237,7 +237,7 @@
     // `from_produce` marks it as a root of the recipe graph like `dispensable`
     // does, so the reachability guardrail does not read it as a dead end. It
     // has no use of its own: it is the contaminant that stops ground produce
-    // being delivered without a trip through the ChemMaster.
+    // being delivered without a trip through the Mixing Chamber.
     (id: "plant_fibre", name: "Plant Fibre", color: (0.42, 0.50, 0.32), from_produce: true),
 
     // ---- Medicines --------------------------------------------------------

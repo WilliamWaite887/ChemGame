@@ -313,8 +313,9 @@ fn every_entity_in_the_map_is_a_class_the_game_registers() {
 #[test]
 fn the_map_still_places_every_machine() {
     // The drift this whole approach risks: delete a machine spot in TrenchBroom
-    // and nothing notices until a shift starts without a ChemMaster. Positions
-    // are deliberately unchecked — moving one is the point of using an editor.
+    // and nothing notices until a shift starts without a Mixing Chamber.
+    // Positions are deliberately unchecked — moving one is the point of using
+    // an editor.
     let map = std::fs::read_to_string(MAP).unwrap_or_else(|err| panic!("reading {MAP}: {err}"));
 
     for kind in MachineKind::ALL {

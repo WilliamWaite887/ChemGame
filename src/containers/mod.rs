@@ -67,7 +67,7 @@ pub enum ContainerKind {
     Bottle,
     Pill,
     /// Draws from a container and injects. The only route that delivers a whole
-    /// dose at once, which is what makes it worth the trip to the ChemMaster.
+    /// dose at once, which is what makes it worth the trip to the Mixing Chamber.
     Syringe,
 }
 
@@ -168,6 +168,16 @@ pub struct HeldBy(#[entities] pub Entity);
 /// Sitting in this machine's container slot.
 #[derive(Component, Serialize, Deserialize)]
 pub struct InSlot(#[entities] pub Entity);
+
+/// Sitting in this machine's *second* container slot.
+///
+/// Only the [`crate::machines::MachineKind::MixingChamber`] has one — a
+/// second, distinct component rather than an index on [`InSlot`], so every
+/// other machine and every existing single-slot call site stays exactly as
+/// it was: nothing about them changes shape to make room for a slot they
+/// will never have.
+#[derive(Component, Serialize, Deserialize)]
+pub struct InSlotB(#[entities] pub Entity);
 
 /// Shut away in this locker.
 ///
@@ -300,8 +310,8 @@ fn spawn_starting_glassware(mut commands: Commands) {
     }
 
     // One syringe to start with. Cargo's restock deliberately ignores syringes
-    // — they come out of the ChemMaster — so this is the only one that exists
-    // until the player makes another.
+    // — they come out of the Mixing Chamber — so this is the only one that
+    // exists until the player makes another.
     spawn_container(
         &mut commands,
         ContainerKind::Syringe,

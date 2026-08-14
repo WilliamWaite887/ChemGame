@@ -6,7 +6,7 @@
 // Every kind yields plant fibre alongside its extract, and that is the whole
 // design. A ground beaker always holds two reagents, which `grade` reports as
 // Impure — so the grinder is the fast route to a medicine, but never the last
-// step. Cleaning it up is what the ChemMaster is for.
+// step. Cleaning it up is what the Mixing Chamber is for.
 //
 // Poppy is the dirtiest because bicaridine is the most valuable thing here,
 // and the only one the chemist may not yet know how to make.

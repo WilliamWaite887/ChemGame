@@ -496,7 +496,7 @@ mod tests {
     fn every_kind_grinds_dirty() {
         // The grinder exists to be fast and impure. A single-reagent yield
         // would be deliverable straight out of the machine and would make the
-        // ChemMaster pointless for that chemical.
+        // Mixing Chamber pointless for that chemical.
         for def in &config().kinds {
             assert!(
                 def.yields.len() > 1,

@@ -25,7 +25,7 @@
         // ---- Impure -------------------------------------------------------
         (outcome: Impure, text: "{name} here. There was something else swimming in that {reagent}. Worked, mostly. Mostly."),
         (outcome: Impure, text: "Chem lab — this {reagent} is cloudy. Is it meant to be cloudy?"),
-        (outcome: Impure, role: Some("Medical"), text: "Medbay to chemistry. Your {reagent} had contaminants. Patient's fine, but run it through the ChemMaster next time."),
+        (outcome: Impure, role: Some("Medical"), text: "Medbay to chemistry. Your {reagent} had contaminants. Patient's fine, but run it through the Mixing Chamber next time."),
         (outcome: Impure, role: Some("Security"), text: "Whatever was mixed in with that {reagent} gave him a rash. He's not pleased about it."),
 
         // ---- Overdose -----------------------------------------------------

@@ -25,7 +25,7 @@ use bevy_replicon_renet::renet::{ConnectionConfig, DisconnectReason};
 use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRenetPlugins};
 
 use crate::body::{Bloodstream, Body};
-use crate::containers::{Container, HeldBy, InSlot, Stored};
+use crate::containers::{Container, HeldBy, InSlot, InSlotB, Stored};
 use crate::crew::CrewMember;
 use crate::hazards::{ActiveHazard, SmokeCloud, SmokePayload};
 use crate::machines::{Buffer, DispenseAmount, Hopper, Machine, Thermostat};
@@ -496,6 +496,9 @@ fn register_replication(app: &mut App) {
         .replicate::<Container>()
         .replicate::<HeldBy>()
         .replicate::<InSlot>()
+        // The Mixing Chamber's second beaker slot. Same reasoning as `InSlot`
+        // itself: both chemists have to see which beaker is in which slot.
+        .replicate::<InSlotB>()
         // What is shut in the locker, and which one. Both ends need it: the
         // guest's copy is what hides a stored beaker and what fills the panel
         // when they open the locker themselves.
@@ -736,7 +739,7 @@ mod tests {
             .world_mut()
             .spawn((
                 Replicated,
-                Machine::new(crate::machines::MachineKind::Dispenser),
+                Machine::new(crate::machines::MachineKind::ChemMaster5000),
             ))
             .id();
         let beaker = server
@@ -835,7 +838,7 @@ mod tests {
         server.world_mut().spawn((
             Replicated,
             Machine {
-                kind: crate::machines::MachineKind::Dispenser,
+                kind: crate::machines::MachineKind::ChemMaster5000,
                 in_use_by: Some(chemist),
             },
         ));

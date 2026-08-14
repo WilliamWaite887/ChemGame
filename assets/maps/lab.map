@@ -881,13 +881,13 @@
 {
 "classname" "machine_spot"
 "origin" "202 160 0"
-"kind" "Dispenser"
+"kind" "ChemMaster5000"
 "angles" "0 0 0"
 }
 {
 "classname" "machine_spot"
 "origin" "202 -60 0"
-"kind" "ChemMaster"
+"kind" "MixingChamber"
 "angles" "0 0 0"
 }
 {
@@ -901,12 +901,6 @@
 "origin" "202 -420 0"
 "kind" "Analyzer"
 "angles" "0 0 0"
-}
-{
-"classname" "machine_spot"
-"origin" "100 -518 0"
-"kind" "TestBench"
-"angles" "0 -90 0"
 }
 {
 "classname" "machine_spot"

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
 use crate::containers::{
-    set_down_lift, spawn_container, Container, ContainerKind, HeldBy, InSlot, Stored,
+    set_down_lift, spawn_container, Container, ContainerKind, HeldBy, InSlot, InSlotB, Stored,
 };
 use crate::interaction::{
     InteractRequested, InteractionMode, LeaveMachineRequested, MachineOpened,
@@ -75,13 +75,13 @@ impl Plugin for MachinePlugin {
 /// Which piece of equipment this is.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum MachineKind {
-    Dispenser,
-    ChemMaster,
+    /// The acquisition machine: turns unlocked reagents into a loaded beaker.
+    ChemMaster5000,
+    /// The refinement machine: pulls a single named reagent out of a mixture
+    /// into an internal buffer, then packages from the buffer.
+    MixingChamber,
     Grinder,
     Analyzer,
-    /// Unlimited base reagents, but its output cannot be delivered for credit.
-    /// Experimenting costs time, not materials.
-    TestBench,
     DeliveryWindow,
     /// Every department's standing, what each values, and live requisitions.
     StandingBoard,
@@ -104,12 +104,11 @@ impl MachineKind {
     /// Every kind, which is also every machine: the lab holds exactly one of
     /// each. Both the spawner and the client's fit-out iterate this, so a new
     /// machine cannot be added to one and forgotten in the other.
-    pub const ALL: [MachineKind; 9] = [
-        MachineKind::Dispenser,
-        MachineKind::ChemMaster,
+    pub const ALL: [MachineKind; 8] = [
+        MachineKind::ChemMaster5000,
+        MachineKind::MixingChamber,
         MachineKind::Grinder,
         MachineKind::Analyzer,
-        MachineKind::TestBench,
         MachineKind::DeliveryWindow,
         MachineKind::StandingBoard,
         MachineKind::ReactionChamber,
@@ -118,11 +117,10 @@ impl MachineKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            MachineKind::Dispenser => "Chemical Dispenser",
-            MachineKind::ChemMaster => "ChemMaster 4000",
+            MachineKind::ChemMaster5000 => "ChemMaster 5000",
+            MachineKind::MixingChamber => "Mixing Chamber",
             MachineKind::Grinder => "Reagent Grinder",
             MachineKind::Analyzer => "Sample Analyzer",
-            MachineKind::TestBench => "Test Bench",
             MachineKind::DeliveryWindow => "Delivery Window",
             MachineKind::StandingBoard => "Standing Board",
             MachineKind::ReactionChamber => "Reaction Chamber",
@@ -132,11 +130,10 @@ impl MachineKind {
 
     pub fn screen_color(self) -> Color {
         match self {
-            MachineKind::Dispenser => Color::srgb(0.30, 0.75, 0.95),
-            MachineKind::ChemMaster => Color::srgb(0.45, 0.90, 0.55),
+            MachineKind::ChemMaster5000 => Color::srgb(0.30, 0.75, 0.95),
+            MachineKind::MixingChamber => Color::srgb(0.45, 0.90, 0.55),
             MachineKind::Grinder => Color::srgb(0.95, 0.65, 0.25),
             MachineKind::Analyzer => Color::srgb(0.85, 0.45, 0.95),
-            MachineKind::TestBench => Color::srgb(0.95, 0.85, 0.35),
             MachineKind::DeliveryWindow => Color::srgb(0.95, 0.35, 0.35),
             MachineKind::StandingBoard => Color::srgb(0.95, 0.88, 0.45),
             MachineKind::ReactionChamber => Color::srgb(0.98, 0.45, 0.18),
@@ -164,12 +161,23 @@ impl Default for Thermostat {
     }
 }
 
-/// The temperatures the panel offers.
+/// The dial's ends.
 ///
-/// Fixed buttons rather than a slider: this is a first-person game and a
-/// draggable control under a crosshair is miserable. The spread covers freezing,
-/// room temperature, and the bands the hot recipes sit in.
-pub const TEMPERATURE_PRESETS: [f32; 6] = [273.0, 293.0, 350.0, 400.0, 450.0, 500.0];
+/// 100K below `ice`'s 273K cutoff and 100K above `chlorine_trifluoride`'s
+/// 500K overheat threshold — the lowest and highest temperatures anything in
+/// the data actually gates on, with margin on both sides. Used to be six
+/// fixed preset buttons rather than a continuous dial: the panel is worked
+/// with the mouse cursor freed the same way the settings screen is (see
+/// `interaction::panel_input`), so a drag control turned out to work fine —
+/// the "crosshair" concern that ruled it out originally no longer applies.
+pub const TEMPERATURE_MIN: f32 = 173.0;
+pub const TEMPERATURE_MAX: f32 = 600.0;
+
+/// Where the dial actually matters, for the tick marks drawn on it — not
+/// buttons any more, just a hint of where the real recipe thresholds sit.
+/// `ice`'s 273K, `phlogiston`/`methamphetamine`'s shared 374K, `cyanide`'s
+/// 380K, `chlorine_trifluoride`'s 424K minimum, and its 500K overheat.
+pub const TEMPERATURE_MARKS: [f32; 5] = [273.0, 374.0, 380.0, 424.0, 500.0];
 
 /// Fraction of the remaining gap a powered chamber closes per second.
 ///
@@ -183,7 +191,7 @@ const CHAMBER_RATE: f32 = 0.18;
 /// The same, for a container sitting out in the room.
 ///
 /// Far slower, so a hot beaker stays useful long enough to carry to the
-/// ChemMaster — but not forever. This is the clock a chemist is racing.
+/// Mixing Chamber — but not forever. This is the clock a chemist is racing.
 const AMBIENT_RATE: f32 = 0.06;
 
 /// A machine's shared state.
@@ -218,6 +226,14 @@ pub struct ContainerSlot {
     pub offset: Vec3,
 }
 
+/// The Mixing Chamber's second slot. Static geometry like [`ContainerSlot`],
+/// so it is derived locally by `lab::dress_machines` rather than replicated —
+/// see that component's own doc comment for why.
+#[derive(Component)]
+pub struct ContainerSlotB {
+    pub offset: Vec3,
+}
+
 /// The unit vector out of a machine's working face — the side a chemist stands
 /// on to use it.
 ///
@@ -237,25 +253,9 @@ pub struct Facing(pub Vec3);
 /// of UI this game has deliberately avoided everywhere else.
 pub const LOCKER_CAPACITY: usize = 12;
 
-/// The ChemMaster's internal buffer.
+/// The Mixing Chamber's internal buffer, shared by both of its beaker slots.
 #[derive(Component, Serialize, Deserialize)]
 pub struct Buffer(pub Solution);
-
-/// Set on a ChemMaster whose buffer currently holds test-bench stock.
-///
-/// [`TestBenchStock`] marks *glassware*, which was enough right up until the
-/// buffer got involved: practice stock could be pushed into the buffer, and
-/// then either drawn back into a clean beaker or packaged into a pill, and both
-/// of those are containers that never touched the test bench and so carried no
-/// mark. That laundered practice stock into deliverable product and bypassed
-/// the whole "experimenting costs time, not materials" economy. The taint has
-/// to live on the buffer for the same reason it lives on the container rather
-/// than the reagent: it must survive being reacted and repackaged.
-///
-/// Cleared when the buffer runs dry, matching how rinsing a beaker clears
-/// `TestBenchStock` — nothing is contaminated by association once it is empty.
-#[derive(Component)]
-pub struct BufferPracticeStock;
 
 /// Produce waiting to be ground.
 ///
@@ -268,14 +268,6 @@ pub struct Hopper(pub Vec<ProduceId>);
 /// How much a dispenser gives per press. Persists between visits.
 #[derive(Component, Serialize, Deserialize)]
 pub struct DispenseAmount(pub Units);
-
-/// Marks a container that has held test-bench stock.
-///
-/// The bench is for working things out, not for filling orders — without this
-/// it would simply be a second dispenser, and experimenting would carry no
-/// cost at all.
-#[derive(Component)]
-pub struct TestBenchStock;
 
 impl Default for DispenseAmount {
     fn default() -> Self {
@@ -341,12 +333,14 @@ impl ReactionsFired {
 pub struct EjectRequested {
     #[entities]
     pub machine: Entity,
+    pub slot: MachineSlot,
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
 pub struct EmptyRequested {
     #[entities]
     pub machine: Entity,
+    pub slot: MachineSlot,
 }
 
 /// Take one named item back out of a locker.
@@ -370,6 +364,19 @@ pub enum BufferDirection {
     ToContainer,
 }
 
+/// Which of a machine's container slots a request means.
+///
+/// Every machine but the [`MachineKind::MixingChamber`] has exactly one slot,
+/// so `A` is the only value their panels ever send — this exists at all so the
+/// Mixing Chamber's second beaker can be addressed without the request
+/// silently acting on whichever container happens to occupy slot A.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum MachineSlot {
+    #[default]
+    A,
+    B,
+}
+
 #[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
 pub struct BufferTransferRequested {
     #[entities]
@@ -377,6 +384,7 @@ pub struct BufferTransferRequested {
     pub reagent: ReagentId,
     pub amount: Units,
     pub direction: BufferDirection,
+    pub slot: MachineSlot,
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
@@ -433,6 +441,17 @@ pub fn slotted_container(machine: Entity, slotted: &Query<(Entity, &InSlot)>) ->
         .map(|(entity, _)| entity)
 }
 
+/// The same, for a [`MachineKind::MixingChamber`]'s second slot.
+pub fn slotted_container_b(
+    machine: Entity,
+    slotted: &Query<(Entity, &InSlotB)>,
+) -> Option<Entity> {
+    slotted
+        .iter()
+        .find(|(_, slot)| slot.0 == machine)
+        .map(|(entity, _)| entity)
+}
+
 /// Using a machine with a beaker in hand loads it; using one empty-handed
 /// opens the panel. That matches how SS13 plays and avoids a separate
 /// "insert" control.
@@ -445,13 +464,19 @@ pub fn slotted_container(machine: Entity, slotted: &Query<(Entity, &InSlot)>) ->
 fn handle_machine_interact(
     mut commands: Commands,
     mut requests: MessageReader<FromClient<InteractRequested>>,
-    mut machines: Query<(&mut Machine, Option<&ContainerSlot>, &Transform)>,
+    mut machines: Query<(
+        &mut Machine,
+        Option<&ContainerSlot>,
+        Option<&ContainerSlotB>,
+        &Transform,
+    )>,
     mut hoppers: Query<&mut Hopper>,
     mut modes: Query<&mut InteractionMode>,
     chemists: Query<(Entity, &Chemist)>,
     held: Query<(Entity, &HeldBy)>,
     produce: Query<&Produce>,
     slotted: Query<(Entity, &InSlot)>,
+    slotted_b: Query<(Entity, &InSlotB)>,
     stored: Query<(Entity, &Stored)>,
     bodies: Query<&crate::body::Body>,
     mut opened: MessageWriter<ToClients<MachineOpened>>,
@@ -468,7 +493,7 @@ fn handle_machine_interact(
         if bodies.get(player).is_ok_and(|body| body.0.collapsed) {
             continue;
         }
-        let Ok((mut machine, slot, transform)) = machines.get_mut(request.target) else {
+        let Ok((mut machine, slot, slot_b, transform)) = machines.get_mut(request.target) else {
             continue;
         };
 
@@ -519,18 +544,33 @@ fn handle_machine_interact(
         }
 
         let loading = carrying.filter(|item| !produce.contains(*item));
-        match (loading, slot) {
-            (Some(container), Some(slot))
-                if slotted_container(request.target, &slotted).is_none() =>
+
+        // Slot A first; slot B only exists on the Mixing Chamber, and only
+        // comes into play once A is already taken — that is what lets it hold
+        // two beakers at once instead of forcing an eject to swap one in.
+        let free_slot = match (slot, slot_b) {
+            (Some(slot), _) if slotted_container(request.target, &slotted).is_none() => {
+                Some((slot.offset, false))
+            }
+            (_, Some(slot_b))
+                if slotted_container_b(request.target, &slotted_b).is_none() =>
             {
-                commands
-                    .entity(container)
-                    .remove::<HeldBy>()
+                Some((slot_b.offset, true))
+            }
+            _ => None,
+        };
+
+        match (loading, free_slot) {
+            (Some(container), Some((offset, in_b))) => {
+                let mut item = commands.entity(container);
+                item.remove::<HeldBy>()
                     .remove::<ChildOf>()
-                    .insert(InSlot(request.target))
-                    .insert(Transform::from_translation(
-                        transform.translation + slot.offset,
-                    ));
+                    .insert(Transform::from_translation(transform.translation + offset));
+                if in_b {
+                    item.insert(InSlotB(request.target));
+                } else {
+                    item.insert(InSlot(request.target));
+                }
             }
             _ => {
                 if !machine.available_to(player) {
@@ -593,7 +633,10 @@ fn handle_thermostat_controls(
 ) {
     for request in targets.read() {
         if let Ok(mut thermostat) = thermostats.get_mut(request.machine) {
-            thermostat.target = request.target;
+            // The panel's slider already clamps to this range, but a request
+            // is trusted input from the network — the server has to hold the
+            // same line rather than merely suggesting it.
+            thermostat.target = Kelvin(request.target.0.clamp(TEMPERATURE_MIN, TEMPERATURE_MAX));
         }
     }
     for request in power.read() {
@@ -731,7 +774,7 @@ pub struct Reacting {
 /// chamber halfway, or be interrupted during — which is a verb this game did
 /// not have when every recipe was one click.
 ///
-/// The ChemMaster's buffer is deliberately **not** stepped. Reagents in the
+/// The Mixing Chamber's buffer is deliberately **not** stepped. Reagents in the
 /// buffer are held separated on purpose — that is the whole point of the
 /// machine, and it has never run the resolver — so reacting them there would
 /// break the one tool the player has for cleaning up a contaminated batch.
@@ -809,15 +852,12 @@ pub fn chemist_entity(chemists: &Query<(Entity, &Chemist)>, client: ClientId) ->
         .map(|(entity, _)| entity)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn handle_dispense(
-    mut commands: Commands,
     db: Res<ChemDb>,
     knowledge: Res<Knowledge>,
     mut requests: MessageReader<FromClient<DispenseRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
     machines: Query<&DispenseAmount>,
-    kinds: Query<&Machine>,
     slotted: Query<(Entity, &InSlot)>,
     mut containers: Query<&mut Container>,
 ) {
@@ -842,50 +882,42 @@ fn handle_dispense(
         if let Some(message) = ReactionsFired::from_report(target, &report) {
             fired.write(message);
         }
-
-        // Anything drawn from the test bench is practice stock. Marking the
-        // container rather than the reagent is what makes it survive being
-        // reacted, packaged and carried around.
-        if kinds.get(request.machine).map(|m| m.kind) == Ok(MachineKind::TestBench) {
-            commands.entity(target).insert(TestBenchStock);
-        }
     }
 }
 
 fn handle_buffer_transfer(
-    mut commands: Commands,
     db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<BufferTransferRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
-    mut buffers: Query<(&mut Buffer, Has<BufferPracticeStock>)>,
+    mut buffers: Query<&mut Buffer>,
     slotted: Query<(Entity, &InSlot)>,
-    mut containers: Query<(&mut Container, Has<TestBenchStock>)>,
+    slotted_b: Query<(Entity, &InSlotB)>,
+    mut containers: Query<&mut Container>,
 ) {
     for request in requests.read() {
-        let Ok((mut buffer, buffer_practice)) = buffers.get_mut(request.machine) else {
+        let Ok(mut buffer) = buffers.get_mut(request.machine) else {
             continue;
         };
-        let Some(target) = slotted_container(request.machine, &slotted) else {
+        let target = match request.slot {
+            MachineSlot::A => slotted_container(request.machine, &slotted),
+            MachineSlot::B => slotted_container_b(request.machine, &slotted_b),
+        };
+        let Some(target) = target else {
             continue;
         };
-        let Ok((mut container, container_practice)) = containers.get_mut(target) else {
+        let Ok(mut container) = containers.get_mut(target) else {
             continue;
         };
 
         match request.direction {
             BufferDirection::ToBuffer => {
                 // Pulling a single named reagent out of a mixture is the whole
-                // point of the ChemMaster: it is how a contaminated batch gets
-                // cleaned up before it goes in a pill.
+                // point of the Mixing Chamber: it is how a contaminated batch
+                // gets cleaned up before it goes in a pill.
                 let moved = container.solution.remove(request.reagent, request.amount);
                 let overflow = buffer.0.add(request.reagent, moved);
                 if overflow.is_positive() {
                     let _ = container.solution.add(request.reagent, overflow);
-                }
-                // Practice stock taints the buffer it lands in — see
-                // `BufferPracticeStock`.
-                if container_practice && (moved - overflow).is_positive() {
-                    commands.entity(request.machine).insert(BufferPracticeStock);
                 }
             }
             BufferDirection::ToContainer => {
@@ -898,18 +930,7 @@ fn handle_buffer_transfer(
                 if let Some(message) = ReactionsFired::from_report(target, &report) {
                     fired.write(message);
                 }
-                // ...and back out again into whatever glassware receives it,
-                // which is the half of the round trip that used to launder it.
-                if buffer_practice && (moved - overflow).is_positive() {
-                    commands.entity(target).insert(TestBenchStock);
-                }
             }
-        }
-
-        if buffer.0.total_volume().is_zero() {
-            commands
-                .entity(request.machine)
-                .remove::<BufferPracticeStock>();
         }
     }
 }
@@ -917,10 +938,10 @@ fn handle_buffer_transfer(
 fn handle_package(
     mut commands: Commands,
     mut requests: MessageReader<FromClient<PackageRequested>>,
-    mut machines: Query<(&mut Buffer, &Transform, Has<BufferPracticeStock>)>,
+    mut machines: Query<(&mut Buffer, &Transform)>,
 ) {
     for request in requests.read() {
-        let Ok((mut buffer, transform, practice)) = machines.get_mut(request.machine) else {
+        let Ok((mut buffer, transform)) = machines.get_mut(request.machine) else {
             continue;
         };
         if !buffer.0.total_volume().is_positive() {
@@ -936,18 +957,6 @@ fn handle_package(
 
         let drop_at = transform.translation + Vec3::new(0.0, 0.95, 0.45);
         let package = spawn_container(&mut commands, request.kind, drop_at);
-
-        // A pill pressed from practice stock is still practice stock. Without
-        // this the packaging step minted brand-new, unmarked glassware and was
-        // the shortest route around the test bench's whole restriction.
-        if practice {
-            commands.entity(package).insert(TestBenchStock);
-        }
-        if buffer.0.total_volume().is_zero() {
-            commands
-                .entity(request.machine)
-                .remove::<BufferPracticeStock>();
-        }
 
         // The container was only just queued for spawn, so its `Container`
         // component is not readable yet; fill it in on the command queue.
@@ -1002,31 +1011,46 @@ fn give_back(
     }
 }
 
-/// Ejecting hands the container back rather than guessing a spot for it.
+/// Ejecting hands the container straight to the chemist rather than guessing
+/// a spot for it.
 ///
 /// It used to place it a metre up and half a metre along world `+Z`, which
-/// points into the room for the dispenser and the ChemMaster and nowhere useful
-/// for anything else. The grinder faces `-Z`, so its beaker was ejected
+/// points into the room for the ChemMaster 5000 and the Mixing Chamber and
+/// nowhere useful for anything else. The grinder faces `-Z`, so its beaker was ejected
 /// *through* the storeroom's south wall and 1.85 m up: gone, silently, with a
 /// full batch inside it. Straight into the chemist's hand has no direction to
 /// get wrong, and is what they were going to do next anyway.
+///
+/// Refused outright with empty hands the only way in — unlike
+/// [`handle_take`], which still falls back to setting the item down. A locker
+/// take always names the one item it means, so a full-handed take has one
+/// natural place to land; an eject with a machine that has a second slot
+/// (only the Mixing Chamber does) does not, and a fallback spot shared by
+/// both slots would just let two ejects in a row land on top of each other.
 fn handle_eject(
     mut commands: Commands,
     mut requests: MessageReader<FromClient<EjectRequested>>,
-    machines: Query<(&Machine, &Transform, Option<&Facing>)>,
+    machines: Query<&Machine>,
     chemists: Query<(Entity, &Chemist)>,
     slotted: Query<(Entity, &InSlot)>,
-    containers: Query<&Container>,
+    slotted_b: Query<(Entity, &InSlotB)>,
     held: Query<&HeldBy>,
 ) {
     for request in requests.read() {
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
-        let Some(container) = slotted_container(request.machine, &slotted) else {
+        if held.iter().any(|holder| holder.0 == player) {
+            continue;
+        }
+        let container = match request.slot {
+            MachineSlot::A => slotted_container(request.machine, &slotted),
+            MachineSlot::B => slotted_container_b(request.machine, &slotted_b),
+        };
+        let Some(container) = container else {
             continue;
         };
-        let Ok((machine, transform, facing)) = machines.get(request.machine) else {
+        let Ok(machine) = machines.get(request.machine) else {
             continue;
         };
         // Only the chemist working the machine. This never mattered while the
@@ -1037,16 +1061,11 @@ fn handle_eject(
             continue;
         }
 
-        commands.entity(container).remove::<InSlot>();
-        give_back(
-            &mut commands,
-            container,
-            player,
-            held.iter().any(|holder| holder.0 == player),
-            transform,
-            facing,
-            set_down_lift(containers.get(container).ok()),
-        );
+        match request.slot {
+            MachineSlot::A => commands.entity(container).remove::<InSlot>(),
+            MachineSlot::B => commands.entity(container).remove::<InSlotB>(),
+        };
+        commands.entity(container).insert(HeldBy(player));
     }
 }
 
@@ -1117,20 +1136,21 @@ fn handle_take(
 }
 
 fn handle_empty(
-    mut commands: Commands,
     mut requests: MessageReader<FromClient<EmptyRequested>>,
     slotted: Query<(Entity, &InSlot)>,
+    slotted_b: Query<(Entity, &InSlotB)>,
     mut containers: Query<&mut Container>,
 ) {
     for request in requests.read() {
-        let Some(target) = slotted_container(request.machine, &slotted) else {
+        let target = match request.slot {
+            MachineSlot::A => slotted_container(request.machine, &slotted),
+            MachineSlot::B => slotted_container_b(request.machine, &slotted_b),
+        };
+        let Some(target) = target else {
             continue;
         };
         if let Ok(mut container) = containers.get_mut(target) {
             container.solution.clear();
-            // Rinsing it out clears the practice-stock mark too, so a beaker
-            // is not contaminated by association for the rest of the shift.
-            commands.entity(target).remove::<TestBenchStock>();
         }
     }
 }
@@ -1649,6 +1669,7 @@ mod tests {
                 reagent: oxygen,
                 amount: Units::whole(20),
                 direction: BufferDirection::ToBuffer,
+                slot: MachineSlot::A,
             },
         });
         app.update();
@@ -1662,6 +1683,206 @@ mod tests {
         let container = app.world().get::<Container>(beaker).unwrap();
         assert_eq!(container.solution.volume_of(oxygen), Units::ZERO);
         assert_eq!(container.solution.volume_of(sugar), Units::whole(20));
+    }
+
+    // -----------------------------------------------------------------------
+    // The Mixing Chamber's second slot
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn loading_two_beakers_fills_a_then_b_then_refuses() {
+        // The whole point of the second slot: two beakers can sit in the
+        // Mixing Chamber at once, without ejecting one to swap the other in.
+        let mut app = test_app();
+        let (client, chemist) = chemist(&mut app);
+        let machine = app
+            .world_mut()
+            .spawn((
+                Machine::new(MachineKind::MixingChamber),
+                ContainerSlot { offset: Vec3::ZERO },
+                ContainerSlotB { offset: Vec3::ZERO },
+                Transform::default(),
+            ))
+            .id();
+
+        let first = app
+            .world_mut()
+            .spawn((Container::new(ContainerKind::Beaker), HeldBy(chemist)))
+            .id();
+        press_e(&mut app, client, machine);
+        assert_eq!(
+            app.world().get::<InSlot>(first).map(|slot| slot.0),
+            Some(machine),
+            "the first beaker loads into slot A"
+        );
+        assert_eq!(
+            *app.world().get::<InteractionMode>(chemist).unwrap(),
+            InteractionMode::Roaming,
+            "loading a beaker should not also open the panel"
+        );
+
+        let second = app
+            .world_mut()
+            .spawn((Container::new(ContainerKind::Beaker), HeldBy(chemist)))
+            .id();
+        press_e(&mut app, client, machine);
+        assert_eq!(
+            app.world().get::<InSlotB>(second).map(|slot| slot.0),
+            Some(machine),
+            "the second beaker loads into slot B rather than being refused"
+        );
+
+        // A third beaker with both slots full just opens the panel, same as
+        // walking up to any other full machine.
+        let third = app
+            .world_mut()
+            .spawn((Container::new(ContainerKind::Beaker), HeldBy(chemist)))
+            .id();
+        press_e(&mut app, client, machine);
+        assert!(
+            app.world().get::<InSlot>(third).is_none()
+                && app.world().get::<InSlotB>(third).is_none(),
+            "a third beaker has nowhere to go"
+        );
+        assert_eq!(
+            app.world().get::<HeldBy>(third).map(|held| held.0),
+            Some(chemist),
+            "so it stays in hand"
+        );
+        assert_eq!(
+            *app.world().get::<InteractionMode>(chemist).unwrap(),
+            InteractionMode::UsingMachine(machine),
+            "and the panel opens instead"
+        );
+    }
+
+    #[test]
+    fn buffer_transfer_can_target_the_second_slot() {
+        let mut app = test_app();
+        let sugar = reagent(&app, "sugar");
+        let machine = app
+            .world_mut()
+            .spawn(Buffer(Solution::new(Units::whole(300))))
+            .id();
+        let mut container = Container::new(ContainerKind::LargeBeaker);
+        let _ = container.solution.add(sugar, Units::whole(20));
+        let beaker_b = app.world_mut().spawn((container, InSlotB(machine))).id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: BufferTransferRequested {
+                machine,
+                reagent: sugar,
+                amount: Units::whole(20),
+                direction: BufferDirection::ToBuffer,
+                slot: MachineSlot::B,
+            },
+        });
+        app.update();
+
+        let buffer = app.world().get::<Buffer>(machine).unwrap();
+        assert_eq!(
+            buffer.0.volume_of(sugar),
+            Units::whole(20),
+            "slot B feeds the same shared buffer slot A does"
+        );
+        let container = app.world().get::<Container>(beaker_b).unwrap();
+        assert_eq!(container.solution.volume_of(sugar), Units::ZERO);
+    }
+
+    #[test]
+    fn ejecting_one_mixing_chamber_slot_leaves_the_other_alone() {
+        let mut app = test_app();
+        let (client, chemist) = chemist(&mut app);
+        let machine = app
+            .world_mut()
+            .spawn((Machine::new(MachineKind::MixingChamber), Transform::default()))
+            .id();
+        let beaker_a = app
+            .world_mut()
+            .spawn((Container::new(ContainerKind::Beaker), InSlot(machine)))
+            .id();
+        let beaker_b = app
+            .world_mut()
+            .spawn((Container::new(ContainerKind::Beaker), InSlotB(machine)))
+            .id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: EjectRequested {
+                machine,
+                slot: MachineSlot::B,
+            },
+        });
+        app.update();
+
+        assert!(
+            app.world().get::<InSlotB>(beaker_b).is_none(),
+            "slot B is freed"
+        );
+        assert_eq!(
+            app.world().get::<HeldBy>(beaker_b).map(|held| held.0),
+            Some(chemist)
+        );
+        assert!(
+            app.world().get::<InSlot>(beaker_a).is_some(),
+            "slot A's beaker is untouched by ejecting slot B"
+        );
+    }
+
+    #[test]
+    fn a_reagent_moves_from_slot_a_to_slot_b_through_the_shared_buffer() {
+        // The mixing model the second slot exists for: pull a reagent out of
+        // one beaker and push it into the other, without ejecting either one.
+        let mut app = test_app();
+        let sugar = reagent(&app, "sugar");
+        let machine = app
+            .world_mut()
+            .spawn(Buffer(Solution::new(Units::whole(300))))
+            .id();
+        let mut source = Container::new(ContainerKind::LargeBeaker);
+        let _ = source.solution.add(sugar, Units::whole(30));
+        app.world_mut().spawn((source, InSlot(machine)));
+        app.world_mut()
+            .spawn((Container::new(ContainerKind::LargeBeaker), InSlotB(machine)));
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: BufferTransferRequested {
+                machine,
+                reagent: sugar,
+                amount: Units::whole(30),
+                direction: BufferDirection::ToBuffer,
+                slot: MachineSlot::A,
+            },
+        });
+        app.update();
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: BufferTransferRequested {
+                machine,
+                reagent: sugar,
+                amount: Units::whole(30),
+                direction: BufferDirection::ToContainer,
+                slot: MachineSlot::B,
+            },
+        });
+        app.update();
+
+        let buffer = app.world().get::<Buffer>(machine).unwrap();
+        assert_eq!(buffer.0.volume_of(sugar), Units::ZERO);
+
+        let mut query = app.world_mut().query::<(&Container, &InSlotB)>();
+        let (container_b, _) = query
+            .iter(app.world())
+            .find(|(_, slot)| slot.0 == machine)
+            .expect("slot B should still be loaded");
+        assert_eq!(
+            container_b.solution.volume_of(sugar),
+            Units::whole(30),
+            "it should have crossed from A to B without ever being ejected"
+        );
     }
 
     #[test]
@@ -1711,7 +1932,7 @@ mod tests {
             "plant fibre rides along, so a straight grind cannot be handed over"
         );
 
-        // What the ChemMaster does: pull the one reagent out into clean glass.
+        // What the Mixing Chamber does: pull the one reagent out into clean glass.
         let mut clean = Solution::new(ContainerKind::Beaker.capacity());
         let _ = clean.add(dylovene, dirty.volume_of(dylovene));
         assert_eq!(
@@ -1811,7 +2032,7 @@ mod tests {
         let dispenser = app
             .world_mut()
             .spawn((
-                Machine::new(MachineKind::Dispenser),
+                Machine::new(MachineKind::ChemMaster5000),
                 ContainerSlot { offset: Vec3::ZERO },
                 Transform::default(),
             ))
@@ -1900,7 +2121,10 @@ mod tests {
 
         app.world_mut().write_message(FromClient {
             client_id: client,
-            message: EjectRequested { machine },
+            message: EjectRequested {
+                machine,
+                slot: MachineSlot::A,
+            },
         });
         app.update();
 
@@ -1917,19 +2141,19 @@ mod tests {
     }
 
     #[test]
-    fn ejecting_with_full_hands_sets_the_beaker_down_in_front_of_the_machine() {
-        // The fallback, and the one that has to respect which way the machine
-        // points. A grinder standing against the storeroom's south wall faces
-        // `-Z`, so the beaker belongs at a *smaller* z than the casing — the
-        // direction the old constant got backwards.
+    fn ejecting_with_full_hands_is_refused() {
+        // Used to set the beaker down in front of the machine instead. That
+        // fallback needed a spot per *machine*, and the Mixing Chamber's
+        // second slot has no natural one to reuse — two ejects in a row with
+        // full hands would have landed both beakers in exactly the same
+        // place. Refusing outright has no such edge case and matches what a
+        // chemist would expect: hands are visibly full.
         let mut app = test_app();
         let (client, chemist) = chemist(&mut app);
         let machine = grinder(&mut app, &[], Some(ContainerKind::Beaker));
-        app.world_mut().entity_mut(machine).insert((
-            Facing(Vec3::NEG_Z),
-            Transform::from_translation(Vec3::new(-4.0, 0.85, 5.55))
-                .with_scale(Vec3::new(1.5, 1.7, 0.8)),
-        ));
+        app.world_mut()
+            .entity_mut(machine)
+            .insert(Facing(Vec3::NEG_Z));
         // Already carrying something else, so there is nowhere to hand it.
         app.world_mut()
             .spawn((Container::new(ContainerKind::Bottle), HeldBy(chemist)));
@@ -1941,22 +2165,18 @@ mod tests {
 
         app.world_mut().write_message(FromClient {
             client_id: client,
-            message: EjectRequested { machine },
+            message: EjectRequested {
+                machine,
+                slot: MachineSlot::A,
+            },
         });
         app.update();
 
+        assert!(
+            app.world().get::<InSlot>(beaker).is_some(),
+            "the beaker stays put rather than landing anywhere unexpected"
+        );
         assert!(app.world().get::<HeldBy>(beaker).is_none());
-        let resting = app.world().get::<Transform>(beaker).unwrap().translation;
-        assert!(
-            resting.z < 5.55 - 0.4,
-            "it must land clear of the face the chemist stands at, got {resting:?}"
-        );
-        let (_, height) = ContainerKind::Beaker.dimensions();
-        assert!(
-            (resting.y - height * 0.5).abs() < 0.001,
-            "and standing on the floor rather than sunk into it or floating \
-             above it, got {resting:?}"
-        );
     }
 
     #[test]
@@ -1982,7 +2202,10 @@ mod tests {
 
         app.world_mut().write_message(FromClient {
             client_id: client,
-            message: EjectRequested { machine },
+            message: EjectRequested {
+                machine,
+                slot: MachineSlot::A,
+            },
         });
         app.update();
 
@@ -2144,7 +2367,7 @@ mod tests {
         let mut app = test_app();
         let machine = app
             .world_mut()
-            .spawn((Machine::new(MachineKind::Dispenser), Transform::default()))
+            .spawn((Machine::new(MachineKind::ChemMaster5000), Transform::default()))
             .id();
         let client = ClientId::Client(app.world_mut().spawn_empty().id());
         let chemist = app
@@ -2190,7 +2413,7 @@ mod tests {
         let mut app = test_app();
         let machine = app
             .world_mut()
-            .spawn((Machine::new(MachineKind::Dispenser), Transform::default()))
+            .spawn((Machine::new(MachineKind::ChemMaster5000), Transform::default()))
             .id();
         // Two real connections, each driving their own chemist.
         let first_client = ClientId::Client(app.world_mut().spawn_empty().id());
@@ -2267,6 +2490,33 @@ mod tests {
         }
         app.world_mut().spawn((container, InSlot(machine)));
         machine
+    }
+
+    #[test]
+    fn a_target_request_is_clamped_to_the_dial_range() {
+        // The slider already clamps client-side, but a request is trusted
+        // input from the network — the server has to hold the same line
+        // rather than merely suggesting it, same as the locked-reagent check
+        // on dispensing.
+        let mut app = test_app();
+        let machine = chamber(&mut app, 293.0, false, &[]);
+
+        for (requested, expected) in [(50.0, TEMPERATURE_MIN), (9000.0, TEMPERATURE_MAX)] {
+            app.world_mut().write_message(FromClient {
+                client_id: ClientId::Server,
+                message: SetTargetTemperature {
+                    machine,
+                    target: Kelvin(requested),
+                },
+            });
+            app.update();
+
+            assert_eq!(
+                app.world().get::<Thermostat>(machine).unwrap().target,
+                Kelvin(expected),
+                "a target of {requested}K should clamp to {expected}K"
+            );
+        }
     }
 
     /// Runs `seconds` of game time in one-tenth-second frames.
@@ -2553,130 +2803,4 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Test-bench stock cannot be laundered through the buffer
-    // -----------------------------------------------------------------------
-
-    /// A ChemMaster with a beaker of practice stock already loaded, and the
-    /// reagent that beaker holds.
-    fn chemmaster_with_practice_stock(app: &mut App) -> (Entity, Entity, ReagentId) {
-        let machine = app
-            .world_mut()
-            .spawn((
-                Machine::new(MachineKind::ChemMaster),
-                Buffer(Solution::unbounded()),
-                Transform::default(),
-            ))
-            .id();
-        let sugar = reagent(app, "sugar");
-        let mut container = Container::new(ContainerKind::LargeBeaker);
-        let _ = container.solution.add(sugar, Units::whole(60));
-        let beaker = app
-            .world_mut()
-            .spawn((container, InSlot(machine), TestBenchStock))
-            .id();
-        (machine, beaker, sugar)
-    }
-
-    fn transfer(app: &mut App, machine: Entity, reagent: ReagentId, direction: BufferDirection) {
-        app.world_mut().write_message(FromClient {
-            client_id: ClientId::Server,
-            message: BufferTransferRequested {
-                machine,
-                reagent,
-                amount: Units::whole(60),
-                direction,
-            },
-        });
-        app.update();
-    }
-
-    #[test]
-    fn practice_stock_taints_the_buffer_it_is_pushed_into() {
-        let mut app = test_app();
-        let (machine, _beaker, sugar) = chemmaster_with_practice_stock(&mut app);
-
-        transfer(&mut app, machine, sugar, BufferDirection::ToBuffer);
-
-        assert!(
-            app.world().get::<BufferPracticeStock>(machine).is_some(),
-            "the buffer has to carry the mark, or the container is the only \
-             thing that does and packaging mints a clean one"
-        );
-    }
-
-    #[test]
-    fn practice_stock_survives_a_round_trip_through_the_buffer() {
-        // The laundering route that used to work: push practice stock into the
-        // buffer, then draw it back out into a *different*, unmarked beaker.
-        let mut app = test_app();
-        let (machine, beaker, sugar) = chemmaster_with_practice_stock(&mut app);
-        transfer(&mut app, machine, sugar, BufferDirection::ToBuffer);
-
-        // Swap the marked beaker out for a clean one, exactly as a player
-        // would by ejecting and loading another.
-        app.world_mut().entity_mut(beaker).despawn();
-        let clean = app
-            .world_mut()
-            .spawn((Container::new(ContainerKind::LargeBeaker), InSlot(machine)))
-            .id();
-
-        transfer(&mut app, machine, sugar, BufferDirection::ToContainer);
-
-        assert!(
-            app.world().get::<TestBenchStock>(clean).is_some(),
-            "a clean beaker filled from a tainted buffer is still practice stock"
-        );
-    }
-
-    #[test]
-    fn a_pill_pressed_from_practice_stock_is_still_practice_stock() {
-        // The shorter laundering route: practice stock into the buffer, then
-        // straight into a pill. `handle_package` spawns brand-new glassware
-        // that never touched the test bench, so it carried no mark at all.
-        let mut app = test_app();
-        let (machine, _beaker, sugar) = chemmaster_with_practice_stock(&mut app);
-        transfer(&mut app, machine, sugar, BufferDirection::ToBuffer);
-
-        app.world_mut().write_message(FromClient {
-            client_id: ClientId::Server,
-            message: PackageRequested {
-                machine,
-                kind: ContainerKind::Pill,
-            },
-        });
-        app.update();
-        // The container is filled on the command queue, one frame behind.
-        app.update();
-
-        let pill = app
-            .world_mut()
-            .query_filtered::<Entity, (With<Container>, Without<InSlot>)>()
-            .iter(app.world())
-            .next()
-            .expect("packaging should have spawned a pill");
-        assert!(
-            app.world().get::<TestBenchStock>(pill).is_some(),
-            "packaging must not launder practice stock into deliverable product"
-        );
-    }
-
-    #[test]
-    fn draining_the_buffer_clears_the_practice_mark() {
-        // Same rule rinsing a beaker already follows: nothing stays
-        // contaminated by association once it is empty.
-        let mut app = test_app();
-        let (machine, beaker, sugar) = chemmaster_with_practice_stock(&mut app);
-        transfer(&mut app, machine, sugar, BufferDirection::ToBuffer);
-        assert!(app.world().get::<BufferPracticeStock>(machine).is_some());
-
-        // Everything back out again leaves the buffer dry.
-        let _ = beaker;
-        transfer(&mut app, machine, sugar, BufferDirection::ToContainer);
-
-        assert!(
-            app.world().get::<BufferPracticeStock>(machine).is_none(),
-            "an empty buffer is clean again"
-        );
-    }
 }

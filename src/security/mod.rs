@@ -187,10 +187,8 @@ fn schedule_raid(
 /// Inspects every container in the world, once, when the officer's dwell
 /// runs out.
 ///
-/// No filter on `HeldBy`, `InSlot` or `TestBenchStock` — every `Container`
-/// is checked, wherever it is. That is exactly what makes test-bench-origin
-/// stock non-exempt with no special-casing: it is still a `Container`
-/// holding an `Illicit`-category reagent, indistinguishable from any other.
+/// No filter on `HeldBy` or `InSlot` — every `Container` is checked, wherever
+/// it is: on a bench, in a hand, loaded into a machine.
 #[allow(clippy::too_many_arguments)]
 fn run_sweep(
     mut commands: Commands,
@@ -256,7 +254,6 @@ fn run_sweep(
 mod tests {
     use super::*;
     use crate::containers::ContainerKind;
-    use crate::machines::TestBenchStock;
     use chem_sim::{ChemData, Units};
 
     #[test]
@@ -334,29 +331,6 @@ mod tests {
                 .solution
                 .is_empty(),
             "contraband should be confiscated"
-        );
-        assert_eq!(
-            app.world().resource::<Shift>().standing(Department::Security),
-            RAID_PENALTY
-        );
-    }
-
-    #[test]
-    fn test_bench_stock_is_not_exempt_from_a_sweep() {
-        let mut app = sweep_app();
-        officer_waiting(&mut app, 0.5);
-        let beaker = beaker_of(&mut app, "space_drugs", 15);
-        app.world_mut().entity_mut(beaker).insert(TestBenchStock);
-
-        advance(&mut app, 1.0);
-
-        assert!(
-            app.world()
-                .get::<Container>(beaker)
-                .unwrap()
-                .solution
-                .is_empty(),
-            "practice stock is still real contraband sitting in the lab"
         );
         assert_eq!(
             app.world().resource::<Shift>().standing(Department::Security),

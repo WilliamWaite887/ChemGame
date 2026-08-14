@@ -24,7 +24,8 @@ use chem_sim::{Solution, Units};
 
 use crate::interaction::Interactable;
 use crate::machines::{
-    Buffer, ContainerSlot, DispenseAmount, Facing, Hopper, Machine, MachineKind, Thermostat,
+    Buffer, ContainerSlot, ContainerSlotB, DispenseAmount, Facing, Hopper, Machine, MachineKind,
+    Thermostat,
 };
 use crate::net::is_authority;
 use crate::AppState;
@@ -144,9 +145,9 @@ pub const LOBBY: usize = 4;
 /// the core loop and every other room hangs off it; the lobby has the only
 /// external door, so crew and couriers never set foot on the working floor.
 pub const ROOMS: [Room; 5] = [
-    // The mixing hall. Dispenser and ChemMaster stay in here together: they are
-    // the two halves of every single order, and a wall between them would tax
-    // the common case instead of the interesting one.
+    // The mixing hall. ChemMaster 5000 and Mixing Chamber stay in here
+    // together: they are the two halves of every single order, and a wall
+    // between them would tax the common case instead of the interesting one.
     Room {
         name: "Mixing Hall",
         min_x: -7.5,
@@ -159,8 +160,8 @@ pub const ROOMS: [Room; 5] = [
     // Reaction bay, off the hall's west end, walled off deliberately: the
     // coolant vent hazard is contained by the room instead of washing over half
     // the lab, and a hot batch has to be carried out through a doorway and
-    // across the hall to the ChemMaster. That walk is the deadline heating has
-    // always needed, and now it is one you can see.
+    // across the hall to the Mixing Chamber. That walk is the deadline heating
+    // has always needed, and now it is one you can see.
     Room {
         name: "Reaction Bay",
         min_x: -13.5,
@@ -170,10 +171,11 @@ pub const ROOMS: [Room; 5] = [
         floor: [0.18, 0.21, 0.26],
         light: [0.74, 0.85, 1.00],
     },
-    // Analysis, off the hall's east end. Analyzer and test bench belong
-    // together: both are for finding out what you have made, and neither is on
-    // the critical path of an order. Their own room means experimenting never
-    // has you standing in the way of a delivery.
+    // Analysis, off the hall's east end. The analyzer is for finding out what
+    // you have made, and is not on the critical path of an order — its own
+    // room means working that out never has you standing in the way of a
+    // delivery. (Used to share this room with the test bench; the space it
+    // left is still here, unclaimed.)
     Room {
         name: "Analysis",
         min_x: 7.5,
@@ -861,8 +863,8 @@ fn fit(kind: MachineKind) -> MachineFit {
         // The core loop, spread across the hall's north wall with room to stand
         // between them. In the one-room lab these were two of five machines at
         // 2.3m centres; five metres apart, each one has its own place to work.
-        MachineKind::Dispenser => north(hall, -4.0),
-        MachineKind::ChemMaster => north(hall, 1.5),
+        MachineKind::ChemMaster5000 => north(hall, -4.0),
+        MachineKind::MixingChamber => north(hall, 1.5),
         // On the hall's east wall beside the lobby door, so it is the last
         // thing you pass on the way out to the counter and the first on the way
         // back in. Shallow, because it is a notice board, not a cabinet.
@@ -872,19 +874,12 @@ fn fit(kind: MachineKind) -> MachineFit {
             facing: Vec3::NEG_X,
             is_worktop: false,
         },
-        // Analysis, in its own room: the analyzer against the north wall and the
-        // test bench down the east one.
+        // Analysis, in its own room, against the north wall.
         MachineKind::Analyzer => north(&ROOMS[ANALYSIS], 10.5),
-        MachineKind::TestBench => MachineFit {
-            base: Vec3::new(ROOMS[ANALYSIS].max_x - 0.55, 0.0, -2.5),
-            size: Vec3::new(1.0, 1.1, 2.6),
-            facing: Vec3::NEG_X,
-            is_worktop: true,
-        },
         // The reaction bay's whole reason to exist, on its west wall — as far
-        // from the ChemMaster as the suite gets. A hot batch has to cross a
+        // from the Mixing Chamber as the suite gets. A hot batch has to cross a
         // doorway and the length of the hall, which is the only cost heating
-        // has; putting the chamber next to the ChemMaster would remove it.
+        // has; putting the chamber next to the Mixing Chamber would remove it.
         MachineKind::ReactionChamber => MachineFit {
             base: Vec3::new(ROOMS[REACTION_BAY].min_x + 0.55, 0.0, -3.5),
             size: Vec3::new(1.0, 1.5, 1.4),
@@ -1016,10 +1011,10 @@ fn spawn_machines(mut commands: Commands) {
 
         // Equipment-specific state.
         match kind {
-            MachineKind::Dispenser | MachineKind::TestBench => {
+            MachineKind::ChemMaster5000 => {
                 commands.entity(machine).insert(DispenseAmount::default());
             }
-            MachineKind::ChemMaster => {
+            MachineKind::MixingChamber => {
                 commands
                     .entity(machine)
                     .insert(Buffer(Solution::new(Units::whole(300))));
@@ -1096,9 +1091,21 @@ pub(crate) fn dress_machines(
         // what is in your hand *inside*, and a slot would catch the first
         // beaker on the roof instead.
         if !matches!(kind, MachineKind::StandingBoard | MachineKind::Locker) {
-            commands.entity(entity).insert(ContainerSlot {
-                offset: Vec3::Y * (fit.size.y * 0.5 + 0.07) + fit.facing * 0.18,
-            });
+            let lift = Vec3::Y * (fit.size.y * 0.5 + 0.07) + fit.facing * 0.18;
+            if kind == MachineKind::MixingChamber {
+                // Two beakers side by side across the casing's top, so a
+                // chemist can see at a glance which one is which — the whole
+                // point of holding two at once instead of one at a time.
+                // `facing` rotated a quarter turn around `Y` is the machine's
+                // own left-right axis, wherever it is standing.
+                let lateral = Vec3::new(fit.facing.z, 0.0, -fit.facing.x) * 0.28;
+                commands.entity(entity).insert((
+                    ContainerSlot { offset: lift - lateral },
+                    ContainerSlotB { offset: lift + lateral },
+                ));
+            } else {
+                commands.entity(entity).insert(ContainerSlot { offset: lift });
+            }
         }
 
         // The screen is a separate unparented entity rather than a child:
@@ -1167,7 +1174,7 @@ mod tests {
         let mut app = client_lab();
         let arrived = app
             .world_mut()
-            .spawn(Machine::new(MachineKind::Dispenser))
+            .spawn(Machine::new(MachineKind::ChemMaster5000))
             .id();
 
         app.update();

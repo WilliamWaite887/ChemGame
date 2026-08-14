@@ -2,9 +2,9 @@
 //!
 //! Every hand-off over the counter takes the container with it — the crew walk
 //! away holding your beaker, which is true in the original too — and nothing
-//! else in the game makes one. The ChemMaster mints pills and bottles from its
-//! buffer, but getting anything *into* the buffer needs a beaker, so without a
-//! supply line the lab is bricked after five deliveries.
+//! else in the game makes one. The Mixing Chamber mints pills and bottles from
+//! its buffer, but getting anything *into* the buffer needs a beaker, so
+//! without a supply line the lab is bricked after five deliveries.
 //!
 //! Supply arrives the way everything else in this lab does: someone walks in on
 //! a timer, puts it on the counter, and goes. The courier is lifted almost
@@ -113,8 +113,9 @@ fn order_glassware(
 
     // Only beaker-class glassware counts, wherever it is — bench, hand, machine
     // slot, delivery window. Pills, bottles and syringes are minted by the
-    // ChemMaster without limit, so counting them would let a player who spammed
-    // packaging starve themselves of the beakers that make packaging possible.
+    // Mixing Chamber without limit, so counting them would let a player who
+    // spammed packaging starve themselves of the beakers that make packaging
+    // possible.
     // That is also why cargo never resupplies a syringe: it is something you
     // make, not something you order.
     let live = glassware
