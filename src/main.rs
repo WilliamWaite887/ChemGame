@@ -9,6 +9,7 @@ mod containers;
 mod crew;
 mod crisis;
 mod cult;
+mod ending;
 mod fx;
 mod hazards;
 mod interaction;
@@ -28,6 +29,8 @@ mod rogue_security;
 mod saboteur;
 mod saves;
 mod security;
+mod session;
+mod settings;
 mod showdown;
 mod shift;
 mod smuggler;
@@ -151,7 +154,19 @@ fn main() {
                 // models — reads `Bloodstream`, never mutates it.
                 fx::FxPlugin,
             ),
-            (ui::UiPlugin, menu::MenuPlugin),
+            // `settings` owns the pause overlay as well as the knobs, and
+            // reuses the menu's own shell to draw it — so it goes with them.
+            (
+                ui::UiPlugin,
+                menu::MenuPlugin,
+                settings::SettingsPlugin,
+                // Draws on `settings`' overlay when the arc resolves, which is
+                // why it goes here rather than with `arc`.
+                ending::EndingPlugin,
+                // Unwinds a session on the way out, so quitting to the menu
+                // and opening another save does not inherit this one's career.
+                session::SessionPlugin,
+            ),
         ));
 
     // Kept out of the tuple above (already near Bevy's 16-plugin limit) and
@@ -163,6 +178,25 @@ fn main() {
     }
 
     app.run();
+}
+
+/// Marks an entity as belonging to *this* visit to the lab.
+///
+/// Everything a session spawns — the room shell, the machines, the glassware,
+/// the crew, the chemists, their cameras, the HUD — carries this, so leaving
+/// for the main menu unwinds the whole world in one move rather than each of
+/// fifteen modules owning a teardown system that could be forgotten.
+///
+/// A function rather than a constant because `DespawnOnExit` holds the state
+/// value, and a helper is what makes the rule greppable: if you spawn a root
+/// entity while `Playing` and it does not carry this, it will still be sitting
+/// in the world when the next save opens. `spawned_for_this_session_is_cleaned_up`
+/// in `src/net/mod.rs` is the guard on that.
+///
+/// Children need no marker of their own — despawning a root takes its
+/// hierarchy with it.
+pub fn until_we_leave_the_lab() -> DespawnOnExit<AppState> {
+    DespawnOnExit(AppState::Playing)
 }
 
 #[derive(States, Debug, Clone, Copy, Default, Eq, PartialEq, Hash)]

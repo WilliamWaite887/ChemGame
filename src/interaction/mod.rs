@@ -36,10 +36,17 @@ impl Plugin for InteractionPlugin {
                     // Before `panel_input`, so a panel the server has just
                     // granted is open for this frame's Escape to close.
                     apply_machine_opened,
+                    // Not gated on `not_paused` — it is what *reads* Escape,
+                    // so it has to keep running to let the player back out.
                     panel_input,
-                    update_focus,
-                    request_interaction,
-                    update_prompt,
+                    // Chained: `request_interaction` acts on the target
+                    // `update_focus` picked this frame, and `update_prompt`
+                    // describes it. Wrapping them in a tuple for the pause
+                    // gate drops the ordering the outer `.chain()` used to
+                    // give them unless it is restored here.
+                    (update_focus, request_interaction, update_prompt)
+                        .chain()
+                        .run_if(crate::settings::not_paused),
                 )
                     .chain()
                     .run_if(in_state(AppState::Playing)),
@@ -132,17 +139,32 @@ fn apply_machine_opened(
 /// Escape has to mean "close the panel" when one is open and "let go of the
 /// cursor" when not. Split across two systems those race within a frame — the
 /// panel closes and the same keypress immediately frees the cursor.
+#[allow(clippy::too_many_arguments)]
 fn panel_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     cursor: Single<&mut CursorOptions>,
+    settings: Res<crate::settings::Settings>,
+    mut paused: ResMut<crate::settings::Paused>,
     mut released: ResMut<CursorReleased>,
     mut players: Query<(Entity, &mut InteractionMode), With<LocalPlayer>>,
     mut machines: Query<&mut Machine>,
     mut leaving: MessageWriter<LeaveMachineRequested>,
 ) {
     let escape = keys.just_pressed(KeyCode::Escape);
-    let book = keys.just_pressed(KeyCode::KeyB);
+    let book = keys.just_pressed(settings.bindings.book);
+
+    // The pause menu owns Escape whenever it is up, and nothing else here
+    // should run underneath it — a keypress meant to close the menu must not
+    // also toggle the book behind it.
+    if paused.0 {
+        if escape {
+            paused.0 = false;
+        }
+        free_the_cursor(cursor, true);
+        return;
+    }
+
     let mut panel_open = false;
 
     for (player, mut mode) in &mut players {
@@ -175,24 +197,35 @@ fn panel_input(
             continue;
         }
 
+        // Escape from the floor opens the pause menu. It used to merely free
+        // the cursor, which looked identical to the game having stopped
+        // responding — there was no way out of the lab, and no settings to
+        // reach, from anywhere inside it.
         if escape {
-            released.0 = true;
+            paused.0 = true;
         } else if mouse.just_pressed(MouseButton::Left) {
             released.0 = false;
         }
     }
 
-    let want_free = panel_open || released.0;
+    free_the_cursor(cursor, panel_open || paused.0 || released.0);
+}
+
+/// Grabs or frees the mouse, only when that is actually a change.
+///
+/// Shared by the paused early-return above and the ordinary path below it, so
+/// the two can never disagree about who owns the cursor.
+fn free_the_cursor(cursor: Single<&mut CursorOptions>, want_free: bool) {
     let mut cursor = cursor.into_inner();
-    let is_free = cursor.grab_mode == CursorGrabMode::None;
-    if want_free != is_free {
-        cursor.visible = want_free;
-        cursor.grab_mode = if want_free {
-            CursorGrabMode::None
-        } else {
-            CursorGrabMode::Locked
-        };
+    if want_free == (cursor.grab_mode == CursorGrabMode::None) {
+        return;
     }
+    cursor.visible = want_free;
+    cursor.grab_mode = if want_free {
+        CursorGrabMode::None
+    } else {
+        CursorGrabMode::Locked
+    };
 }
 
 /// What a player is currently doing. Per-player rather than a global state
@@ -340,10 +373,11 @@ fn update_focus(
 
 fn request_interaction(
     keys: Res<ButtonInput<KeyCode>>,
+    controls: Res<crate::settings::Settings>,
     players: Query<(Entity, &Focus, &InteractionMode), With<LocalPlayer>>,
     mut requests: MessageWriter<InteractRequested>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyE) {
+    if !keys.just_pressed(controls.bindings.interact) {
         return;
     }
     for (_player, focus, mode) in &players {
@@ -373,6 +407,7 @@ fn spawn_hud(mut commands: Commands) {
             ..default()
         },
         BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.75)),
+        crate::until_we_leave_the_lab(),
     ));
 
     // Interaction prompt.
@@ -390,6 +425,7 @@ fn spawn_hud(mut commands: Commands) {
             TextColor(Color::srgb(0.94, 0.95, 0.98)),
             InteractionPrompt,
         )],
+        crate::until_we_leave_the_lab(),
     ));
 }
 

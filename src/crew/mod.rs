@@ -232,6 +232,7 @@ pub fn spawn_crew_member(commands: &mut Commands, def: &CrewDef, lane: f32) -> E
             Bloodstream::default(),
             // The route stays server-side; clients see the resulting Transform.
             bevy_replicon::prelude::Replicated,
+            crate::until_we_leave_the_lab(),
         ))
         .id()
 }

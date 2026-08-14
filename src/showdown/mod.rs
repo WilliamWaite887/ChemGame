@@ -118,7 +118,7 @@ pub struct Pursuit {
 
 /// The live showdown. Absent means none is running.
 #[derive(Resource)]
-struct Showdown {
+pub struct Showdown {
     /// Seconds left before the arc is lost.
     deadline: f32,
     /// Seconds until the next gas vent (siege only).
@@ -164,6 +164,7 @@ fn arm_showdown(
                 Visibility::default(),
                 Interactable::new(format!("Treat it — {cure_reagent} or anything like it")),
                 Replicated,
+                crate::until_we_leave_the_lab(),
             ));
         }
         ShowdownForm::Assailant { name, color } => {
@@ -250,6 +251,7 @@ fn run_siege(
         Transform::from_translation(origin),
         Visibility::default(),
         Replicated,
+        crate::until_we_leave_the_lab(),
     ));
 }
 

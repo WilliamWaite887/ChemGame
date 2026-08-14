@@ -58,6 +58,11 @@ impl Plugin for MachinePlugin {
                     handle_thermostat_controls,
                     apply_thermostats,
                     cool_to_ambient,
+                    // Last: everything above is a change to a beaker, and this
+                    // is what carries whatever that change *started* forward
+                    // in time. Running it first would step a batch before the
+                    // frame's pours had gone in.
+                    tick_reactions,
                 )
                     .chain()
                     .run_if(in_state(AppState::Playing))
@@ -678,6 +683,124 @@ fn cool_to_ambient(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Reactions that take time
+// ---------------------------------------------------------------------------
+
+/// A batch part-way through, and what it has done so far.
+///
+/// Only reactions that name a `rate` in `chem.reactions.ron` can produce one:
+/// everything else still completes inside the `Container::mutate` that started
+/// it, and never touches this at all.
+///
+/// It exists to answer two questions that a per-frame report cannot:
+///
+/// 1. **What was in the beaker when this started?** `distinct_reagents` is how
+///    `knowledge::learn_from_experiments` tells a focused experiment from a
+///    shotgun dump, and the resolver eats intermediates as it goes — so read
+///    mid-run it flatters a dump that would have been rejected on frame one.
+/// 2. **Has it already been announced?** A four-second reaction is sixty
+///    frames, and sixty `ReactionsFired` means sixty smoke clouds and sixty
+///    "too much going on in that beaker" lines.
+///
+/// Deliberately **not** replicated, and deliberately not what anything asks
+/// "is this batch finished?". That question is answered by
+/// `chem_sim::is_reacting` from the solution and the chemistry — both of which
+/// a guest already has — so the panel and the delivery window get the same
+/// answer on both ends without a component that changes every frame of every
+/// batch going on the wire. This is purely the authority's bookkeeping.
+#[derive(Component)]
+pub struct Reacting {
+    /// Distinct reagents present on the frame the run began.
+    distinct_reagents: usize,
+    /// Every reaction that has fired during this run, in order of first firing.
+    reactions: Vec<chem_sim::ReactionId>,
+    /// Side effects accumulated across the run, emitted once at the end.
+    ///
+    /// Held back rather than emitted per step because `Smoke` and `Explosion`
+    /// do not scale with how much reacted — they are "this happened" flags —
+    /// so a stepped reaction would vent a full cloud every frame it ran.
+    effects: Vec<chem_sim::ReactionEffect>,
+}
+
+/// Advances every beaker in the lab by one frame of chemistry.
+///
+/// Does nothing at all for the instant recipes, which are already finished by
+/// the time this sees them. What it is for is the rated ones: a batch that
+/// takes real seconds is a batch you can stand and watch, pull out of the
+/// chamber halfway, or be interrupted during — which is a verb this game did
+/// not have when every recipe was one click.
+///
+/// The ChemMaster's buffer is deliberately **not** stepped. Reagents in the
+/// buffer are held separated on purpose — that is the whole point of the
+/// machine, and it has never run the resolver — so reacting them there would
+/// break the one tool the player has for cleaning up a contaminated batch.
+fn tick_reactions(
+    mut commands: Commands,
+    time: Res<Time>,
+    db: Res<ChemDb>,
+    mut fired: MessageWriter<ReactionsFired>,
+    mut containers: Query<(Entity, &mut Container, Option<&mut Reacting>)>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+
+    for (entity, mut container, run) in &mut containers {
+        let report = if container.solution.is_empty() {
+            // An empty beaker cannot react — but this still has to fall
+            // through, not `continue`, so that a run *interrupted* by the
+            // beaker being emptied or detonated is closed out below instead of
+            // leaving a `Reacting` behind to merge into whatever is poured in
+            // next.
+            chem_sim::ResolveReport::default()
+        } else {
+            // Deliberately bypassing change detection to *look*. A `Container`
+            // is replicated, so touching one marks it for the wire; most
+            // beakers in the lab are sitting still, and stepping them must
+            // cost nothing until something actually happens. The `set_changed`
+            // calls below are the honest signal.
+            let solution = &mut container.bypass_change_detection().solution;
+            chem_sim::resolve_step(solution, &db.reactions, dt)
+        };
+
+        let Some(mut run) = run else {
+            if !report.reacted() && report.effects.is_empty() {
+                continue;
+            }
+            container.set_changed();
+            commands.entity(entity).insert(Reacting {
+                distinct_reagents: report.distinct_reagents,
+                reactions: report.fired_reactions(),
+                effects: report.effects,
+            });
+            continue;
+        };
+
+        if report.reacted() || !report.effects.is_empty() {
+            container.set_changed();
+            for reaction in report.fired_reactions() {
+                if !run.reactions.contains(&reaction) {
+                    run.reactions.push(reaction);
+                }
+            }
+            run.effects.extend(report.effects);
+            continue;
+        }
+
+        // Nothing moved this frame, so the run is over: one report for the
+        // whole batch, carrying the reagent count from the frame it started.
+        fired.write(ReactionsFired {
+            reactions: std::mem::take(&mut run.reactions),
+            container: entity,
+            effects: std::mem::take(&mut run.effects),
+            distinct_reagents: run.distinct_reagents,
+        });
+        commands.entity(entity).remove::<Reacting>();
+    }
+}
+
 /// Resolves a connection to the chemist it drives.
 pub fn chemist_entity(chemists: &Query<(Entity, &Chemist)>, client: ClientId) -> Option<Entity> {
     chemists
@@ -1204,6 +1327,7 @@ mod tests {
                     handle_thermostat_controls,
                     apply_thermostats,
                     cool_to_ambient,
+                    tick_reactions,
                 )
                     .chain(),
             );
@@ -1367,22 +1491,122 @@ mod tests {
             });
             app.update();
         }
-
-        let fired = app.world().resource::<Messages<ReactionsFired>>();
-        let mut cursor = fired.get_cursor();
-        let reported: Vec<chem_sim::ReactionId> = cursor
-            .read(fired)
-            .flat_map(|event| event.reactions.clone())
-            .collect();
-
-        let db = app.world().resource::<ChemDb>();
-        let names: Vec<&str> = reported
-            .iter()
-            .map(|id| db.reactions.get(*id).key.as_str())
-            .collect();
+        // Both halves of the pipeline, in one test: inaprovaline has no rate
+        // and is reported by the dispense that made it, while bicaridine does
+        // and is reported by `tick_reactions` once its batch finishes.
+        let names = reactions_over(&mut app, 8.0);
         assert!(
-            names.contains(&"inaprovaline") && names.contains(&"bicaridine"),
+            names.iter().any(|key| key == "inaprovaline")
+                && names.iter().any(|key| key == "bicaridine"),
             "both steps of the chain should be reported, got {names:?}"
+        );
+    }
+
+    // -- reactions that take time ------------------------------------------
+
+    #[test]
+    fn a_batch_that_takes_time_is_reported_once_not_once_per_frame() {
+        // Bicaridine is rated, so it runs across dozens of frames. One report
+        // per frame would mean a recipe with a `Smoke` effect venting a full
+        // cloud sixty times, and `knowledge::learn_from_experiments` grading
+        // one experiment sixty times over.
+        let mut app = test_app();
+        loose_beaker(&mut app, &[("inaprovaline", 10), ("carbon", 10)]);
+        let bicaridine = reaction_id(&app, "bicaridine");
+
+        let reports = fired_over(&mut app, 8.0);
+        let mentions = reports
+            .iter()
+            .filter(|report| report.reactions.contains(&bicaridine))
+            .count();
+        assert_eq!(mentions, 1, "one batch, one report");
+    }
+
+    #[test]
+    fn the_crowd_count_is_taken_when_a_batch_starts_not_when_it_ends() {
+        // `distinct_reagents` is how discovery tells a focused experiment from
+        // a shotgun dump. The resolver eats intermediates as it goes, so read
+        // at the *end* of a slow run it flatters a beaker that started as a
+        // pile of everything — the exact dump the check exists to refuse.
+        let mut app = test_app();
+        loose_beaker(&mut app, &[("inaprovaline", 10), ("carbon", 10)]);
+        let bicaridine = reaction_id(&app, "bicaridine");
+
+        let reports = fired_over(&mut app, 8.0);
+        let report = reports
+            .iter()
+            .find(|report| report.reactions.contains(&bicaridine))
+            .expect("the batch should have been reported");
+        assert_eq!(
+            report.distinct_reagents, 2,
+            "two reagents went in; by the end there is only the product left"
+        );
+    }
+
+    #[test]
+    fn a_running_batch_says_so_and_stops_saying_so() {
+        // What the panel's "Still reacting…" line reads, and the difference
+        // between "not finished yet" and "this is all you are getting".
+        let mut app = test_app();
+        let beaker = loose_beaker(&mut app, &[("inaprovaline", 10), ("carbon", 10)]);
+
+        run_for(&mut app, 0.5);
+        assert!(
+            app.world().get::<Reacting>(beaker).is_some(),
+            "two seconds of bicaridine is not done in half of one"
+        );
+
+        run_for(&mut app, 8.0);
+        assert!(app.world().get::<Reacting>(beaker).is_none());
+        let container = app.world().get::<Container>(beaker).unwrap();
+        let product = container
+            .solution
+            .volume_of(app.world().resource::<ChemDb>().reagent("bicaridine"));
+        assert_eq!(product, Units::whole(20));
+    }
+
+    #[test]
+    fn an_untouched_beaker_is_never_marked_for_replication() {
+        // A `Container` is replicated, so touching one puts it on the wire.
+        // Stepping every beaker in the lab every frame must cost nothing until
+        // something in one of them actually moves.
+        let mut app = test_app();
+        let beaker = loose_beaker(&mut app, &[("carbon", 10)]);
+
+        run_for(&mut app, 1.0);
+        let tick = app.world().read_change_tick();
+        run_for(&mut app, 1.0);
+
+        let container = app
+            .world()
+            .entity(beaker)
+            .get_ref::<Container>()
+            .expect("the beaker is still there");
+        assert!(
+            !container.last_changed().is_newer_than(tick, app.world().read_change_tick()),
+            "carbon on its own reacts with nothing and must not be re-sent"
+        );
+    }
+
+    #[test]
+    fn a_beaker_emptied_mid_batch_does_not_carry_the_run_into_the_next_one() {
+        // Otherwise the next thing poured in inherits the last batch's reagent
+        // count and its half-finished list of what fired.
+        let mut app = test_app();
+        let beaker = loose_beaker(&mut app, &[("inaprovaline", 10), ("carbon", 10)]);
+        run_for(&mut app, 0.5);
+        assert!(app.world().get::<Reacting>(beaker).is_some());
+
+        app.world_mut()
+            .get_mut::<Container>(beaker)
+            .unwrap()
+            .solution
+            .clear();
+        run_for(&mut app, 0.5);
+
+        assert!(
+            app.world().get::<Reacting>(beaker).is_none(),
+            "an interrupted run has to be closed out, not left attached"
         );
     }
 
@@ -1567,17 +1791,12 @@ mod tests {
         }
 
         grind(&mut app, grinder, false);
-
-        let fired = app.world().resource::<Messages<ReactionsFired>>();
-        let mut cursor = fired.get_cursor();
-        let db = app.world().resource::<ChemDb>();
-        let names: Vec<&str> = cursor
-            .read(fired)
-            .flat_map(|event| event.reactions.iter())
-            .map(|id| db.reactions.get(*id).key.as_str())
-            .collect();
+        // Hyronalin is rated, so the grind starts it and `tick_reactions`
+        // carries it. The thing under test is unchanged: the grind has to go
+        // through `Container::mutate` at all, or nothing would ever start.
+        let names = reactions_over(&mut app, 8.0);
         assert!(
-            names.contains(&"hyronalin"),
+            names.iter().any(|key| key == "hyronalin"),
             "the grind must go through Container::mutate so reactions resolve, got {names:?}"
         );
     }
@@ -2059,6 +2278,85 @@ mod tests {
                 .advance_by(std::time::Duration::from_secs_f32(0.1));
             app.update();
         }
+    }
+
+    /// Takes every `ReactionsFired` written so far.
+    ///
+    /// Drains rather than reads, so it can be called every frame without
+    /// double-counting — `Messages` keeps two frames' worth, so a plain cursor
+    /// read per frame would see each report twice.
+    fn drain_fired(app: &mut App) -> Vec<ReactionsFired> {
+        app.world_mut()
+            .resource_mut::<Messages<ReactionsFired>>()
+            .drain()
+            .collect()
+    }
+
+    /// The same, as recipe names.
+    fn drain_reported(app: &mut App) -> Vec<String> {
+        let fired = drain_fired(app);
+        let db = app.world().resource::<ChemDb>();
+        fired
+            .iter()
+            .flat_map(|event| event.reactions.iter())
+            .map(|id| db.reactions.get(*id).key.clone())
+            .collect()
+    }
+
+    /// A loose beaker holding whole units of each named reagent, with nothing
+    /// reacted yet — the state `tick_reactions` is meant to pick up.
+    fn loose_beaker(app: &mut App, contents: &[(&str, i32)]) -> Entity {
+        let mut container = Container::new(ContainerKind::LargeBeaker);
+        for (key, amount) in contents {
+            let reagent = reagent(app, key);
+            let overflow = container.solution.add(reagent, Units::whole(*amount));
+            assert!(overflow.is_zero(), "the test beaker overflowed");
+        }
+        app.world_mut().spawn(container).id()
+    }
+
+    fn reaction_id(app: &App, key: &str) -> chem_sim::ReactionId {
+        app.world()
+            .resource::<ChemDb>()
+            .reactions
+            .find(key)
+            .expect("the recipe should exist")
+            .id
+    }
+
+    /// Every report written across `seconds` of game time, plus anything
+    /// already pending when the run started.
+    fn fired_over(app: &mut App, seconds: f32) -> Vec<ReactionsFired> {
+        let mut reports = drain_fired(app);
+        let frames = (seconds / 0.1).round() as u32;
+        for _ in 0..frames {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+            reports.extend(drain_fired(app));
+        }
+        reports
+    }
+
+    /// Every recipe reported across `seconds` of game time, plus anything
+    /// already pending when the run started.
+    ///
+    /// Collected as it goes rather than read at the end, because a rated
+    /// reaction reports when its batch *finishes* — seconds after the pour
+    /// that started it, and long after the instant half of the same chain has
+    /// been reported and aged out of the message buffer.
+    fn reactions_over(app: &mut App, seconds: f32) -> Vec<String> {
+        let mut names = drain_reported(app);
+        let frames = (seconds / 0.1).round() as u32;
+        for _ in 0..frames {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+            names.extend(drain_reported(app));
+        }
+        names
     }
 
     fn slot_temperature(app: &mut App, machine: Entity) -> Kelvin {

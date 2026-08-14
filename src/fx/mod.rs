@@ -77,6 +77,7 @@ fn build_overlay(mut commands: Commands) {
         BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.0)),
         ScreenOverlay,
         GlobalZIndex(1000),
+        crate::until_we_leave_the_lab(),
     ));
 }
 

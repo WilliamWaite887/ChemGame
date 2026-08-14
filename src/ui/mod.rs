@@ -34,7 +34,10 @@ use crate::orders::{reference_category, Department, Order, Shift};
 use crate::player::LocalPlayer;
 use crate::produce::{ProduceCatalog, ProduceId};
 use crate::radio::RadioLog;
-use crate::shift::{can_afford, RequisitionKind, RequisitionRequested, ToggleAcceptingOrders};
+use crate::shift::{
+    can_afford, can_call_it, shift_report, CallItAShift, OpenUpAgain, RequisitionKind,
+    RequisitionRequested, ShiftReport, ToggleAcceptingOrders,
+};
 use crate::AppState;
 
 /// How many orders the queue can show at once.
@@ -62,7 +65,9 @@ pub(crate) const ERROR_TEXT: Color = Color::srgb(0.85, 0.35, 0.35);
 pub(crate) const GOOD_TEXT: Color = Color::srgb(0.45, 0.80, 0.50);
 pub(crate) const BUTTON_IDLE: Color = Color::srgb(0.17, 0.19, 0.23);
 const BUTTON_HOVER: Color = Color::srgb(0.25, 0.29, 0.35);
-const BUTTON_ACTIVE: Color = Color::srgb(0.20, 0.45, 0.62);
+/// The "this is the one that is currently set" tint, shared by the dispense
+/// amount row, the book's open tab and the settings screen's presets.
+pub(crate) const BUTTON_ACTIVE: Color = Color::srgb(0.20, 0.45, 0.62);
 
 pub struct UiPlugin;
 
@@ -98,6 +103,8 @@ impl Plugin for UiPlugin {
                 .run_if(in_state(AppState::Playing)),
         )
         .init_resource::<BookView>()
+        .init_resource::<LastPanel>()
+        .init_resource::<LastSignState>()
         .add_message::<ShowToast>();
     }
 }
@@ -136,6 +143,8 @@ enum PanelAction {
     OpenRecipe(ReactionId),
     CloseRecipe,
     ToggleAcceptingOrders,
+    CallItAShift,
+    OpenUpAgain,
     Requisition(RequisitionKind),
     Close,
 }
@@ -160,6 +169,16 @@ struct BookView {
 /// buffer — and a missed signal shows the player stale contents, which in a
 /// chemistry game means dosing off numbers that are no longer true. The
 /// comparison is a few dozen integers; correctness is worth far more.
+/// The last signature [`sync_panel`] drew, so an unchanged panel is not
+/// rebuilt every frame.
+///
+/// A resource rather than the `Local<PanelSignature>` it was, so
+/// `crate::session` can clear it: leaving a stale signature behind meant the
+/// first panel opened in a *second* session could compare equal to one from
+/// the first and simply never draw.
+#[derive(Resource, Default)]
+pub struct LastPanel(PanelSignature);
+
 #[derive(PartialEq)]
 struct PanelSignature {
     mode: InteractionMode,
@@ -175,6 +194,11 @@ struct PanelSignature {
     /// The loaded container is practice stock. Tracked separately because the
     /// delivery window has to explain why it will not take it.
     test_stock: bool,
+    /// A batch is still running in the loaded container. Here so the readout
+    /// stops saying so the moment it finishes; the *numbers* moving while it
+    /// runs are already covered by `contents` above, which is what actually
+    /// shows the batch progressing.
+    reacting: bool,
     amount: Option<Units>,
     known_recipes: usize,
     /// The book's open heading. Here rather than tracked separately because
@@ -188,6 +212,12 @@ struct PanelSignature {
     /// panel would freeze on whatever it happened to show first.
     department_standing: Vec<(Department, i32)>,
     accepting_orders: bool,
+    /// Which of the board's three stages is drawn: open, wrapping up, or
+    /// debriefing. Carries the whole report rather than just the flag, because
+    /// the numbers on a debrief keep moving — the other chemist can still be
+    /// delivering while this one reads it — and a stale debrief is exactly the
+    /// stale readout this signature exists to prevent.
+    board: BoardStage,
     research_points: u32,
     /// What the standing board says about the campaign. Same reasoning as
     /// `department_standing`: the board draws from it, so without it here the
@@ -221,6 +251,7 @@ impl Default for PanelSignature {
             hopper: Vec::new(),
             stored: Vec::new(),
             test_stock: false,
+            reacting: false,
             amount: None,
             known_recipes: usize::MAX,
             book_category: None,
@@ -231,6 +262,9 @@ impl Default for PanelSignature {
             // "never compared yet" signal on its own — this field just needs
             // *a* starting value.
             accepting_orders: false,
+            // Same reasoning again: the vector above is what guarantees a
+            // difference on the first comparison, so this only needs a value.
+            board: BoardStage::Open,
             research_points: u32::MAX,
             arc: None,
             temperature: Some(i32::MAX),
@@ -240,19 +274,44 @@ impl Default for PanelSignature {
     }
 }
 
+/// Which of the standing board's three stages is showing.
+///
+/// The board is the only place a shift can be ended, and ending one is two
+/// deliberate steps: put the sign down, then — once whoever is still at the
+/// counter has been served or has given up — call it. Modelling that as one
+/// value rather than a pair of booleans read at three call sites is what keeps
+/// the panel, the signature and the click handler from ever disagreeing about
+/// which buttons exist.
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum BoardStage {
+    /// Taking requests. One button: put the sign down.
+    Open,
+    /// The sign is down and the lab is closing up. `clear` is whether the
+    /// counter has actually emptied, which is what makes "Call it a shift"
+    /// live rather than merely drawn.
+    WrappingUp { clear: bool },
+    /// The shift has been called. This is the debrief, and it is a *screen*,
+    /// not a state gate: the world is still running behind it, and the other
+    /// chemist can still be at the window while this one reads.
+    Debrief(ShiftReport),
+}
+
 /// Everything the standing board is allowed to say about the campaign.
 ///
 /// Built once, in [`arc_headline`], so the rule about what may be shown at
 /// which [`Reveal`] tier lives in exactly one place rather than being spread
 /// through the panel-drawing code.
+/// `pub(crate)` for `crate::ending`, which needs exactly this rule and must not
+/// re-derive it: "may the screen name them?" has one correct answer and it is
+/// this one.
 #[derive(PartialEq, Eq, Clone)]
-struct ArcHeadline {
+pub(crate) struct ArcHeadline {
     /// `None` until [`Reveal::Named`] — before that the board can say
     /// something is wrong, but not what.
-    name: Option<String>,
+    pub(crate) name: Option<String>,
     /// Counter-track progress, once the track has opened.
-    countered: usize,
-    total: usize,
+    pub(crate) countered: usize,
+    pub(crate) total: usize,
     resolved: Option<bool>,
 }
 
@@ -260,7 +319,10 @@ struct ArcHeadline {
 ///
 /// `None` while the antagonist is still [`Reveal::Hidden`]: the board is a
 /// public notice, and the whole arc depends on it not being one yet.
-fn arc_headline(campaign: &Campaign, script: Option<&ArcScript>) -> Option<ArcHeadline> {
+pub(crate) fn arc_headline(
+    campaign: &Campaign,
+    script: Option<&ArcScript>,
+) -> Option<ArcHeadline> {
     if campaign.reveal == Reveal::Hidden && campaign.outcome.is_none() {
         return None;
     }
@@ -316,6 +378,49 @@ struct StorageView<'w, 's> {
     labels: Query<'w, 's, &'static Interactable>,
 }
 
+/// What the standing board reads on top of [`Shift`] itself.
+///
+/// Bundled for the same reason [`StorageView`] is — `sync_panel` is one
+/// parameter off Bevy's sixteen-parameter ceiling — and because the query
+/// exists solely to answer the board's one extra question: is anyone still
+/// waiting at the counter?
+#[derive(SystemParam)]
+struct BoardView<'w, 's> {
+    shift: Res<'w, Shift>,
+    /// Crew who walked in and are still holding an order. Residents are
+    /// filtered out because they live here: they are never what a shift is
+    /// waiting on, and counting them would mean the sign could never come
+    /// down at all.
+    waiting: Query<'w, 's, (), (With<Order>, crate::crew::NotResident)>,
+}
+
+impl BoardView<'_, '_> {
+    fn stage(&self, knowledge: &Knowledge) -> BoardStage {
+        board_stage(&self.shift, knowledge, self.waiting.iter().count())
+    }
+}
+
+/// Which stage the board is at right now.
+///
+/// `clear` comes from `shift::can_call_it` rather than from a local
+/// `waiting == 0` so the button and the authority's own check are the same
+/// rule — a button that lights up on a condition the server then refuses reads
+/// as the game being broken.
+///
+/// Pure, and separate from [`BoardView::stage`], so the three-stage rule can be
+/// checked without a world to hang a query off.
+fn board_stage(shift: &Shift, knowledge: &Knowledge, waiting: usize) -> BoardStage {
+    if shift.called {
+        return BoardStage::Debrief(shift_report(shift, knowledge));
+    }
+    if shift.accepting_orders {
+        return BoardStage::Open;
+    }
+    BoardStage::WrappingUp {
+        clear: can_call_it(shift, waiting),
+    }
+}
+
 /// One line of a locker's contents.
 #[derive(Clone, PartialEq, Eq)]
 struct StoredItem {
@@ -342,7 +447,7 @@ fn stored_items(
     stored_in(locker, &view.stored)
         .into_iter()
         .map(|item| {
-            let container = containers.get(item).ok().map(|(container, _)| container);
+            let container = containers.get(item).ok().map(|(container, ..)| container);
             let name = container
                 .map(|container| container.kind.label().to_string())
                 .or_else(|| view.labels.get(item).ok().map(|label| label.label.clone()))
@@ -381,9 +486,10 @@ fn sync_panel(
     catalog: Option<Res<ProduceCatalog>>,
     campaign: Option<Res<Campaign>>,
     arc_script: Option<Res<crate::arc::Script>>,
-    shift: Res<Shift>,
-    mut previous: Local<PanelSignature>,
+    board: BoardView,
+    previous: ResMut<LastPanel>,
 ) {
+    let shift = &board.shift;
     let mode = modes.iter().next().copied().unwrap_or_default();
     let open_machine = match mode {
         InteractionMode::UsingMachine(machine) => Some(machine),
@@ -393,6 +499,14 @@ fn sync_panel(
     let slot_contents = loaded_entity.and_then(|entity| containers.get(entity).ok());
     let loaded = slot_contents.map(|(container, _)| container);
     let test_stock = slot_contents.is_some_and(|(_, practice)| practice);
+    // Derived from the beaker and the chemistry rather than read off a marker
+    // component, so a guest can answer it too. `machines::Reacting` is the
+    // authority's own bookkeeping and is deliberately not on the wire; a
+    // client holds the same solution and the same recipes, so it does not need
+    // to be told.
+    let reacting = loaded.is_some_and(|container| {
+        chem_sim::is_reacting(&container.solution, &db.reactions)
+    });
     let machine_parts = open_machine.and_then(|machine| machines.get(machine).ok());
 
     // Built before the signature so both the comparison and the panel body can
@@ -400,6 +514,9 @@ fn sync_panel(
     let arc = campaign
         .as_deref()
         .and_then(|campaign| arc_headline(campaign, arc_script.as_deref().map(|s| &s.0)));
+    // Same reasoning as `arc` above: built once, read by both the comparison
+    // and the panel body, because the signature is moved into `previous`.
+    let stage = board.stage(&knowledge);
 
     // Only for the locker, and only while its panel is open. Reading every
     // stored item on every frame of every other panel would be a scan of the
@@ -427,6 +544,7 @@ fn sync_panel(
             .unwrap_or_default(),
         stored: stored.clone(),
         test_stock,
+        reacting,
         amount: machine_parts
             .and_then(|(_, amount, _, _, _)| amount)
             .map(|a| a.0),
@@ -438,6 +556,7 @@ fn sync_panel(
             .map(|dept| (dept, shift.standing(dept)))
             .collect(),
         accepting_orders: shift.accepting_orders,
+        board: stage.clone(),
         research_points: knowledge.research_points,
         arc: arc.clone(),
         // Only tracked while a chamber panel is open, so no other machine pays
@@ -454,10 +573,10 @@ fn sync_panel(
             .is_some_and(|thermostat| thermostat.powered),
     };
 
-    if signature == *previous {
+    if signature == previous.0 {
         return;
     }
-    *previous = signature;
+    previous.into_inner().0 = signature;
 
     for panel in &existing {
         commands.entity(panel).despawn();
@@ -497,6 +616,7 @@ fn sync_panel(
                 ..default()
             },
             PanelRoot,
+            crate::until_we_leave_the_lab(),
         ))
         .with_children(|screen| {
             screen
@@ -517,7 +637,15 @@ fn sync_panel(
 
                     match machine.kind {
                         MachineKind::Dispenser | MachineKind::TestBench => {
-                            dispenser_body(panel, &db, &knowledge, machine.kind, amount, loaded);
+                            dispenser_body(
+                                panel,
+                                &db,
+                                &knowledge,
+                                machine.kind,
+                                amount,
+                                loaded,
+                                reacting,
+                            );
                         }
                         MachineKind::ChemMaster => {
                             chemmaster_body(panel, &db, buffer, loaded);
@@ -526,16 +654,16 @@ fn sync_panel(
                             analyzer_body(panel, &db, &knowledge, loaded);
                         }
                         MachineKind::Grinder => {
-                            grinder_body(panel, &db, catalog.as_deref(), hopper, loaded);
+                            grinder_body(panel, &db, catalog.as_deref(), hopper, loaded, reacting);
                         }
                         MachineKind::DeliveryWindow => {
-                            delivery_window_body(panel, &db, loaded, test_stock);
+                            delivery_window_body(panel, &db, loaded, reacting, test_stock);
                         }
                         MachineKind::StandingBoard => {
-                            standing_board_body(panel, &shift, arc.as_ref());
+                            standing_board_body(panel, shift, &stage, arc.as_ref());
                         }
                         MachineKind::ReactionChamber => {
-                            heater_body(panel, &db, thermostat, loaded);
+                            heater_body(panel, &db, thermostat, loaded, reacting);
                         }
                         MachineKind::Locker => {
                             locker_body(panel, &stored);
@@ -557,6 +685,7 @@ fn sync_panel(
 fn standing_board_body(
     panel: &mut ChildSpawnerCommands,
     shift: &Shift,
+    stage: &BoardStage,
     arc: Option<&ArcHeadline>,
 ) {
     // The campaign notice goes above the standing table, because once there is
@@ -567,23 +696,15 @@ fn standing_board_body(
         draw_arc_notice(panel, arc);
     }
 
-    panel.spawn(label(
-        if shift.accepting_orders {
-            "Taking requests."
-        } else {
-            "Not accepting requests right now — flip the sign back when you're ready."
-        },
-        13.0,
-        TEXT_DIM,
-    ));
-    panel.spawn(row()).with_children(|row| {
-        let caption = if shift.accepting_orders {
-            "Stop taking requests"
-        } else {
-            "Start taking requests"
-        };
-        row.spawn(button(caption, PanelAction::ToggleAcceptingOrders));
-    });
+    // The debrief replaces the sign controls but *not* the requisition table
+    // below it. Reading what the shift came to and then spending what it
+    // earned is one thought, and it is the thought the removed prep phase used
+    // to be for — putting the debrief on a screen of its own would split it
+    // back in two.
+    match stage {
+        BoardStage::Debrief(report) => draw_debrief(panel, report),
+        _ => draw_sign_controls(panel, shift, stage),
+    }
 
     for department in Department::ALL {
         panel.spawn(label(
@@ -627,6 +748,131 @@ fn standing_board_body(
     }
 }
 
+/// The sign, and the second stage that ends the shift.
+fn draw_sign_controls(panel: &mut ChildSpawnerCommands, shift: &Shift, stage: &BoardStage) {
+    panel.spawn(label(format!("Shift {}", shift.shift_number), 16.0, TEXT));
+    panel.spawn(label(
+        match stage {
+            BoardStage::Open => "Taking requests.",
+            BoardStage::WrappingUp { clear: false } => {
+                "Sign is down. Someone is still at the counter — serve them, or wait them out."
+            }
+            BoardStage::WrappingUp { clear: true } => {
+                "Sign is down and the counter is clear. Call it whenever you're ready."
+            }
+            // Drawn by `draw_debrief` instead; this function is never reached
+            // with one.
+            BoardStage::Debrief(_) => "",
+        },
+        13.0,
+        TEXT_DIM,
+    ));
+    panel.spawn(row()).with_children(|row| {
+        let caption = if shift.accepting_orders {
+            "Stop taking requests"
+        } else {
+            "Start taking requests"
+        };
+        row.spawn(button(caption, PanelAction::ToggleAcceptingOrders));
+
+        // Only live once the sign is down *and* nobody is left waiting. Drawn
+        // dead rather than hidden while the counter is busy, for the same
+        // reason an unaffordable requisition is: a button that appears out of
+        // nowhere is a button the player never learns exists.
+        if let BoardStage::WrappingUp { clear } = stage {
+            let mut entity = row.spawn(button("Call it a shift", PanelAction::CallItAShift));
+            if !clear {
+                entity.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
+            }
+        }
+    });
+}
+
+/// The end-of-shift debrief.
+///
+/// Everything on it is a *difference* — this shift against the one before,
+/// never the career total, which the HUD already shows and which nobody needs
+/// two readouts of. That is the whole point of the beat: a career total only
+/// ever goes up, so it can never tell you whether the last hour went well.
+///
+/// A panel body rather than a full-screen modal, deliberately. The world is
+/// still running behind it: crew who were already at the counter are still
+/// waiting, the arc is still drifting, and in co-op the other chemist is very
+/// possibly still working. Stopping the game to show a summary would make
+/// reading it a cost.
+fn draw_debrief(panel: &mut ChildSpawnerCommands, report: &ShiftReport) {
+    panel.spawn(label(format!("SHIFT {} — DEBRIEF", report.number), 18.0, TEXT));
+
+    if report.is_quiet() {
+        panel.spawn(label(
+            "Nothing came in and nothing went out. Some shifts are like that.",
+            13.0,
+            TEXT_DIM,
+        ));
+    } else {
+        panel.spawn(label(
+            format!(
+                "Delivered {}   ·   botched {}",
+                report.delivered, report.botched
+            ),
+            15.0,
+            if report.botched > report.delivered {
+                ERROR_TEXT
+            } else {
+                TEXT
+            },
+        ));
+    }
+
+    if report.recipes > 0 {
+        panel.spawn(label(
+            format!(
+                "{} new {} written up.",
+                report.recipes,
+                if report.recipes == 1 {
+                    "recipe"
+                } else {
+                    "recipes"
+                }
+            ),
+            13.0,
+            GOOD_TEXT,
+        ));
+    }
+    if report.research != 0 {
+        // "Banked", not "earned": hints and dispenser tiers come out of the
+        // same pot, so a productive shift that spent everything nets zero and
+        // a shift that only shopped goes negative. See `ShiftReport::research`.
+        panel.spawn(label(
+            format!("Research banked  {:+}", report.research),
+            13.0,
+            if report.research < 0 { TEXT_DIM } else { TEXT },
+        ));
+    }
+
+    panel.spawn(label("Standing", 15.0, TEXT));
+    if report.standing.is_empty() {
+        panel.spawn(label("  Nobody's opinion moved.", 12.0, TEXT_DIM));
+    } else {
+        for (department, delta) in &report.standing {
+            panel.spawn(label(
+                format!("  {}  {:+}", department.label(), delta),
+                13.0,
+                if *delta < 0 { ERROR_TEXT } else { GOOD_TEXT },
+            ));
+        }
+    }
+
+    panel.spawn(label(
+        "Spend what you've earned before you open up again — requisitions are below.",
+        12.0,
+        TEXT_DIM,
+    ));
+    panel.spawn(row()).with_children(|row| {
+        row.spawn(button("Open up again", PanelAction::OpenUpAgain));
+    });
+}
+
 /// The campaign notice at the top of the standing board.
 ///
 /// Says as little as the station actually knows. At [`Reveal::Suspected`] that
@@ -666,6 +912,7 @@ fn dispenser_body(
     kind: MachineKind,
     amount: Option<&DispenseAmount>,
     loaded: Option<&Container>,
+    reacting: bool,
 ) {
     let selected = amount.map(|a| a.0).unwrap_or(Units::whole(10));
 
@@ -761,7 +1008,7 @@ fn dispenser_body(
         index = end;
     }
 
-    container_readout(panel, db, loaded, true);
+    container_readout(panel, db, loaded, reacting, true);
 }
 
 /// The reaction chamber: a dial, a switch, and a thermometer.
@@ -775,6 +1022,7 @@ fn heater_body(
     db: &ChemDb,
     thermostat: Option<&Thermostat>,
     loaded: Option<&Container>,
+    reacting: bool,
 ) {
     let thermostat = thermostat.copied().unwrap_or_default();
 
@@ -834,7 +1082,7 @@ fn heater_body(
         row.spawn(button("Eject container", PanelAction::Eject));
     });
 
-    container_readout(panel, db, loaded, false);
+    container_readout(panel, db, loaded, reacting, false);
 }
 
 fn chemmaster_body(
@@ -1000,6 +1248,7 @@ fn grinder_body(
     catalog: Option<&ProduceCatalog>,
     hopper: Option<&Hopper>,
     loaded: Option<&Container>,
+    reacting: bool,
 ) {
     panel.spawn(label(
         "Extracts produce straight into the beaker. Fast, and never clean — \
@@ -1051,7 +1300,7 @@ fn grinder_body(
         row.spawn(button("Grind all", PanelAction::Grind { all: true }));
     });
 
-    container_readout(panel, db, loaded, true);
+    container_readout(panel, db, loaded, reacting, true);
 }
 
 /// The shelf.
@@ -1115,6 +1364,7 @@ fn delivery_window_body(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
     loaded: Option<&Container>,
+    reacting: bool,
     test_stock: bool,
 ) {
     panel.spawn(label(
@@ -1124,7 +1374,7 @@ fn delivery_window_body(
         TEXT_DIM,
     ));
 
-    container_readout(panel, db, loaded, false);
+    container_readout(panel, db, loaded, reacting, false);
 
     let Some(container) = loaded else {
         return;
@@ -1142,6 +1392,16 @@ fn delivery_window_body(
         (
             "Empty. Put a finished batch in and it will go out on its own.".to_string(),
             TEXT_DIM,
+        )
+    } else if reacting {
+        // The tray hands over the instant anything in the beaker matches, and
+        // a batch part-way through is half reactant and half product. So it is
+        // held back rather than sent out impure — and said out loud here,
+        // because a window that has quietly stopped working is worse than one
+        // that says why.
+        (
+            "Still reacting. It will go out as soon as the batch settles.".to_string(),
+            Color::srgb(0.95, 0.88, 0.45),
         )
     } else {
         (
@@ -1165,6 +1425,7 @@ fn container_readout(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
     loaded: Option<&Container>,
+    reacting: bool,
     show_empty_button: bool,
 ) {
     panel.spawn(label("Loaded container", 13.0, TEXT_DIM));
@@ -1197,6 +1458,14 @@ fn container_readout(
                 for (reagent, quantity) in container.solution.iter() {
                     section.spawn(reagent_name(db, reagent, quantity));
                 }
+            }
+
+            // Some recipes take real seconds. The numbers above are already
+            // moving while one runs — that is the actual readout — but a
+            // chemist watching them needs to know the difference between "not
+            // finished yet" and "this is all you are getting".
+            if reacting {
+                section.spawn(label("Still reacting…", 13.0, GOOD_TEXT));
             }
 
             section.spawn(row()).with_children(|row| {
@@ -1242,6 +1511,7 @@ fn spawn_reference_book(
                 ..default()
             },
             PanelRoot,
+            crate::until_we_leave_the_lab(),
         ))
         .with_children(|screen| {
             screen
@@ -1803,6 +2073,7 @@ fn spawn_order_queue(mut commands: Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgba(0.06, 0.07, 0.09, 0.82)),
+            crate::until_we_leave_the_lab(),
         ))
         .with_children(|queue| {
             queue.spawn((
@@ -1835,24 +2106,29 @@ fn spawn_order_queue(mut commands: Commands) {
         });
 }
 
-/// The one line that tells the player whether the lab is taking requests.
+/// The one line that tells the player which shift this is and whether the lab
+/// is taking requests.
 ///
-/// Pure so both wordings can be checked at once. There is no shift or phase
-/// to report on any more — just the sign the player themselves controls at
-/// the standing board.
-fn accepting_banner_line(shift: &Shift) -> &'static str {
-    if shift.accepting_orders {
+/// Pure so all three wordings can be checked at once. There is still no phase
+/// clock — the sign and the shift boundary are both the player's own, worked
+/// at the standing board — but the number is what turns "another order" into
+/// "shift six", which is the whole reason shifts came back.
+fn accepting_banner_line(shift: &Shift) -> String {
+    let state = if shift.called {
+        "CLOSED OUT — debrief at the board"
+    } else if shift.accepting_orders {
         "OPEN — crew are coming in"
     } else {
         "CLOSED — not accepting requests"
-    }
+    };
+    format!("SHIFT {}  ·  {state}", shift.shift_number)
 }
 
 fn update_phase_banner(shift: Res<Shift>, banner: BannerText) {
     let line = accepting_banner_line(&shift);
     let mut banner = banner.into_inner();
     if banner.0 != line {
-        banner.0 = line.to_string();
+        banner.0 = line;
     }
 }
 
@@ -2012,6 +2288,7 @@ fn spawn_toast(
                 ..default()
             },
             Toast(Timer::from_seconds(4.5, TimerMode::Once)),
+            crate::until_we_leave_the_lab(),
         ))
         .with_children(|toast| {
             toast
@@ -2053,40 +2330,57 @@ fn announce_discoveries(
     }
 }
 
-/// Toasts when the "accepting requests" sign flips.
+/// What the sign toast last said, so it only fires on an actual change.
 ///
-/// Watches `Shift` from `Update` rather than the toggle message itself,
-/// because this runs on both ends — a joined chemist needs to notice their
-/// partner flipping the sign too, and only the replicated resource reaches
-/// them, not the client message that caused it.
+/// A resource rather than the `Local<Option<bool>>` it was, for the reason
+/// `LastPanel` is one: a `Local` cannot be reset from outside, so a session
+/// that ended with the sign down left `Some(false)` behind and the *next*
+/// session announced itself as "back open" on its first frame.
+#[derive(Resource, Default)]
+pub struct LastSignState(Option<(bool, bool)>);
+
+/// Toasts when the sign flips or the shift is called.
+///
+/// Watches `Shift` from `Update` rather than the messages themselves, because
+/// this runs on both ends — a joined chemist needs to notice their partner
+/// flipping the sign too, and only the replicated resource reaches them, not
+/// the client message that caused it.
 fn announce_accepting_toggle(
     shift: Res<Shift>,
-    mut announced: Local<Option<bool>>,
+    mut announced: ResMut<LastSignState>,
     mut toasts: MessageWriter<ShowToast>,
 ) {
-    if *announced == Some(shift.accepting_orders) {
+    let now = (shift.accepting_orders, shift.called);
+    if announced.0 == Some(now) {
         return;
     }
     // Don't toast the very first frame — that would just announce "open" the
     // instant every session starts.
-    let first_run = announced.is_none();
-    *announced = Some(shift.accepting_orders);
+    let first_run = announced.0.is_none();
+    announced.0 = Some(now);
     if first_run {
         return;
     }
 
-    let (kicker, subtitle, background) = if shift.accepting_orders {
-        (
+    let (kicker, subtitle, background) = match now {
+        // Called takes precedence over the sign: the sign is necessarily down
+        // for a shift to be called at all, so reporting "closed" here would be
+        // announcing the lesser half of what just happened.
+        (_, true) => (
+            "SHIFT OVER",
+            format!("Shift {} closed out. Debrief at the board.", shift.shift_number),
+            Color::srgba(0.12, 0.16, 0.24, 0.94),
+        ),
+        (true, false) => (
             "OPEN",
             "Taking requests again.".to_string(),
             Color::srgba(0.10, 0.20, 0.13, 0.94),
-        )
-    } else {
-        (
+        ),
+        (false, false) => (
             "CLOSED",
             "Not accepting requests for a while.".to_string(),
             Color::srgba(0.18, 0.15, 0.09, 0.94),
-        )
+        ),
     };
 
     toasts.write(ShowToast {
@@ -2163,6 +2457,7 @@ fn spawn_vitals_panel(mut commands: Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgba(0.06, 0.07, 0.09, 0.82)),
+            crate::until_we_leave_the_lab(),
         ))
         .with_children(|panel| {
             panel.spawn((
@@ -2355,6 +2650,7 @@ fn spawn_room_label(mut commands: Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgba(0.05, 0.06, 0.08, 0.70)),
+            crate::until_we_leave_the_lab(),
         ))
         .with_children(|panel| {
             panel.spawn((
@@ -2405,6 +2701,7 @@ fn spawn_radio_feed(mut commands: Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgba(0.05, 0.06, 0.08, 0.78)),
+            crate::until_we_leave_the_lab(),
         ))
         .with_children(|feed| {
             feed.spawn(label("STATION RADIO", 12.0, TEXT_DIM));
@@ -2595,6 +2892,8 @@ struct PanelMessages<'w> {
     set_target: MessageWriter<'w, SetTargetTemperature>,
     set_power: MessageWriter<'w, SetHeaterPower>,
     toggle_accepting: MessageWriter<'w, ToggleAcceptingOrders>,
+    call_it: MessageWriter<'w, CallItAShift>,
+    open_up: MessageWriter<'w, OpenUpAgain>,
     requisition: MessageWriter<'w, RequisitionRequested>,
     leave_machine: MessageWriter<'w, LeaveMachineRequested>,
     upgrade_dispenser: MessageWriter<'w, UpgradeDispenserRequested>,
@@ -2730,12 +3029,19 @@ fn handle_panel_clicks(
                     .is_ok_and(|thermostat| !thermostat.powered);
                 out.set_power.write(SetHeaterPower { machine, on });
             }
-            // The board's two. Requests, not writes: the server owns the
-            // standing and the sign, and a client that moved either locally
-            // would be corrected out from under the player a frame later.
+            // The board's own. Requests, not writes: the server owns the
+            // standing, the sign and the shift, and a client that moved any of
+            // them locally would be corrected out from under the player a
+            // frame later.
             PanelAction::ToggleAcceptingOrders => {
                 out.toggle_accepting
                     .write(ToggleAcceptingOrders { board: machine });
+            }
+            PanelAction::CallItAShift => {
+                out.call_it.write(CallItAShift { board: machine });
+            }
+            PanelAction::OpenUpAgain => {
+                out.open_up.write(OpenUpAgain { board: machine });
             }
             PanelAction::Requisition(kind) => {
                 out.requisition.write(RequisitionRequested {
@@ -2762,9 +3068,80 @@ mod tests {
     fn the_banner_reads_the_accepting_sign() {
         let mut shift = Shift::default();
         assert!(accepting_banner_line(&shift).contains("OPEN"));
+        // The number is the point of the line: it is what turns "another
+        // order" into "shift six".
+        assert!(accepting_banner_line(&shift).contains("SHIFT 1"));
 
         shift.accepting_orders = false;
         assert!(accepting_banner_line(&shift).contains("CLOSED"));
+        assert!(!accepting_banner_line(&shift).contains("debrief"));
+
+        shift.called = true;
+        shift.shift_number = 6;
+        let called = accepting_banner_line(&shift);
+        assert!(called.contains("SHIFT 6"));
+        assert!(
+            called.contains("debrief"),
+            "a called shift has somewhere to go, and the banner has to say where"
+        );
+    }
+
+    #[test]
+    fn the_board_offers_call_it_a_shift_only_once_the_counter_is_clear() {
+        let (_, knowledge) = book_fixture();
+
+        let open = Shift::default();
+        assert!(matches!(
+            board_stage(&open, &knowledge, 0),
+            BoardStage::Open
+        ));
+
+        // The sign is down but somebody is still waiting: the button is drawn,
+        // dead, rather than appearing out of nowhere the moment they leave.
+        let closing = Shift {
+            accepting_orders: false,
+            ..default()
+        };
+        assert!(matches!(
+            board_stage(&closing, &knowledge, 2),
+            BoardStage::WrappingUp { clear: false }
+        ));
+        assert!(matches!(
+            board_stage(&closing, &knowledge, 0),
+            BoardStage::WrappingUp { clear: true }
+        ));
+
+        let called = Shift {
+            accepting_orders: false,
+            called: true,
+            shift_number: 3,
+            ..default()
+        };
+        let BoardStage::Debrief(report) = board_stage(&called, &knowledge, 0) else {
+            panic!("a called shift shows its debrief");
+        };
+        assert_eq!(report.number, 3);
+    }
+
+    #[test]
+    fn a_debrief_that_is_still_moving_rebuilds_the_panel() {
+        // The report is in `PanelSignature` rather than just the `called` flag
+        // because the world keeps running behind the debrief: in co-op the
+        // other chemist can still be delivering, and a debrief frozen on the
+        // numbers it opened with is the stale readout the signature exists to
+        // prevent.
+        let (_, knowledge) = book_fixture();
+        let mut shift = Shift {
+            accepting_orders: false,
+            called: true,
+            succeeded: 4,
+            opened_at: Some(crate::orders::ShiftSnapshot::default()),
+            ..default()
+        };
+        let before = board_stage(&shift, &knowledge, 0);
+
+        shift.succeeded = 5;
+        assert_ne!(before, board_stage(&shift, &knowledge, 0));
     }
 
     // -- the reference book's grouping --------------------------------------

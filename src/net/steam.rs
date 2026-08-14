@@ -312,6 +312,26 @@ fn forget_join_attempt(mut commands: Commands) {
     commands.remove_resource::<SteamJoinAttempt>();
 }
 
+/// Closes a Steam-hosted lab down on the way out to the menu.
+///
+/// The lobby has to go with the transport, or the host shows as still hosting
+/// in the Steam overlay and friends can accept an invite into a lab that no
+/// longer exists.
+pub(crate) fn close_host(commands: &mut Commands) {
+    commands.remove_resource::<RenetServer>();
+    commands.remove_resource::<SteamServerTransport>();
+    // Queued for the same reason `abandon_join` queues its own leave:
+    // `Commands` has no world access, and leaving needs the `Client`.
+    commands.queue(|world: &mut World| {
+        let Some(HostedLobby(lobby)) = world.remove_resource::<HostedLobby>() else {
+            return;
+        };
+        if let Some(client) = world.get_resource::<Client>() {
+            client.matchmaking().leave_lobby(lobby);
+        }
+    });
+}
+
 /// Drops whatever half-open Steam connection resources exist, for a
 /// cancelled or failed join attempt.
 pub(crate) fn abandon_join(commands: &mut Commands) {

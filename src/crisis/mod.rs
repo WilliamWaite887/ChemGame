@@ -166,7 +166,7 @@ fn promote_script(
 /// agree on what's actually going around. `None` means `UnderworldStanding`
 /// has not crossed the threshold since the last crisis cleared.
 #[derive(Resource, Default)]
-struct CrisisSchedule {
+pub struct CrisisSchedule {
     warning_in: Option<f32>,
     case: usize,
 }

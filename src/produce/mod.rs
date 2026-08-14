@@ -37,6 +37,7 @@ impl Plugin for ProducePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(RonAssetPlugin::<ProduceConfig>::new(&["produce.ron"]))
             .add_systems(Startup, start_loading)
+            .add_systems(OnEnter(AppState::Playing), rearm_delivery_clock)
             .add_systems(
                 Update,
                 (
@@ -118,6 +119,10 @@ pub struct ProduceCatalog {
     courier: String,
     gap_seconds: (f32, f32),
     items_per_delivery: (u32, u32),
+    /// Carried so [`rearm_delivery_clock`] can arm a second session's clock
+    /// exactly as the first one was armed. Without it the catalog knows the
+    /// gap between hauls but not how long the lab waits for the first.
+    first_delivery_delay: f32,
 }
 
 impl ProduceCatalog {
@@ -155,6 +160,7 @@ impl ProduceCatalog {
             courier: config.courier.clone(),
             gap_seconds: config.gap_seconds,
             items_per_delivery: config.items_per_delivery,
+            first_delivery_delay: config.first_delivery_delay,
         }
     }
 
@@ -204,6 +210,25 @@ fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(PendingProduceData(assets.load("data/station.produce.ron")));
 }
 
+fn arm_delivery_clock(commands: &mut Commands, first_delivery_delay: f32) {
+    commands.insert_resource(DeliverySchedule {
+        timer: Timer::from_seconds(first_delivery_delay, TimerMode::Once),
+    });
+}
+
+/// Re-arms botany's delivery clock on the way into the lab.
+///
+/// Same reasoning as `orders::rearm_arrival_clocks`: `promote_produce_data`
+/// runs once per process and this is a `TimerMode::Once`, so without this the
+/// second save opened in a session would never see a single plant arrive.
+/// No-ops on the first pass, before the catalog has loaded.
+fn rearm_delivery_clock(mut commands: Commands, catalog: Option<Res<ProduceCatalog>>) {
+    let Some(catalog) = catalog else {
+        return;
+    };
+    arm_delivery_clock(&mut commands, catalog.first_delivery_delay);
+}
+
 /// Turns the loaded RON into a catalog once the chemistry data is available.
 ///
 /// Yields are written as reagent keys, so this cannot run before `ChemDb`
@@ -239,9 +264,7 @@ fn promote_produce_data(
 
     info!("produce loaded: {} kinds", config.kinds.len());
 
-    commands.insert_resource(DeliverySchedule {
-        timer: Timer::from_seconds(config.first_delivery_delay, TimerMode::Once),
-    });
+    arm_delivery_clock(&mut commands, config.first_delivery_delay);
     commands.insert_resource(ProduceAssets {
         mesh: meshes.add(Sphere::new(ITEM_RADIUS)),
         materials: handles,
@@ -268,6 +291,7 @@ pub fn spawn_produce(commands: &mut Commands, kind: ProduceId, position: Vec3) -
             Produce(kind),
             Transform::from_translation(position),
             Replicated,
+            crate::until_we_leave_the_lab(),
         ))
         .id()
 }

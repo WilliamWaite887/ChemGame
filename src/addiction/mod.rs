@@ -71,7 +71,9 @@ impl Plugin for AddictionPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(RonAssetPlugin::<AddictionScript>::new(&["addiction.ron"]))
             .init_resource::<Addictions>()
+            .init_resource::<CarriedSuspicion>()
             .add_systems(Startup, start_loading)
+            .add_systems(OnEnter(AppState::Playing), arm_spawner)
             .add_systems(
                 Update,
                 (
@@ -200,7 +202,7 @@ fn promote_script(
     mut commands: Commands,
     pending: Option<Res<PendingAddictionScript>>,
     mut scripts: ResMut<Assets<AddictionScript>>,
-    spawner: Option<Res<AddictSpawner>>,
+    clock: Option<Res<DoseClock>>,
 ) {
     let Some(pending) = pending else {
         return;
@@ -208,10 +210,12 @@ fn promote_script(
     let Some(script) = scripts.remove(&pending.0) else {
         return;
     };
-    if spawner.is_none() {
-        commands.insert_resource(AddictSpawner {
-            timer: Timer::from_seconds(FIRST_VISIT_SECONDS, TimerMode::Once),
-        });
+    // The dose clock needs a number out of the script, so unlike
+    // [`arm_spawner`] it cannot be set up before the asset has loaded. It is
+    // `TimerMode::Repeating` and carries no session state, so leaving it alone
+    // across a quit to the menu is correct — only the `Once` timer below has
+    // to be re-armed per session.
+    if clock.is_none() {
         commands.insert_resource(DoseClock(Timer::from_seconds(
             script.dose_interval_seconds,
             TimerMode::Repeating,
@@ -219,6 +223,18 @@ fn promote_script(
     }
     commands.insert_resource(Script(script));
     commands.remove_resource::<PendingAddictionScript>();
+}
+
+/// Arms the return-visit clock for a fresh session.
+///
+/// See the identical note on every other thread's own `arm_spawner`: a spent
+/// `TimerMode::Once` never fires again, so leaving this to `promote_script` —
+/// which runs once per *process* — would silently kill the thread for every
+/// save opened after the first.
+fn arm_spawner(mut commands: Commands) {
+    commands.insert_resource(AddictSpawner {
+        timer: Timer::from_seconds(FIRST_VISIT_SECONDS, TimerMode::Once),
+    });
 }
 
 /// How long after the first habit forms before anyone comes back. Their own
@@ -246,13 +262,21 @@ fn note_doses(
     let (Some(script), Some(mut clock)) = (script, clock) else {
         return;
     };
-    let elapsed = time.delta_secs();
+    // Everything below — including dry time — happens on the dose clock and
+    // nowhere else.
+    //
+    // Dry time used to *also* advance by `time.delta_secs()` on every frame
+    // this system returned early, on top of the full interval it adds below.
+    // That made habits go dry at roughly twice real time, so `withdrawal_after`
+    // was silently worth half what the data file says. It also meant
+    // `Addictions` changed every frame, and since it is part of `ProgressSave`,
+    // `shift::persist_progress` re-serialised and rewrote `progress.ron` to
+    // disk every frame for as long as anybody on the station had a habit.
+    //
+    // Advancing once per interval is exactly equivalent in aggregate, and the
+    // 4-second granularity is invisible against a 300-second withdrawal
+    // window.
     if !clock.0.tick(time.delta()).just_finished() {
-        // Dry time still runs between reads, or withdrawal would only ever
-        // advance on the frames a habit happened to be looked at.
-        for habit in addictions.0.values_mut() {
-            habit.dry_for += elapsed;
-        }
         return;
     }
 
@@ -310,7 +334,7 @@ fn notice_the_high(
     script: Option<Res<Script>>,
     addictions: Res<Addictions>,
     mut suspicion: ResMut<SecuritySuspicion>,
-    mut carried: Local<f32>,
+    mut carried: ResMut<CarriedSuspicion>,
     // Residents excluded on purpose: this mechanic is about the chem lab, and
     // the design turns on the player being able to *see* the addict who is
     // raising suspicion and stall until they leave. A resident getting high in
@@ -352,12 +376,21 @@ fn notice_the_high(
     // Accumulated in a float and spent in whole points, because
     // `SecuritySuspicion` is an integer and a fractional rise per frame would
     // otherwise truncate to nothing at all.
-    *carried += script.suspicion_per_second * time.delta_secs();
-    while *carried >= 1.0 {
-        *carried -= 1.0;
+    carried.0 += script.suspicion_per_second * time.delta_secs();
+    while carried.0 >= 1.0 {
+        carried.0 -= 1.0;
         suspicion.0 += 1;
     }
 }
+
+/// Sub-point suspicion, banked until it is worth a whole one.
+///
+/// A resource rather than the `Local<f32>` it was so `crate::session` can zero
+/// it between careers — `SecuritySuspicion` itself is deliberately never
+/// persisted, and leaving its fractional remainder behind would have quietly
+/// undone that.
+#[derive(Resource, Default)]
+pub struct CarriedSuspicion(pub f32);
 
 // ---------------------------------------------------------------------------
 // The income
@@ -504,25 +537,46 @@ fn handle_withdrawal(
     let (Some(script), Some(station)) = (script, station) else {
         return;
     };
-    let mut lines: Vec<(String, String)> = Vec::new();
+    // Scanned read-only first, and the table is only borrowed mutably if
+    // somebody is actually due.
+    //
+    // `iter_mut` marks `Addictions` changed whether or not anything is
+    // written to it, and `Addictions` is part of `ProgressSave` — so an
+    // unconditional mutable borrow here re-serialised and rewrote
+    // `progress.ron` to disk *every frame* for as long as anybody on the
+    // station had a habit, which is the same disk-thrash `note_doses`'
+    // per-frame `dry_for` used to cause from the other direction.
+    let due: Vec<String> = addictions
+        .0
+        .iter()
+        .filter(|(_, habit)| {
+            !habit.withdrawn
+                && habit.hooked(&script)
+                && habit.dry_for >= script.withdrawal_after
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    if due.is_empty() {
+        return;
+    }
 
-    for (name, habit) in addictions.0.iter_mut() {
-        if habit.withdrawn
-            || !habit.hooked(&script)
-            || habit.dry_for < script.withdrawal_after
-        {
-            continue;
+    let mut lines: Vec<(String, String)> = Vec::new();
+    for name in due {
+        // Marked before the roster lookup, exactly as before: an addict whose
+        // name is not on `station.crew.ron` still counts as having had this
+        // dry spell's withdrawal, or they would be rescanned forever.
+        if let Some(habit) = addictions.0.get_mut(&name) {
+            habit.withdrawn = true;
         }
-        habit.withdrawn = true;
         let Some(role) = station
             .crew
             .iter()
-            .find(|def| &def.name == name)
+            .find(|def| def.name == name)
             .map(|def| def.role.clone())
         else {
             continue;
         };
-        lines.push((name.clone(), role));
+        lines.push((name, role));
     }
 
     let mut rng = rand::rng();
@@ -585,6 +639,7 @@ mod tests {
             .insert_resource(DoseClock(Timer::from_seconds(interval, TimerMode::Repeating)))
             .init_resource::<Addictions>()
             .init_resource::<SecuritySuspicion>()
+            .init_resource::<CarriedSuspicion>()
             .init_resource::<Shift>()
             .init_resource::<RadioLog>()
             .init_resource::<Time>()
@@ -776,6 +831,73 @@ mod tests {
     }
 
     // -- withdrawal --------------------------------------------------------
+
+    #[test]
+    fn dry_time_tracks_real_time_at_any_frame_rate() {
+        // `note_doses` used to add `time.delta_secs()` on every frame it
+        // returned early *and* a full `dose_interval_seconds` on the frame the
+        // clock fired, so `dry_for` ran at roughly twice real time and
+        // `withdrawal_after` was worth half what the data file says.
+        //
+        // Only visible at a real frame rate: a test that advances one whole
+        // interval per `app.update()` fires the clock every frame and never
+        // takes the early return at all, which is why this steps finely.
+        let mut app = addiction_app();
+        app.world_mut().resource_mut::<Addictions>().0.insert(
+            "Chef Dubois".to_string(),
+            Habit {
+                reagent: "space_drugs".to_string(),
+                weight: 99.0,
+                dry_for: 0.0,
+                withdrawn: false,
+            },
+        );
+
+        let step = 0.25;
+        let frames = 200;
+        for _ in 0..frames {
+            advance(&mut app, step);
+        }
+        let real_elapsed = step * frames as f32;
+
+        let dry = app.world().resource::<Addictions>().0["Chef Dubois"].dry_for;
+        assert!(
+            (dry - real_elapsed).abs() <= interval(&app),
+            "dry time ran at {dry}s against {real_elapsed}s of real time"
+        );
+    }
+
+    #[test]
+    fn an_untouched_habit_does_not_rewrite_the_save_every_frame() {
+        // `Addictions` is part of `ProgressSave`, and `shift::persist_progress`
+        // writes whenever the built save differs from the last one written. A
+        // `dry_for` that moved every frame therefore re-serialised and rewrote
+        // `progress.ron` to disk every frame for as long as anyone on the
+        // station had a habit.
+        let mut app = addiction_app();
+        app.world_mut().resource_mut::<Addictions>().0.insert(
+            "Chef Dubois".to_string(),
+            Habit {
+                reagent: "space_drugs".to_string(),
+                weight: 99.0,
+                dry_for: 0.0,
+                withdrawn: false,
+            },
+        );
+        // Land mid-interval, then take a frame far too short to reach the next
+        // dose clock tick.
+        let half = interval(&app) * 0.5;
+        advance(&mut app, half);
+        let before = app.world().resource_ref::<Addictions>().last_changed();
+
+        advance(&mut app, 0.016);
+
+        assert_eq!(
+            app.world().resource_ref::<Addictions>().last_changed(),
+            before,
+            "a frame between dose reads must not touch the habit table"
+        );
+    }
 
     #[test]
     fn an_addict_left_dry_files_exactly_one_complaint() {

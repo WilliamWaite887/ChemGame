@@ -42,6 +42,7 @@ impl Plugin for ObsessedPlugin {
         app.add_plugins(RonAssetPlugin::<ObsessedScript>::new(&["obsessed.ron"]))
             .init_resource::<ObsessedProgress>()
             .add_systems(Startup, start_loading)
+            .add_systems(OnEnter(AppState::Playing), arm_spawner)
             .add_systems(
                 Update,
                 (
@@ -122,7 +123,6 @@ fn promote_script(
     mut commands: Commands,
     pending: Option<Res<PendingObsessedScript>>,
     mut scripts: ResMut<Assets<ObsessedScript>>,
-    spawner: Option<Res<ObsessedSpawner>>,
 ) {
     let Some(pending) = pending else {
         return;
@@ -130,14 +130,22 @@ fn promote_script(
     let Some(script) = scripts.remove(&pending.0) else {
         return;
     };
-    if spawner.is_none() {
-        let gap = rand::rng().random_range(INITIAL_GAP_SECONDS.0..=INITIAL_GAP_SECONDS.1);
-        commands.insert_resource(ObsessedSpawner {
-            timer: Timer::from_seconds(gap, TimerMode::Once),
-        });
-    }
     commands.insert_resource(Script(script));
     commands.remove_resource::<PendingObsessedScript>();
+}
+
+/// Arms this thread's visit clock for a fresh session.
+///
+/// `OnEnter(AppState::Playing)` rather than inside `promote_script`, which
+/// runs exactly once per process: quitting to the menu and opening another
+/// save would otherwise leave a spent `TimerMode::Once` behind, and a spent
+/// `Once` timer never reports `just_finished` again — the whole thread would
+/// be silently dead for the rest of the session with nothing to show for it.
+fn arm_spawner(mut commands: Commands) {
+    let gap = rand::rng().random_range(INITIAL_GAP_SECONDS.0..=INITIAL_GAP_SECONDS.1);
+    commands.insert_resource(ObsessedSpawner {
+        timer: Timer::from_seconds(gap, TimerMode::Once),
+    });
 }
 
 // ---------------------------------------------------------------------------

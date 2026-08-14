@@ -80,7 +80,7 @@ impl GlasswareDelivery {
 /// would cancel the lab's entire resupply, and any requisition paid for it
 /// with it.
 #[derive(Resource, Default)]
-struct PendingRestock(Option<usize>);
+pub struct PendingRestock(Option<usize>);
 
 /// Works out how short the lab is, on a periodic check rather than once per
 /// prep — there is no prep to hang it off any more.

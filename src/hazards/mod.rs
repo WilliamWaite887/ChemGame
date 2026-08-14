@@ -45,6 +45,7 @@ impl Plugin for HazardPlugin {
         app.add_plugins(RonAssetPlugin::<HazardScript>::new(&["hazards.ron"]))
             .add_server_message::<HazardFelt>(Channel::Ordered)
             .init_resource::<IncidentSchedule>()
+            .init_resource::<IncidentGrace>()
             .add_systems(Startup, start_loading_hazards)
             .add_systems(
                 Update,
@@ -108,9 +109,18 @@ fn default_hazard_color() -> (f32, f32, f32) {
 #[derive(Resource)]
 struct PendingHazardScript(Handle<HazardScript>);
 
+/// Seconds this session has been running, for the opening grace period.
+///
+/// A resource rather than the `Local<f32>` it was, so `crate::session` can put
+/// it back to zero: left as a `Local` it carried over, and the second save
+/// opened in a process started with its grace period already spent — a brand
+/// new chemist could be hit by an incident before finding the door.
+#[derive(Resource, Default)]
+pub struct IncidentGrace(pub f32);
+
 /// When the next incident is due, and which one is running.
 #[derive(Resource, Default)]
-struct IncidentSchedule {
+pub struct IncidentSchedule {
     /// `None` until the first one is scheduled for this shift.
     next_in: Option<f32>,
     warning_in: Option<f32>,
@@ -143,9 +153,9 @@ fn schedule_incidents(
     time: Res<Time>,
     // Time actually spent in the lab, not wall-clock time since the process
     // started — the grace period should not burn away while a player sits at
-    // the menu. Local rather than a resource because nothing else needs it,
-    // and it starts at zero on its own the moment this system starts running.
-    mut elapsed: Local<f32>,
+    // the menu. See [`IncidentGrace`] for why it is a resource and not the
+    // `Local` it reads like.
+    mut elapsed: ResMut<IncidentGrace>,
     scripts: Res<Assets<HazardScript>>,
     pending: Option<Res<PendingHazardScript>>,
     mut schedule: ResMut<IncidentSchedule>,
@@ -155,8 +165,8 @@ fn schedule_incidents(
         return;
     };
     let dt = time.delta_secs();
-    *elapsed += dt;
-    if *elapsed < script.grace_seconds {
+    elapsed.0 += dt;
+    if elapsed.0 < script.grace_seconds {
         return;
     }
 
@@ -190,6 +200,7 @@ fn schedule_incidents(
             Transform::from_xyz(def.origin.0, def.origin.1, def.origin.2),
             Visibility::default(),
             Replicated,
+            crate::until_we_leave_the_lab(),
         ));
         radio.push(RadioEntry {
             channel: "LAB".to_string(),
@@ -387,6 +398,7 @@ fn spawn_hazards(
                 Transform::from_translation(origin),
                 Visibility::default(),
                 Replicated,
+                crate::until_we_leave_the_lab(),
             ));
             radio.push(RadioEntry {
                 channel: "LAB".to_string(),

@@ -10,6 +10,30 @@
 // `hints` are revealed progressively in the reference book while a recipe is
 // still locked, coarsest first. Ingredient *count* is derived automatically,
 // so hints should add something beyond it.
+//
+// `rate` is reaction-units per second. Omitted, a recipe is instantaneous: it
+// finishes inside the pour that made it possible, exactly as all of them once
+// did. Given a rate, the same recipe takes real seconds — you can watch it,
+// carry it, be interrupted during it, or pull it out of the chamber halfway.
+// `scale` is the multiplier the recipe runs at, so a 1:1 recipe producing 2
+// needs a scale of 10 to make 20u of product: at `rate: 5` that is two seconds.
+//
+// Which recipes have one, and why:
+//
+//   * The three base recipes stay instant. They are the tutorial, and the
+//     first thing a new chemist does should not be waiting.
+//   * Everything one or two steps up is rated. That is what the counter
+//     actually orders, so it is where a batch taking time is felt.
+//   * **Nothing with a `Heat` effect is rated**, and this is deliberate rather
+//     than an omission. Phlogiston and chlorine trifluoride are tuned to the
+//     kelvin against the resolver running a whole batch in one pass (see their
+//     own comments below): heat released over four seconds is heat the reaction
+//     chamber's own 18%-of-the-gap-per-second is pulling straight back out
+//     again, which quietly moves the batch size at which they detonate. Rating
+//     them is a *good* idea — "watch it climb and decide whether to pull it
+//     out" is the best version of that mechanic — but it needs both their
+//     tuning blocks rebuilt against thermal exchange, and that is a balance
+//     pass, not a data edit.
 [
     // ---- Base recipes: the three the player starts knowing -----------------
     (
@@ -48,6 +72,8 @@
         id: "bicaridine",
         reactants: [("inaprovaline", 1), ("carbon", 1)],
         products: [("bicaridine", 2)],
+        // A 20u order is a scale of 10, so about two seconds.
+        rate: Some(5),
         priority: 20,
         hints: [
             "One ingredient is a compound you already know how to make.",
@@ -59,6 +85,7 @@
         id: "hyronalin",
         reactants: [("dylovene", 1), ("radium", 1)],
         products: [("hyronalin", 2)],
+        rate: Some(5),
         priority: 15,
         hints: [
             "One ingredient is a compound you already know how to make.",
@@ -70,6 +97,10 @@
         id: "tricordrazine",
         reactants: [("inaprovaline", 1), ("dylovene", 1)],
         products: [("tricordrazine", 2)],
+        // Slower than the others one step up: it wants two compounds rather
+        // than a compound and a base reagent, and the extra second is what
+        // makes the broad-spectrum answer cost something over the specific one.
+        rate: Some(4),
         priority: 20,
         hints: [
             "No base reagents at all.",
@@ -81,6 +112,7 @@
         id: "dermaline",
         reactants: [("kelotane", 1), ("oxygen", 1), ("phosphorus", 1)],
         products: [("dermaline", 3)],
+        rate: Some(5),
         priority: 20,
         hints: [
             "Three ingredients: one compound and two base reagents.",
@@ -94,6 +126,10 @@
         id: "arithrazine",
         reactants: [("hyronalin", 1), ("hydrogen", 1)],
         products: [("arithrazine", 2)],
+        // The slowest thing in the book, and the deepest chain in it. A 20u
+        // order of this is roughly three seconds on top of the five the
+        // hyronalin underneath it already took.
+        rate: Some(3),
         priority: 20,
         hints: [
             "Two ingredients. One is a compound two steps removed from base reagents.",
@@ -110,6 +146,11 @@
         reactants: [("oxygen", 2)],
         catalysts: [("plasma", 1)],
         products: [("dexalin", 1)],
+        // Higher than the rest because this recipe *loses* volume: two oxygen
+        // make one dexalin, so a 20u order is a scale of 20 rather than 10.
+        // At 8/s that lands in the same two-and-a-bit seconds as its
+        // neighbours, which is the number that was actually being chosen.
+        rate: Some(8),
         priority: 12,
         hints: [
             "Only one ingredient is consumed, and you get back half what you put in.",

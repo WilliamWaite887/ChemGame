@@ -3,7 +3,10 @@
 
 use std::collections::HashSet;
 
-use chem_sim::{resolve, Category, ChemData, Kelvin, ReactionEffect, ReagentId, Solution, Units};
+use chem_sim::{
+    is_reacting, resolve, resolve_step, Category, ChemData, Kelvin, ReactionEffect, ReagentId,
+    Solution, Units,
+};
 
 const REAGENTS_RON: &str = include_str!("../../../assets/data/chem.reagents.ron");
 const REACTIONS_RON: &str = include_str!("../../../assets/data/chem.reactions.ron");
@@ -991,4 +994,168 @@ fn every_reagent_is_produced_by_at_most_one_reaction() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Reactions that take time
+// ---------------------------------------------------------------------------
+//
+// `resolve` is `resolve_step(.., f32::INFINITY)`, so every test above this line
+// is also a test that an unrated reaction is unchanged. These pin the new half.
+
+#[test]
+fn a_recipe_with_no_rate_finishes_inside_a_single_step() {
+    // The compatibility guarantee the whole design rests on: a recipe that
+    // names no rate must behave under `resolve_step` exactly as it always did
+    // under `resolve`, at any `dt` including zero.
+    let data = data();
+    for dt in [0.0, 1.0 / 240.0, 1.0, f32::INFINITY] {
+        let mut solution = beaker(&data, 50, &[("oxygen", 5), ("carbon", 5), ("sugar", 5)]);
+        let report = resolve_step(&mut solution, &data.reactions, dt);
+        assert!(report.reacted(), "inaprovaline should have run at dt {dt}");
+        assert_contents(&data, &solution, &[("inaprovaline", 15)]);
+    }
+}
+
+#[test]
+fn a_rated_recipe_takes_its_authored_time() {
+    // Bicaridine is `rate: 5`, so 10u of each reactant — a scale of 10 —
+    // should take two seconds and arrive as 20u of product.
+    let data = data();
+    let mut solution = beaker(&data, 50, &[("inaprovaline", 10), ("carbon", 10)]);
+
+    let first = resolve_step(&mut solution, &data.reactions, 0.5);
+    assert!(first.reacted());
+    assert_eq!(
+        solution.volume_of(data.reagent("bicaridine")),
+        Units::whole(5),
+        "half a second at 5/s is a scale of 2.5, which is 5u of product"
+    );
+    assert!(
+        solution.volume_of(data.reagent("carbon")).is_positive(),
+        "the batch is not finished, so there is still carbon left"
+    );
+
+    // Three more half-seconds finishes it, and a fourth finds nothing to do.
+    for _ in 0..3 {
+        assert!(resolve_step(&mut solution, &data.reactions, 0.5).reacted());
+    }
+    assert_contents(&data, &solution, &[("bicaridine", 20)]);
+    assert!(!resolve_step(&mut solution, &data.reactions, 0.5).reacted());
+}
+
+#[test]
+fn a_step_of_zero_runs_the_instant_chemistry_and_leaves_the_slow_alone() {
+    // What `Container::mutate` relies on. Pouring into a beaker resolves
+    // everything instant — grading and the panel both read it the same frame —
+    // without secretly advancing a batch already running in it.
+    let data = data();
+    let mut solution = beaker(
+        &data,
+        100,
+        &[("oxygen", 5), ("carbon", 15), ("sugar", 5)],
+    );
+
+    let report = resolve_step(&mut solution, &data.reactions, 0.0);
+    assert!(report.reacted(), "inaprovaline is instant and must still run");
+    // Inaprovaline formed; the bicaridine it now enables did not, because that
+    // one is rated and zero seconds have passed.
+    assert_contents(&data, &solution, &[("inaprovaline", 15), ("carbon", 10)]);
+}
+
+#[test]
+fn a_rated_reaction_spends_its_allowance_once_per_step_not_once_per_pass() {
+    // The resolver loops up to `MAX_ITERATIONS` times per call. Without
+    // tracking what each rated reaction has already used, a capped reaction
+    // would simply be picked again next pass and run its whole per-step
+    // allowance over a hundred times — a rate that silently does nothing.
+    let data = data();
+    let mut solution = beaker(&data, 100, &[("inaprovaline", 30), ("carbon", 30)]);
+
+    resolve_step(&mut solution, &data.reactions, 0.1);
+    assert_eq!(
+        solution.volume_of(data.reagent("bicaridine")),
+        Units::whole(1),
+        "a tenth of a second at 5/s is a scale of 0.5, so 1u of product"
+    );
+}
+
+#[test]
+fn a_rated_reaction_always_creeps_forward_however_short_the_frame() {
+    // Rounded honestly, a scale of 5/s over a 1/1000s frame is zero — and a
+    // reaction that advances by zero never finishes, on fast machines only.
+    let data = data();
+    let mut solution = beaker(&data, 50, &[("inaprovaline", 10), ("carbon", 10)]);
+
+    let report = resolve_step(&mut solution, &data.reactions, 0.001);
+    assert!(report.reacted());
+    assert!(solution
+        .volume_of(data.reagent("bicaridine"))
+        .is_positive());
+}
+
+#[test]
+fn resolve_is_resolve_step_with_no_clock() {
+    // `Bloodstream::receive` and `metabolise` both go through `resolve`, and
+    // must keep doing chemistry instantly however the lab's glassware behaves:
+    // a bloodstream is not somewhere a chemist can stand and watch a beaker.
+    let data = data();
+
+    let mut instant = beaker(&data, 50, &[("inaprovaline", 10), ("carbon", 10)]);
+    resolve(&mut instant, &data.reactions);
+    assert_contents(&data, &instant, &[("bicaridine", 20)]);
+
+    let mut stepped = beaker(&data, 50, &[("inaprovaline", 10), ("carbon", 10)]);
+    resolve_step(&mut stepped, &data.reactions, f32::INFINITY);
+    assert_contents(&data, &stepped, &[("bicaridine", 20)]);
+}
+
+#[test]
+fn nothing_that_releases_heat_is_rated() {
+    // Phlogiston and chlorine trifluoride are tuned to the kelvin against the
+    // resolver running a whole batch in one pass. Rate one of them and the
+    // reaction chamber's own thermal exchange starts competing with the heat
+    // it releases, which quietly moves the batch size at which it detonates —
+    // and both tuning blocks in `chem.reactions.ron` become fiction.
+    //
+    // Not a rule of the engine, which is happy either way. A rule of the
+    // *data*, and a reminder to redo the tuning before breaking it.
+    let data = data();
+    for reaction in data.reactions.iter() {
+        let heats = reaction
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, ReactionEffect::Heat(_)));
+        assert!(
+            !(heats && reaction.rate.is_some()),
+            "'{}' both releases heat and has a rate — retune it first",
+            reaction.key
+        );
+    }
+}
+
+#[test]
+fn a_finished_batch_stops_reading_as_a_running_one() {
+    // `is_reacting` is what the panel and the delivery window both ask, on the
+    // authority and on a guest alike. It has to go false the moment the batch
+    // is actually done, or a finished beaker sits in the window forever.
+    let data = data();
+    let mut solution = beaker(&data, 50, &[("inaprovaline", 10), ("carbon", 10)]);
+    assert!(is_reacting(&solution, &data.reactions));
+
+    while resolve_step(&mut solution, &data.reactions, 0.5).reacted() {}
+    assert!(!is_reacting(&solution, &data.reactions));
+    assert_contents(&data, &solution, &[("bicaridine", 20)]);
+}
+
+#[test]
+fn an_instant_recipe_never_reads_as_a_running_batch() {
+    // Nothing unrated is ever *part-way* through: it finishes inside the pour
+    // that made it possible. A beaker of the base recipe's ingredients that
+    // has been resolved holds only product, and one that has not is a bug
+    // somewhere else — either way this must not hold a delivery back.
+    let data = data();
+    let mut solution = beaker(&data, 50, &[("oxygen", 5), ("carbon", 5), ("sugar", 5)]);
+    resolve_step(&mut solution, &data.reactions, 0.0);
+    assert!(!is_reacting(&solution, &data.reactions));
 }

@@ -26,7 +26,8 @@ use crate::knowledge::Knowledge;
 use crate::machines::{Machine, MachineKind};
 use crate::net::is_authority;
 use crate::orders::{
-    Department, ForecastDef, OrderConfig, RampDef, RequestDef, Shift, StationData, SupplyDef,
+    Department, ForecastDef, OrderConfig, RampDef, RequestDef, Shift, ShiftSnapshot, StationData,
+    SupplyDef,
 };
 use crate::produce::DeliverySchedule;
 use crate::radio::RadioEntry;
@@ -36,7 +37,7 @@ use crate::AppState;
 
 mod restock;
 
-pub use restock::RestockPlugin;
+pub use restock::{PendingRestock, RestockPlugin};
 
 /// The whole cycle, minus the phases: difficulty, forecasts and requisitions.
 ///
@@ -48,11 +49,21 @@ pub struct ShiftPlugin;
 impl Plugin for ShiftPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CurrentForecast>()
+            .init_resource::<ForecastClock>()
             .add_mapped_client_message::<RequisitionRequested>(Channel::Ordered)
             .add_mapped_client_message::<ToggleAcceptingOrders>(Channel::Ordered)
+            .add_mapped_client_message::<CallItAShift>(Channel::Ordered)
+            .add_mapped_client_message::<OpenUpAgain>(Channel::Ordered)
             .add_systems(
                 Update,
-                (redraw_forecast, handle_requisition, handle_toggle_accepting)
+                (
+                    open_the_shift,
+                    redraw_forecast,
+                    handle_requisition,
+                    handle_toggle_accepting,
+                    handle_call_it_a_shift,
+                    handle_open_up_again,
+                )
                     .run_if(is_authority)
                     .run_if(in_state(AppState::Playing)),
             );
@@ -125,11 +136,19 @@ impl ShiftRules {
     }
 }
 
-/// The live difficulty, computed fresh from how much of the career has
-/// actually happened — total orders resolved, successfully or not — rather
-/// than a shift number nothing tracks any more.
+/// The live difficulty, computed fresh from how much of the career the chemist
+/// has actually *earned* — clean deliveries only — rather than a shift number
+/// nothing tracks any more.
+///
+/// Deliberately not `succeeded + botched`, which is what this counted first.
+/// Counting failures made the ramp a death spiral: a chemist who was already
+/// drowning got shorter gaps, less patience and more people at the counter for
+/// it, with no recovery valve anywhere in the game. Tying it to `succeeded`
+/// alone makes `orders_per_tier` mean what it reads as — "five *good*
+/// deliveries" — and means a bad run costs standing, which is recoverable,
+/// rather than difficulty, which was not.
 pub fn current_rules(config: &OrderConfig, shift: &Shift) -> ShiftRules {
-    let tier = (shift.succeeded + shift.botched) / config.ramp.orders_per_tier.max(1);
+    let tier = shift.succeeded / config.ramp.orders_per_tier.max(1);
     ShiftRules::for_tier(config, &config.ramp, tier)
 }
 
@@ -152,6 +171,17 @@ pub struct ForecastPick {
 #[derive(Resource, Default)]
 pub struct CurrentForecast(pub Option<ForecastPick>);
 
+/// When the next briefing is due. `None` reads as "now", which is what makes a
+/// fresh session briefed immediately rather than silent for a full interval.
+///
+/// A resource rather than the `Local<Option<Timer>>` it was, for the reason
+/// every other conversion in this file happened: `crate::session` has to be
+/// able to put it back, and a `Local` cannot be reached from outside its own
+/// system. Left as a `Local`, the second save opened in a session inherited a
+/// part-elapsed timer and opened on silence instead of a briefing.
+#[derive(Resource, Default)]
+pub struct ForecastClock(pub Option<Timer>);
+
 impl CurrentForecast {
     pub fn themes(&self) -> &[String] {
         match &self.0 {
@@ -167,7 +197,7 @@ impl CurrentForecast {
 /// immediately rather than sitting silent for a full interval.
 fn redraw_forecast(
     time: Res<Time>,
-    mut timer: Local<Option<Timer>>,
+    mut clock: ResMut<ForecastClock>,
     station: Option<Res<StationData>>,
     mut forecast: ResMut<CurrentForecast>,
     mut radio: ResMut<RadioLog>,
@@ -175,7 +205,7 @@ fn redraw_forecast(
     let Some(station) = station else {
         return;
     };
-    let due = match timer.as_mut() {
+    let due = match clock.0.as_mut() {
         Some(t) => t.tick(time.delta()).just_finished(),
         None => true,
     };
@@ -184,7 +214,7 @@ fn redraw_forecast(
     }
     let window = station.config.forecast_seconds;
     let next = rand::rng().random_range(window.0..=window.1);
-    *timer = Some(Timer::from_seconds(next, TimerMode::Once));
+    clock.0 = Some(Timer::from_seconds(next, TimerMode::Once));
 
     let roll = rand::rng().random::<f64>();
     let Some(picked) = draw_forecast(&station.config.forecasts, roll) else {
@@ -471,6 +501,189 @@ fn handle_toggle_accepting(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Calling it a shift
+// ---------------------------------------------------------------------------
+
+// The old Prep/Service/Debrief machine is still gone and is not coming back:
+// crew arrive continuously and no clock the player does not control ever ends
+// anything. What went with it, though, was the *reflection beat* — a moment
+// that says "that was a shift", tallies it, and gives the player somewhere to
+// stop. That is what this section puts back, entirely on the player's say-so:
+// they flip the sign, they wait out whoever is still at the counter, and they
+// decide when to call it.
+//
+// Nothing here gates the simulation. Calling a shift sets a flag the standing
+// board draws from; everything else in the lab carries on exactly as it was.
+
+/// Ends the shift, once the sign is down and the counter has cleared.
+///
+/// Separate from [`ToggleAcceptingOrders`] because they are different verbs:
+/// flipping the sign is reversible and means "no new traffic", while calling
+/// the shift closes the books on it. Folding them into one two-meaning button
+/// would make a mis-click on a busy counter unrecoverable.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
+pub struct CallItAShift {
+    #[entities]
+    pub board: Entity,
+}
+
+/// Starts the next shift: snapshot reset, number up, sign back up.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
+pub struct OpenUpAgain {
+    #[entities]
+    pub board: Entity,
+}
+
+/// Whether the shift can be called right now.
+///
+/// Pure, and checked on the authority as well as drawn from in the panel: the
+/// button being hidden is presentation, and a client is free to send the
+/// message whenever it likes. `waiting` is how many crew are still standing at
+/// the counter holding an order — calling a shift out from under someone who
+/// is still waiting would botch their order for them.
+pub fn can_call_it(shift: &Shift, waiting: usize) -> bool {
+    !shift.accepting_orders && !shift.called && waiting == 0
+}
+
+/// What one shift came to: the difference between now and
+/// [`Shift::opened_at`].
+///
+/// A plain value with no `Entity` in it, built by [`shift_report`], so the
+/// whole debrief can be checked without a world.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShiftReport {
+    pub number: u32,
+    pub delivered: u32,
+    pub botched: u32,
+    /// Net research, not research *earned*: hints and dispenser tiers are
+    /// bought out of the same pot, so a shift that discovered plenty and spent
+    /// it all reads as zero. That is the honest number — it is what the lab
+    /// actually has to show for the shift — and it is why the board labels
+    /// this "banked" rather than "earned".
+    pub research: i64,
+    pub recipes: usize,
+    /// Only the departments that actually moved, in [`Department::ALL`] order.
+    /// A debrief listing five unchanged zeroes is a debrief nobody reads.
+    pub standing: Vec<(Department, i32)>,
+}
+
+impl ShiftReport {
+    /// Nothing happened this shift — no deliveries, no botches, no movement.
+    pub fn is_quiet(&self) -> bool {
+        self.delivered == 0
+            && self.botched == 0
+            && self.research == 0
+            && self.recipes == 0
+            && self.standing.is_empty()
+    }
+}
+
+/// Takes the career totals as they stand right now.
+fn snapshot(shift: &Shift, knowledge: &Knowledge) -> ShiftSnapshot {
+    ShiftSnapshot {
+        succeeded: shift.succeeded,
+        botched: shift.botched,
+        department_standing: shift.department_standing.clone(),
+        research_points: knowledge.research_points,
+        recipes_known: knowledge.known_count(),
+    }
+}
+
+/// The debrief: everything that changed since the shift opened.
+///
+/// Saturating throughout. The career totals only ever climb, so a snapshot
+/// that is somehow ahead of the present is a bug elsewhere — but it must
+/// report zero rather than panic in a release build and wrap in a debug one.
+pub fn shift_report(shift: &Shift, knowledge: &Knowledge) -> ShiftReport {
+    let opened = shift.opened_at.clone().unwrap_or_default();
+    ShiftReport {
+        number: shift.shift_number,
+        delivered: shift.succeeded.saturating_sub(opened.succeeded),
+        botched: shift.botched.saturating_sub(opened.botched),
+        research: knowledge.research_points as i64 - opened.research_points as i64,
+        recipes: knowledge.known_count().saturating_sub(opened.recipes_known),
+        standing: Department::ALL
+            .into_iter()
+            .filter_map(|department| {
+                let before = opened
+                    .department_standing
+                    .get(&department)
+                    .copied()
+                    .unwrap_or(0);
+                let delta = shift.standing(department) - before;
+                (delta != 0).then_some((department, delta))
+            })
+            .collect(),
+    }
+}
+
+/// Takes the opening snapshot on the first frame the lab is running.
+///
+/// In `Update` rather than `OnEnter(AppState::Playing)` because
+/// `knowledge::initialise_knowledge` inserts `Knowledge` through `Commands`:
+/// it does not exist until the command queue flushes, so there is no ordering
+/// inside `OnEnter` that could read it. Guarded on `is_none` rather than run
+/// once, so resuming a save mid-shift keeps the snapshot it was saved with
+/// instead of quietly re-opening the shift on load.
+fn open_the_shift(mut shift: ResMut<Shift>, knowledge: Res<Knowledge>) {
+    if shift.opened_at.is_some() {
+        return;
+    }
+    let taken = snapshot(&shift, &knowledge);
+    shift.opened_at = Some(taken);
+}
+
+fn handle_call_it_a_shift(
+    mut requests: MessageReader<FromClient<CallItAShift>>,
+    boards: Query<&Machine>,
+    counter: Query<(), (With<crate::orders::Order>, crate::crew::NotResident)>,
+    mut shift: ResMut<Shift>,
+    mut radio: ResMut<RadioLog>,
+) {
+    for request in requests.read() {
+        if !is_board(request.board, &boards) {
+            continue;
+        }
+        if !can_call_it(&shift, counter.iter().count()) {
+            continue;
+        }
+        shift.called = true;
+        radio.push(RadioEntry {
+            channel: "COM".to_string(),
+            text: format!("Chemistry: that's shift {} closed out.", shift.shift_number),
+            good: true,
+        });
+    }
+}
+
+fn handle_open_up_again(
+    mut requests: MessageReader<FromClient<OpenUpAgain>>,
+    boards: Query<&Machine>,
+    knowledge: Res<Knowledge>,
+    mut shift: ResMut<Shift>,
+    mut radio: ResMut<RadioLog>,
+) {
+    for request in requests.read() {
+        if !is_board(request.board, &boards) {
+            continue;
+        }
+        if !shift.called {
+            continue;
+        }
+        let taken = snapshot(&shift, &knowledge);
+        shift.opened_at = Some(taken);
+        shift.shift_number += 1;
+        shift.called = false;
+        shift.accepting_orders = true;
+        radio.push(RadioEntry {
+            channel: "COM".to_string(),
+            text: format!("Chemistry: shift {}, open for business.", shift.shift_number),
+            good: true,
+        });
+    }
+}
+
 /// Is this entity actually the standing board?
 ///
 /// A message names the machine it acts on, and a client is free to name any
@@ -502,7 +715,9 @@ pub struct ProgressPlugin;
 
 impl Plugin for ProgressPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_resource::<PersistedProgress>()
+            .init_resource::<ThwartingRecorded>()
+            .add_systems(
             OnEnter(AppState::Playing),
             load_progress.run_if(is_authority),
         )
@@ -527,6 +742,20 @@ struct ProgressSave {
     botched: u32,
     #[serde(default)]
     department_standing: HashMap<Department, i32>,
+    /// Which shift the career is on, and what it looked like when that shift
+    /// opened — so closing the game halfway through a shift and coming back
+    /// resumes *that* shift rather than silently starting a new one.
+    ///
+    /// `0` is not a legal shift number; a save written before shifts were
+    /// numbered carries it and [`load_progress`] reads it as "shift 1".
+    #[serde(default)]
+    shift_number: u32,
+    /// `Option` for the same reason `campaign` below is: a save written before
+    /// this existed has no snapshot to resume, and inventing one from zeroes
+    /// would report a whole career as this shift's work. `None` means
+    /// [`open_the_shift`] takes a fresh one on the first frame instead.
+    #[serde(default)]
+    opened_at: Option<ShiftSnapshot>,
     /// A career fact like any other — this game keeps no secrets from a
     /// player willing to open a save file in a text editor.
     #[serde(default)]
@@ -601,6 +830,10 @@ fn load_progress(
     shift.succeeded = save.succeeded;
     shift.botched = save.botched;
     shift.department_standing = save.department_standing;
+    // Shifts are 1-based; `0` is what a save written before they were numbered
+    // deserialises to, and reading it as "shift 1" is exactly right for one.
+    shift.shift_number = save.shift_number.max(1);
+    shift.opened_at = save.opened_at;
     if let Some(mut underworld) = underworld {
         underworld.0 = save.underworld_standing;
     }
@@ -690,7 +923,7 @@ fn persist_progress(
     campaign: Option<Res<crate::arc::Campaign>>,
     addictions: Res<crate::addiction::Addictions>,
     slot: Option<Res<SaveSlot>>,
-    mut written: Local<Option<ProgressSave>>,
+    mut written: ResMut<PersistedProgress>,
 ) {
     let Some(slot) = slot else {
         return;
@@ -699,6 +932,8 @@ fn persist_progress(
         succeeded: shift.succeeded,
         botched: shift.botched,
         department_standing: shift.department_standing.clone(),
+        shift_number: shift.shift_number,
+        opened_at: shift.opened_at.clone(),
         underworld_standing: underworld.map(|u| u.0).unwrap_or(0),
         rogue_redeemed: rogue_redeemed.map(|r| r.0).unwrap_or(false),
         obsessed_progress: obsessed_progress.map(|p| p.0).unwrap_or(0),
@@ -709,13 +944,13 @@ fn persist_progress(
         campaign: campaign.map(|c| c.clone()),
         addictions: addictions.clone(),
     };
-    if written.as_ref() == Some(&save) {
+    if written.0.as_ref() == Some(&save) {
         return;
     }
     let Ok(text) = ron::ser::to_string_pretty(&save, default()) else {
         return;
     };
-    *written = Some(save);
+    written.0 = Some(save);
     slot.write_progress(&text);
 }
 
@@ -731,9 +966,9 @@ fn persist_progress(
 /// rather than continuously.
 fn record_thwarting(
     campaign: Option<Res<crate::arc::Campaign>>,
-    mut recorded: Local<bool>,
+    mut recorded: ResMut<ThwartingRecorded>,
 ) {
-    if *recorded {
+    if recorded.0 {
         return;
     }
     let Some(campaign) = campaign else {
@@ -743,8 +978,27 @@ fn record_thwarting(
         return;
     }
     crate::saves::record_thwarted(campaign.antag);
-    *recorded = true;
+    recorded.0 = true;
 }
+
+/// The last career written to disk, so an unchanged one is not rewritten every
+/// frame.
+///
+/// **Was a `Local`, and that was a data-loss bug waiting to happen.** A career
+/// opened after another one in the same process inherited the previous save's
+/// last-written snapshot; a new career whose totals happened to match it would
+/// compare equal and never be written to disk at all.
+#[derive(Resource, Default)]
+pub struct PersistedProgress(Option<ProgressSave>);
+
+/// Whether this session has already written its beaten antagonist to the
+/// cross-save unlock file.
+///
+/// Was a `Local` for the same reason and with a worse consequence: once one
+/// career had recorded a thwarting, every *later* career in the same process
+/// would silently fail to record its own, and the unlock would never appear.
+#[derive(Resource, Default)]
+pub struct ThwartingRecorded(bool);
 
 #[cfg(test)]
 mod tests {
@@ -827,7 +1081,7 @@ mod tests {
     }
 
     #[test]
-    fn current_rules_reads_the_tier_off_career_totals() {
+    fn current_rules_reads_the_tier_off_clean_deliveries() {
         let base = config();
         let shift = Shift {
             succeeded: base.ramp.orders_per_tier * 2,
@@ -837,6 +1091,40 @@ mod tests {
         let rules = current_rules(&base, &shift);
         let expected = ShiftRules::for_tier(&base, &base.ramp, 2);
         assert_eq!(rules, expected);
+    }
+
+    #[test]
+    fn failing_never_makes_the_lab_harder() {
+        // The ramp used to read `succeeded + botched`, which meant a chemist
+        // who was already drowning got shorter gaps and less patience for it,
+        // with no way back. A bad run costs standing, not difficulty.
+        let base = config();
+        let drowning = Shift {
+            succeeded: 0,
+            botched: base.ramp.orders_per_tier * 20,
+            ..Shift::default()
+        };
+
+        assert_eq!(
+            current_rules(&base, &drowning),
+            ShiftRules::for_tier(&base, &base.ramp, 0),
+            "a career of nothing but failures must stay at tier 0"
+        );
+    }
+
+    #[test]
+    fn botching_alongside_success_does_not_accelerate_the_ramp() {
+        let base = config();
+        let clean = Shift {
+            succeeded: base.ramp.orders_per_tier * 3,
+            ..Shift::default()
+        };
+        let messy = Shift {
+            botched: 40,
+            ..clean.clone()
+        };
+
+        assert_eq!(current_rules(&base, &clean), current_rules(&base, &messy));
     }
 
     // -- forecast weighting -----------------------------------------------
@@ -1170,6 +1458,227 @@ mod tests {
         });
         app.update();
         assert!(app.world().resource::<Shift>().accepting_orders);
+    }
+
+    // -- calling a shift --------------------------------------------------
+
+    /// Somebody at the counter holding an order. Nothing else about them
+    /// matters here — `handle_call_it_a_shift` only counts.
+    fn waiting_crew(app: &mut App) -> Entity {
+        app.world_mut()
+            .spawn(crate::orders::Order {
+                reagent: chem_sim::ReagentId(0),
+                specific: false,
+                amount: chem_sim::Units::whole(20),
+                plea: String::new(),
+                patience: 120.0,
+                waited: 0.0,
+            })
+            .id()
+    }
+
+    fn call_it(app: &mut App, board: Entity) {
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: CallItAShift { board },
+        });
+        app.update();
+    }
+
+    fn open_up(app: &mut App, board: Entity) {
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: OpenUpAgain { board },
+        });
+        app.update();
+    }
+
+    fn put_the_sign_down(app: &mut App, board: Entity) {
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: ToggleAcceptingOrders { board },
+        });
+        app.update();
+    }
+
+    #[test]
+    fn a_shift_cannot_be_called_over_someone_still_at_the_counter() {
+        // The rule the button draws from, checked here on the authority: a
+        // client is free to send the message whenever it likes, and calling a
+        // shift out from under a waiting crew member would botch their order
+        // for them.
+        let mut app = shift_app();
+        let board = board(&mut app);
+        let customer = waiting_crew(&mut app);
+        put_the_sign_down(&mut app, board);
+
+        call_it(&mut app, board);
+        assert!(
+            !app.world().resource::<Shift>().called,
+            "the counter was not clear"
+        );
+
+        app.world_mut().entity_mut(customer).despawn();
+        call_it(&mut app, board);
+        assert!(app.world().resource::<Shift>().called);
+    }
+
+    #[test]
+    fn a_shift_cannot_be_called_with_the_sign_still_up() {
+        // Two stages on purpose. Ending a shift while crew are still walking
+        // in would strand whoever arrives the next second.
+        let mut app = shift_app();
+        let board = board(&mut app);
+
+        call_it(&mut app, board);
+        assert!(!app.world().resource::<Shift>().called);
+    }
+
+    #[test]
+    fn only_the_board_can_end_a_shift() {
+        // Same trust boundary as `only_the_board_can_be_requisitioned_against`.
+        let mut app = shift_app();
+        let board = board(&mut app);
+        let grinder = app
+            .world_mut()
+            .spawn(Machine::new(MachineKind::Grinder))
+            .id();
+        put_the_sign_down(&mut app, board);
+
+        call_it(&mut app, grinder);
+        assert!(!app.world().resource::<Shift>().called);
+    }
+
+    #[test]
+    fn opening_up_again_numbers_the_next_shift_and_resnapshots() {
+        let mut app = shift_app();
+        let board = board(&mut app);
+        assert_eq!(app.world().resource::<Shift>().shift_number, 1);
+
+        // A shift's work.
+        app.world_mut().resource_mut::<Shift>().succeeded = 6;
+        put_the_sign_down(&mut app, board);
+        call_it(&mut app, board);
+
+        let knowledge = app.world().resource::<Knowledge>().known_count();
+        let report = shift_report(app.world().resource::<Shift>(), app.world().resource());
+        assert_eq!(report.number, 1);
+        assert_eq!(report.delivered, 6);
+
+        open_up(&mut app, board);
+        let shift = app.world().resource::<Shift>();
+        assert_eq!(shift.shift_number, 2);
+        assert!(shift.accepting_orders, "the sign goes back up");
+        assert!(!shift.called);
+        assert_eq!(
+            shift.opened_at,
+            Some(ShiftSnapshot {
+                succeeded: 6,
+                botched: 0,
+                department_standing: HashMap::new(),
+                research_points: 0,
+                recipes_known: knowledge,
+            }),
+            "shift two starts from where shift one finished"
+        );
+
+        // And the second shift's debrief is its own, not a running total.
+        let report = shift_report(shift, app.world().resource());
+        assert_eq!(report.number, 2);
+        assert_eq!(report.delivered, 0);
+    }
+
+    #[test]
+    fn a_debrief_reports_the_shift_rather_than_the_career() {
+        // The whole point of the beat. A career total only ever climbs, so it
+        // can never say whether the last hour went well.
+        let mut shift = Shift {
+            succeeded: 40,
+            botched: 9,
+            shift_number: 4,
+            ..default()
+        };
+        shift.adjust(Department::Medical, 6);
+        shift.adjust(Department::Cargo, -3);
+        shift.opened_at = Some(ShiftSnapshot {
+            succeeded: 33,
+            botched: 8,
+            department_standing: [(Department::Medical, 4)].into_iter().collect(),
+            research_points: 12,
+            recipes_known: 5,
+        });
+
+        let mut knowledge = Knowledge::new(&chemistry());
+        knowledge.award_research(20);
+
+        let report = shift_report(&shift, &knowledge);
+        assert_eq!(report.number, 4);
+        assert_eq!(report.delivered, 7);
+        assert_eq!(report.botched, 1);
+        assert_eq!(report.research, 8, "20 banked against 12 at open");
+        // Only what moved, and Medical moved by the difference, not to 6.
+        assert_eq!(
+            report.standing,
+            vec![(Department::Medical, 2), (Department::Cargo, -3)]
+        );
+        assert!(!report.is_quiet());
+    }
+
+    #[test]
+    fn a_shift_with_no_snapshot_reports_nothing_rather_than_everything() {
+        // `opened_at` is `None` for one frame at startup and for a save
+        // written before shifts were numbered. Falling back to a zero snapshot
+        // would report the entire career as this shift's work.
+        let shift = Shift {
+            succeeded: 40,
+            opened_at: None,
+            ..default()
+        };
+        let report = shift_report(&shift, &Knowledge::new(&chemistry()));
+        assert_eq!(
+            report.delivered, 40,
+            "a zero snapshot is the honest reading of 'no snapshot'"
+        );
+        // ...which is exactly why `open_the_shift` takes one immediately.
+    }
+
+    #[test]
+    fn the_opening_snapshot_is_taken_once_and_not_retaken_every_frame() {
+        // Retaking it would make every debrief empty: the difference against a
+        // snapshot taken this frame is always zero.
+        let mut app = shift_app();
+        assert!(
+            app.world().resource::<Shift>().opened_at.is_some(),
+            "taken on the first frame in the lab"
+        );
+
+        app.world_mut().resource_mut::<Shift>().succeeded = 3;
+        app.update();
+        app.update();
+
+        let shift = app.world().resource::<Shift>();
+        assert_eq!(shift.opened_at.as_ref().unwrap().succeeded, 0);
+        assert_eq!(shift_report(shift, app.world().resource()).delivered, 3);
+    }
+
+    #[test]
+    fn the_call_it_rule_is_the_one_the_button_draws_from() {
+        let open = Shift::default();
+        assert!(!can_call_it(&open, 0), "the sign is still up");
+
+        let closing = Shift {
+            accepting_orders: false,
+            ..default()
+        };
+        assert!(!can_call_it(&closing, 1), "somebody is still waiting");
+        assert!(can_call_it(&closing, 0));
+
+        let already = Shift {
+            accepting_orders: false,
+            called: true,
+            ..default()
+        };
+        assert!(!can_call_it(&already, 0), "already called");
     }
 
     // -- data integrity -----------------------------------------------------

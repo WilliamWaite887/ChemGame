@@ -76,7 +76,13 @@ impl Plugin for BodyPlugin {
                     )
                         .chain()
                         .run_if(is_authority),
-                    (request_consume, request_apply_held, close_panel_on_collapse),
+                    // Drinking and applying stop while the pause menu is up;
+                    // collapsing does not, since nothing about being paused
+                    // makes a panel safe to leave open on a chemist who just
+                    // went down.
+                    (request_consume, request_apply_held)
+                        .run_if(crate::settings::not_paused),
+                    close_panel_on_collapse,
                 )
                     .run_if(in_state(AppState::Playing)),
             );
@@ -142,10 +148,11 @@ pub struct ApplyHeldRequested {
 /// is not an acceptable failure mode of a button you press constantly.
 fn request_consume(
     keys: Res<ButtonInput<KeyCode>>,
+    settings: Res<crate::settings::Settings>,
     players: Query<&crate::interaction::InteractionMode, With<crate::player::LocalPlayer>>,
     mut requests: MessageWriter<ConsumeRequested>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyR) {
+    if !keys.just_pressed(settings.bindings.drink) {
         return;
     }
     // Not while a panel is open: R is a text-adjacent key and the panel has
@@ -162,6 +169,7 @@ fn request_consume(
 /// whether you meant to load the syringe or inject the machine.
 fn request_apply_held(
     keys: Res<ButtonInput<KeyCode>>,
+    settings: Res<crate::settings::Settings>,
     players: Query<
         (
             &crate::interaction::Focus,
@@ -171,7 +179,7 @@ fn request_apply_held(
     >,
     mut requests: MessageWriter<ApplyHeldRequested>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyF) {
+    if !keys.just_pressed(settings.bindings.apply) {
         return;
     }
     for (focus, mode) in &players {

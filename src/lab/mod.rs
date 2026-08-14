@@ -648,6 +648,7 @@ fn solid_box(
             Solid {
                 half_extents: size * 0.5,
             },
+            crate::until_we_leave_the_lab(),
         ))
         .id()
 }
@@ -665,6 +666,7 @@ fn decor_box(
             Mesh3d(cube.clone()),
             MeshMaterial3d(material.clone()),
             Transform::from_translation(center).with_scale(size),
+            crate::until_we_leave_the_lab(),
         ))
         .id()
 }
@@ -795,6 +797,7 @@ fn spawn_shell(
                 },
                 Transform::from_translation(spot),
                 LabLight { base_color },
+                crate::until_we_leave_the_lab(),
             ));
         }
     }
@@ -1007,6 +1010,7 @@ fn spawn_machines(mut commands: Commands) {
                 Transform::from_translation(fit.center()).with_scale(fit.size),
                 // Occupancy and buffer contents must match for both chemists.
                 bevy_replicon::prelude::Replicated,
+                crate::until_we_leave_the_lab(),
             ))
             .id();
 
@@ -1118,6 +1122,7 @@ pub(crate) fn dress_machines(
             Transform::from_translation(fit.center() + offset + Vec3::Y * (fit.size.y * 0.22))
                 .with_scale(screen_size),
             MachineScreen,
+            crate::until_we_leave_the_lab(),
         ));
     }
 }

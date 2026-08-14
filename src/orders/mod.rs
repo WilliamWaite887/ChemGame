@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::body::{Body, Bloodstream};
 use crate::chem_data::ChemDb;
-use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlot};
+use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlot, Stored};
 use crate::crew::{spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{InteractRequested, Interactable};
 use crate::knowledge::{research_for_delivery, Knowledge};
@@ -47,6 +47,7 @@ impl Plugin for OrderPlugin {
         .add_server_message::<ShiftSync>(Channel::Ordered)
         .init_resource::<Shift>()
         .add_systems(Startup, start_loading)
+        .add_systems(OnEnter(AppState::Playing), rearm_arrival_clocks)
         .add_systems(
             Update,
             (
@@ -296,6 +297,20 @@ fn promote_station_data(
         return;
     };
 
+    arm_arrival_clocks(&mut commands, &config, &shift);
+    commands.insert_resource(StationData {
+        crew: crew.0,
+        config,
+    });
+    commands.remove_resource::<PendingStationData>();
+}
+
+/// Sets both arrival clocks running from a standing start.
+///
+/// Shared by the first session's asset-promotion path and every later
+/// session's [`rearm_arrival_clocks`], so the two can never disagree about how
+/// long the lab waits for its first customer.
+fn arm_arrival_clocks(commands: &mut Commands, config: &OrderConfig, shift: &Shift) {
     commands.insert_resource(OrderSpawner {
         timer: Timer::from_seconds(config.first_order_delay, TimerMode::Once),
     });
@@ -303,18 +318,34 @@ fn promote_station_data(
     // own re-arm uses — `Shift` is already at its tier-0 default here, so
     // (unlike the antagonist thread's very first visit) this needs no
     // separate flat constant.
-    let rules = current_rules(&config, &shift);
+    let rules = current_rules(config, shift);
     let mut rng = rand::rng();
     let first_specific_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1)
         * rng.random_range(config.specific_gap_multiplier.0..=config.specific_gap_multiplier.1);
     commands.insert_resource(SpecificOrderSpawner {
         timer: Timer::from_seconds(first_specific_gap, TimerMode::Once),
     });
-    commands.insert_resource(StationData {
-        crew: crew.0,
-        config,
-    });
-    commands.remove_resource::<PendingStationData>();
+}
+
+/// Re-arms the arrival clocks on the way into the lab.
+///
+/// Every session after the first: `promote_station_data` runs exactly once per
+/// process, and both of these are `TimerMode::Once`. A spent `Once` timer never
+/// reports `just_finished` again, so without this, quitting to the menu and
+/// opening another save gave a lab that nobody ever walked into — no error, no
+/// warning, just an empty counter forever.
+///
+/// No-ops on the first session, where the config has not finished loading yet
+/// and `promote_station_data` is what arms them.
+fn rearm_arrival_clocks(
+    mut commands: Commands,
+    station: Option<Res<StationData>>,
+    shift: Res<Shift>,
+) {
+    let Some(station) = station else {
+        return;
+    };
+    arm_arrival_clocks(&mut commands, &station.config, &shift);
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +656,27 @@ pub struct Requisition {
     pub glassware: usize,
 }
 
+/// What the career looked like when this shift opened.
+///
+/// The debrief is the difference between this and now, which is why nothing
+/// has to be tallied per-shift as it happens: one snapshot when the lab opens,
+/// one subtraction when it closes. It rides on [`Shift`], which already
+/// replicates whole through [`ShiftSync`], so both chemists read the same
+/// debrief without a second sync to keep in step.
+///
+/// `research_points` and `recipes_known` belong to [`crate::knowledge::Knowledge`]
+/// rather than to `Shift`, and are copied in here at open time on purpose:
+/// the alternative is a second snapshot on a second resource that a second
+/// message would have to replicate, for two numbers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShiftSnapshot {
+    pub succeeded: u32,
+    pub botched: u32,
+    pub department_standing: HashMap<Department, i32>,
+    pub research_points: u32,
+    pub recipes_known: usize,
+}
+
 #[derive(Resource, Clone, Serialize, Deserialize)]
 pub struct Shift {
     pub succeeded: u32,
@@ -636,6 +688,27 @@ pub struct Shift {
     /// counter keeps waiting, and their clock keeps running, exactly as if
     /// the sign were still up. It stops new traffic, not existing orders.
     pub accepting_orders: bool,
+    /// Which shift this is, 1-based. Nothing in the simulation branches on it
+    /// — it is the number the board and the HUD put on the shift, and the
+    /// thing that makes "shift 6" a different sentence from "shift 1".
+    pub shift_number: u32,
+    /// The career totals this shift opened at. `None` only before
+    /// `shift::open_the_shift` has taken the first one, which happens on the
+    /// authority's first frame in the lab.
+    pub opened_at: Option<ShiftSnapshot>,
+    /// The shift has been called: the sign is down, the counter is clear, and
+    /// the standing board is showing the debrief.
+    ///
+    /// Deliberately **not** a state gate. Nothing stops running while this is
+    /// set — it only changes what the board draws — because in co-op one
+    /// chemist reading the debrief must not stop the other working.
+    ///
+    /// Not persisted, for the same reason `accepting_orders` is not: a save
+    /// always resumes into an open lab, with whatever shift it was saved
+    /// during still running. Quitting while reading a debrief therefore comes
+    /// back as "you never finished closing up", which is truer than resuming
+    /// into a debrief with the sign somehow back up.
+    pub called: bool,
 }
 
 impl Default for Shift {
@@ -646,13 +719,31 @@ impl Default for Shift {
             department_standing: HashMap::new(),
             requisition: Requisition::default(),
             accepting_orders: true,
+            shift_number: 1,
+            opened_at: None,
+            called: false,
         }
     }
 }
 
+/// How far a department's opinion of the lab can sink.
+///
+/// Debt is allowed to exist — `shift::can_afford` already refuses to spend it,
+/// so a bad run costs the player their requisitions — but it used to be
+/// unbounded, and unbounded debt is not a consequence, it is a wall. Six
+/// expired orders in a row put a department at −24 and there is no faster way
+/// back up than +2 per clean delivery, so a rough patch could quietly cost
+/// dozens of deliveries of repair work with nothing on screen explaining why.
+///
+/// Well below `station.rogue_security.ron`'s `hostile_below: -8`, so the
+/// floor never makes Security's own threat thread unreachable — pinned by
+/// `the_standing_floor_leaves_room_for_security_to_turn`.
+pub const STANDING_FLOOR: i32 = -25;
+
 impl Shift {
     pub fn adjust(&mut self, department: Department, delta: i32) {
-        *self.department_standing.entry(department).or_insert(0) += delta;
+        let entry = self.department_standing.entry(department).or_insert(0);
+        *entry = (*entry + delta).max(STANDING_FLOOR);
     }
 
     pub fn standing(&self, department: Department) -> i32 {
@@ -1463,7 +1554,18 @@ fn handle_window_delivery(
         // just be a dispenser that costs nothing. Refused quietly here rather
         // than over the radio — the panel explains it, and a line every frame
         // would bury the feed.
-        if test_stock {
+        //
+        // A batch still running is refused for a different reason and the same
+        // way. This tray hands over the instant *anything* in the beaker
+        // matches, and a rated recipe passes through a stage where it is half
+        // reactant and half product — so without this, parking a beaker here
+        // and walking away would deliver a half-made batch and grade it
+        // `Impure`, which reads as the window having stolen it early.
+        //
+        // Asked of the chemistry rather than of `machines::Reacting`, so the
+        // panel drawing the same answer on a guest and the authority acting on
+        // it here are the same question, not two that could disagree.
+        if test_stock || chem_sim::is_reacting(&container.solution, &db.reactions) {
             continue;
         }
 
@@ -1503,20 +1605,85 @@ fn handle_window_delivery(
     }
 }
 
+/// Gap between things set down at the vial drop.
+///
+/// A bottle is 0.07 m across, so this is generous — the point is that two
+/// vials read as two objects from across the room, not that they merely fail
+/// to intersect.
+const VIAL_SPACING: f32 = 0.24;
+
+/// How many lanes there are before the layout gives up and stacks.
+///
+/// The lobby's east wall is at x = 7.5 and the drop starts at
+/// `COUNTER_SPOT.x` (4.0), so twelve lanes at [`VIAL_SPACING`] stay well
+/// inside the room. Lanes run **east**, away from the glassware crate, which
+/// `restock::CRATE_X_OFFSET` puts to the west.
+const VIAL_LANES: usize = 12;
+
+/// How close in z something has to be to count as sitting at the drop rather
+/// than somewhere else in the lab entirely.
+const VIAL_LANE_Z_TOLERANCE: f32 = 0.35;
+
+/// The next free spot along the counter for something set down at the vial
+/// drop, given where loose containers already are.
+///
+/// Pure so the layout can be tested without spawning anything. Vials used to
+/// be dropped at exactly `COUNTER_SPOT.x` every time, so a second one landed
+/// *inside* the first — invisible, and indistinguishable from the game having
+/// forgotten to give it to you. Same bug the glassware crate already avoids;
+/// this is the same fix.
+///
+/// Falls back to lane zero when every lane is taken: overlapping is bad, but
+/// spawning through the lobby's east wall is worse.
+pub fn free_vial_lane(occupied: &[Vec3]) -> Vec3 {
+    let at_the_drop: Vec<f32> = occupied
+        .iter()
+        .filter(|spot| (spot.z - crate::lab::COUNTER_DROP_Z).abs() <= VIAL_LANE_Z_TOLERANCE)
+        .map(|spot| spot.x)
+        .collect();
+
+    let (_, height) = ContainerKind::Bottle.dimensions();
+    let y = crate::lab::COUNTER_TOP + height * 0.5;
+
+    for lane in 0..VIAL_LANES {
+        let x = COUNTER_SPOT.x + lane as f32 * VIAL_SPACING;
+        let clear = at_the_drop
+            .iter()
+            .all(|taken| (taken - x).abs() > VIAL_SPACING * 0.5);
+        if clear {
+            return Vec3::new(x, y, crate::lab::COUNTER_DROP_Z);
+        }
+    }
+    Vec3::new(COUNTER_SPOT.x, y, crate::lab::COUNTER_DROP_Z)
+}
+
 /// Grateful crew occasionally leave a sample of something else they use.
 ///
 /// Run through the analyzer it yields a recipe, which is the route into
 /// anything the player cannot yet stumble onto by mixing. Tying it to clean
 /// deliveries means the game opens up in response to doing the job well.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn leave_sample_vials(
     mut commands: Commands,
     db: Res<ChemDb>,
     knowledge: Res<Knowledge>,
     mut resolved: MessageReader<OrderResolved>,
     mut radio: ResMut<RadioLog>,
+    loose: Query<
+        &Transform,
+        (
+            With<Container>,
+            Without<HeldBy>,
+            Without<InSlot>,
+            Without<Stored>,
+        ),
+    >,
 ) {
     let mut rng = rand::rng();
+    // Spawns are deferred, so anything placed earlier in this same call is not
+    // in the query yet. Two deliveries can resolve in one frame — the counter
+    // and the window both run here — so claimed lanes are carried by hand.
+    let mut occupied: Vec<Vec3> = loose.iter().map(|spot| spot.translation).collect();
 
     for report in resolved.read() {
         if report.outcome != Outcome::Success || !rng.random_bool(SAMPLE_VIAL_CHANCE) {
@@ -1547,16 +1714,9 @@ fn leave_sample_vials(
             continue;
         };
 
-        let (_, height) = ContainerKind::Bottle.dimensions();
-        let vial = spawn_container(
-            &mut commands,
-            ContainerKind::Bottle,
-            Vec3::new(
-                COUNTER_SPOT.x,
-                crate::lab::COUNTER_TOP + height * 0.5,
-                crate::lab::COUNTER_DROP_Z,
-            ),
-        );
+        let spot = free_vial_lane(&occupied);
+        occupied.push(spot);
+        let vial = spawn_container(&mut commands, ContainerKind::Bottle, spot);
         let amount = ContainerKind::Bottle.capacity();
         commands.queue(move |world: &mut World| {
             if let Some(mut container) = world.get_mut::<Container>(vial) {
@@ -2247,6 +2407,117 @@ mod tests {
                 "{kind:?} would leak the reference reagent it was never told to reveal"
             );
         }
+    }
+
+    // -- standing ---------------------------------------------------------
+
+    #[test]
+    fn standing_cannot_sink_below_the_floor() {
+        // Unbounded debt is not a consequence, it is a wall: a rough patch used
+        // to cost dozens of clean deliveries of repair work at +2 each, with
+        // nothing on screen saying so.
+        let mut shift = Shift::default();
+        for _ in 0..50 {
+            shift.adjust(Department::Medical, -4);
+        }
+
+        assert_eq!(shift.standing(Department::Medical), STANDING_FLOOR);
+    }
+
+    #[test]
+    fn the_floor_does_not_interfere_with_ordinary_movement() {
+        let mut shift = Shift::default();
+        shift.adjust(Department::Cargo, 7);
+        shift.adjust(Department::Cargo, -3);
+        assert_eq!(shift.standing(Department::Cargo), 4);
+
+        // And climbing back out of the floor still works normally.
+        shift.adjust(Department::Cargo, STANDING_FLOOR * 4);
+        shift.adjust(Department::Cargo, 5);
+        assert_eq!(shift.standing(Department::Cargo), STANDING_FLOOR + 5);
+    }
+
+    #[test]
+    fn the_standing_floor_leaves_room_for_security_to_turn() {
+        // `rogue_security` arms off Security standing itself. A floor at or
+        // above its `hostile_below` would make that whole thread unreachable
+        // by construction.
+        let rogue: crate::rogue_security::RogueSecurityScript =
+            ron::from_str(include_str!("../../assets/data/station.rogue_security.ron")).unwrap();
+        assert!(
+            STANDING_FLOOR < rogue.hostile_below,
+            "the floor at {STANDING_FLOOR} sits at or above Security's own \
+             threshold of {}, so they could never turn",
+            rogue.hostile_below
+        );
+    }
+
+    // -- where a sample vial lands ----------------------------------------
+
+    #[test]
+    fn a_second_vial_does_not_land_inside_the_first() {
+        // Vials used to drop at exactly `COUNTER_SPOT.x` every time, so the
+        // second one was invisible inside the first and read as the game
+        // having simply not given it to you.
+        let first = free_vial_lane(&[]);
+        let second = free_vial_lane(&[first]);
+        let third = free_vial_lane(&[first, second]);
+
+        assert!((first.x - second.x).abs() >= VIAL_SPACING * 0.5);
+        assert!((second.x - third.x).abs() >= VIAL_SPACING * 0.5);
+        assert!((first.x - third.x).abs() >= VIAL_SPACING * 0.5);
+    }
+
+    #[test]
+    fn vials_reuse_a_lane_that_has_been_cleared() {
+        // Picking one up should not leave a permanent hole — the next vial
+        // takes the nearest free spot, not the next index.
+        let first = free_vial_lane(&[]);
+        let second = free_vial_lane(&[first]);
+
+        assert_eq!(free_vial_lane(&[second]).x, first.x);
+    }
+
+    #[test]
+    fn a_full_counter_stacks_rather_than_spawning_through_a_wall() {
+        let mut taken: Vec<Vec3> = Vec::new();
+        for _ in 0..VIAL_LANES {
+            taken.push(free_vial_lane(&taken));
+        }
+
+        let lobby = &crate::lab::ROOMS[crate::lab::LOBBY];
+        for spot in &taken {
+            assert!(
+                spot.x < lobby.max_x,
+                "lane at {} reaches past the lobby's east wall at {}",
+                spot.x,
+                lobby.max_x
+            );
+        }
+        // Overlapping is bad; spawning outside the room is worse.
+        assert_eq!(free_vial_lane(&taken).x, COUNTER_SPOT.x);
+    }
+
+    #[test]
+    fn vials_never_land_in_the_glassware_crate() {
+        // The crate is laid out west of the drop; lanes run east. If they ever
+        // ran the other way a vial would land inside a beaker.
+        let lanes: Vec<Vec3> = {
+            let mut taken = Vec::new();
+            for _ in 0..VIAL_LANES {
+                taken.push(free_vial_lane(&taken));
+            }
+            taken
+        };
+        assert!(lanes.iter().all(|spot| spot.x >= COUNTER_SPOT.x));
+    }
+
+    #[test]
+    fn something_sitting_elsewhere_in_the_lab_does_not_take_a_lane() {
+        // The occupancy check is scoped to the drop's own z, or a beaker left
+        // on a bench across the room would push vials down the counter.
+        let bench = Vec3::new(COUNTER_SPOT.x, crate::lab::COUNTER_TOP, -3.0);
+        assert_eq!(free_vial_lane(&[bench]).x, COUNTER_SPOT.x);
     }
 
     // -- content guardrails ----------------------------------------------

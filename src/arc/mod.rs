@@ -277,7 +277,7 @@ pub struct CampaignChoice {
 /// integer meter actually moves. Change detection drives the network send, so
 /// a resource touched every frame would broadcast the campaign every frame.
 #[derive(Resource, Default)]
-struct DriftClock(f32);
+pub struct DriftClock(f32);
 
 // ---------------------------------------------------------------------------
 // Data
@@ -502,6 +502,7 @@ fn advance_plot(
     script: Option<Res<Script>>,
     campaign: Option<ResMut<Campaign>>,
     mut drift: ResMut<DriftClock>,
+    shift: Res<Shift>,
     mut resolved: MessageReader<OrderResolved>,
     mut radio: ResMut<RadioLog>,
 ) {
@@ -519,15 +520,28 @@ fn advance_plot(
     // Drift, banked only in whole points. `Campaign` drives a network send off
     // change detection, so writing it every frame would broadcast it every
     // frame.
-    drift.0 += time.delta_secs();
-    while drift.0 >= DRIFT_INTERVAL_SECONDS {
-        drift.0 -= DRIFT_INTERVAL_SECONDS;
-        delta += script.drift_per_minute;
+    //
+    // Paused while the "not accepting requests" sign is down. The sign is the
+    // only pacing control the player has, and it used to be a trap: it stops
+    // every visitor including the counter-track's, so taking a breather shut
+    // the one route to `StoppedByDepartments` while the antagonist carried on
+    // working. Closing up is now genuinely neutral — you make no progress and
+    // neither do they.
+    if shift.accepting_orders {
+        drift.0 += time.delta_secs();
+        while drift.0 >= DRIFT_INTERVAL_SECONDS {
+            drift.0 -= DRIFT_INTERVAL_SECONDS;
+            delta += script.drift_per_minute;
+        }
     }
 
-    let Some(def) = script.antagonist(campaign.antag) else {
-        return;
-    };
+    // Only the counter-track needs the authored definition. This used to be a
+    // `let ... else { return; }` sitting above the plot write, which meant a
+    // campaign whose antagonist had no entry in `station.arc.ron` silently
+    // froze the meter at zero forever — no drift, no aid, and therefore no way
+    // for the arc to ever resolve. A content bug should cost the counter-track,
+    // not the whole save.
+    let def = script.antagonist(campaign.antag);
     let mut delivered_lines: Vec<String> = Vec::new();
 
     for report in resolved.read() {
@@ -537,6 +551,9 @@ fn advance_plot(
         match report.kind {
             OrderKind::Illicit => delta += script.plot_per_aid,
             OrderKind::Counter => {
+                let Some(def) = def else {
+                    continue;
+                };
                 // Mark the first outstanding step this department was asking
                 // for. Matching by role rather than by an id threaded through
                 // the order keeps this on the same "react to `OrderResolved`"
@@ -640,9 +657,16 @@ fn generate_counter_orders(
     if campaign.reveal < Reveal::Suspected || campaign.outcome.is_some() {
         return;
     }
-    // The same sign that stops a legitimate visitor stops this one, and never
-    // two at once — the track is a sequence, not a queue.
-    if !shift.accepting_orders || !active.is_empty() {
+    // Never two at once — the track is a sequence, not a queue.
+    //
+    // Deliberately *not* gated on `shift.accepting_orders`, unlike every other
+    // spawner in the game. A department that has worked out what it needs to
+    // stop the thing killing the station is not ordinary counter traffic, and
+    // making the closed sign shut off the player's only route to
+    // `StoppedByDepartments` turned the one pacing control they have into a
+    // trap. `advance_plot` pauses the drift for the same reason, so closing up
+    // stalls neither side.
+    if !active.is_empty() {
         return;
     }
 
@@ -771,9 +795,6 @@ fn update_reveal(
         return;
     }
 
-    let Some(def) = script.antagonist(campaign.antag) else {
-        return;
-    };
     // Step one tier at a time, so a single large jump still airs the line the
     // player would otherwise never see.
     let next = match campaign.reveal {
@@ -781,12 +802,20 @@ fn update_reveal(
         Reveal::Suspected => Reveal::Named,
         Reveal::Named => return,
     };
+    campaign.reveal = next;
+
+    // The reveal itself climbs whether or not the antagonist is authored —
+    // same reasoning as `advance_plot`'s: a missing entry in `station.arc.ron`
+    // should cost the *line*, not stall the whole arc at `Hidden` with the
+    // counter-track permanently shut behind it.
+    let Some(def) = script.antagonist(campaign.antag) else {
+        return;
+    };
     let line = match next {
         Reveal::Suspected => def.suspected_line.clone(),
         Reveal::Named => def.named_line.clone(),
         Reveal::Hidden => return,
     };
-    campaign.reveal = next;
 
     // Immediate rather than `PendingBroadcasts::push_delayed`: ordinary
     // chatter is delayed to feel like news arriving, but this is the station
@@ -968,12 +997,19 @@ mod tests {
             .init_resource::<DriftClock>()
             .init_resource::<RadioLog>()
             .init_resource::<Time>()
+            // `advance_plot` reads the accepting-orders sign to decide whether
+            // the drift runs at all.
+            .init_resource::<Shift>()
             .add_message::<OrderResolved>()
             .add_systems(
                 Update,
                 (advance_plot, update_reveal, resolve_campaign).chain(),
             );
         app
+    }
+
+    fn close_the_sign(app: &mut App) {
+        app.world_mut().resource_mut::<Shift>().accepting_orders = false;
     }
 
     fn advance(app: &mut App, seconds: f32) {
@@ -1026,6 +1062,58 @@ mod tests {
             app.world().resource_ref::<Campaign>().last_changed(),
             before,
             "a sub-minute tick must not mark the campaign changed"
+        );
+    }
+
+    #[test]
+    fn closing_the_sign_stops_the_drift() {
+        // The sign is the only pacing control the player has. While it also
+        // shut off the counter-track, taking a breather was strictly bad: the
+        // antagonist kept working and the one route to stopping them was
+        // closed. Closing up is now neutral on both sides.
+        let mut app = arc_app(AntagId::Cult);
+        close_the_sign(&mut app);
+
+        advance(&mut app, 60.0 * 5.0);
+
+        assert_eq!(plot(&app), 0, "the plot must not creep up while closed");
+    }
+
+    #[test]
+    fn reopening_starts_the_drift_again() {
+        let mut app = arc_app(AntagId::Cult);
+        let per_minute = app.world().resource::<Script>().drift_per_minute;
+        close_the_sign(&mut app);
+        advance(&mut app, 60.0);
+
+        app.world_mut().resource_mut::<Shift>().accepting_orders = true;
+        advance(&mut app, 60.0);
+
+        assert_eq!(
+            plot(&app),
+            per_minute,
+            "exactly the open minute should have counted"
+        );
+    }
+
+    #[test]
+    fn an_unauthored_antagonist_still_drifts() {
+        // This used to be a `let ... else { return; }` above the plot write, so
+        // a campaign whose antagonist had no entry in `station.arc.ron` froze
+        // the meter at zero forever and the arc could never resolve at all.
+        let mut app = arc_app(AntagId::Cult);
+        let per_minute = app.world().resource::<Script>().drift_per_minute;
+        // A script with the roster emptied out — the shape a content bug takes.
+        let mut stripped = script();
+        stripped.antagonists.clear();
+        app.insert_resource(Script(stripped));
+
+        advance(&mut app, 60.0);
+
+        assert_eq!(
+            plot(&app),
+            per_minute,
+            "a missing definition should cost the counter-track, not the arc"
         );
     }
 
@@ -1140,6 +1228,23 @@ mod tests {
             !order.specific,
             "a counter step must stay lenient, or it demands one exact reagent \
              instead of the category the department actually needs"
+        );
+    }
+
+    #[test]
+    fn the_counter_track_ignores_the_closed_sign() {
+        // Every other spawner in the game stops at the sign. This one must not:
+        // a department bringing the chemist the thing that stops the station
+        // dying is not ordinary counter traffic, and gating it made the sign a
+        // trap — the drift kept running while the only counter to it was shut.
+        let mut app = counter_app(AntagId::Cult);
+        close_the_sign(&mut app);
+        open_the_track(&mut app);
+
+        assert_eq!(
+            app.world_mut().query::<&CounterOrder>().iter(app.world()).count(),
+            1,
+            "a countermeasure has to be able to reach a closed lab"
         );
     }
 

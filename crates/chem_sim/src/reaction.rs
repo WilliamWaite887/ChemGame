@@ -67,6 +67,17 @@ pub struct ReactionDef {
     /// Higher priority wins when two reactions compete for the same reagent.
     #[serde(default)]
     pub priority: i32,
+    /// How fast this runs, in reaction-units per second.
+    ///
+    /// `None` — the default, and what every recipe written before this existed
+    /// carries — means instantaneous: the reaction completes inside the call
+    /// that noticed it could happen, exactly as chemistry in this crate always
+    /// has. A rate turns the same recipe into something that takes real time,
+    /// which is what makes a batch watchable, rushable, and interruptible.
+    ///
+    /// See [`crate::resolve_step`].
+    #[serde(default)]
+    pub rate: Option<Units>,
     #[serde(default)]
     pub effects: Vec<ReactionEffect>,
     /// Progressive hints shown in the reference book while this recipe is
@@ -88,6 +99,8 @@ pub struct Reaction {
     pub overheat_temp: Option<Kelvin>,
     pub overheat: Overheat,
     pub priority: i32,
+    /// See [`ReactionDef::rate`]. `None` is instantaneous.
+    pub rate: Option<Units>,
     pub effects: Vec<ReactionEffect>,
     pub hints: Vec<String>,
 }
@@ -159,6 +172,34 @@ impl Reaction {
     pub fn is_overheated(&self, temperature: Kelvin) -> bool {
         matches!(self.overheat_temp, Some(threshold) if temperature > threshold)
     }
+
+    /// The most this reaction may advance in `dt` seconds, or `None` for "as
+    /// far as it will go" — which is both what an unrated reaction always
+    /// means and what an infinite `dt` asks for.
+    ///
+    /// The result is floored at one raw hundredth whenever the rate and the
+    /// step are both positive. Without that floor, a slow reaction on a fast
+    /// machine rounds its per-frame share down to zero and never advances at
+    /// all — the worst kind of bug, since it only appears above some frame
+    /// rate. The floor puts a hard lower bound of `SCALE` hundredths per
+    /// second on any rated reaction, so rates below roughly 1u/s are not
+    /// meaningfully distinguishable from each other; the shipped data does not
+    /// use any, and this is the reason not to.
+    ///
+    /// A `rate` of zero or less is a content bug. It is read as "instant"
+    /// rather than "never", because a recipe that silently cannot be made is a
+    /// far worse thing to ship than one that is merely faster than intended.
+    pub fn step_limit(&self, dt: f32) -> Option<Units> {
+        let rate = self.rate?;
+        if !dt.is_finite() || !rate.is_positive() {
+            return None;
+        }
+        let allowance = Units::from_f64(rate.as_f64() * dt.max(0.0) as f64);
+        if dt > 0.0 && !allowance.is_positive() {
+            return Some(Units::from_raw(1));
+        }
+        Some(allowance)
+    }
 }
 
 /// Every known reaction.
@@ -216,6 +257,7 @@ impl ReactionSet {
             overheat_temp: def.overheat_temp,
             overheat: def.overheat,
             priority: def.priority,
+            rate: def.rate,
             effects: def.effects,
             hints: def.hints,
         });

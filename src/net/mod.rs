@@ -322,6 +322,11 @@ impl Plugin for NetPlugin {
             // `ServerState`, so this line appearing is proof the transport is
             // actually running. Its absence is what a silent host looks like.
             .add_systems(OnEnter(ServerState::Running), announce_serving)
+            // Hangs up on the way out to the menu. Paired with
+            // `crate::session`, which unwinds everything the session put in
+            // the world; this is the half that unwinds what it put on a
+            // socket.
+            .add_systems(OnExit(AppState::Playing), close_session_transport)
             // A host or singleplayer game owns the simulation immediately —
             // there is nothing to wait for.
             .add_systems(
@@ -408,6 +413,37 @@ pub fn abandon_connection_attempt(commands: &mut Commands, mode: LaunchMode) {
         LaunchMode::JoinSteam(_) => steam::abandon_join(commands),
         _ => {}
     }
+}
+
+/// Closes the session's transport on the way out of the lab.
+///
+/// Quitting to the menu has to hang up as well as tear the world down: a host
+/// that kept listening would have guests still connected to a lab that no
+/// longer exists, and a client that kept its socket open would be dialled into
+/// a session it has left. Either one leaves the *next* launch fighting a
+/// half-open connection for a port, and neither says anything about it.
+///
+/// Singleplayer holds none of these resources, so this is a no-op there.
+fn close_session_transport(mut commands: Commands, mode: Option<Res<LaunchMode>>) {
+    let Some(mode) = mode else {
+        return;
+    };
+    match *mode {
+        LaunchMode::Singleplayer => {}
+        LaunchMode::Host => {
+            commands.remove_resource::<RenetServer>();
+            commands.remove_resource::<NetcodeServerTransport>();
+        }
+        LaunchMode::Join(_) => {
+            commands.remove_resource::<RenetClient>();
+            commands.remove_resource::<NetcodeClientTransport>();
+        }
+        LaunchMode::HostSteam => steam::close_host(&mut commands),
+        LaunchMode::JoinSteam(_) => steam::abandon_join(&mut commands),
+    }
+    // Back to the default the menu chooses from again, so a Steam co-op
+    // session followed by a solo one does not run solo through the Steam path.
+    commands.insert_resource(LaunchMode::default());
 }
 
 /// Pushes the shared resources again whenever a chemist joins.

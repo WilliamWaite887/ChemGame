@@ -199,6 +199,7 @@ fn clear_screen(mut commands: Commands, roots: Query<Entity, With<MenuRoot>>) {
 fn show_mode_screen(mut commands: Commands, error: Res<ConnectError>) {
     menu_shell(
         &mut commands,
+        MenuRoot,
         "ChemGame",
         "A shift in the chemistry lab.",
         |panel| {
@@ -236,7 +237,7 @@ fn show_save_screen(mut commands: Commands, pending: Res<PendingMode>) {
     };
     let slots = saves::list_slots();
 
-    menu_shell(&mut commands, "Choose a save", subtitle, |panel| {
+    menu_shell(&mut commands, MenuRoot, "Choose a save", subtitle, |panel| {
         panel.spawn(choice(
             "New save",
             "Start over: shift 1, an empty notebook.",
@@ -269,6 +270,7 @@ fn show_campaign_screen(mut commands: Commands) {
 
     menu_shell(
         &mut commands,
+        MenuRoot,
         "A new career",
         "You have stopped one of them before. That door swings both ways now.",
         |panel| {
@@ -308,6 +310,7 @@ fn show_join_screen(mut commands: Commands, mut input: ResMut<AddressInput>) {
 
     menu_shell(
         &mut commands,
+        MenuRoot,
         "Join a lab",
         "For a host running chemgame --host on the same network. \
          A host who clicked Host in the menu is using Steam, not this — \
@@ -358,7 +361,7 @@ fn show_connecting_screen(mut commands: Commands, mode: Res<LaunchMode>) {
         _ => "Connecting…".to_string(),
     };
 
-    menu_shell(&mut commands, "Joining a lab", &detail, |panel| {
+    menu_shell(&mut commands, MenuRoot, "Joining a lab", &detail, |panel| {
         panel.spawn(row()).with_children(|row| {
             row.spawn(button("Cancel", MenuAction::Cancel));
         });
@@ -643,8 +646,13 @@ fn start(
 // ---------------------------------------------------------------------------
 
 /// The frame every screen shares: title, subtitle, and a column of controls.
-fn menu_shell(
+///
+/// `root` is whatever marks the screen for teardown — [`MenuRoot`] here, and
+/// its own marker for the in-game pause menu, which reuses this shell so the
+/// two never drift apart visually.
+pub(crate) fn menu_shell(
     commands: &mut Commands,
+    root: impl Bundle,
     title: &str,
     subtitle: &str,
     body: impl FnOnce(&mut ChildSpawnerCommands),
@@ -660,7 +668,7 @@ fn menu_shell(
                 ..default()
             },
             BackgroundColor(PANEL_BG),
-            MenuRoot,
+            root,
         ))
         .with_children(|screen| {
             screen
@@ -683,7 +691,15 @@ fn menu_shell(
 ///
 /// Wider and taller than a panel button because this is the one screen the
 /// player uses with a free cursor and no hurry.
-fn choice(title: impl Into<String>, detail: &str, action: MenuAction) -> impl Bundle {
+///
+/// Generic over the action for the same reason [`menu_shell`] is generic over
+/// its root: the pause menu wants exactly this button with an action type of
+/// its own, and two copies would drift.
+pub(crate) fn choice<A: Component>(
+    title: impl Into<String>,
+    detail: &str,
+    action: A,
+) -> impl Bundle {
     (
         Button,
         Node {

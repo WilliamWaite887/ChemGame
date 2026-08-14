@@ -44,6 +44,7 @@ impl Plugin for QuackPlugin {
         app.add_plugins(RonAssetPlugin::<QuackScript>::new(&["quack.ron"]))
             .init_resource::<QuackProgress>()
             .add_systems(Startup, start_loading)
+            .add_systems(OnEnter(AppState::Playing), arm_spawner)
             .add_systems(
                 Update,
                 (promote_script, generate_quack_visit, handle_quack_resolution)
@@ -106,7 +107,6 @@ fn promote_script(
     mut commands: Commands,
     pending: Option<Res<PendingQuackScript>>,
     mut scripts: ResMut<Assets<QuackScript>>,
-    spawner: Option<Res<QuackSpawner>>,
 ) {
     let Some(pending) = pending else {
         return;
@@ -114,14 +114,22 @@ fn promote_script(
     let Some(script) = scripts.remove(&pending.0) else {
         return;
     };
-    if spawner.is_none() {
-        let gap = rand::rng().random_range(INITIAL_GAP_SECONDS.0..=INITIAL_GAP_SECONDS.1);
-        commands.insert_resource(QuackSpawner {
-            timer: Timer::from_seconds(gap, TimerMode::Once),
-        });
-    }
     commands.insert_resource(Script(script));
     commands.remove_resource::<PendingQuackScript>();
+}
+
+/// Arms this thread's visit clock for a fresh session.
+///
+/// `OnEnter(AppState::Playing)` rather than inside `promote_script`, which
+/// runs exactly once per process: quitting to the menu and opening another
+/// save would otherwise leave a spent `TimerMode::Once` behind, and a spent
+/// `Once` timer never reports `just_finished` again — the whole thread would
+/// be silently dead for the rest of the session with nothing to show for it.
+fn arm_spawner(mut commands: Commands) {
+    let gap = rand::rng().random_range(INITIAL_GAP_SECONDS.0..=INITIAL_GAP_SECONDS.1);
+    commands.insert_resource(QuackSpawner {
+        timer: Timer::from_seconds(gap, TimerMode::Once),
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

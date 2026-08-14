@@ -25,7 +25,14 @@ pub const EYE_HEIGHT: f32 = 1.7;
 const PLAYER_RADIUS: f32 = 0.35;
 /// Unhurried, unmedicated walking pace.
 const WALK_SPEED: f32 = 4.2;
-const MOUSE_SENSITIVITY: f32 = 0.0022;
+/// How much faster sprinting is.
+///
+/// Deliberately modest. The lab is five rooms you can cross in a few seconds,
+/// so this is about not resenting the walk back from the reaction bay, not
+/// about outrunning anything — and the one thing worth outrunning, the
+/// showdown's assailant, is tuned against the *walk* speed
+/// (`ShowdownTuning::speed`), which a big multiplier here would trivialise.
+const SPRINT_MULTIPLIER: f32 = 1.55;
 /// Just under 90°, so looking straight up or down never flips the view.
 const PITCH_LIMIT: f32 = 1.54;
 
@@ -60,8 +67,24 @@ impl Plugin for PlayerPlugin {
                         dress_chemists,
                         adopt_my_chemist,
                         hide_own_body,
-                        mouse_look,
-                        send_move_input,
+                        // Reading the mouse and keyboard on the player's
+                        // behalf stops while the pause menu is up — in co-op
+                        // that is the *only* thing pausing does, since one
+                        // peer does not get to stop the other's simulation.
+                        //
+                        // The explicit `.after` is load-bearing, and its
+                        // absence has no error message. `apply_move_input`
+                        // writes `look.yaw` back from the last `MoveInput` the
+                        // authority was told about, so a `send_move_input`
+                        // that runs *before* `mouse_look` reports the previous
+                        // frame's yaw and the view snaps straight back to it —
+                        // the symptom is being unable to turn your head at
+                        // all. Stated as a constraint between the two systems
+                        // rather than relying on the position of this tuple
+                        // inside the outer `.chain()`, which is exactly what
+                        // got lost when the pause gate was added.
+                        (mouse_look, send_move_input.after(mouse_look))
+                            .run_if(crate::settings::not_paused),
                         follow_chemist,
                     )
                         .chain(),
@@ -104,6 +127,10 @@ pub struct LocalPlayer;
 struct MoveIntent {
     direction: Vec2,
     yaw: f32,
+    /// Whether the sprint key was down. Latched with the rest of the command
+    /// for the same reason: a dropped packet should mean "keep doing what you
+    /// were told", not "stop sprinting until the next one lands".
+    sprint: bool,
 }
 
 /// The camera. Not parented to the body, so head movement stays local.
@@ -136,6 +163,12 @@ pub struct MoveInput {
     pub direction: Vec2,
     /// Which way the body faces.
     pub yaw: f32,
+    /// Whether the sprint key is down.
+    ///
+    /// Sent rather than applied locally, because movement is
+    /// server-authoritative with no prediction — see [`walk_speed`]'s own note
+    /// on why a client that scaled its own speed would rubber-band.
+    pub sprint: bool,
 }
 
 /// Spawns the chemist for whoever is running the world: the singleplayer
@@ -220,6 +253,7 @@ fn spawn_chemist(commands: &mut Commands, client: ClientId, lane: f32) -> Entity
             ),
             Visibility::default(),
             Replicated,
+            crate::until_we_leave_the_lab(),
         ))
         .id()
 }
@@ -250,6 +284,7 @@ fn adopt_my_chemist(mut commands: Commands, mut assigned: MessageReader<YouAreCh
                 chemist: message.chemist,
             },
             Transform::from_xyz(0.0, EYE_HEIGHT, 2.6),
+            crate::until_we_leave_the_lab(),
         ));
     }
 }
@@ -392,18 +427,20 @@ fn grab_cursor(mut cursor: Single<&mut CursorOptions>) {
 fn mouse_look(
     mut motion: MessageReader<MouseMotion>,
     cursor: Single<&CursorOptions>,
+    settings: Res<crate::settings::Settings>,
     mut players: Query<(&mut Look, &InteractionMode), With<LocalPlayer>>,
 ) {
     let delta: Vec2 = motion.read().map(|m| m.delta).sum();
     if cursor.grab_mode == CursorGrabMode::None || delta == Vec2::ZERO {
         return;
     }
+    let sensitivity = settings.mouse_sensitivity;
     for (mut look, mode) in &mut players {
         if !mode.is_roaming() {
             continue;
         }
-        look.yaw -= delta.x * MOUSE_SENSITIVITY;
-        look.pitch = (look.pitch - delta.y * MOUSE_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        look.yaw -= delta.x * sensitivity;
+        look.pitch = (look.pitch - delta.y * sensitivity).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 }
 
@@ -421,36 +458,43 @@ const MOVE_INPUT_RESEND_SECONDS: f32 = 0.1;
 fn send_move_input(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    settings: Res<crate::settings::Settings>,
     players: Query<(&Look, &InteractionMode), With<LocalPlayer>>,
     mut outgoing: MessageWriter<MoveInput>,
-    mut last: Local<Option<(Vec2, f32)>>,
+    mut last: Local<Option<(Vec2, f32, bool)>>,
     mut since_send: Local<f32>,
 ) {
     let Ok((look, mode)) = players.single() else {
         return;
     };
 
+    let bind = &settings.bindings;
     let mut direction = Vec2::ZERO;
     if mode.is_roaming() {
-        if keys.pressed(KeyCode::KeyW) {
+        if keys.pressed(bind.forward) {
             direction.y -= 1.0;
         }
-        if keys.pressed(KeyCode::KeyS) {
+        if keys.pressed(bind.back) {
             direction.y += 1.0;
         }
-        if keys.pressed(KeyCode::KeyA) {
+        if keys.pressed(bind.left) {
             direction.x -= 1.0;
         }
-        if keys.pressed(KeyCode::KeyD) {
+        if keys.pressed(bind.right) {
             direction.x += 1.0;
         }
     }
     let direction = direction.normalize_or_zero();
+    // Only meaningful while actually roaming, for the same reason `direction`
+    // is: a chemist at an open panel is not running anywhere.
+    let sprint = mode.is_roaming() && keys.pressed(bind.sprint);
 
     // Any change goes out the same frame, so this costs no responsiveness —
-    // note that includes mouse-look, since `yaw` is part of the command.
+    // note that includes mouse-look, since `yaw` is part of the command, and
+    // sprinting, which has to be in the comparison or letting go of Shift
+    // while still holding W would never be reported.
     *since_send += time.delta_secs();
-    let command = (direction, look.yaw);
+    let command = (direction, look.yaw, sprint);
     if *last == Some(command) && *since_send < MOVE_INPUT_RESEND_SECONDS {
         return;
     }
@@ -460,6 +504,7 @@ fn send_move_input(
     outgoing.write(MoveInput {
         direction,
         yaw: look.yaw,
+        sprint,
     });
 }
 
@@ -469,7 +514,7 @@ fn send_move_input(
 /// not incidental: movement is server-authoritative with no prediction, so if
 /// the client scaled its own speed the two would disagree and the player would
 /// rubber-band every time they took a stimulant.
-fn walk_speed(blood: &Bloodstream, body: &Body) -> f32 {
+fn walk_speed(blood: &Bloodstream, body: &Body, sprinting: bool) -> f32 {
     if body.0.collapsed {
         return 0.0;
     }
@@ -478,7 +523,12 @@ fn walk_speed(blood: &Bloodstream, body: &Body) -> f32 {
     // Hastened and sluggish cancel rather than compete, so taking both is
     // simply a waste of two chemicals.
     let factor = (1.0 + 0.6 * hastened - 0.4 * sluggish).clamp(0.25, 2.0);
-    WALK_SPEED * factor
+    // Multiplied on top of the chemical factor rather than folded into it, so
+    // a sprinting chemist who is also sluggish is still slower than a walking
+    // one who is not — the drug is a state you are in, the sprint is a thing
+    // you are doing.
+    let sprint = if sprinting { SPRINT_MULTIPLIER } else { 1.0 };
+    WALK_SPEED * factor * sprint
 }
 
 /// Latches the newest movement command per chemist. Does not move anyone —
@@ -496,6 +546,7 @@ fn receive_move_input(
         };
         intent.direction = input.direction;
         intent.yaw = input.yaw;
+        intent.sprint = input.sprint;
     }
 }
 
@@ -537,7 +588,7 @@ fn apply_move_input(
             continue;
         }
 
-        let speed = walk_speed(blood, body);
+        let speed = walk_speed(blood, body, intent.sprint);
         if speed <= 0.0 {
             continue;
         }
@@ -695,6 +746,127 @@ mod tests {
     }
 
     #[test]
+    fn sprinting_is_faster_but_never_outruns_being_hurt() {
+        let healthy = Bloodstream::default();
+        let upright = Body::default();
+
+        let walk = walk_speed(&healthy, &upright, false);
+        let sprint = walk_speed(&healthy, &upright, true);
+        assert!(sprint > walk, "sprinting has to actually be faster");
+
+        // A collapsed chemist is not going anywhere, however hard they hold
+        // the key — the check that stops them is ahead of the multiplier.
+        let mut down = Body::default();
+        down.0.collapsed = true;
+        assert_eq!(walk_speed(&healthy, &down, true), 0.0);
+    }
+
+    #[test]
+    fn sprinting_stacks_with_a_stimulant_rather_than_replacing_it() {
+        // The drug is a state you are in and the sprint is a thing you are
+        // doing, so a sluggish sprinter is still slower than an unimpaired
+        // walker — folding the two into one factor would lose that.
+        let mut sluggish = Bloodstream::default();
+        sluggish
+            .0
+            .add_status(chem_sim::StatusKind::Sluggish, 60.0, 1.0);
+        let upright = Body::default();
+
+        let clear_walk = walk_speed(&Bloodstream::default(), &upright, false);
+        let sluggish_sprint = walk_speed(&sluggish, &upright, true);
+        let sluggish_walk = walk_speed(&sluggish, &upright, false);
+
+        assert!(sluggish_sprint > sluggish_walk);
+        assert!(
+            sluggish_sprint < clear_walk * SPRINT_MULTIPLIER,
+            "the impairment has to still be felt while sprinting"
+        );
+    }
+
+    #[test]
+    fn letting_go_of_sprint_is_reported_even_while_still_walking() {
+        // The send is deduplicated against the last command, so sprint has to
+        // be part of that comparison — otherwise releasing Shift with W still
+        // held would never reach the authority and the chemist would keep
+        // running until they stopped for some other reason.
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Time>()
+            .insert_resource(crate::settings::Settings::default())
+            .add_message::<MoveInput>()
+            .add_systems(Update, send_move_input);
+        app.world_mut()
+            .spawn((LocalPlayer, Look::default(), InteractionMode::default()));
+
+        let bind = app.world().resource::<crate::settings::Settings>().bindings;
+        let press = |app: &mut App, keys: &[KeyCode], pressed: bool| {
+            let mut input = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            for key in keys {
+                if pressed {
+                    input.press(*key);
+                } else {
+                    input.release(*key);
+                }
+            }
+        };
+
+        press(&mut app, &[bind.forward, bind.sprint], true);
+        app.update();
+        press(&mut app, &[bind.sprint], false);
+        app.update();
+
+        let sent: Vec<bool> = app
+            .world()
+            .resource::<Messages<MoveInput>>()
+            .iter_current_update_messages()
+            .map(|input| input.sprint)
+            .collect();
+        assert_eq!(
+            sent.last().copied(),
+            Some(false),
+            "releasing sprint has to go out even though the direction did not change"
+        );
+    }
+
+    #[test]
+    fn the_yaw_sent_to_the_server_is_whatever_look_holds_right_now() {
+        // Yaw is server-authoritative: `apply_move_input` writes `look.yaw`
+        // back from the last `MoveInput` the authority was told about. So this
+        // system reporting a stale `Look` is not a one-frame latency problem,
+        // it is the view being pinned — whatever it last reported is what the
+        // authority keeps writing back, and the player cannot turn at all.
+        //
+        // The *ordering* that guarantees freshness is stated structurally, as
+        // `send_move_input.after(mouse_look)` in the plugin. This pins the
+        // other half: that what goes out is read from `Look` at send time and
+        // never cached anywhere.
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Time>()
+            .insert_resource(crate::settings::Settings::default())
+            .add_message::<MoveInput>()
+            .add_systems(Update, send_move_input);
+
+        app.world_mut().spawn((
+            LocalPlayer,
+            Look {
+                yaw: 1.25,
+                pitch: 0.0,
+            },
+            InteractionMode::default(),
+        ));
+        app.update();
+
+        let sent: Vec<f32> = app
+            .world()
+            .resource::<Messages<MoveInput>>()
+            .iter_current_update_messages()
+            .map(|input| input.yaw)
+            .collect();
+        assert_eq!(sent.last().copied(), Some(1.25));
+    }
+
+    #[test]
     fn every_chemist_gets_a_body_and_only_yours_is_hidden() {
         // Two chemists sharing a lab have to be able to see each other, and
         // neither wants to be looking at the inside of their own head.
@@ -778,7 +950,11 @@ mod tests {
     fn send_input(app: &mut App, client: ClientId, direction: Vec2) {
         app.world_mut().write_message(FromClient {
             client_id: client,
-            message: MoveInput { direction, yaw: 0.0 },
+            message: MoveInput {
+                direction,
+                yaw: 0.0,
+                sprint: false,
+            },
         });
     }
 

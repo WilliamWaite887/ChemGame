@@ -7,7 +7,7 @@
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
-use chem_sim::{resolve, ResolveReport, Solution, Units};
+use chem_sim::{resolve_step, ResolveReport, Solution, Units};
 use serde::{Deserialize, Serialize};
 
 use crate::body::Body;
@@ -44,7 +44,7 @@ impl Plugin for ContainerPlugin {
                 (
                     (handle_pickup, handle_drop).run_if(is_authority),
                     (
-                        request_drop,
+                        request_drop.run_if(crate::settings::not_paused),
                         // Runs everywhere: a replicated beaker arrives as
                         // contents and a position, and each end builds the
                         // glass for it.
@@ -136,13 +136,23 @@ impl Container {
     /// Every mutation goes through here so reactions can never be forgotten —
     /// a beaker that has had reagent added but not resolved would show the
     /// player ingredients that should already have become medicine.
+    ///
+    /// Steps by **zero seconds**, which is not the same as doing nothing:
+    /// `resolve_step` runs every reaction with no `rate` to completion exactly
+    /// as `resolve` always did, and leaves every *rated* one where it stands.
+    /// That split is what keeps a slow batch honest. Pouring into a beaker
+    /// must not advance the batch already in it by a frame's worth on the
+    /// strength of having been touched — and, more importantly, an instant
+    /// reaction has to stay instant *here*, because delivery grading and the
+    /// panel both read the beaker in the same frame it was poured into.
+    /// `machines::tick_reactions` is what advances the rated ones.
     pub fn mutate<R>(
         &mut self,
         db: &ChemDb,
         change: impl FnOnce(&mut Solution) -> R,
     ) -> (R, ResolveReport) {
         let result = change(&mut self.solution);
-        let report = resolve(&mut self.solution, &db.reactions);
+        let report = resolve_step(&mut self.solution, &db.reactions, 0.0);
         (result, report)
     }
 }
@@ -205,6 +215,7 @@ pub fn spawn_container(commands: &mut Commands, kind: ContainerKind, position: V
             Container::new(kind),
             Transform::from_translation(position),
             Replicated,
+            crate::until_we_leave_the_lab(),
         ))
         .id()
 }
@@ -365,8 +376,12 @@ fn handle_pickup(
     }
 }
 
-fn request_drop(keys: Res<ButtonInput<KeyCode>>, mut requests: MessageWriter<DropRequested>) {
-    if keys.just_pressed(KeyCode::KeyQ) {
+fn request_drop(
+    keys: Res<ButtonInput<KeyCode>>,
+    settings: Res<crate::settings::Settings>,
+    mut requests: MessageWriter<DropRequested>,
+) {
+    if keys.just_pressed(settings.bindings.drop) {
         requests.write(DropRequested);
     }
 }
