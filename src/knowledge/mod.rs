@@ -38,8 +38,25 @@ const FREE_HINTS: usize = 1;
 /// reagent unlocks compete meaningfully for the same research points instead
 /// of hints being nearly free by comparison.
 pub const HINT_COST: u32 = 3;
-/// Points earned for a clean delivery.
+/// Points earned for a clean delivery of the weakest chemical that could
+/// satisfy the order. See [`research_for_delivery`] for what a better one
+/// pays.
 pub const RESEARCH_PER_SUCCESS: u32 = 1;
+
+/// Research a clean delivery of a reagent with this `potency` is worth.
+///
+/// Scaled by the same authored `potency` that already decides department
+/// favor, on the same `saturating_sub(1)` convention `orders::reputation_delta`
+/// uses: the weakest member of a category pays exactly what every delivery
+/// used to, and a stronger answer pays more (arithrazine 3 → 3 points, against
+/// hyronalin's 1). Research and standing agreeing on what "better" means is
+/// the point — a chemist who reaches past the bare minimum should not have to
+/// pick which currency it earns them. Anything with no potency at all — an
+/// illicit reagent, a precursor — still pays the flat
+/// [`RESEARCH_PER_SUCCESS`].
+pub fn research_for_delivery(potency: u32) -> u32 {
+    RESEARCH_PER_SUCCESS + potency.saturating_sub(1)
+}
 
 /// Research points to upgrade the dispenser from tier `N` to `N+1`, indexed
 /// by `N` (index 0 = tier 0→1, etc.). Each entry is the sum of what the
@@ -213,10 +230,48 @@ impl Knowledge {
     }
 
     /// Marks a recipe as learned. Returns true if this was news.
+    ///
+    /// The bare form, used when loading a save. Anything that represents a
+    /// chemist actually working a recipe out should call [`Self::discover`]
+    /// instead, or the discovery pays nothing.
     pub fn learn(&mut self, reaction: ReactionId) -> bool {
         let already = self.is_known(reaction);
         self.entries.insert(reaction, Entry::Known);
         !already
+    }
+
+    /// Research handed back for working a recipe out instead of buying it.
+    ///
+    /// Exactly what was left unspent on that recipe: every hint still
+    /// unrevealed, at what it would have cost to reveal. Deducing a recipe at
+    /// the bench — or reverse-engineering a sample in the analyzer — is
+    /// therefore worth precisely what not having to buy the rest of its hints
+    /// saved, and a chemist who bought their way most of the way there gets
+    /// correspondingly little back. Discovery used to be worth nothing in
+    /// research terms at all, which left the first dispenser tier 24 clean
+    /// deliveries away with no way to shorten it by being good at the job.
+    pub fn discovery_payback(&self, data: &ChemData, reaction: ReactionId) -> u32 {
+        match self.entry(reaction) {
+            Entry::Known => 0,
+            Entry::Locked { hints_revealed } => {
+                let hints = data.reactions.get(reaction).hints.len();
+                hints.saturating_sub(hints_revealed) as u32 * HINT_COST
+            }
+        }
+    }
+
+    /// Learns a recipe the chemist worked out, and pays the discovery back.
+    ///
+    /// Returns the points awarded, or `None` if the recipe was already known —
+    /// the caller needs both facts, and a bare `bool` plus a second lookup
+    /// would let the two disagree about which recipe was news.
+    pub fn discover(&mut self, data: &ChemData, reaction: ReactionId) -> Option<u32> {
+        let payback = self.discovery_payback(data, reaction);
+        if !self.learn(reaction) {
+            return None;
+        }
+        self.award_research(payback);
+        Some(payback)
     }
 
     pub fn award_research(&mut self, points: u32) {
@@ -526,14 +581,25 @@ fn learn_from_experiments(
             continue;
         }
         for reaction in &event.reactions {
-            if !knowledge.learn(*reaction) {
+            let Some(payback) = knowledge.discover(&db, *reaction) else {
                 continue;
-            }
+            };
             let name = product_name(&db, *reaction);
-            info!("recipe discovered: {name}");
+            info!("recipe discovered: {name} (+{payback} research)");
             radio.push(RadioEntry {
                 channel: "LAB".to_string(),
-                text: format!("Method for {name} written up in the reference book."),
+                // The points are said out loud. A payback the player never
+                // sees arrive is indistinguishable from no payback at all,
+                // and this is the reward for the part of the job the game is
+                // actually about.
+                text: if payback > 0 {
+                    format!(
+                        "Method for {name} written up in the reference book. \
+                         Research credits it at {payback} points."
+                    )
+                } else {
+                    format!("Method for {name} written up in the reference book.")
+                },
                 good: true,
             });
             discovered.write(RecipeDiscovered { name });
@@ -882,6 +948,81 @@ mod tests {
         assert_eq!(50 - knowledge.research_points, spent);
         let all = &data.reactions.get(bicaridine).hints;
         assert_eq!(knowledge.visible_hints(&data, bicaridine).len(), all.len());
+    }
+
+    #[test]
+    fn working_a_recipe_out_pays_back_every_hint_that_was_never_bought() {
+        // The whole point of the payback: deduce it at the bench and you keep
+        // what the notebook would have charged to spell it out for you.
+        let data = data();
+        let mut knowledge = Knowledge::new(&data);
+        let bicaridine = data.reactions.find("bicaridine").unwrap().id;
+        let hints = data.reactions.get(bicaridine).hints.len();
+
+        assert_eq!(
+            knowledge.discover(&data, bicaridine),
+            Some((hints - FREE_HINTS) as u32 * HINT_COST)
+        );
+        assert_eq!(
+            knowledge.research_points,
+            (hints - FREE_HINTS) as u32 * HINT_COST
+        );
+        assert!(knowledge.is_known(bicaridine));
+    }
+
+    #[test]
+    fn a_recipe_half_bought_pays_back_only_what_is_left() {
+        // Buying hints is spending the payback in advance, not stacking with
+        // it — otherwise the cheapest route to research would be to buy every
+        // hint and then discover the recipe anyway.
+        let data = data();
+        let mut knowledge = Knowledge::new(&data);
+        let bicaridine = data.reactions.find("bicaridine").unwrap().id;
+
+        knowledge.award_research(HINT_COST);
+        assert!(knowledge.buy_hint(&data, bicaridine));
+        assert_eq!(knowledge.research_points, 0);
+
+        let hints = data.reactions.get(bicaridine).hints.len();
+        let left = (hints - FREE_HINTS - 1) as u32 * HINT_COST;
+        assert_eq!(knowledge.discover(&data, bicaridine), Some(left));
+        assert_eq!(knowledge.research_points, left);
+    }
+
+    #[test]
+    fn rediscovering_a_known_recipe_pays_nothing() {
+        // A beaker that makes inaprovaline again on every batch must not be a
+        // research fountain.
+        let data = data();
+        let mut knowledge = Knowledge::new(&data);
+        let inaprovaline = data.reactions.find("inaprovaline").unwrap().id;
+
+        assert_eq!(knowledge.discover(&data, inaprovaline), None);
+        assert_eq!(knowledge.research_points, 0);
+
+        let bicaridine = data.reactions.find("bicaridine").unwrap().id;
+        knowledge.discover(&data, bicaridine);
+        let banked = knowledge.research_points;
+        assert_eq!(knowledge.discover(&data, bicaridine), None);
+        assert_eq!(knowledge.research_points, banked, "paid once, not per batch");
+    }
+
+    #[test]
+    fn a_stronger_chemical_pays_more_research_than_the_bare_minimum() {
+        let data = data();
+        let hyronalin = data.reagents.get(data.reagent("hyronalin")).potency;
+        let arithrazine = data.reagents.get(data.reagent("arithrazine")).potency;
+
+        // The weakest answer in a category still pays exactly what every
+        // delivery used to, so nothing regressed by adding the scale.
+        assert_eq!(research_for_delivery(hyronalin), RESEARCH_PER_SUCCESS);
+        assert!(
+            research_for_delivery(arithrazine) > research_for_delivery(hyronalin),
+            "the harder anti-rad has to be worth reaching for"
+        );
+        // Illicit reagents and precursors carry no potency at all and must
+        // still pay something, or an antagonist delivery would be free.
+        assert_eq!(research_for_delivery(0), RESEARCH_PER_SUCCESS);
     }
 
     #[test]

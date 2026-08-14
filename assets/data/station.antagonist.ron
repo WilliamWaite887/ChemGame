@@ -55,7 +55,8 @@
         ),
         (
             reagent: "methamphetamine",
-            amounts: [10, 15],
+            // Overdoses at 10u.
+            amounts: [8, 10],
             role: "Engineering",
             pretext: "Any chance of some Methamphetamine? Double shift, need to stay sharp on the reactor.",
             incident_line: "Atmos flagged someone pacing the same corridor for forty minutes, talking to no one.",
@@ -63,7 +64,8 @@
         ),
         (
             reagent: "mindbreaker_toxin",
-            amounts: [10, 15],
+            // Overdoses at 12u.
+            amounts: [10, 12],
             role: "Cargo",
             pretext: "Could you whip up some Mindbreaker Toxin? Testing pest deterrents on the shipment.",
             incident_line: "Someone in the cargo bay swears the crates were whispering to them.",

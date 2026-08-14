@@ -18,22 +18,27 @@
         ),
         (
             reagent: "chloral_hydrate",
-            amount: 20,
+            // Overdoses at 15u.
+            amount: 15,
             plea: "For a patient who won't stay still. It's easier for everyone this way.",
         ),
         (
             reagent: "hyperzine",
-            amount: 25,
+            // Overdoses at 10u.
+            amount: 10,
             plea: "Not for a patient. For me. It's a double shift and I'm not asking twice.",
         ),
         (
             reagent: "synaptizine",
-            amount: 25,
+            // Overdoses at 5u — the doctor asking for even this much is the
+            // point of the scene.
+            amount: 5,
             plea: "I have a theory about combining these. Don't put that in the log.",
         ),
         (
             reagent: "mindbreaker_toxin",
-            amount: 15,
+            // Overdoses at 12u.
+            amount: 12,
             plea: "It's therapeutic at the right dose. I've worked out what the right dose is.",
         ),
     ],

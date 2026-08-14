@@ -58,7 +58,8 @@ use crate::interaction::Interactable;
 use crate::knowledge::Knowledge;
 use crate::net::is_authority;
 use crate::orders::{
-    Department, IllicitOrder, Order, OrderKind, OrderResolved, Shift, StationData,
+    deliverable_amount, Department, IllicitOrder, Order, OrderKind, OrderResolved, Shift,
+    StationData,
 };
 use crate::radio::{RadioEntry, RadioLog};
 use crate::shift::current_rules;
@@ -428,23 +429,29 @@ fn generate_addict_visits(
     let crew = spawn_crew_member(&mut commands, crew_def, lane);
 
     let reagent_name = db.reagents.get(reagent).name.clone();
+    // The one spawner whose amounts are authored without knowing the reagent —
+    // `Script::amounts` is shared across every habit — so this is where the
+    // clamp earns its keep rather than merely backstopping the data: 20u is a
+    // fine ask for space drugs (overdose 20) and a guaranteed botch for
+    // methamphetamine (10).
+    let amount = deliverable_amount(&db, reagent, Units::whole(amount as i32));
     commands.entity(crew).insert((
         Order {
             reagent,
             specific: false,
-            amount: Units::whole(amount as i32),
+            amount,
             plea: plea.clone(),
             patience,
             waited: 0.0,
         },
         IllicitOrder,
         Interactable::new(format!(
-            "{} — hand over {}u {}",
+            "{} — hand over {} {}",
             crew_def.name, amount, reagent_name
         )),
     ));
 
-    info!("addiction: {} is back for {}u {}", crew_def.name, amount, reagent_name);
+    info!("addiction: {} is back for {} {}", crew_def.name, amount, reagent_name);
 }
 
 /// Pays for a sale, and resets the customer's clock.

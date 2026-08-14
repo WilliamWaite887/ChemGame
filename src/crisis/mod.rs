@@ -44,7 +44,9 @@ use crate::crew::{spawn_crew_member, CrewDef};
 use crate::interaction::Interactable;
 use crate::lab::LabLight;
 use crate::net::is_authority;
-use crate::orders::{CrisisOrder, Department, Order, OrderResolved, Shift, StationData};
+use crate::orders::{
+    deliverable_amount, CrisisOrder, Department, Order, OrderResolved, Shift, StationData,
+};
 use crate::radio::{RadioEntry, RadioLog};
 use crate::AppState;
 
@@ -289,7 +291,10 @@ fn afflict_victim(
         Order {
             reagent: cure,
             specific: false,
-            amount: Units::whole(case.cure_amount as i32),
+            // Only the *cure* is clamped. `harm_amount` above is what the
+            // casualty was dosed with before they walked in — a poisoning is
+            // meant to be past the threshold, and that is the whole crisis.
+            amount: deliverable_amount(db, cure, Units::whole(case.cure_amount as i32)),
             plea: case.plea.clone(),
             patience: deadline,
             waited: 0.0,

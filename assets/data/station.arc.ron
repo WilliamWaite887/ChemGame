@@ -93,7 +93,8 @@
                 (
                     role: "Medical",
                     reagent: "dylovene",
-                    amount: 30,
+                    // Overdoses at 20u.
+                    amount: 20,
                     plea: "We've got four of them in here and whatever they drank isn't leaving on its own. I need something that flushes it.",
                     delivered_line: "Medbay's got the acolytes stable. Two of them are talking.",
                 ),
@@ -107,7 +108,8 @@
                 (
                     role: "Security",
                     reagent: "kelotane",
-                    amount: 25,
+                    // Overdoses at 15u.
+                    amount: 15,
                     plea: "Whatever they lit down there went up faster than it should have. Two of mine are burned.",
                     delivered_line: "Security's back on their feet and they know which hatch to kick.",
                 ),
@@ -143,21 +145,24 @@
                 (
                     role: "Security",
                     reagent: "dylovene",
-                    amount: 30,
+                    // Overdoses at 20u.
+                    amount: 20,
                     plea: "Someone's been putting things in drinks. I want antidote stock behind the desk before it happens again.",
                     delivered_line: "Security's holding antidote stock now. That trick won't work twice.",
                 ),
                 (
                     role: "Medical",
                     reagent: "bicaridine",
-                    amount: 25,
+                    // Overdoses at 15u.
+                    amount: 15,
                     plea: "Two crew found something they shouldn't have and got put down hard for it. Patch them up and they'll testify.",
                     delivered_line: "Both witnesses are up and talking. Security has a description now.",
                 ),
                 (
                     role: "Security",
                     reagent: "hyperzine",
-                    amount: 20,
+                    // Overdoses at 10u.
+                    amount: 10,
                     plea: "We're watching four airlocks with three people. I need my shift standing through a double.",
                     delivered_line: "Every airlock's covered around the clock. He can't move without being seen.",
                 ),
@@ -192,7 +197,8 @@
                 (
                     role: "Medical",
                     reagent: "dylovene",
-                    amount: 30,
+                    // Overdoses at 20u.
+                    amount: 20,
                     plea: "I need a baseline screen I can run on the whole shift. Something a person passes and a thing doesn't.",
                     delivered_line: "Medbay's screening the shift. Two people came back wrong on the first pass.",
                 ),
@@ -206,7 +212,8 @@
                 (
                     role: "Security",
                     reagent: "bicaridine",
-                    amount: 25,
+                    // Overdoses at 15u.
+                    amount: 15,
                     plea: "It went through two officers to get out of the dorms. I need them back on shift, not in a bed.",
                     delivered_line: "Both officers are up. It won't get through that corridor a second time.",
                 ),
@@ -241,7 +248,8 @@
                 (
                     role: "Engineering",
                     reagent: "kelotane",
-                    amount: 30,
+                    // Overdoses at 15u.
+                    amount: 15,
                     plea: "It cooked a whole shift in the turbine room before anyone could get the door open.",
                     delivered_line: "Atmos are back on their feet, and they're routing around the AI now.",
                 ),
@@ -290,7 +298,8 @@
                 (
                     role: "Medical",
                     reagent: "dylovene",
-                    amount: 30,
+                    // Overdoses at 20u.
+                    amount: 20,
                     plea: "Anyone who gets near it comes back coughing something up. I need to be able to treat that.",
                     delivered_line: "Medbay can treat the spores now. People can actually get close enough to fight it.",
                 ),
@@ -311,7 +320,8 @@
                 (
                     role: "Medical",
                     reagent: "kelotane",
-                    amount: 20,
+                    // Overdoses at 15u.
+                    amount: 15,
                     plea: "Everyone who burned it back got burned doing it. I'd like my volunteers to stay volunteers.",
                     delivered_line: "The burn crews are patched and going back in. This is nearly done.",
                 ),

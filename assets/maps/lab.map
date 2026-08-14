@@ -927,6 +927,12 @@
 "angles" "0 90 0"
 }
 {
+"classname" "machine_spot"
+"origin" "-98 60 0"
+"kind" "Locker"
+"angles" "0 0 0"
+}
+{
 "classname" "chemist_start"
 "origin" "-0 -0 0"
 }

@@ -26,7 +26,7 @@ use crate::containers::{spawn_container, ContainerKind};
 use crate::crew::{spawn_crew_member, CrewDef};
 use crate::interaction::Interactable;
 use crate::net::is_authority;
-use crate::orders::{Order, OrderResolved, Shift, StationData};
+use crate::orders::{deliverable_amount, Order, OrderResolved, Shift, StationData};
 use crate::radio::{channel_for, RadioEntry, RadioLog};
 use crate::shift::current_rules;
 use crate::AppState;
@@ -192,18 +192,19 @@ fn generate_obsessed_visit(
     let crew = spawn_crew_member(&mut commands, &identity, 0.0);
 
     let reagent_name = db.reagents.get(reagent).name.clone();
+    let amount = deliverable_amount(&db, reagent, chem_sim::Units::whole(visit.amount as i32));
     commands.entity(crew).insert((
         Order {
             reagent,
             specific: true,
-            amount: chem_sim::Units::whole(visit.amount as i32),
+            amount,
             plea: visit.plea.clone(),
             patience,
             waited: 0.0,
         },
         Interactable::new(format!(
-            "{} — hand over {}u {}",
-            script.name, visit.amount, reagent_name
+            "{} — hand over {} {}",
+            script.name, amount, reagent_name
         )),
     ));
 

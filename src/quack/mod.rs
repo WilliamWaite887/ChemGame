@@ -28,7 +28,9 @@ use crate::chem_data::ChemDb;
 use crate::crew::{spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::Interactable;
 use crate::net::is_authority;
-use crate::orders::{Department, Order, OrderResolved, Outcome, Shift, StationData};
+use crate::orders::{
+    deliverable_amount, Department, Order, OrderResolved, Outcome, Shift, StationData,
+};
 use crate::radio::{channel_for, RadioEntry, RadioLog};
 use crate::shift::current_rules;
 use crate::AppState;
@@ -170,18 +172,19 @@ fn generate_quack_visit(
     let crew = spawn_crew_member(&mut commands, &identity, 0.0);
 
     let reagent_name = db.reagents.get(reagent).name.clone();
+    let amount = deliverable_amount(&db, reagent, Units::whole(visit.amount as i32));
     commands.entity(crew).insert((
         Order {
             reagent,
             specific: true,
-            amount: Units::whole(visit.amount as i32),
+            amount,
             plea: visit.plea.clone(),
             patience,
             waited: 0.0,
         },
         Interactable::new(format!(
-            "{} — hand over {}u {}",
-            script.name, visit.amount, reagent_name
+            "{} — hand over {} {}",
+            script.name, amount, reagent_name
         )),
     ));
 

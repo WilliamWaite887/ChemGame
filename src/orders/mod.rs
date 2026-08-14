@@ -17,7 +17,7 @@ use crate::chem_data::ChemDb;
 use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlot};
 use crate::crew::{spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{InteractRequested, Interactable};
-use crate::knowledge::{Knowledge, RESEARCH_PER_SUCCESS};
+use crate::knowledge::{research_for_delivery, Knowledge};
 use crate::lab::COUNTER_SPOT;
 use crate::machines::{chemist_entity, slotted_container, Machine, MachineKind, TestBenchStock};
 use crate::net::is_authority;
@@ -736,6 +736,33 @@ pub fn category_has_member_in(db: &ChemDb, cat: Category, set: &HashSet<ReagentI
         .any(|r| r.categories.contains(&cat) && set.contains(&r.id))
 }
 
+/// The most of `reagent` a crew member can be handed at once without [`grade`]
+/// calling it an [`Outcome::Overdose`].
+///
+/// Requests are authored per reagent across `assets/data/station.*.ron`, and
+/// were written without reference to the pharmacology: most of the medical
+/// ones asked for more than their own reagent's overdose threshold — 40u of
+/// bicaridine against a threshold of 15. Such an order could not be filled at
+/// all. A pill, bottle or syringe holding exactly what was asked for graded
+/// `Overdose`; anything smaller graded `Short`; only a beaker escaped, because
+/// bulk glassware is exempt from the check — and nothing on screen ever said
+/// so, which is what made it read as the game being broken rather than as a
+/// dosing mistake. Every spawner runs its authored amount through here, so a
+/// request stays freely authorable and the crew member still asks for a dose
+/// that can actually be handed over in whatever glassware is to hand.
+///
+/// Clamped against the *named* reagent's threshold, not the lowest in its
+/// category. A lenient order accepts any member, but reaching for a more
+/// dangerous sibling — 15u of synaptizine, which overdoses at 5 — is the
+/// chemist's own call, and grading it as an overdose is the feedback that
+/// teaches the difference.
+pub fn deliverable_amount(db: &ChemDb, reagent: ReagentId, asked: Units) -> Units {
+    match db.reagents.get(reagent).overdose {
+        Some(threshold) => asked.min(threshold),
+        None => asked,
+    }
+}
+
 /// Decides how a delivery went, and which reagent it was actually judged
 /// against.
 ///
@@ -896,9 +923,10 @@ fn generate_orders(
         warn!("order requests unknown reagent '{}'", request.reagent);
         return;
     };
-    let Some(&amount) = request.amounts.choose(&mut rng) else {
+    let Some(&asked) = request.amounts.choose(&mut rng) else {
         return;
     };
+    let amount = deliverable_amount(&db, reagent, Units::whole(asked as i32));
 
     let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
     let crew = spawn_crew_member(&mut commands, crew_def, waiting as f32 * 0.95);
@@ -915,13 +943,13 @@ fn generate_orders(
         Order {
             reagent,
             specific: false,
-            amount: Units::whole(amount as i32),
+            amount,
             plea: request.plea.clone(),
             patience,
             waited: 0.0,
         },
         Interactable::new(format!(
-            "{} — hand over {}u {}",
+            "{} — hand over {} {}",
             crew_def.name, amount, want_label
         )),
     ));
@@ -931,7 +959,7 @@ fn generate_orders(
     announce_request(&mut radio, &crew_def.name, &crew_def.role, &request.plea);
 
     info!(
-        "{} ({}) wants {}u {}",
+        "{} ({}) wants {} {}",
         crew_def.name, crew_def.role, amount, want_label
     );
 }
@@ -1028,9 +1056,10 @@ fn generate_specific_orders(
         warn!("order requests unknown reagent '{}'", request.reagent);
         return;
     };
-    let Some(&amount) = request.amounts.choose(&mut rng) else {
+    let Some(&asked) = request.amounts.choose(&mut rng) else {
         return;
     };
+    let amount = deliverable_amount(&db, reagent, Units::whole(asked as i32));
 
     let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
     let crew = spawn_crew_member(&mut commands, crew_def, waiting as f32 * 0.95);
@@ -1040,13 +1069,13 @@ fn generate_specific_orders(
         Order {
             reagent,
             specific: true,
-            amount: Units::whole(amount as i32),
+            amount,
             plea: request.specific_plea.clone(),
             patience,
             waited: 0.0,
         },
         Interactable::new(format!(
-            "{} — hand over {}u {}",
+            "{} — hand over {} {}",
             crew_def.name, amount, reagent_name
         )),
     ));
@@ -1054,7 +1083,7 @@ fn generate_specific_orders(
     announce_request(&mut radio, &crew_def.name, &crew_def.role, &request.specific_plea);
 
     info!(
-        "{} ({}) specifically wants {}u {}",
+        "{} ({}) specifically wants {} {}",
         crew_def.name, crew_def.role, amount, reagent_name
     );
 }
@@ -1290,9 +1319,14 @@ fn complete_delivery(
         kind,
     });
 
+    // Whatever was actually handed over, not what the request was authored
+    // around: a lenient order accepts any member of its category, and both
+    // currencies below pay for the one the chemist chose to make.
+    let potency = matched.map(|id| db.reagents.get(id).potency).unwrap_or(0);
+
     if outcome.is_good() {
         shift.succeeded += 1;
-        knowledge.award_research(RESEARCH_PER_SUCCESS);
+        knowledge.award_research(research_for_delivery(potency));
     } else {
         shift.botched += 1;
     }
@@ -1305,7 +1339,6 @@ fn complete_delivery(
     // declined illicit order — falls through to the ordinary path below,
     // unchanged.
     if !(kind.is_illicit() && outcome.is_good()) {
-        let potency = matched.map(|id| db.reagents.get(id).potency).unwrap_or(0);
         adjust_for_role(shift, &member.role, outcome, order.waited, order.patience, potency);
     }
 
@@ -2260,6 +2293,123 @@ mod tests {
                 cat
             );
         }
+    }
+
+    /// Panics unless `amount` of `reagent` can be handed over in *any*
+    /// glassware without [`grade`] calling it an overdose.
+    fn assert_askable(db: &ChemDb, reagent: &str, amount: u32, whose: &str) {
+        let id = db
+            .reagents
+            .id_of(reagent)
+            .unwrap_or_else(|| panic!("{whose} names no real reagent '{reagent}'"));
+        let asked = Units::whole(amount as i32);
+        assert_eq!(
+            deliverable_amount(db, id, asked),
+            asked,
+            "{whose} asks for {asked} of {reagent}, past its overdose threshold of {:?} — \
+             a pill, bottle or syringe holding exactly that grades Overdose and anything \
+             smaller grades Short, so a beaker would be the only container that could \
+             ever fill it",
+            db.reagents.get(id).overdose
+        );
+    }
+
+    #[test]
+    fn no_authored_request_asks_for_more_than_can_be_handed_over_safely() {
+        // Every thread that authors its own amounts, checked in one place
+        // rather than seven near-identical tests in seven modules.
+        //
+        // `deliverable_amount` clamps all of these at spawn, so a slip here is
+        // never unfillable in play — it only means the RON no longer says what
+        // the crew member will actually ask for. `station.addiction.ron` is
+        // deliberately absent: its `amounts` are shared across every habit and
+        // so cannot be authored against any one reagent's threshold, which is
+        // exactly the case the spawn-time clamp exists for.
+        let db = db();
+
+        for request in &station_orders().requests {
+            for &amount in &request.amounts {
+                assert_askable(&db, &request.reagent, amount, "station.orders.ron");
+            }
+        }
+
+        let antagonist: crate::antagonist::AntagonistScript =
+            ron::from_str(include_str!("../../assets/data/station.antagonist.ron")).unwrap();
+        for request in &antagonist.requests {
+            for &amount in &request.amounts {
+                assert_askable(&db, &request.reagent, amount, "station.antagonist.ron");
+            }
+        }
+
+        let cult: crate::cult::CultScript =
+            ron::from_str(include_str!("../../assets/data/station.cult.ron")).unwrap();
+        for stage in &cult.stages {
+            assert_askable(&db, &stage.reagent, stage.amount, "station.cult.ron");
+        }
+
+        let quack: crate::quack::QuackScript =
+            ron::from_str(include_str!("../../assets/data/station.quack.ron")).unwrap();
+        for visit in &quack.visits {
+            assert_askable(&db, &visit.reagent, visit.amount, "station.quack.ron");
+        }
+
+        let obsessed: crate::obsessed::ObsessedScript =
+            ron::from_str(include_str!("../../assets/data/station.obsessed.ron")).unwrap();
+        for visit in &obsessed.visits {
+            assert_askable(&db, &visit.reagent, visit.amount, "station.obsessed.ron");
+        }
+
+        let saboteur: crate::saboteur::SaboteurScript =
+            ron::from_str(include_str!("../../assets/data/station.saboteur.ron")).unwrap();
+        for visit in &saboteur.visits {
+            assert_askable(&db, &visit.reagent, visit.amount, "station.saboteur.ron");
+        }
+
+        let smuggler: crate::smuggler::SmugglerScript =
+            ron::from_str(include_str!("../../assets/data/station.smuggler.ron")).unwrap();
+        for visit in &smuggler.visits {
+            assert_askable(&db, &visit.reagent, visit.amount, "station.smuggler.ron");
+        }
+
+        let arc: crate::arc::ArcScript =
+            ron::from_str(include_str!("../../assets/data/station.arc.ron")).unwrap();
+        for antag in &arc.antagonists {
+            for step in &antag.counter_steps {
+                assert_askable(&db, &step.reagent, step.amount, "station.arc.ron");
+            }
+        }
+
+        let crisis: crate::crisis::CrisisScript =
+            ron::from_str(include_str!("../../assets/data/station.crisis.ron")).unwrap();
+        for case in &crisis.cases {
+            // Only the cure. `harm_amount` is what the casualty was dosed with
+            // before they walked in, and a poisoning past the threshold is the
+            // whole crisis.
+            assert_askable(&db, &case.cure_reagent, case.cure_amount, "station.crisis.ron");
+        }
+    }
+
+    #[test]
+    fn an_ask_is_clamped_to_the_dose_its_own_reagent_can_carry() {
+        let db = db();
+        let bicaridine = db.reagent("bicaridine");
+        // Overdoses at 15u, so 40u of it is not something anyone can be handed.
+        assert_eq!(
+            deliverable_amount(&db, bicaridine, Units::whole(40)),
+            Units::whole(15)
+        );
+        // Under the threshold, the authored ask stands untouched.
+        assert_eq!(
+            deliverable_amount(&db, bicaridine, Units::whole(10)),
+            Units::whole(10)
+        );
+        // Nothing to clamp against: inaprovaline has no threshold at all, and
+        // the big bulk asks depend on staying that way.
+        let inaprovaline = db.reagent("inaprovaline");
+        assert_eq!(
+            deliverable_amount(&db, inaprovaline, Units::whole(45)),
+            Units::whole(45)
+        );
     }
 
     #[test]

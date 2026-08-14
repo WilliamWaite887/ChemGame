@@ -16,18 +16,19 @@ use chem_sim::{Category, DamageKind, Kelvin, ReactionId, ReagentId, Units};
 use crate::arc::{ArcScript, Campaign, Reveal};
 use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
-use crate::containers::{Container, ContainerKind, InSlot};
+use crate::containers::{Container, ContainerKind, InSlot, Stored};
 use crate::crew::{CrewMember, CrewPhase, CrewRoute};
-use crate::interaction::{leave_machine, InteractionMode, LeaveMachineRequested};
+use crate::interaction::{leave_machine, InteractionMode, Interactable, LeaveMachineRequested};
 use crate::knowledge::{
     product_name, reaction_categories, BuyHintRequested, Knowledge, RecipeDiscovered,
     UpgradeDispenserRequested, HINT_COST,
 };
 use crate::machines::{
-    slotted_container, AnalyzeRequested, Buffer, BufferDirection, BufferTransferRequested,
-    DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested, GrindRequested, Hopper,
-    Machine, MachineKind, PackageRequested, SetHeaterPower, SetTargetTemperature, TestBenchStock,
-    Thermostat, TEMPERATURE_PRESETS,
+    slotted_container, stored_in, AnalyzeRequested, Buffer, BufferDirection,
+    BufferTransferRequested, DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested,
+    GrindRequested, Hopper, Machine, MachineKind, PackageRequested, SetHeaterPower,
+    SetTargetTemperature, TakeRequested, TestBenchStock, Thermostat, LOCKER_CAPACITY,
+    TEMPERATURE_PRESETS,
 };
 use crate::orders::{reference_category, Department, Order, Shift};
 use crate::player::LocalPlayer;
@@ -119,6 +120,9 @@ enum PanelAction {
     Dispense(ReagentId),
     UpgradeDispenser,
     Eject,
+    /// Take one named item out of the open locker. Carries the item because a
+    /// locker holds many, unlike every slot in the lab, which holds one.
+    Take(Entity),
     Empty,
     ToBuffer(ReagentId, Units),
     ToContainer(ReagentId, Units),
@@ -163,6 +167,11 @@ struct PanelSignature {
     contents: Vec<(ReagentId, Units)>,
     buffer: Vec<(ReagentId, Units)>,
     hopper: Vec<ProduceId>,
+    /// What the open locker holds, already rendered to the lines the panel
+    /// draws. Kept as the finished strings rather than the entity ids because
+    /// a beaker's *contents* can change while it sits on the shelf, and the ids
+    /// alone would not notice.
+    stored: Vec<StoredItem>,
     /// The loaded container is practice stock. Tracked separately because the
     /// delivery window has to explain why it will not take it.
     test_stock: bool,
@@ -210,6 +219,7 @@ impl Default for PanelSignature {
             contents: Vec::new(),
             buffer: Vec::new(),
             hopper: Vec::new(),
+            stored: Vec::new(),
             test_stock: false,
             amount: None,
             known_recipes: usize::MAX,
@@ -291,6 +301,71 @@ type MachineParts<'w, 's> = Query<
     ),
 >;
 
+/// Whatever a container is holding, and whether it came off the test bench.
+type SlotContents<'w, 's> = Query<'w, 's, (&'static Container, Has<TestBenchStock>)>;
+
+/// What a locker's panel reads. Bundled because `sync_panel` is already close
+/// to Bevy's sixteen-parameter ceiling, and because these two are only ever
+/// used together.
+#[derive(SystemParam)]
+struct StorageView<'w, 's> {
+    stored: Query<'w, 's, (Entity, &'static Stored)>,
+    /// The crosshair label every pickable thing already carries. Reading the
+    /// name from here rather than matching on the item's type is what lets a
+    /// locker list something this module has never heard of.
+    labels: Query<'w, 's, &'static Interactable>,
+}
+
+/// One line of a locker's contents.
+#[derive(Clone, PartialEq, Eq)]
+struct StoredItem {
+    item: Entity,
+    name: String,
+    /// What is in it, for glassware. Empty for anything that is not a
+    /// container, which is most of what a locker will eventually hold.
+    detail: String,
+}
+
+/// Reads a locker's contents into the lines its panel draws.
+///
+/// Glassware is the one special case, because "Beaker" on its own is useless
+/// when there are six of them on the shelf. Everything else falls back to the
+/// `Interactable` label it already needed to be pickable at all — so a new kind
+/// of item shows up here correctly named without this function learning
+/// anything about it.
+fn stored_items(
+    locker: Entity,
+    db: &ChemDb,
+    view: &StorageView,
+    containers: &SlotContents,
+) -> Vec<StoredItem> {
+    stored_in(locker, &view.stored)
+        .into_iter()
+        .map(|item| {
+            let container = containers.get(item).ok().map(|(container, _)| container);
+            let name = container
+                .map(|container| container.kind.label().to_string())
+                .or_else(|| view.labels.get(item).ok().map(|label| label.label.clone()))
+                .unwrap_or_else(|| "Item".to_string());
+            let detail = container.map_or_else(String::new, |container| {
+                if container.solution.is_empty() {
+                    "empty".to_string()
+                } else {
+                    container
+                        .solution
+                        .iter()
+                        .map(|(reagent, amount)| {
+                            format!("{amount} {}", db.reagents.get(reagent).name)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            });
+            StoredItem { item, name, detail }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sync_panel(
     mut commands: Commands,
@@ -299,7 +374,8 @@ fn sync_panel(
     modes: Query<&InteractionMode, With<LocalPlayer>>,
     machines: MachineParts,
     slotted: Query<(Entity, &InSlot)>,
-    containers: Query<(&Container, Has<TestBenchStock>)>,
+    containers: SlotContents,
+    storage: StorageView,
     knowledge: Res<Knowledge>,
     book: Res<BookView>,
     catalog: Option<Res<ProduceCatalog>>,
@@ -325,6 +401,16 @@ fn sync_panel(
         .as_deref()
         .and_then(|campaign| arc_headline(campaign, arc_script.as_deref().map(|s| &s.0)));
 
+    // Only for the locker, and only while its panel is open. Reading every
+    // stored item on every frame of every other panel would be a scan of the
+    // whole lab's contents to produce an empty vector.
+    let stored = match (open_machine, machine_parts) {
+        (Some(locker), Some((machine, ..))) if machine.kind == MachineKind::Locker => {
+            stored_items(locker, &db, &storage, &containers)
+        }
+        _ => Vec::new(),
+    };
+
     let signature = PanelSignature {
         mode,
         container: loaded_entity,
@@ -339,6 +425,7 @@ fn sync_panel(
             .and_then(|(_, _, _, hopper, _)| hopper)
             .map(|hopper| hopper.0.clone())
             .unwrap_or_default(),
+        stored: stored.clone(),
         test_stock,
         amount: machine_parts
             .and_then(|(_, amount, _, _, _)| amount)
@@ -449,6 +536,9 @@ fn sync_panel(
                         }
                         MachineKind::ReactionChamber => {
                             heater_body(panel, &db, thermostat, loaded);
+                        }
+                        MachineKind::Locker => {
+                            locker_body(panel, &stored);
                         }
                     }
 
@@ -962,6 +1052,58 @@ fn grinder_body(
     });
 
     container_readout(panel, db, loaded, true);
+}
+
+/// The shelf.
+///
+/// Every row is one stored item and a button to get it back. There is no
+/// "put in" button on purpose: things go in the way everything else in the lab
+/// goes in, by carrying them over and pressing E, and a panel button for it
+/// would be a second way to do the thing the walk-up already does.
+fn locker_body(panel: &mut ChildSpawnerCommands, stored: &[StoredItem]) {
+    panel.spawn(label(
+        "Shelf space. Carry anything over and press E to put it away; it comes \
+         back out into your hand.",
+        13.0,
+        TEXT_DIM,
+    ));
+
+    panel.spawn(label(
+        format!("Contents   {} / {LOCKER_CAPACITY}", stored.len()),
+        13.0,
+        TEXT_DIM,
+    ));
+    panel
+        .spawn((section(), BackgroundColor(SECTION_BG)))
+        .with_children(|section| {
+            if stored.is_empty() {
+                section.spawn(label("Empty.", 14.0, TEXT_DIM));
+                return;
+            }
+
+            for item in stored {
+                section.spawn(row()).with_children(|row| {
+                    row.spawn(button("Take", PanelAction::Take(item.item)));
+                    row.spawn(label(
+                        if item.detail.is_empty() {
+                            item.name.clone()
+                        } else {
+                            format!("{}   —   {}", item.name, item.detail)
+                        },
+                        14.0,
+                        TEXT,
+                    ));
+                });
+            }
+        });
+
+    if stored.len() >= LOCKER_CAPACITY {
+        panel.spawn(label(
+            "Full. Take something out before putting anything else away.",
+            13.0,
+            ERROR_TEXT,
+        ));
+    }
 }
 
 /// The counter tray.
@@ -2444,6 +2586,7 @@ pub(crate) fn button_feedback(mut buttons: ChangedButtons) {
 struct PanelMessages<'w> {
     dispense: MessageWriter<'w, DispenseRequested>,
     eject: MessageWriter<'w, EjectRequested>,
+    take: MessageWriter<'w, TakeRequested>,
     empty: MessageWriter<'w, EmptyRequested>,
     transfer: MessageWriter<'w, BufferTransferRequested>,
     package: MessageWriter<'w, PackageRequested>,
@@ -2535,6 +2678,12 @@ fn handle_panel_clicks(
             }
             PanelAction::Eject => {
                 out.eject.write(EjectRequested { machine });
+            }
+            PanelAction::Take(item) => {
+                out.take.write(TakeRequested {
+                    machine,
+                    item: *item,
+                });
             }
             PanelAction::Empty => {
                 out.empty.write(EmptyRequested { machine });

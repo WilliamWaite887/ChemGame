@@ -19,7 +19,8 @@
         ),
         (
             reagent: "mindbreaker_toxin",
-            amount: 15,
+            // Overdoses at 12u.
+            amount: 12,
             pretext: "We need clearer sight for what comes next. You understand.",
             ritual_line: "Corwin Ashe: The others are seeing it too, now. Soon there won't be any doubt.",
         ),

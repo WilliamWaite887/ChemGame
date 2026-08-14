@@ -23,7 +23,7 @@ use crate::chem_data::ChemDb;
 use crate::crew::{spawn_crew_member, CrewMember};
 use crate::interaction::Interactable;
 use crate::net::is_authority;
-use crate::orders::{IllicitOrder, Order, OrderResolved, Shift, StationData};
+use crate::orders::{deliverable_amount, IllicitOrder, Order, OrderResolved, Shift, StationData};
 use crate::radio::{PendingBroadcasts, RadioEntry, RadioLog};
 use crate::shift::current_rules;
 use crate::AppState;
@@ -315,20 +315,21 @@ fn generate_antagonist_orders(
     let crew = spawn_crew_member(&mut commands, crew_def, lane);
 
     let reagent_name = db.reagents.get(reagent).name.clone();
+    let amount = deliverable_amount(&db, reagent, Units::whole(amount as i32));
     commands.entity(crew).insert((
         Order {
             reagent,
             // `IllicitOrder` is what makes this exact, not this field — the
             // two never stack. See `Order::specific`'s own doc comment.
             specific: false,
-            amount: Units::whole(amount as i32),
+            amount,
             plea: request.pretext.clone(),
             patience,
             waited: 0.0,
         },
         IllicitOrder,
         Interactable::new(format!(
-            "{} — hand over {}u {}",
+            "{} — hand over {} {}",
             crew_def.name, amount, reagent_name
         )),
     ));

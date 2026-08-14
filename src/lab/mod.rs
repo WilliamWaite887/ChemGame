@@ -24,7 +24,7 @@ use chem_sim::{Solution, Units};
 
 use crate::interaction::Interactable;
 use crate::machines::{
-    Buffer, ContainerSlot, DispenseAmount, Hopper, Machine, MachineKind, Thermostat,
+    Buffer, ContainerSlot, DispenseAmount, Facing, Hopper, Machine, MachineKind, Thermostat,
 };
 use crate::net::is_authority;
 use crate::AppState;
@@ -371,6 +371,58 @@ impl Plugin for LabPlugin {
 #[reflect(Component)]
 pub struct Solid {
     pub half_extents: Vec3,
+}
+
+/// The highest surface anything can be set down on, in metres.
+///
+/// A box whose top is above this is something you walk into rather than
+/// something you put a beaker on: every wall, and the 1.7 m machine casings.
+/// The benches at 0.9 and the delivery counter at 1.15 are under it, which is
+/// exactly the line a chemist's hands draw anyway.
+pub const SET_DOWN_REACH: f32 = 1.4;
+
+/// Where something set down at `spot` actually comes to rest.
+///
+/// Deliberately not a physics drop — nothing in the lab falls. An item is
+/// *placed*, so the only question is which surface is underneath the placement,
+/// and the answer is the highest [`Solid`] top below [`SET_DOWN_REACH`] whose
+/// footprint covers the spot. Before this, dropping was a hardcoded `y = 0.08`,
+/// which put a beaker set down at a bench through the bench and onto the floor
+/// inside it — visible from nowhere and reachable from nowhere.
+///
+/// `solids` are `(centre, half-extents)` pairs, so this is testable without a
+/// world to raycast against. `fallback` is somewhere known to be clear — the
+/// chemist's own feet — used when the spot itself is inside a wall or a machine,
+/// which is what happens when you drop while facing one at arm's length.
+pub fn resting_place(spot: Vec3, fallback: Vec3, solids: &[(Vec3, Vec3)]) -> Vec3 {
+    // Straddling the reach line is what makes a box an obstruction: it is too
+    // tall to rest anything on and too solid to rest anything inside. A ceiling
+    // slab starts above the line and a bench top ends below it, so neither is
+    // one.
+    let obstructed = |point: Vec3| {
+        solids.iter().any(|(center, half)| {
+            center.y - half.y < SET_DOWN_REACH
+                && center.y + half.y > SET_DOWN_REACH
+                && (point.x - center.x).abs() < half.x
+                && (point.z - center.z).abs() < half.z
+        })
+    };
+
+    let spot = if obstructed(spot) { fallback } else { spot };
+
+    let mut surface = 0.0;
+    for (center, half) in solids {
+        let top = center.y + half.y;
+        if top > SET_DOWN_REACH || top <= surface {
+            continue;
+        }
+        if (spot.x - center.x).abs() > half.x || (spot.z - center.z).abs() > half.z {
+            continue;
+        }
+        surface = top;
+    }
+
+    Vec3::new(spot.x, surface, spot.z)
 }
 
 /// The glowing panel on the front of a machine.
@@ -836,6 +888,16 @@ fn fit(kind: MachineKind) -> MachineFit {
             facing: Vec3::X,
             is_worktop: false,
         },
+        // Storage, in the room named for it, on the north wall just east of the
+        // hall door. Everything carried between the mixing hall and the
+        // storeroom passes it, which is what a place to put things down has to
+        // be near to get used at all.
+        MachineKind::Locker => MachineFit {
+            base: Vec3::new(-1.5, 0.0, ROOMS[PREP].min_z + OFF_WALL),
+            size: CABINET,
+            facing: Vec3::Z,
+            is_worktop: false,
+        },
         // The grinder, on the storeroom's south wall. Produce is dropped at the
         // counter through the connecting door, so the haul from crate to hopper
         // is a few steps.
@@ -966,7 +1028,12 @@ fn spawn_machines(mut commands: Commands) {
             MachineKind::ReactionChamber => {
                 commands.entity(machine).insert(Thermostat::default());
             }
-            MachineKind::Analyzer | MachineKind::DeliveryWindow | MachineKind::StandingBoard => {}
+            // The locker keeps no state of its own: what is in it lives on the
+            // items, as `Stored`, so there is nothing to spawn here.
+            MachineKind::Analyzer
+            | MachineKind::DeliveryWindow
+            | MachineKind::StandingBoard
+            | MachineKind::Locker => {}
         }
     }
 }
@@ -1002,6 +1069,11 @@ pub(crate) fn dress_machines(
             Solid {
                 half_extents: fit.size * 0.5,
             },
+            // Which way the machine's working face points. Static geometry like
+            // the slot below, so it is derived here on both ends rather than
+            // replicated — and needed on the authority, because "in front of
+            // this machine" is where anything it hands back has to end up.
+            Facing(fit.facing),
             Interactable::new(kind.label()),
             // Position is replicated, but a client that dresses a machine the
             // same frame it arrives may not have received the transform yet.
@@ -1016,8 +1088,10 @@ pub(crate) fn dress_machines(
         // The standing board has none, deliberately: walking up holding a
         // beaker would park it on the board instead of opening the panel, and
         // the player would have no way of telling why the board had stopped
-        // responding.
-        if kind != MachineKind::StandingBoard {
+        // responding. The locker has none for the opposite reason — it takes
+        // what is in your hand *inside*, and a slot would catch the first
+        // beaker on the roof instead.
+        if !matches!(kind, MachineKind::StandingBoard | MachineKind::Locker) {
             commands.entity(entity).insert(ContainerSlot {
                 offset: Vec3::Y * (fit.size.y * 0.5 + 0.07) + fit.facing * 0.18,
             });
@@ -1113,18 +1187,103 @@ mod tests {
     }
 
     #[test]
-    fn the_standing_board_is_the_one_machine_with_no_slot() {
-        // Walking up to it holding a beaker would park the beaker on the board
-        // instead of opening the panel, and nothing would explain why.
+    fn the_two_machines_that_must_not_catch_a_beaker_have_no_slot() {
+        // The board, because parking a beaker on it instead of opening the
+        // panel would leave nothing to explain why it had stopped responding.
+        // The locker, because what you are carrying belongs *inside* it, and a
+        // slot would catch the first beaker on the roof.
         let mut app = client_lab();
-        let board = app
-            .world_mut()
-            .spawn(Machine::new(MachineKind::StandingBoard))
-            .id();
+        let slotless: Vec<Entity> = [MachineKind::StandingBoard, MachineKind::Locker]
+            .into_iter()
+            .map(|kind| app.world_mut().spawn(Machine::new(kind)).id())
+            .collect();
 
         app.update();
 
-        assert!(app.world().get::<ContainerSlot>(board).is_none());
+        for machine in slotless {
+            assert!(app.world().get::<ContainerSlot>(machine).is_none());
+        }
+    }
+
+    #[test]
+    fn every_machine_knows_which_way_it_faces() {
+        // What ejecting reads to decide where a beaker goes. The old fixed
+        // `+Z` was right for the two machines on the hall's north wall and
+        // wrong for every other one — the grinder faces `-Z`, so its beaker
+        // went through the storeroom wall.
+        let mut app = client_lab();
+        let machines: Vec<(MachineKind, Entity)> = MachineKind::ALL
+            .into_iter()
+            .map(|kind| (kind, app.world_mut().spawn(Machine::new(kind)).id()))
+            .collect();
+
+        app.update();
+
+        for (kind, machine) in machines {
+            let facing = app
+                .world()
+                .get::<Facing>(machine)
+                .unwrap_or_else(|| panic!("{kind:?} has no facing"));
+            assert_eq!(
+                facing.0,
+                fit(kind).facing,
+                "{kind:?} is dressed facing a different way from its fit"
+            );
+        }
+    }
+
+    #[test]
+    fn a_beaker_set_down_at_a_bench_lands_on_it() {
+        // The bug this replaced a constant to fix: the drop height was a
+        // hardcoded 0.08, so a beaker set down at a bench went *through* the
+        // bench and came to rest inside it — invisible, and unreachable by the
+        // crosshair that would have picked it back up.
+        let bench = (Vec3::new(0.0, 0.45, 0.0), Vec3::new(1.3, 0.45, 0.45));
+
+        let on_top = resting_place(Vec3::new(0.2, 1.7, 0.1), Vec3::ZERO, &[bench]);
+        assert_eq!(on_top.y, 0.9, "the bench top is 0.9 m up");
+        assert_eq!((on_top.x, on_top.z), (0.2, 0.1), "and it stays where put");
+
+        // Just past the end of the bench is floor, not bench.
+        let beside_it = resting_place(Vec3::new(2.0, 1.7, 0.1), Vec3::ZERO, &[bench]);
+        assert_eq!(beside_it.y, 0.0);
+    }
+
+    #[test]
+    fn nothing_is_ever_set_down_inside_a_wall() {
+        // Dropping while facing a wall at arm's length puts the spot inside it.
+        // Without the fallback the beaker would sit in the masonry; with a
+        // naive "highest surface" rule and no reach limit it would sit on top
+        // of the wall, three metres up. Neither is somewhere a chemist can
+        // reach, which is the only thing setting something down is for.
+        let wall = (
+            Vec3::new(0.0, ROOM_HEIGHT * 0.5, 3.0),
+            Vec3::new(6.0, ROOM_HEIGHT * 0.5, WALL_THICKNESS * 0.5),
+        );
+        let feet = Vec3::new(0.5, 1.7, 2.0);
+
+        let resting = resting_place(Vec3::new(0.5, 1.7, 3.0), feet, &[wall]);
+        assert_eq!(
+            resting,
+            Vec3::new(0.5, 0.0, 2.0),
+            "a blocked spot falls back to the chemist's own feet, on the floor"
+        );
+    }
+
+    #[test]
+    fn a_ceiling_is_neither_a_surface_nor_an_obstruction() {
+        // Both halves of `resting_place` key off the reach line, and a slab
+        // entirely above it has to fail both tests: counted as an obstruction
+        // it would make every square metre of the lab undroppable, and counted
+        // as a surface it would put beakers on the roof.
+        let ceiling = (
+            Vec3::new(0.0, ROOM_HEIGHT + 0.05, 0.0),
+            Vec3::new(6.0, 0.05, 6.0),
+        );
+        let spot = Vec3::new(1.0, 1.7, 1.0);
+
+        let resting = resting_place(spot, Vec3::ZERO, &[ceiling]);
+        assert_eq!(resting, Vec3::new(1.0, 0.0, 1.0));
     }
 
     #[test]

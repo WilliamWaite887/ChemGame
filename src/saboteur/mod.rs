@@ -23,11 +23,11 @@ use rand::prelude::*;
 use serde::Deserialize;
 
 use crate::chem_data::ChemDb;
-use crate::containers::{Container, HeldBy, InSlot};
+use crate::containers::{Container, HeldBy, InSlot, Stored};
 use crate::crew::{spawn_crew_member, CrewDef};
 use crate::interaction::Interactable;
 use crate::net::is_authority;
-use crate::orders::{Order, OrderResolved, Outcome, Shift, StationData};
+use crate::orders::{deliverable_amount, Order, OrderResolved, Outcome, Shift, StationData};
 use crate::radio::{channel_for, RadioEntry, RadioLog};
 use crate::shift::current_rules;
 use crate::AppState;
@@ -175,18 +175,19 @@ fn generate_saboteur_visit(
     let crew = spawn_crew_member(&mut commands, &identity, 0.0);
 
     let reagent_name = db.reagents.get(reagent).name.clone();
+    let amount = deliverable_amount(&db, reagent, Units::whole(visit.amount as i32));
     commands.entity(crew).insert((
         Order {
             reagent,
             specific: true,
-            amount: Units::whole(visit.amount as i32),
+            amount,
             plea: visit.plea.clone(),
             patience,
             waited: 0.0,
         },
         Interactable::new(format!(
-            "{} — hand over {}u {}",
-            script.name, visit.amount, reagent_name
+            "{} — hand over {} {}",
+            script.name, amount, reagent_name
         )),
     ));
 
@@ -196,6 +197,16 @@ fn generate_saboteur_visit(
         good: false,
     });
 }
+
+/// Glassware they can get at, exactly as `smuggler` defines it: anything held,
+/// slotted or shut in a locker is under someone's eye, and "keep hold of it"
+/// has to remain the answer.
+type LooseGlassware<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Container,
+    (Without<HeldBy>, Without<InSlot>, Without<Stored>),
+>;
 
 /// Advances the chain — and, on an expired visit, has a fiddle.
 ///
@@ -211,9 +222,7 @@ fn handle_saboteur_resolution(
     mut resolved: MessageReader<OrderResolved>,
     mut progress: ResMut<SaboteurProgress>,
     mut radio: ResMut<RadioLog>,
-    // Unattended only, exactly like `smuggler`: held or slotted glassware is
-    // under someone's eye, and "keep hold of it" has to remain the answer.
-    mut loose: Query<&mut Container, (Without<HeldBy>, Without<InSlot>)>,
+    mut loose: LooseGlassware,
 ) {
     let Some(script) = script else {
         resolved.clear();

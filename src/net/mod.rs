@@ -25,7 +25,7 @@ use bevy_replicon_renet::renet::{ConnectionConfig, DisconnectReason};
 use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRenetPlugins};
 
 use crate::body::{Bloodstream, Body};
-use crate::containers::{Container, HeldBy, InSlot};
+use crate::containers::{Container, HeldBy, InSlot, Stored};
 use crate::crew::CrewMember;
 use crate::hazards::{ActiveHazard, SmokeCloud, SmokePayload};
 use crate::machines::{Buffer, DispenseAmount, Hopper, Machine, Thermostat};
@@ -460,6 +460,10 @@ fn register_replication(app: &mut App) {
         .replicate::<Container>()
         .replicate::<HeldBy>()
         .replicate::<InSlot>()
+        // What is shut in the locker, and which one. Both ends need it: the
+        // guest's copy is what hides a stored beaker and what fills the panel
+        // when they open the locker themselves.
+        .replicate::<Stored>()
         .replicate::<Machine>()
         .replicate::<Buffer>()
         .replicate::<Hopper>()

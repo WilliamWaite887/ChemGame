@@ -152,15 +152,7 @@ fn panel_input(
         // to do it — losing the claim, and the beaker's place in the queue —
         // was the wrong answer.
         if book {
-            *mode = match *mode {
-                InteractionMode::Roaming => InteractionMode::ReadingBook(None),
-                InteractionMode::UsingMachine(machine) => {
-                    InteractionMode::ReadingBook(Some(machine))
-                }
-                InteractionMode::ReadingBook(from) => {
-                    from.map_or(InteractionMode::Roaming, InteractionMode::UsingMachine)
-                }
-            };
+            *mode = mode.toggled_book();
         }
 
         if mode.is_roaming() {
@@ -225,6 +217,21 @@ pub enum InteractionMode {
 impl InteractionMode {
     pub fn is_roaming(&self) -> bool {
         matches!(self, InteractionMode::Roaming)
+    }
+
+    /// Where the book key takes this chemist next.
+    ///
+    /// Split out of [`panel_input`] so the round trip — floor to book and
+    /// back, machine to book and back to the *same* machine — is testable
+    /// without a window, a cursor and a raycast to hang them off.
+    pub fn toggled_book(self) -> Self {
+        match self {
+            InteractionMode::Roaming => InteractionMode::ReadingBook(None),
+            InteractionMode::UsingMachine(machine) => InteractionMode::ReadingBook(Some(machine)),
+            InteractionMode::ReadingBook(from) => {
+                from.map_or(InteractionMode::Roaming, InteractionMode::UsingMachine)
+            }
+        }
     }
 
     /// The machine this chemist is holding, whether they are working it or
@@ -443,5 +450,46 @@ fn update_prompt(
 
     if text.0 != message {
         text.0 = message;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_book_key_returns_a_chemist_to_wherever_they_opened_it() {
+        let dispenser = Entity::from_raw_u32(7).unwrap();
+
+        // From the floor, and back to it.
+        let reading = InteractionMode::Roaming.toggled_book();
+        assert_eq!(reading, InteractionMode::ReadingBook(None));
+        assert_eq!(reading.toggled_book(), InteractionMode::Roaming);
+
+        // From a machine, and back to that same machine rather than to the
+        // floor — the claim was never released, so dropping the player out to
+        // roaming here would leave them standing at a dispenser the server
+        // still believes they are working.
+        let at_machine = InteractionMode::UsingMachine(dispenser);
+        let reading = at_machine.toggled_book();
+        assert_eq!(reading, InteractionMode::ReadingBook(Some(dispenser)));
+        assert_eq!(reading.toggled_book(), at_machine);
+    }
+
+    #[test]
+    fn a_book_open_over_a_machine_still_counts_as_holding_it() {
+        // Every release path keys off this, so a `None` here would strand the
+        // machine in use for the rest of the shift.
+        let dispenser = Entity::from_raw_u32(7).unwrap();
+        assert_eq!(
+            InteractionMode::ReadingBook(Some(dispenser)).claimed_machine(),
+            Some(dispenser)
+        );
+        assert_eq!(InteractionMode::ReadingBook(None).claimed_machine(), None);
+        assert_eq!(InteractionMode::Roaming.claimed_machine(), None);
+        assert_eq!(
+            InteractionMode::UsingMachine(dispenser).claimed_machine(),
+            Some(dispenser)
+        );
     }
 }

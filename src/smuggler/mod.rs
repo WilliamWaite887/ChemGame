@@ -22,11 +22,11 @@ use rand::prelude::*;
 use serde::Deserialize;
 
 use crate::chem_data::ChemDb;
-use crate::containers::{Container, HeldBy, InSlot};
+use crate::containers::{Container, HeldBy, InSlot, Stored};
 use crate::crew::{spawn_crew_member, CrewDef};
 use crate::interaction::Interactable;
 use crate::net::is_authority;
-use crate::orders::{Order, OrderResolved, Outcome, Shift, StationData};
+use crate::orders::{deliverable_amount, Order, OrderResolved, Outcome, Shift, StationData};
 use crate::radio::{channel_for, RadioEntry, RadioLog};
 use crate::shift::current_rules;
 use crate::AppState;
@@ -169,18 +169,19 @@ fn generate_smuggler_visit(
     let crew = spawn_crew_member(&mut commands, &identity, 0.0);
 
     let reagent_name = db.reagents.get(reagent).name.clone();
+    let amount = deliverable_amount(&db, reagent, chem_sim::Units::whole(visit.amount as i32));
     commands.entity(crew).insert((
         Order {
             reagent,
             specific: true,
-            amount: chem_sim::Units::whole(visit.amount as i32),
+            amount,
             plea: visit.plea.clone(),
             patience,
             waited: 0.0,
         },
         Interactable::new(format!(
-            "{} — hand over {}u {}",
-            script.name, visit.amount, reagent_name
+            "{} — hand over {} {}",
+            script.name, amount, reagent_name
         )),
     ));
 
@@ -193,10 +194,21 @@ fn generate_smuggler_visit(
 
 /// Containers nobody is holding and nothing is holding.
 ///
-/// Deliberately excludes anything held or slotted: they lift what is
-/// *unattended*, which is what makes "hold onto it" a real answer.
-type LooseGlassware<'w, 's> =
-    Query<'w, 's, Entity, (With<Container>, Without<HeldBy>, Without<InSlot>)>;
+/// Deliberately excludes anything held, slotted or shut in a locker: they lift
+/// what is *unattended*, which is what makes "hold onto it" a real answer — and
+/// putting it away is the same answer, with the locker as the thing that makes
+/// it available to a chemist who has to walk off and do something else.
+type LooseGlassware<'w, 's> = Query<
+    'w,
+    's,
+    Entity,
+    (
+        With<Container>,
+        Without<HeldBy>,
+        Without<InSlot>,
+        Without<Stored>,
+    ),
+>;
 
 /// Advances the chain — and, on an expired visit, takes something.
 ///

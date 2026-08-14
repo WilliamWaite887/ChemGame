@@ -40,7 +40,8 @@ use crate::crew::{spawn_crew_member, CrewDef, CrewMember};
 use crate::interaction::Interactable;
 use crate::net::is_authority;
 use crate::orders::{
-    reference_category, CounterOrder, Order, OrderKind, OrderResolved, Shift, StationData,
+    deliverable_amount, reference_category, CounterOrder, Order, OrderKind, OrderResolved, Shift,
+    StationData,
 };
 use crate::radio::{announce_request, RadioEntry, RadioLog};
 use crate::shift::current_rules;
@@ -704,26 +705,27 @@ fn generate_counter_orders(
     let want_label = reference_category(&db, reagent)
         .map(|cat| cat.want_phrase().to_string())
         .unwrap_or_else(|| db.reagents.get(reagent).name.clone());
+    let amount = deliverable_amount(&db, reagent, Units::whole(step.amount as i32));
     commands.entity(crew).insert((
         Order {
             reagent,
             specific: false,
-            amount: Units::whole(step.amount as i32),
+            amount,
             plea: step.plea.clone(),
             patience,
             waited: 0.0,
         },
         CounterOrder,
         Interactable::new(format!(
-            "{} — hand over {}u {}",
-            crew_def.name, step.amount, want_label
+            "{} — hand over {} {}",
+            crew_def.name, amount, want_label
         )),
     ));
 
     announce_request(&mut radio, &crew_def.name, &crew_def.role, &step.plea);
     info!(
-        "counter-track: {} ({}) wants {}u {}",
-        crew_def.name, crew_def.role, step.amount, want_label
+        "counter-track: {} ({}) wants {} {}",
+        crew_def.name, crew_def.role, amount, want_label
     );
 }
 

@@ -12,7 +12,9 @@ use chem_sim::{Kelvin, ReagentId, Solution, Units};
 use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
-use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlot};
+use crate::containers::{
+    set_down_lift, spawn_container, Container, ContainerKind, HeldBy, InSlot, Stored,
+};
 use crate::interaction::{
     InteractRequested, InteractionMode, LeaveMachineRequested, MachineOpened,
 };
@@ -32,6 +34,7 @@ impl Plugin for MachinePlugin {
         app.add_mapped_client_message::<DispenseRequested>(Channel::Ordered)
             .add_mapped_client_message::<EjectRequested>(Channel::Ordered)
             .add_mapped_client_message::<EmptyRequested>(Channel::Ordered)
+            .add_mapped_client_message::<TakeRequested>(Channel::Ordered)
             .add_mapped_client_message::<BufferTransferRequested>(Channel::Ordered)
             .add_mapped_client_message::<PackageRequested>(Channel::Ordered)
             .add_mapped_client_message::<AnalyzeRequested>(Channel::Ordered)
@@ -50,6 +53,7 @@ impl Plugin for MachinePlugin {
                     handle_analyze,
                     handle_grind,
                     handle_eject,
+                    handle_take,
                     handle_empty,
                     handle_thermostat_controls,
                     apply_thermostats,
@@ -81,13 +85,21 @@ pub enum MachineKind {
     /// The only machine that does nothing on its own: it changes the conditions
     /// and lets the chemistry decide what that means.
     ReactionChamber,
+    /// Shelf space. Holds anything a chemist can carry, and hands it back.
+    ///
+    /// A machine rather than a thing of its own so it inherits the whole
+    /// existing apparatus: the claim that stops two chemists reaching into it
+    /// at once, the panel, and the walk-up-and-press-E that every other machine
+    /// already teaches. Nothing about it knows what a beaker is, which is the
+    /// point — it stores whatever exists now and whatever gets added later.
+    Locker,
 }
 
 impl MachineKind {
     /// Every kind, which is also every machine: the lab holds exactly one of
     /// each. Both the spawner and the client's fit-out iterate this, so a new
     /// machine cannot be added to one and forgotten in the other.
-    pub const ALL: [MachineKind; 8] = [
+    pub const ALL: [MachineKind; 9] = [
         MachineKind::Dispenser,
         MachineKind::ChemMaster,
         MachineKind::Grinder,
@@ -96,6 +108,7 @@ impl MachineKind {
         MachineKind::DeliveryWindow,
         MachineKind::StandingBoard,
         MachineKind::ReactionChamber,
+        MachineKind::Locker,
     ];
 
     pub fn label(self) -> &'static str {
@@ -108,6 +121,7 @@ impl MachineKind {
             MachineKind::DeliveryWindow => "Delivery Window",
             MachineKind::StandingBoard => "Standing Board",
             MachineKind::ReactionChamber => "Reaction Chamber",
+            MachineKind::Locker => "Storage Locker",
         }
     }
 
@@ -121,6 +135,7 @@ impl MachineKind {
             MachineKind::DeliveryWindow => Color::srgb(0.95, 0.35, 0.35),
             MachineKind::StandingBoard => Color::srgb(0.95, 0.88, 0.45),
             MachineKind::ReactionChamber => Color::srgb(0.98, 0.45, 0.18),
+            MachineKind::Locker => Color::srgb(0.40, 0.85, 0.80),
         }
     }
 }
@@ -197,6 +212,25 @@ impl Machine {
 pub struct ContainerSlot {
     pub offset: Vec3,
 }
+
+/// The unit vector out of a machine's working face — the side a chemist stands
+/// on to use it.
+///
+/// Set by `lab::dress_machines` from the same `fit` that decides the casing, so
+/// it cannot drift from where the machine actually points. Everything a machine
+/// hands back is placed along it: with the direction hardcoded to `+Z`, that
+/// only ever pointed into the room for the two machines on the hall's north
+/// wall, and the grinder — which faces `-Z` — ejected its beaker through the
+/// storeroom wall.
+#[derive(Component, Clone, Copy)]
+pub struct Facing(pub Vec3);
+
+/// How many items a [`MachineKind::Locker`] holds.
+///
+/// A limit at all, rather than none, so the contents stay a list a player can
+/// read at a glance instead of a scrolling inventory screen — which is the kind
+/// of UI this game has deliberately avoided everywhere else.
+pub const LOCKER_CAPACITY: usize = 12;
 
 /// The ChemMaster's internal buffer.
 #[derive(Component, Serialize, Deserialize)]
@@ -310,6 +344,20 @@ pub struct EmptyRequested {
     pub machine: Entity,
 }
 
+/// Take one named item back out of a locker.
+///
+/// Names the item as well as the locker, unlike [`EjectRequested`], because a
+/// locker holds many things and the panel row the player clicked is the only
+/// thing that knows which one they meant. Both ids are mapped on the way over;
+/// the server checks they belong together rather than acting on either alone.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
+pub struct TakeRequested {
+    #[entities]
+    pub machine: Entity,
+    #[entities]
+    pub item: Entity,
+}
+
 /// Which way reagent moves between the loaded container and the buffer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum BufferDirection {
@@ -399,6 +447,7 @@ fn handle_machine_interact(
     held: Query<(Entity, &HeldBy)>,
     produce: Query<&Produce>,
     slotted: Query<(Entity, &InSlot)>,
+    stored: Query<(Entity, &Stored)>,
     bodies: Query<&crate::body::Body>,
     mut opened: MessageWriter<ToClients<MachineOpened>>,
 ) {
@@ -422,6 +471,34 @@ fn handle_machine_interact(
             .iter()
             .find(|(_, holder)| holder.0 == player)
             .map(|(entity, _)| entity);
+
+        // A locker takes whatever is in hand and asks nothing about it. That
+        // is deliberately unlike the two branches below, which both key off
+        // *what* the player is carrying: storage is the one thing in the lab
+        // that should keep working for items that do not exist yet.
+        if machine.kind == MachineKind::Locker {
+            if let Some(item) = carrying {
+                let room = stored
+                    .iter()
+                    .filter(|(_, shut_in)| shut_in.0 == request.target)
+                    .count()
+                    < LOCKER_CAPACITY;
+                if room {
+                    commands
+                        .entity(item)
+                        .remove::<HeldBy>()
+                        .remove::<ChildOf>()
+                        .insert(Stored(request.target))
+                        // Parked inside the casing. It is hidden while stored,
+                        // so this only matters for the frame it comes back out
+                        // on and for anything that reads a position regardless.
+                        .insert(Transform::from_translation(transform.translation));
+                    continue;
+                }
+                // Full. Falls through to open the panel, which says so — a
+                // locker that silently refused would read as a dead keypress.
+            }
+        }
 
         // Produce into the hopper. The item is consumed on load rather than
         // parked in the machine, so the hopper is a list of kinds and nothing
@@ -762,25 +839,157 @@ fn handle_package(
     }
 }
 
+/// Floor level, just clear of a machine's working face.
+///
+/// Derived from the machine's own box — its transform carries the fit's size as
+/// a scale — so it lands in front of whichever machine this is, at whatever
+/// height that machine stands, rather than at one offset that happened to suit
+/// the hall's north wall.
+fn front_of(machine: &Transform, facing: Option<&Facing>, lift: f32) -> Vec3 {
+    // `Vec3::Z` only for a machine that has not been dressed yet, which in
+    // practice means a test that spawned one by hand.
+    let facing = facing.map_or(Vec3::Z, |facing| facing.0);
+    let depth = machine.scale.dot(facing.abs());
+    let floor = machine.translation.y - machine.scale.y * 0.5;
+    let spot = machine.translation + facing * (depth * 0.5 + 0.35);
+    Vec3::new(spot.x, floor + lift, spot.z)
+}
+
+/// Gives `item` to the chemist who asked for it, or sets it down in front of
+/// the machine if their hands are already full.
+///
+/// Shared by ejecting and by taking something out of a locker, because both are
+/// the same act: the machine is done with it, so it goes back to a place the
+/// player can actually get at. The caller removes whatever marker was holding
+/// it — [`InSlot`] or [`Stored`] — before calling.
+fn give_back(
+    commands: &mut Commands,
+    item: Entity,
+    player: Entity,
+    hands_full: bool,
+    machine: &Transform,
+    facing: Option<&Facing>,
+    lift: f32,
+) {
+    let mut item = commands.entity(item);
+    if hands_full {
+        item.insert(Transform::from_translation(front_of(machine, facing, lift)));
+    } else {
+        item.insert(HeldBy(player));
+    }
+}
+
+/// Ejecting hands the container back rather than guessing a spot for it.
+///
+/// It used to place it a metre up and half a metre along world `+Z`, which
+/// points into the room for the dispenser and the ChemMaster and nowhere useful
+/// for anything else. The grinder faces `-Z`, so its beaker was ejected
+/// *through* the storeroom's south wall and 1.85 m up: gone, silently, with a
+/// full batch inside it. Straight into the chemist's hand has no direction to
+/// get wrong, and is what they were going to do next anyway.
 fn handle_eject(
     mut commands: Commands,
     mut requests: MessageReader<FromClient<EjectRequested>>,
-    machines: Query<&Transform, With<Machine>>,
+    machines: Query<(&Machine, &Transform, Option<&Facing>)>,
+    chemists: Query<(Entity, &Chemist)>,
     slotted: Query<(Entity, &InSlot)>,
+    containers: Query<&Container>,
+    held: Query<&HeldBy>,
 ) {
     for request in requests.read() {
+        let Some(player) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
         let Some(container) = slotted_container(request.machine, &slotted) else {
             continue;
         };
-        let Ok(transform) = machines.get(request.machine) else {
+        let Ok((machine, transform, facing)) = machines.get(request.machine) else {
             continue;
         };
-        commands
-            .entity(container)
-            .remove::<InSlot>()
-            .insert(Transform::from_translation(
-                transform.translation + Vec3::new(0.0, 1.0, 0.55),
-            ));
+        // Only the chemist working the machine. This never mattered while the
+        // beaker was placed on the floor — anyone could have walked over and
+        // picked it up — but it does now that ejecting puts it in a *hand*,
+        // and the hand is the asking client's.
+        if !machine.available_to(player) {
+            continue;
+        }
+
+        commands.entity(container).remove::<InSlot>();
+        give_back(
+            &mut commands,
+            container,
+            player,
+            held.iter().any(|holder| holder.0 == player),
+            transform,
+            facing,
+            set_down_lift(containers.get(container).ok()),
+        );
+    }
+}
+
+/// Everything shut in `locker`, in a stable order.
+///
+/// Sorted, because query iteration follows archetype order and shuffles as
+/// items go in and out — which would move a row out from under the button the
+/// player was about to click.
+pub fn stored_in(locker: Entity, stored: &Query<(Entity, &Stored)>) -> Vec<Entity> {
+    let mut items: Vec<Entity> = stored
+        .iter()
+        .filter(|(_, shut_in)| shut_in.0 == locker)
+        .map(|(item, _)| item)
+        .collect();
+    items.sort_unstable_by_key(|item| item.to_bits());
+    items
+}
+
+/// Takes one item back out of a locker.
+#[allow(clippy::too_many_arguments)]
+fn handle_take(
+    mut commands: Commands,
+    mut requests: MessageReader<FromClient<TakeRequested>>,
+    machines: Query<(&Machine, &Transform, Option<&Facing>)>,
+    chemists: Query<(Entity, &Chemist)>,
+    stored: Query<&Stored>,
+    containers: Query<&Container>,
+    held: Query<&HeldBy>,
+    bodies: Query<&crate::body::Body>,
+) {
+    for request in requests.read() {
+        let Some(player) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
+        if bodies.get(player).is_ok_and(|body| body.0.collapsed) {
+            continue;
+        }
+        // The item has to be in the locker the message names. Checked rather
+        // than trusted: the pair comes off the wire, and without this a client
+        // could name any entity in the world and have it handed over.
+        let Ok(shut_in) = stored.get(request.item) else {
+            continue;
+        };
+        if shut_in.0 != request.machine {
+            continue;
+        }
+        let Ok((machine, transform, facing)) = machines.get(request.machine) else {
+            continue;
+        };
+        // Whoever has the locker open. Same reasoning as ejecting: this hands
+        // an item to the asking client, so it must be the client the server
+        // granted the locker to.
+        if !machine.available_to(player) {
+            continue;
+        }
+
+        commands.entity(request.item).remove::<Stored>();
+        give_back(
+            &mut commands,
+            request.item,
+            player,
+            held.iter().any(|holder| holder.0 == player),
+            transform,
+            facing,
+            set_down_lift(containers.get(request.item).ok()),
+        );
     }
 }
 
@@ -969,10 +1178,13 @@ mod tests {
             .add_message::<ReactionsFired>()
             .add_message::<FromClient<BufferTransferRequested>>()
             .add_message::<FromClient<InteractRequested>>()
+            .add_message::<FromClient<LeaveMachineRequested>>()
             .add_message::<FromClient<GrindRequested>>()
             .add_message::<FromClient<SetTargetTemperature>>()
             .add_message::<FromClient<SetHeaterPower>>()
             .add_message::<FromClient<PackageRequested>>()
+            .add_message::<FromClient<EjectRequested>>()
+            .add_message::<FromClient<TakeRequested>>()
             // What the server tells a client when it grants them a machine.
             // Headless there is nobody to tell, but the writer still has to
             // exist for the system to run.
@@ -982,10 +1194,13 @@ mod tests {
                 Update,
                 (
                     handle_machine_interact,
+                    handle_leave_machine,
                     handle_dispense,
                     handle_buffer_transfer,
                     handle_package,
                     handle_grind,
+                    handle_eject,
+                    handle_take,
                     handle_thermostat_controls,
                     apply_thermostats,
                     cool_to_ambient,
@@ -993,6 +1208,16 @@ mod tests {
                     .chain(),
             );
         app
+    }
+
+    /// A chemist with a connection of their own, as the server sees one.
+    fn chemist(app: &mut App) -> (ClientId, Entity) {
+        let client = ClientId::Client(app.world_mut().spawn_empty().id());
+        let chemist = app
+            .world_mut()
+            .spawn((InteractionMode::default(), Chemist { client }))
+            .id();
+        (client, chemist)
     }
 
     fn reagent(app: &App, key: &str) -> ReagentId {
@@ -1432,6 +1657,311 @@ mod tests {
             *app.world().get::<InteractionMode>(chemist).unwrap(),
             InteractionMode::Roaming,
             "loading the hopper should not also open the panel"
+        );
+    }
+
+    #[test]
+    fn ejecting_puts_the_beaker_in_the_chemists_hand() {
+        // The bug: eject placed the container at a fixed `machine + (0, 1, 0.55)`,
+        // which is only "in front and on top" for the two machines that happen
+        // to face world `+Z`. The grinder faces `-Z` against the storeroom's
+        // south wall, so its beaker was posted through the wall 1.85 m up and
+        // was simply gone — full batch and all, with nothing said.
+        let mut app = test_app();
+        let (client, chemist) = chemist(&mut app);
+        let machine = grinder(&mut app, &[], Some(ContainerKind::Beaker));
+        app.world_mut()
+            .entity_mut(machine)
+            .insert(Facing(Vec3::NEG_Z));
+
+        let beaker = {
+            let mut query = app.world_mut().query_filtered::<Entity, With<InSlot>>();
+            query.single(app.world()).expect("a beaker is loaded")
+        };
+
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: EjectRequested { machine },
+        });
+        app.update();
+
+        assert!(
+            app.world().get::<InSlot>(beaker).is_none(),
+            "the slot has to be freed either way"
+        );
+        assert_eq!(
+            app.world().get::<HeldBy>(beaker).map(|held| held.0),
+            Some(chemist),
+            "an ejected beaker goes to the one place that has no direction to \
+             get wrong: the hand of whoever pressed the button"
+        );
+    }
+
+    #[test]
+    fn ejecting_with_full_hands_sets_the_beaker_down_in_front_of_the_machine() {
+        // The fallback, and the one that has to respect which way the machine
+        // points. A grinder standing against the storeroom's south wall faces
+        // `-Z`, so the beaker belongs at a *smaller* z than the casing — the
+        // direction the old constant got backwards.
+        let mut app = test_app();
+        let (client, chemist) = chemist(&mut app);
+        let machine = grinder(&mut app, &[], Some(ContainerKind::Beaker));
+        app.world_mut().entity_mut(machine).insert((
+            Facing(Vec3::NEG_Z),
+            Transform::from_translation(Vec3::new(-4.0, 0.85, 5.55))
+                .with_scale(Vec3::new(1.5, 1.7, 0.8)),
+        ));
+        // Already carrying something else, so there is nowhere to hand it.
+        app.world_mut()
+            .spawn((Container::new(ContainerKind::Bottle), HeldBy(chemist)));
+
+        let beaker = {
+            let mut query = app.world_mut().query_filtered::<Entity, With<InSlot>>();
+            query.single(app.world()).expect("a beaker is loaded")
+        };
+
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: EjectRequested { machine },
+        });
+        app.update();
+
+        assert!(app.world().get::<HeldBy>(beaker).is_none());
+        let resting = app.world().get::<Transform>(beaker).unwrap().translation;
+        assert!(
+            resting.z < 5.55 - 0.4,
+            "it must land clear of the face the chemist stands at, got {resting:?}"
+        );
+        let (_, height) = ContainerKind::Beaker.dimensions();
+        assert!(
+            (resting.y - height * 0.5).abs() < 0.001,
+            "and standing on the floor rather than sunk into it or floating \
+             above it, got {resting:?}"
+        );
+    }
+
+    #[test]
+    fn ejecting_from_a_machine_someone_else_is_working_is_refused() {
+        // Ejecting used to put the beaker on the floor, where anybody could
+        // have picked it up anyway. It puts it in a *hand* now, and the hand
+        // belongs to whoever sent the message — so without this a client could
+        // pull the other chemist's batch out of the grinder from across the
+        // lab, in the middle of their grind.
+        let mut app = test_app();
+        let (client, _) = chemist(&mut app);
+        let (_, other) = chemist(&mut app);
+        let machine = grinder(&mut app, &[], Some(ContainerKind::Beaker));
+        app.world_mut()
+            .entity_mut(machine)
+            .insert(Facing(Vec3::NEG_Z));
+        app.world_mut().get_mut::<Machine>(machine).unwrap().in_use_by = Some(other);
+
+        let beaker = {
+            let mut query = app.world_mut().query_filtered::<Entity, With<InSlot>>();
+            query.single(app.world()).expect("a beaker is loaded")
+        };
+
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: EjectRequested { machine },
+        });
+        app.update();
+
+        assert!(
+            app.world().get::<InSlot>(beaker).is_some(),
+            "it stays where the chemist who claimed the machine put it"
+        );
+        assert!(app.world().get::<HeldBy>(beaker).is_none());
+    }
+
+    /// A locker, and a chemist standing at it holding `item`.
+    fn locker(app: &mut App) -> Entity {
+        app.world_mut()
+            .spawn((Machine::new(MachineKind::Locker), Transform::default()))
+            .id()
+    }
+
+    fn press_e(app: &mut App, client: ClientId, target: Entity) {
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: InteractRequested { target },
+        });
+        app.update();
+    }
+
+    #[test]
+    fn a_locker_takes_whatever_is_in_hand_and_gives_it_back() {
+        let mut app = test_app();
+        let (client, chemist) = chemist(&mut app);
+        let locker = locker(&mut app);
+        let beaker = app
+            .world_mut()
+            .spawn((Container::new(ContainerKind::Beaker), HeldBy(chemist)))
+            .id();
+
+        press_e(&mut app, client, locker);
+
+        assert_eq!(
+            app.world().get::<Stored>(beaker).map(|stored| stored.0),
+            Some(locker),
+        );
+        assert!(
+            app.world().get::<HeldBy>(beaker).is_none(),
+            "it is on the shelf now, not in a hand"
+        );
+        assert_eq!(
+            *app.world().get::<InteractionMode>(chemist).unwrap(),
+            InteractionMode::Roaming,
+            "putting something away should not also open the panel"
+        );
+
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: TakeRequested {
+                machine: locker,
+                item: beaker,
+            },
+        });
+        app.update();
+
+        assert!(app.world().get::<Stored>(beaker).is_none());
+        assert_eq!(
+            app.world().get::<HeldBy>(beaker).map(|held| held.0),
+            Some(chemist),
+        );
+    }
+
+    #[test]
+    fn a_locker_stores_things_that_are_not_containers() {
+        // The whole reason it is a locker and not a beaker rack. Produce is the
+        // one non-container that already exists; anything added later takes
+        // this path without the locker learning about it.
+        let mut app = test_app();
+        let (client, chemist) = chemist(&mut app);
+        let locker = locker(&mut app);
+        let aloe = produce(&app, "Aloe");
+        let item = app.world_mut().spawn((Produce(aloe), HeldBy(chemist))).id();
+
+        press_e(&mut app, client, locker);
+
+        assert_eq!(
+            app.world().get::<Stored>(item).map(|stored| stored.0),
+            Some(locker),
+            "a locker with no hopper must not eat the plant the way the \
+             grinder does"
+        );
+        assert!(app.world().get_entity(item).is_ok());
+    }
+
+    #[test]
+    fn a_full_locker_opens_its_panel_instead_of_refusing_in_silence() {
+        let mut app = test_app();
+        let (client, chemist) = chemist(&mut app);
+        let locker = locker(&mut app);
+        for _ in 0..LOCKER_CAPACITY {
+            app.world_mut()
+                .spawn((Container::new(ContainerKind::Beaker), Stored(locker)));
+        }
+        let beaker = app
+            .world_mut()
+            .spawn((Container::new(ContainerKind::Beaker), HeldBy(chemist)))
+            .id();
+
+        press_e(&mut app, client, locker);
+
+        assert!(
+            app.world().get::<Stored>(beaker).is_none(),
+            "the thirteenth item must not go in"
+        );
+        assert_eq!(
+            app.world().get::<HeldBy>(beaker).map(|held| held.0),
+            Some(chemist),
+            "and must stay in hand rather than being dropped on the floor"
+        );
+        assert_eq!(
+            *app.world().get::<InteractionMode>(chemist).unwrap(),
+            InteractionMode::UsingMachine(locker),
+            "the panel is what tells the player the locker is full"
+        );
+    }
+
+    #[test]
+    fn a_locker_only_hands_over_what_is_actually_in_it() {
+        // Both ids come off the wire. Without the check a client could name any
+        // entity in the world and have the server hand it over — including one
+        // the other chemist is holding.
+        let mut app = test_app();
+        let (client, _) = chemist(&mut app);
+        let (_, other) = chemist(&mut app);
+        let locker = locker(&mut app);
+        let elsewhere = app
+            .world_mut()
+            .spawn((Container::new(ContainerKind::Beaker), HeldBy(other)))
+            .id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: TakeRequested {
+                machine: locker,
+                item: elsewhere,
+            },
+        });
+        app.update();
+
+        assert_eq!(
+            app.world().get::<HeldBy>(elsewhere).map(|held| held.0),
+            Some(other),
+            "it was never in the locker, so the locker cannot give it away"
+        );
+    }
+
+    #[test]
+    fn leaving_releases_a_machine_still_held_under_the_reference_book() {
+        // Opening the book at a machine keeps the claim on purpose — a chemist
+        // checking a recipe mid-batch has not walked away from the dispenser —
+        // so every release path has to recognise that shape too. A bare
+        // `UsingMachine` check here would leave the machine in use for the
+        // rest of the shift the moment somebody closed out from the book.
+        let mut app = test_app();
+        let machine = app
+            .world_mut()
+            .spawn((Machine::new(MachineKind::Dispenser), Transform::default()))
+            .id();
+        let client = ClientId::Client(app.world_mut().spawn_empty().id());
+        let chemist = app
+            .world_mut()
+            .spawn((InteractionMode::default(), Chemist { client }))
+            .id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: InteractRequested { target: machine },
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<Machine>(machine).unwrap().in_use_by,
+            Some(chemist),
+            "the claim has to exist before this test means anything"
+        );
+
+        // What pressing B at an open panel leaves behind.
+        app.world_mut()
+            .entity_mut(chemist)
+            .insert(InteractionMode::ReadingBook(Some(machine)));
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: LeaveMachineRequested,
+        });
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Machine>(machine).unwrap().in_use_by,
+            None,
+            "the dispenser must not stay locked against the other chemist"
+        );
+        assert_eq!(
+            *app.world().get::<InteractionMode>(chemist).unwrap(),
+            InteractionMode::Roaming
         );
     }
 

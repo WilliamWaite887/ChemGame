@@ -109,32 +109,46 @@
     // favor (see `Reagent::potency`). `specific_plea` is what the same
     // request says on the rare occasions it is drawn as an exact ask instead
     // — see `orders::generate_specific_orders`.
+    //
+    // `amounts` must stay at or under the reagent's own `overdose` threshold
+    // in `chem.reagents.ron`. Above it there is no delivery that works: a
+    // pill, bottle or syringe of exactly what was asked for grades `Overdose`
+    // and anything smaller grades `Short`, leaving a beaker as the only
+    // container that ever passes and nothing on screen saying why. Pinned by
+    // `no_request_asks_for_more_than_can_be_safely_handed_over`, and clamped
+    // at spawn by `orders::deliverable_amount` for anything that slips
+    // through anyway.
     requests: [
         (
             reagent: "bicaridine",
             themes: ["trauma"],
-            amounts: [20, 30, 40],
+            // Overdoses at 15u.
+            amounts: [8, 12, 15],
             plea: "Got a crewman bleeding badly down here. Whatever stops it, quick as you can.",
             specific_plea: "Got a crewman bleeding badly down here. Bicaridine, quick as you can.",
         ),
         (
             reagent: "kelotane",
             themes: ["burns"],
-            amounts: [20, 30],
+            // Overdoses at 15u.
+            amounts: [10, 12, 15],
             plea: "Welder burn. Nothing dramatic. Something for it would sort him out.",
             specific_plea: "Welder burn. Nothing dramatic. Some kelotane would sort it.",
         ),
         (
             reagent: "dermaline",
             themes: ["burns"],
-            amounts: [15, 20, 30],
+            // Overdoses at 10u — the tightest of the medicines, which is the
+            // trade for it being the strongest burn treatment.
+            amounts: [6, 8, 10],
             plea: "Plasma fire in engineering, burns are deep. Need your best burn treatment.",
             specific_plea: "Plasma fire in engineering, burns are deep. Need dermaline — nothing weaker's touching this.",
         ),
         (
             reagent: "dylovene",
             themes: ["poison"],
-            amounts: [20, 30],
+            // Overdoses at 20u.
+            amounts: [12, 16, 20],
             plea: "Someone's been poisoned in the bar. Whatever clears it, please.",
             specific_plea: "Someone's been poisoned in the bar. Dylovene, please.",
         ),
@@ -159,7 +173,8 @@
         (
             reagent: "dexalin",
             themes: ["asphyxiation"],
-            amounts: [20, 30],
+            // Overdoses at 20u.
+            amounts: [12, 16, 20],
             plea: "Hull breach on deck two, we have asphyxiation cases. Anything that helps them breathe.",
             specific_plea: "Hull breach on deck two, we have asphyxiation cases. Dexalin, by name — we're not taking chances.",
         ),
@@ -197,7 +212,8 @@
         (
             reagent: "mannitol",
             themes: ["concussion"],
-            amounts: [15, 20],
+            // Overdoses at 15u.
+            amounts: [10, 12, 15],
             plea: "Took a baton to the head and can't hold a thought. Something should clear it.",
             specific_plea: "Took a baton to the head and can't hold a thought. Mannitol should clear it — synaptizine makes him worse.",
         ),

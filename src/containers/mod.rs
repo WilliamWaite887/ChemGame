@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::body::Body;
 use crate::chem_data::ChemDb;
 use crate::interaction::{InteractRequested, Interactable};
+use crate::lab::{self, Solid};
 use crate::machines::chemist_entity;
 use crate::net::is_authority;
 use crate::player::{Chemist, LocalPlayer, PlayerCamera};
@@ -49,6 +50,7 @@ impl Plugin for ContainerPlugin {
                         // glass for it.
                         dress_containers,
                         carry_held_containers,
+                        hide_stored_items,
                         update_liquid_visuals,
                     )
                         .chain(),
@@ -156,6 +158,29 @@ pub struct HeldBy(#[entities] pub Entity);
 /// Sitting in this machine's container slot.
 #[derive(Component, Serialize, Deserialize)]
 pub struct InSlot(#[entities] pub Entity);
+
+/// Shut away in this locker.
+///
+/// The same shape as [`InSlot`], and for the same reason: storage is a
+/// relation, not a list. A locker holding a `Vec<Entity>` would have to be kept
+/// in step with every other way an item can leave the world, and would have to
+/// put a list of entity ids on the wire to do it. This way the item carries the
+/// fact, replication maps the single id it holds, and an item that is destroyed
+/// takes its own membership with it.
+///
+/// Says nothing about *what* is stored — that is the whole point of a locker,
+/// and why anything added to the game later needs no work here to be storable.
+#[derive(Component, Serialize, Deserialize)]
+pub struct Stored(#[entities] pub Entity);
+
+/// How far above a surface an item's origin sits when it is set down.
+///
+/// Glassware is a cylinder centred on its origin, so half its height. Anything
+/// else is a small prop, and a couple of centimetres keeps it clear of the floor
+/// without every future item having to declare a size.
+pub fn set_down_lift(container: Option<&Container>) -> f32 {
+    container.map_or(0.06, |container| container.kind.dimensions().1 * 0.5)
+}
 
 /// The liquid mesh inside a container, kept in sync with its contents.
 #[derive(Component)]
@@ -306,6 +331,7 @@ fn handle_pickup(
     mut requests: MessageReader<FromClient<InteractRequested>>,
     pickable: Pickable,
     held: Query<&HeldBy>,
+    stored: Query<&Stored>,
     chemists: Query<(Entity, &Chemist)>,
     bodies: Query<&Body>,
 ) {
@@ -318,6 +344,12 @@ fn handle_pickup(
             continue;
         }
         if !pickable.contains(request.target) || held.contains(request.target) {
+            continue;
+        }
+        // Belt and braces. A stored item is hidden, so the crosshair cannot
+        // land on one — but the target comes off the wire, and the server does
+        // not take a client's word for what it can see.
+        if stored.contains(request.target) {
             continue;
         }
         // One hand, one beaker. Anything else needs an inventory, which this
@@ -339,13 +371,23 @@ fn request_drop(keys: Res<ButtonInput<KeyCode>>, mut requests: MessageWriter<Dro
     }
 }
 
+/// Puts down whatever the chemist is carrying, on top of whatever is under it.
+///
+/// The height used to be a hardcoded `0.08` — floor level, whatever the chemist
+/// was standing at. Setting a beaker down at a bench dropped it *through* the
+/// bench and left it sitting inside the box, out of sight and out of reach of
+/// the crosshair. [`lab::resting_place`] answers the question the constant was
+/// standing in for: which surface is actually under the spot.
 fn handle_drop(
     mut commands: Commands,
     mut requests: MessageReader<FromClient<DropRequested>>,
-    held: Query<(Entity, &HeldBy)>,
+    held: Query<(Entity, &HeldBy, Option<&Container>)>,
     chemists: Query<(Entity, &Chemist)>,
     transforms: Query<&Transform>,
+    solids: Query<(&Transform, &Solid)>,
 ) {
+    let mut surfaces = None;
+
     for request in requests.read() {
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
@@ -353,17 +395,31 @@ fn handle_drop(
         let Ok(transform) = transforms.get(player) else {
             continue;
         };
-        for (container, holder) in &held {
+        // Gathered once, and only if somebody actually dropped something: this
+        // is every wall, bench and machine in the suite, and a drop is a
+        // keypress rather than a per-frame event.
+        let surfaces = surfaces.get_or_insert_with(|| {
+            solids
+                .iter()
+                .map(|(transform, solid)| (transform.translation, solid.half_extents))
+                .collect::<Vec<_>>()
+        });
+
+        for (container, holder, contents) in &held {
             if holder.0 != player {
                 continue;
             }
-            let ahead = transform.translation + transform.forward() * 0.6;
+            // Far enough forward to land on the bench you are facing rather
+            // than between your feet, and near enough to still be inside the
+            // reach the crosshair picks it back up at.
+            let ahead = transform.translation + transform.forward() * 0.65;
+            let resting = lab::resting_place(ahead, transform.translation, surfaces);
             commands
                 .entity(container)
                 .remove::<HeldBy>()
-                .insert(Transform::from_translation(Vec3::new(
-                    ahead.x, 0.08, ahead.z,
-                )));
+                .insert(Transform::from_translation(
+                    resting + Vec3::Y * set_down_lift(contents),
+                ));
         }
     }
 }
@@ -399,6 +455,35 @@ fn carry_held_containers(
     for container in dropped.read() {
         if let Ok(mut entity) = commands.get_entity(container) {
             entity.remove::<ChildOf>();
+        }
+    }
+}
+
+/// Takes a stored item out of sight, and puts it back when it comes out.
+///
+/// Runs everywhere, keyed on the replicated [`Stored`] arriving or leaving, for
+/// the reason every other presentation system here does: the authority decides
+/// what is in the locker and both ends draw the consequence. Hiding is all the
+/// hiding needed — the interaction raycast uses the default
+/// `RayCastVisibility::VisibleInView`, so an invisible beaker is also one the
+/// crosshair cannot reach through the locker door.
+///
+/// The liquid is a child of the glass, so it inherits this and no second pass
+/// is needed for it.
+fn hide_stored_items(
+    mut commands: Commands,
+    newly_stored: Query<Entity, Added<Stored>>,
+    mut taken_out: RemovedComponents<Stored>,
+) {
+    for item in &newly_stored {
+        commands.entity(item).insert(Visibility::Hidden);
+    }
+
+    // `commands.get_entity` rather than a plain `entity`: an item can leave the
+    // locker by being despawned, and the removal fires either way.
+    for item in taken_out.read() {
+        if let Ok(mut entity) = commands.get_entity(item) {
+            entity.insert(Visibility::Inherited);
         }
     }
 }
