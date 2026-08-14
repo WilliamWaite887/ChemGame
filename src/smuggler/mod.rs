@@ -191,6 +191,13 @@ fn generate_smuggler_visit(
     });
 }
 
+/// Containers nobody is holding and nothing is holding.
+///
+/// Deliberately excludes anything held or slotted: they lift what is
+/// *unattended*, which is what makes "hold onto it" a real answer.
+type LooseGlassware<'w, 's> =
+    Query<'w, 's, Entity, (With<Container>, Without<HeldBy>, Without<InSlot>)>;
+
 /// Advances the chain — and, on an expired visit, takes something.
 ///
 /// Only [`Outcome::Expired`] triggers the theft, not a wrong delivery:
@@ -205,9 +212,7 @@ fn handle_smuggler_resolution(
     mut resolved: MessageReader<OrderResolved>,
     mut progress: ResMut<SmugglerProgress>,
     mut radio: ResMut<RadioLog>,
-    // Deliberately excludes anything held or slotted: they lift what is
-    // *unattended*, which is what makes "hold onto it" a real answer.
-    loose: Query<Entity, (With<Container>, Without<HeldBy>, Without<InSlot>)>,
+    loose: LooseGlassware,
 ) {
     let Some(script) = script else {
         resolved.clear();

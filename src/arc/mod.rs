@@ -1456,6 +1456,58 @@ mod tests {
     }
 
     #[test]
+    fn every_department_has_a_minor_antagonist_and_none_of_them_are_gated() {
+        // The user requirement this milestone was built to: *every* department
+        // keeps a permanent minor antagonist causing shenanigans, whichever
+        // main antagonist a save happens to have drawn.
+        //
+        // Checked against the data rather than the module list, because the
+        // module list is what would silently drift: adding a sixth thread and
+        // pointing it at a department that already has one is the mistake, and
+        // it shows up here as a duplicate.
+        use crate::orders::Department;
+
+        let mut covered: Vec<Department> = Vec::new();
+        let mut claim = |role: &str, who: &str| {
+            let department = Department::from_role(role)
+                .unwrap_or_else(|| panic!("{who} names a role no department recognises"));
+            assert!(
+                !covered.contains(&department),
+                "{department:?} has two minor threads — {who} is one too many"
+            );
+            covered.push(department);
+        };
+
+        let obsessed: crate::obsessed::ObsessedScript =
+            ron::from_str(include_str!("../../assets/data/station.obsessed.ron")).unwrap();
+        claim(&obsessed.role, "obsessed");
+
+        let smuggler: crate::smuggler::SmugglerScript =
+            ron::from_str(include_str!("../../assets/data/station.smuggler.ron")).unwrap();
+        claim(&smuggler.role, "smuggler");
+
+        let saboteur: crate::saboteur::SaboteurScript =
+            ron::from_str(include_str!("../../assets/data/station.saboteur.ron")).unwrap();
+        claim(&saboteur.role, "saboteur");
+
+        let quack: crate::quack::QuackScript =
+            ron::from_str(include_str!("../../assets/data/station.quack.ron")).unwrap();
+        claim(&quack.role, "quack");
+
+        // `rogue_security` is Security's, and is bespoke enough not to share
+        // the others' script shape — it names no `role` field because it *is*
+        // Security, by construction.
+        covered.push(Department::Security);
+
+        for department in Department::ALL {
+            assert!(
+                covered.contains(&department),
+                "{department:?} has nobody causing trouble in it"
+            );
+        }
+    }
+
+    #[test]
     fn an_antag_id_survives_a_round_trip_through_its_key() {
         // The key is what goes in the cross-save unlock file.
         for id in AntagId::ALL {

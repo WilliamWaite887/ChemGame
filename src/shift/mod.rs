@@ -544,6 +544,16 @@ struct ProgressSave {
     /// reached. See `cult::CultProgress`.
     #[serde(default)]
     cult_progress: usize,
+    /// How far into each department minor's authored chain the career has
+    /// reached — Cargo's, Engineering's and Medical's respectively. Same
+    /// reasoning as `obsessed_progress`: an escalation the player is meant to
+    /// notice across a career has to survive closing the game.
+    #[serde(default)]
+    smuggler_progress: usize,
+    #[serde(default)]
+    saboteur_progress: usize,
+    #[serde(default)]
+    quack_progress: usize,
     /// This save's campaign — which main antagonist it drew, how far along
     /// they are, and how it ended if it has. See `arc::Campaign`.
     ///
@@ -569,6 +579,9 @@ fn load_progress(
     rogue_redeemed: Option<ResMut<crate::rogue_security::RogueRedeemed>>,
     obsessed_progress: Option<ResMut<crate::obsessed::ObsessedProgress>>,
     cult_progress: Option<ResMut<crate::cult::CultProgress>>,
+    smuggler_progress: Option<ResMut<crate::smuggler::SmugglerProgress>>,
+    saboteur_progress: Option<ResMut<crate::saboteur::SaboteurProgress>>,
+    quack_progress: Option<ResMut<crate::quack::QuackProgress>>,
     mut thwarted: ResMut<crate::arc::ThwartedAntags>,
     mut addictions: ResMut<crate::addiction::Addictions>,
     slot: Option<Res<SaveSlot>>,
@@ -599,6 +612,15 @@ fn load_progress(
     }
     if let Some(mut progress) = cult_progress {
         progress.0 = save.cult_progress;
+    }
+    if let Some(mut progress) = smuggler_progress {
+        progress.0 = save.smuggler_progress;
+    }
+    if let Some(mut progress) = saboteur_progress {
+        progress.0 = save.saboteur_progress;
+    }
+    if let Some(mut progress) = quack_progress {
+        progress.0 = save.quack_progress;
     }
     // Inserted rather than assigned: this runs `OnEnter(Playing)`, before the
     // first `Update`, so `arc::assign_campaign` sees a campaign already here
@@ -662,6 +684,9 @@ fn persist_progress(
     rogue_redeemed: Option<Res<crate::rogue_security::RogueRedeemed>>,
     obsessed_progress: Option<Res<crate::obsessed::ObsessedProgress>>,
     cult_progress: Option<Res<crate::cult::CultProgress>>,
+    smuggler_progress: Option<Res<crate::smuggler::SmugglerProgress>>,
+    saboteur_progress: Option<Res<crate::saboteur::SaboteurProgress>>,
+    quack_progress: Option<Res<crate::quack::QuackProgress>>,
     campaign: Option<Res<crate::arc::Campaign>>,
     addictions: Res<crate::addiction::Addictions>,
     slot: Option<Res<SaveSlot>>,
@@ -678,6 +703,9 @@ fn persist_progress(
         rogue_redeemed: rogue_redeemed.map(|r| r.0).unwrap_or(false),
         obsessed_progress: obsessed_progress.map(|p| p.0).unwrap_or(0),
         cult_progress: cult_progress.map(|p| p.0).unwrap_or(0),
+        smuggler_progress: smuggler_progress.map(|p| p.0).unwrap_or(0),
+        saboteur_progress: saboteur_progress.map(|p| p.0).unwrap_or(0),
+        quack_progress: quack_progress.map(|p| p.0).unwrap_or(0),
         campaign: campaign.map(|c| c.clone()),
         addictions: addictions.clone(),
     };

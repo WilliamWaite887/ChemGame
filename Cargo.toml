@@ -34,8 +34,13 @@ bevy-steamworks = "0.17.0"
 bevy_renet2 = { version = "0.16.0", default-features = false, features = [
     "steam",
 ] }
+# Prototype: the TrenchBroom-authored lab. Optional, so the const-table lab in
+# src/lab/mod.rs stays the default build while the two approaches are compared.
+bevy_trenchbroom = { version = "0.14.0", optional = true }
 
 [features]
+# Loads the lab from assets/maps/lab.map instead of building it from ROOMS/WALLS.
+trenchbroom = ["dep:bevy_trenchbroom"]
 # Links bevy dynamically, which cuts iteration builds down a lot. Off by
 # default because it needs the shared library alongside the binary, so it is
 # not suitable for shipping: `cargo run --features fast-compile`.
@@ -48,6 +53,13 @@ opt-level = 3
 
 [dev-dependencies]
 ron = "0.11"
+# Only used by the one-way `.map` exporter, to write solid-colour placeholder
+# textures. Already in the tree via bevy, so it costs nothing to build.
+image = { version = "0.25", default-features = false, features = ["png"] }
+# The same parser `bevy_trenchbroom` loads maps with, pinned to the version it
+# depends on. Used to check the exported map against the real thing rather than
+# against our own idea of the format.
+quake-map = "0.6"
 
 [profile.dev]
 opt-level = 1

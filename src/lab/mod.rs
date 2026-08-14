@@ -11,6 +11,13 @@
 //! room moved in `ROOMS` takes its floor, its lights and its walkable footprint
 //! with it.
 
+// Under the `trenchbroom` feature the map builds the shell, so the floor plan
+// below is reachable only from the exporter — which is test-only, and so reads
+// as dead code in a normal build. The tables are kept rather than cfg'd out
+// because the point of the prototype is to run the two side by side: `contain`
+// still uses them, and so does every test in this module.
+#![cfg_attr(feature = "trenchbroom", allow(dead_code))]
+
 use bevy::prelude::*;
 
 use chem_sim::{Solution, Units};
@@ -22,7 +29,28 @@ use crate::machines::{
 use crate::net::is_authority;
 use crate::AppState;
 
+/// Writes the floor plan out as a Quake `.map` for TrenchBroom. Test-only: it
+/// is a one-way export used to seed the map, not part of the running game.
+#[cfg(test)]
+mod tb_export;
+
+/// The TrenchBroom-driven alternative to [`spawn_shell`]. Behind a feature flag
+/// so the const-table lab stays the default while the two are compared.
+#[cfg(feature = "trenchbroom")]
+pub mod tb;
+
 pub const ROOM_HEIGHT: f32 = 3.2;
+
+/// TrenchBroom units per metre, shared by the exporter and the loader.
+///
+/// 40 rather than `bevy_trenchbroom`'s default 39.37 (one unit per inch): every
+/// coordinate in the floor plan is a multiple of 0.025 m, so at 40 every brush
+/// lands on an integer and almost all on TrenchBroom's default 8-unit grid. At
+/// 39.37 the whole lab sits on fractional coordinates and is miserable to edit.
+// Read by the exporter (test-only) and the loader (feature-gated), so a plain
+// default build legitimately never touches it.
+#[cfg_attr(not(feature = "trenchbroom"), allow(dead_code))]
+pub const TB_SCALE: f32 = 40.0;
 
 const WALL_THICKNESS: f32 = 0.25;
 /// Width of every doorway. The walkable slab through a door is this less the
@@ -302,14 +330,23 @@ pub struct LabPlugin;
 
 impl Plugin for LabPlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(feature = "trenchbroom")]
+        app.add_plugins(tb::LabTrenchBroomPlugin);
+
+        // The room itself is scenery: identical on both ends, derived from
+        // constants, and nothing about it is worth a packet. Under the
+        // `trenchbroom` feature the shell and its fixtures come out of
+        // `assets/maps/lab.map` instead — see [`tb`].
+        #[cfg(not(feature = "trenchbroom"))]
+        app.add_systems(
+            OnEnter(AppState::Playing),
+            (spawn_shell, spawn_fixtures).chain().after(load_machine_assets),
+        );
+
         app.add_systems(
             OnEnter(AppState::Playing),
             (
-                // The room itself is scenery: identical on both ends, derived
-                // from constants, and nothing about it is worth a packet.
-                spawn_shell,
                 load_machine_assets,
-                spawn_fixtures,
                 // The machines are state, so only the authority creates them.
                 spawn_machines.run_if(is_authority),
             )
@@ -327,7 +364,11 @@ impl Plugin for LabPlugin {
 ///
 /// Deliberately not a physics engine: a lab is a set of boxes with boxes in it,
 /// and swept-AABB resolution against a handful of statics is all that needs.
-#[derive(Component)]
+/// `Reflect` because the TrenchBroom path spawns these inside a loaded scene,
+/// and the scene spawner refuses to write any component it cannot find in the
+/// type registry. Harmless for the hand-built lab, which spawns them directly.
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct Solid {
     pub half_extents: Vec3,
 }
@@ -746,43 +787,43 @@ pub(crate) fn load_machine_assets(
     });
 }
 
+/// Every plain bench in the suite, as (centre, size).
+///
+/// Split out from the spawner so the TrenchBroom exporter can emit the same
+/// boxes as brushes without restating their positions — the moment there are
+/// two lists of fixtures, one of them is wrong.
+pub(crate) fn fixtures() -> Vec<(Vec3, Vec3)> {
+    let mut all = Vec::new();
+
+    // An island down the middle of the hall. Standing off the walls is the
+    // point: it gives the room a route around it instead of a single lane, and
+    // somewhere to put a beaker down that is not on top of a machine.
+    for x in [-3.5f32, 2.0] {
+        all.push((Vec3::new(x, 0.45, -2.2), Vec3::new(2.6, 0.9, 0.9)));
+    }
+
+    // Shelving down the storeroom's west wall.
+    for z in [3.1f32, 4.9] {
+        all.push((
+            Vec3::new(ROOMS[PREP].min_x + 0.5, 0.45, z),
+            Vec3::new(1.0, 0.9, 1.4),
+        ));
+    }
+
+    // A bench under the analysis room's west wall, for staging samples.
+    all.push((Vec3::new(9.0, 0.45, -1.4), Vec3::new(2.2, 0.9, 0.8)));
+
+    all
+}
+
 /// Plain benches, so the rooms are not just corridors.
 ///
 /// Scenery rather than equipment: no state, nothing to replicate, and the
 /// server needs them present to collide against.
 fn spawn_fixtures(mut commands: Commands, assets: Res<MachineAssets>) {
-    // An island down the middle of the hall. Standing off the walls is the
-    // point: it gives the room a route around it instead of a single lane, and
-    // somewhere to put a beaker down that is not on top of a machine.
-    for x in [-3.5f32, 2.0] {
-        solid_box(
-            &mut commands,
-            &assets.cube,
-            &assets.bench,
-            Vec3::new(x, 0.45, -2.2),
-            Vec3::new(2.6, 0.9, 0.9),
-        );
+    for (center, size) in fixtures() {
+        solid_box(&mut commands, &assets.cube, &assets.bench, center, size);
     }
-
-    // Shelving down the storeroom's west wall.
-    for z in [3.1f32, 4.9] {
-        solid_box(
-            &mut commands,
-            &assets.cube,
-            &assets.bench,
-            Vec3::new(ROOMS[PREP].min_x + 0.5, 0.45, z),
-            Vec3::new(1.0, 0.9, 1.4),
-        );
-    }
-
-    // A bench under the analysis room's west wall, for staging samples.
-    solid_box(
-        &mut commands,
-        &assets.cube,
-        &assets.bench,
-        Vec3::new(9.0, 0.45, -1.4),
-        Vec3::new(2.2, 0.9, 0.8),
-    );
 }
 
 /// Creates the machines and their state. Authority only.

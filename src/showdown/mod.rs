@@ -319,7 +319,7 @@ fn handle_breach_delivery(
             continue;
         }
 
-        showdown.treated = showdown.treated + landed;
+        showdown.treated += landed;
         // The glassware goes with it, same as a delivery to a crew member.
         commands.entity(container_entity).despawn();
         radio.push(RadioEntry {
@@ -356,6 +356,10 @@ fn cure_units(db: &ChemDb, solution: &Solution, cure: chem_sim::ReagentId) -> Un
 // Assailant
 // ---------------------------------------------------------------------------
 
+/// An assailant that has not stopped being an ordinary visitor yet.
+type StillPretending<'w, 's> =
+    Query<'w, 's, (Entity, &'static CrewRoute), (With<Assailant>, Without<Pursuit>)>;
+
 /// Drops the act once it has walked in.
 ///
 /// It arrives like any other visitor — through the door, across to the
@@ -365,7 +369,7 @@ fn cure_units(db: &ChemDb, solution: &Solution, cure: chem_sim::ReagentId) -> Un
 fn turn_assailant_hostile(
     mut commands: Commands,
     script: Option<Res<Script>>,
-    arrived: Query<(Entity, &CrewRoute), (With<Assailant>, Without<Pursuit>)>,
+    arrived: StillPretending,
 ) {
     let Some(script) = script else {
         return;

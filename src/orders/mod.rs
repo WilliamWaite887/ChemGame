@@ -447,10 +447,6 @@ impl OrderKind {
     pub fn is_crisis(self) -> bool {
         matches!(self, OrderKind::Crisis)
     }
-
-    pub fn is_counter(self) -> bool {
-        matches!(self, OrderKind::Counter)
-    }
 }
 
 /// How a delivery went.

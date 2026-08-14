@@ -21,6 +21,7 @@ mod obsessed;
 mod orders;
 mod player;
 mod produce;
+mod quack;
 mod radio;
 mod rogue_security;
 mod saboteur;
@@ -127,6 +128,7 @@ fn main() {
                 obsessed::ObsessedPlugin,
                 smuggler::SmugglerPlugin,
                 saboteur::SaboteurPlugin,
+                quack::QuackPlugin,
                 // A main antagonist, not a minor: gated on the save having
                 // drawn the Cult. Cargo's minor is `smuggler`, above.
                 cult::CultPlugin,
