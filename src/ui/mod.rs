@@ -99,7 +99,7 @@ impl Plugin for UiPlugin {
                 update_vitals_panel,
                 update_room_label,
                 update_radio_feed,
-                scroll_reference_book,
+                scroll_active_pane,
                 announce_discoveries,
                 announce_accepting_toggle,
                 show_toasts,
@@ -109,6 +109,7 @@ impl Plugin for UiPlugin {
                 .run_if(in_state(AppState::Playing)),
         )
         .init_resource::<BookView>()
+        .init_resource::<BoardTab>()
         .init_resource::<LastPanel>()
         .init_resource::<LastSignState>()
         .init_resource::<ThermostatDrag>()
@@ -155,7 +156,23 @@ enum PanelAction {
     CallItAShift,
     OpenUpAgain,
     Requisition(RequisitionKind),
+    ShowBoardTab(BoardTab),
     Close,
+}
+
+/// Which of the standing board's two tabs is open.
+///
+/// Local presentation state, same rationale as [`BookView`]: which tab a
+/// chemist has open is nobody else's business and not worth a line in
+/// `save.ron`. Split out once the radio history grew from a couple of lines
+/// squeezed above the department shop into its own real scrollable section —
+/// on its own tab it can be the whole panel instead of splitting the screen
+/// with standing every time.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
+enum BoardTab {
+    #[default]
+    Standing,
+    Radio,
 }
 
 /// Which heading the reference book is open at. `None` is the "All" tab.
@@ -222,6 +239,10 @@ struct PanelSignature {
     /// panel would freeze on whatever it happened to show first.
     department_standing: Vec<(Department, i32)>,
     accepting_orders: bool,
+    /// Which of the board's two tabs is open — same rationale as
+    /// `book_category`: switching tab changes what the panel shows, so it
+    /// rebuilds the panel.
+    board_tab: BoardTab,
     /// Which of the board's three stages is drawn: open, wrapping up, or
     /// debriefing. Carries the whole report rather than just the flag, because
     /// the numbers on a debrief keep moving — the other chemist can still be
@@ -281,6 +302,7 @@ impl Default for PanelSignature {
             accepting_orders: false,
             // Same reasoning again: the vector above is what guarantees a
             // difference on the first comparison, so this only needs a value.
+            board_tab: BoardTab::Standing,
             board: BoardStage::Open,
             research_points: u32::MAX,
             arc: None,
@@ -408,6 +430,13 @@ struct BoardView<'w, 's> {
     /// waiting on, and counting them would mean the sign could never come
     /// down at all.
     waiting: Query<'w, 's, (), (With<Order>, crate::crew::NotResident)>,
+    /// The full chatter history, for the board's own scrollable section —
+    /// folded in here rather than added to `sync_panel` directly, which is
+    /// already at Bevy's sixteen-parameter ceiling.
+    radio: Res<'w, RadioLog>,
+    /// Which of the board's two tabs is open — same reason `radio` is here
+    /// rather than a bare `sync_panel` parameter.
+    tab: Res<'w, BoardTab>,
 }
 
 impl BoardView<'_, '_> {
@@ -580,6 +609,7 @@ fn sync_panel(
             .map(|dept| (dept, shift.standing(dept)))
             .collect(),
         accepting_orders: shift.accepting_orders,
+        board_tab: *board.tab,
         board: stage.clone(),
         research_points: knowledge.research_points,
         arc: arc.clone(),
@@ -673,7 +703,14 @@ fn sync_panel(
                             delivery_window_body(panel, &db, loaded, reacting);
                         }
                         MachineKind::StandingBoard => {
-                            standing_board_body(panel, shift, &stage, arc.as_ref());
+                            standing_board_body(
+                                panel,
+                                shift,
+                                &stage,
+                                arc.as_ref(),
+                                &board.radio,
+                                *board.tab,
+                            );
                         }
                         MachineKind::ReactionChamber => {
                             heater_body(panel, &db, thermostat, loaded, reacting);
@@ -690,7 +727,8 @@ fn sync_panel(
         });
 }
 
-/// Every department's standing, what each values, and live requisitions.
+/// Every department's standing, what each values, live requisitions, and the
+/// station's radio history, split across two tabs.
 ///
 /// One panel rather than a modal, exactly like the old shift board: this is
 /// per-player `InteractionMode`, and a modal would trap one chemist on a
@@ -700,25 +738,113 @@ fn standing_board_body(
     shift: &Shift,
     stage: &BoardStage,
     arc: Option<&ArcHeadline>,
+    radio: &RadioLog,
+    tab: BoardTab,
 ) {
-    // The campaign notice goes above the standing table, because once there is
-    // one it is the most important thing on the board — and because a player
-    // who has just been told what they are dealing with should not have to
-    // scroll past five departments' requisitions to read it.
+    // The campaign notice goes above everything else, on both tabs, because
+    // once there is one it is the most important thing on the board — and
+    // because a player who has just been told what they are dealing with
+    // should not have to switch tabs to read it.
     if let Some(arc) = arc {
         draw_arc_notice(panel, arc);
     }
 
-    // The debrief replaces the sign controls but *not* the requisition table
-    // below it. Reading what the shift came to and then spending what it
-    // earned is one thought, and it is the thought the removed prep phase used
-    // to be for — putting the debrief on a screen of its own would split it
-    // back in two.
-    match stage {
-        BoardStage::Debrief(report) => draw_debrief(panel, report),
-        _ => draw_sign_controls(panel, shift, stage),
-    }
+    panel.spawn(row()).with_children(|row| {
+        for (caption, candidate) in [
+            ("Standing", BoardTab::Standing),
+            ("Radio log", BoardTab::Radio),
+        ] {
+            let mut entity = row.spawn(button(caption, PanelAction::ShowBoardTab(candidate)));
+            // Same marker the dispense-amount row and the book's own tabs
+            // use, so `button_feedback` colours the open one with no extra
+            // code.
+            if candidate == tab {
+                entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
+            }
+        }
+    });
 
+    match tab {
+        BoardTab::Standing => {
+            // The debrief replaces the sign controls but *not* the
+            // requisition table below it. Reading what the shift came to and
+            // then spending what it earned is one thought, and it is the
+            // thought the removed prep phase used to be for — putting the
+            // debrief on a screen of its own would split it back in two.
+            // Both stay pinned above the scroll pane below: the sign toggle
+            // must always be reachable without scrolling.
+            match stage {
+                BoardStage::Debrief(report) => draw_debrief(panel, report),
+                _ => draw_sign_controls(panel, shift, stage),
+            }
+            panel
+                .spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(10),
+                        max_height: vh(60),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    ScrollPosition::default(),
+                    ScrollPane,
+                ))
+                .with_children(|scroll| {
+                    draw_department_shop(scroll, shift);
+                });
+        }
+        BoardTab::Radio => {
+            // The log is the whole tab — nothing else is pinned above it but
+            // the tab row itself, so it gets the same generous height the
+            // book's own top-level list does.
+            panel
+                .spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(6),
+                        max_height: vh(66),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    ScrollPosition::default(),
+                    ScrollPane,
+                ))
+                .with_children(|scroll| {
+                    draw_radio_history(scroll, radio);
+                });
+        }
+    }
+}
+
+/// The station's radio history, oldest first — the same order the small
+/// always-on HUD feed reads, just the whole log instead of its last few
+/// lines.
+///
+/// Rendered declaratively from whatever snapshot `BoardView` supplied this
+/// rebuild, not patched in place: `sync_panel` resets `ScrollPosition` to
+/// zero on every rebuild, and radio lines land on their own clock throughout
+/// play, so wiring live updates in here would mean a player reading old
+/// chatter gets yanked back to the top on almost every delivery anywhere in
+/// the lab. `PanelSignature.department_standing` already forces a rebuild on
+/// essentially every delivery anyway, so this is current whenever the board
+/// legitimately redraws for any other reason.
+fn draw_radio_history(panel: &mut ChildSpawnerCommands, radio: &RadioLog) {
+    panel.spawn(label("Radio log", 15.0, TEXT));
+    if radio.entries.is_empty() {
+        panel.spawn(label("Nothing on the wire yet.", 12.0, TEXT_DIM));
+        return;
+    }
+    for entry in &radio.entries {
+        panel.spawn(label(
+            format!("[{}] {}", entry.channel, entry.text),
+            13.0,
+            if entry.good { TEXT } else { TEXT_DIM },
+        ));
+    }
+}
+
+/// Every department's standing, what each values, and its live requisitions.
+fn draw_department_shop(panel: &mut ChildSpawnerCommands, shift: &Shift) {
     for department in Department::ALL {
         panel.spawn(label(
             format!(
@@ -1820,7 +1946,7 @@ fn book_entries(
                 ..default()
             },
             ScrollPosition::default(),
-            BookScroll,
+            ScrollPane,
         ))
         .with_children(|pane| {
             if let Some((name, blurb)) = heading_text {
@@ -1926,7 +2052,7 @@ fn spawn_recipe_tree(
                         ..default()
                     },
                     ScrollPosition::default(),
-                    BookScroll,
+                    ScrollPane,
                 ))
                 .with_children(|pane| {
                     let mut visited = HashSet::new();
@@ -2140,19 +2266,25 @@ fn category_counts(
     (known, recipes.len())
 }
 
-/// The scrolling entry list inside the reference book.
+/// Marks whichever scrollable region the currently-open panel has — the
+/// reference book's entry list or formula tree, or the standing board's
+/// radio-history-plus-shop pane. Shared rather than one marker per panel:
+/// `sync_panel` despawns the whole `PanelRoot` subtree before rebuilding it,
+/// and only ever shows the book *or* one machine panel at a time, so there is
+/// never more than one scrollable region alive at once for this to be
+/// ambiguous about.
 #[derive(Component)]
-struct BookScroll;
+struct ScrollPane;
 
-/// Mouse wheel scrolls the book.
+/// Mouse wheel scrolls whichever panel is open.
 ///
 /// Written straight onto the one scrollable node rather than through Bevy's
-/// pointer-hover scroll events: the cursor is grabbed and invisible while the
-/// book is open, so there is no hover target to route through, and the book is
-/// the only thing on screen that can scroll.
-fn scroll_reference_book(
+/// pointer-hover scroll events: the cursor is grabbed and invisible while a
+/// panel is open, so there is no hover target to route through, and only one
+/// [`ScrollPane`] ever exists at a time for this to be ambiguous about.
+fn scroll_active_pane(
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
-    mut book: Query<(&mut ScrollPosition, &ComputedNode), With<BookScroll>>,
+    mut book: Query<(&mut ScrollPosition, &ComputedNode), With<ScrollPane>>,
 ) {
     let scrolled: f32 = wheel
         .read()
@@ -2915,6 +3047,16 @@ fn spawn_radio_feed(mut commands: Commands) {
         });
 }
 
+/// Slot 0 shows the oldest of the `slots` most recent lines.
+///
+/// The HUD only ever shows a fixed-size trailing window onto a log that can
+/// now hold far more than that window — `log.entries.get(slot.0)` alone
+/// only read as "the most recent lines" back when the log's own capacity
+/// happened to equal the window size.
+fn radio_window_start(total: usize, slots: usize) -> usize {
+    total.saturating_sub(slots)
+}
+
 fn update_radio_feed(
     log: Res<RadioLog>,
     mut slots: Query<(&RadioSlot, &mut Text, &mut TextColor)>,
@@ -2922,15 +3064,17 @@ fn update_radio_feed(
     if !log.is_changed() {
         return;
     }
+    let start = radio_window_start(log.entries.len(), RADIO_SLOTS);
     for (slot, mut text, mut color) in &mut slots {
-        let entry = log.entries.get(slot.0);
+        let index = start + slot.0;
+        let entry = log.entries.get(index);
         let line = entry
             .map(|entry| format!("[{}] {}", entry.channel, entry.text))
             .unwrap_or_default();
 
         // Older lines fade, so the newest report is the one that catches the
         // eye without needing an alert.
-        let age = log.entries.len().saturating_sub(slot.0 + 1);
+        let age = log.entries.len().saturating_sub(1).saturating_sub(index);
         let fade = 1.0 - (age as f32 * 0.13).min(0.55);
         let base = match entry {
             Some(entry) if entry.good => Color::srgb(0.62, 0.86, 0.62),
@@ -3112,6 +3256,7 @@ fn handle_panel_clicks(
     // rare branch was also an exclusive-access constraint against every system
     // that merely reads the notebook.
     mut book: ResMut<BookView>,
+    mut board_tab: ResMut<BoardTab>,
 ) {
     let Some((player, mut mode)) = modes.iter_mut().next() else {
         return;
@@ -3149,6 +3294,10 @@ fn handle_panel_clicks(
             }
             PanelAction::CloseRecipe => {
                 book.open_recipe = None;
+                continue;
+            }
+            PanelAction::ShowBoardTab(tab) => {
+                *board_tab = *tab;
                 continue;
             }
             PanelAction::Close => {
@@ -3253,6 +3402,7 @@ fn handle_panel_clicks(
             | PanelAction::ShowCategory(_)
             | PanelAction::OpenRecipe(_)
             | PanelAction::CloseRecipe
+            | PanelAction::ShowBoardTab(_)
             | PanelAction::Close => {}
         }
     }
@@ -3261,6 +3411,20 @@ fn handle_panel_clicks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_radio_hud_windows_onto_the_most_recent_lines() {
+        // Slot 0 must show the oldest of the trailing window, not the log's
+        // absolute index 0 — that only coincided back when the log's own
+        // capacity happened to equal the HUD's slot count.
+        assert_eq!(radio_window_start(3, 6), 0, "a short log needs no offset");
+        assert_eq!(radio_window_start(6, 6), 0, "exactly full still starts at 0");
+        assert_eq!(
+            radio_window_start(40, 6),
+            34,
+            "a log past the window shows only its tail"
+        );
+    }
 
     #[test]
     fn a_dial_reads_back_what_was_dragged_onto_it() {

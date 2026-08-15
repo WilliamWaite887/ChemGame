@@ -18,8 +18,14 @@ use crate::net::is_authority;
 use crate::orders::{OrderResolved, Outcome};
 use crate::AppState;
 
-/// Lines kept in the feed before the oldest scrolls off.
-const LOG_CAPACITY: usize = 6;
+/// Lines kept in the log before the oldest scrolls off.
+///
+/// Bigger than the small always-on HUD feed shows at once (`ui::RADIO_SLOTS`,
+/// 6) — this is the depth of history the standing board's scrollable radio
+/// section can show. `RadioEntry` is small and `broadcast_radio` already
+/// resends the whole buffer as one snapshot on every change, so 40 stays
+/// trivial next to everything else already crossing the wire per frame.
+const LOG_CAPACITY: usize = 40;
 
 pub struct RadioPlugin;
 
@@ -305,7 +311,10 @@ mod tests {
         }
         assert_eq!(log.entries.len(), LOG_CAPACITY);
         assert_eq!(log.entries.front().unwrap().text, "line 4");
-        assert_eq!(log.entries.back().unwrap().text, "line 9");
+        assert_eq!(
+            log.entries.back().unwrap().text,
+            format!("line {}", LOG_CAPACITY + 3)
+        );
     }
 
     #[test]

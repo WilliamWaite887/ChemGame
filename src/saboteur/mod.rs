@@ -229,6 +229,7 @@ fn handle_saboteur_resolution(
     campaign: Option<ResMut<crate::arc::Campaign>>,
     mut resolved: MessageReader<OrderResolved>,
     mut progress: ResMut<SaboteurProgress>,
+    mut shift: ResMut<Shift>,
     mut radio: ResMut<RadioLog>,
     mut loose: LooseGlassware,
 ) {
@@ -244,6 +245,18 @@ fn handle_saboteur_resolution(
         }
         progress.0 = (progress.0 + 1).min(script.visits.len().saturating_sub(1));
         if report.outcome != Outcome::Expired {
+            continue;
+        }
+
+        // A `SecondInspection` requisition absorbs one contamination before
+        // it happens.
+        if shift.requisition.saboteur_wards > 0 {
+            shift.requisition.saboteur_wards -= 1;
+            radio.push(RadioEntry {
+                channel: channel_for(&script.role),
+                text: "Engineering signed off without touching the glassware.".to_string(),
+                good: true,
+            });
             continue;
         }
 
@@ -311,6 +324,7 @@ mod tests {
         app.insert_resource(ChemDb(data()))
             .insert_resource(Script(script()))
             .init_resource::<SaboteurProgress>()
+            .init_resource::<Shift>()
             .init_resource::<RadioLog>()
             .add_message::<OrderResolved>()
             .add_systems(Update, handle_saboteur_resolution);
@@ -416,6 +430,37 @@ mod tests {
             before.total_volume()
         );
         assert_eq!(app.world().resource::<SaboteurProgress>().0, 1);
+    }
+
+    #[test]
+    fn a_banked_ward_absorbs_the_expiry_and_nothing_happens() {
+        let mut app = resolution_app();
+        let name = app.world().resource::<Script>().0.name.clone();
+        let beaker = loose_batch(&mut app);
+        let before = app.world().get::<Container>(beaker).unwrap().solution.clone();
+        app.world_mut()
+            .resource_mut::<Shift>()
+            .requisition
+            .saboteur_wards = 1;
+
+        resolve(&mut app, &name, Outcome::Expired);
+
+        assert_eq!(
+            app.world().get::<Container>(beaker).unwrap().solution.total_volume(),
+            before.total_volume(),
+            "a Second Inspection requisition should have covered this one"
+        );
+        assert_eq!(
+            app.world().resource::<Shift>().requisition.saboteur_wards,
+            0,
+            "the ward is spent, not banked indefinitely"
+        );
+        assert_eq!(
+            app.world().resource::<SaboteurProgress>().0,
+            1,
+            "the chain still advances even though nothing was touched"
+        );
+        assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
     }
 
     #[test]

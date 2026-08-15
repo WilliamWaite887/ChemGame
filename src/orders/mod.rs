@@ -646,14 +646,41 @@ impl Department {
 
 /// Supplies bought against a department's standing.
 ///
-/// Only glassware banks anything: it still has to be carried in by the
-/// courier, so a purchase lands at the next restock pass rather than
-/// instantly. Every other requisition kind applies the moment it is bought.
+/// Glassware banks because it still has to be carried in by the courier, so
+/// that purchase lands at the next restock pass rather than instantly. The
+/// ward/bonus fields below bank for the same underlying reason: each pays off
+/// against something that hasn't happened yet — the next expired visit from a
+/// department's own minor antagonist, or the next order generated — not the
+/// instant it's bought. Every other requisition kind applies the moment it is
+/// bought. None of these need `#[serde(default)]`: `Shift.requisition` is
+/// never written to `ProgressSave`, so a banked purchase not yet spent when
+/// the player quits is lost, same as an unspent glassware bonus always has
+/// been.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Requisition {
     /// Extra glassware on top of the standing target, banked until the next
     /// restock check consumes it.
     pub glassware: usize,
+    /// Bought by `RequisitionKind::SecondOpinion`. Consumed by
+    /// `quack::handle_quack_resolution`, which absorbs one instead of dosing
+    /// a bystander.
+    pub quack_wards: u32,
+    /// Bought by `RequisitionKind::LookTheOtherWay`. Consumed by
+    /// `security::schedule_raid`, which absorbs one instead of arming a
+    /// warning.
+    pub raid_wards: u32,
+    /// Bought by `RequisitionKind::ChainOfCustody`. Consumed by
+    /// `smuggler::handle_smuggler_resolution`, which absorbs one instead of
+    /// taking a container.
+    pub smuggler_wards: u32,
+    /// Bought by `RequisitionKind::SecondInspection`. Consumed by
+    /// `saboteur::handle_saboteur_resolution`, which absorbs one instead of
+    /// contaminating a container.
+    pub saboteur_wards: u32,
+    /// Bought by `RequisitionKind::CompedRound`. Consumed by
+    /// `orders::generate_orders`, which adds
+    /// `shift::COMPED_PATIENCE_BONUS_SECONDS` to the next order's patience.
+    pub patience_bonus_orders: u32,
 }
 
 /// What the career looked like when this shift opened.
@@ -915,7 +942,7 @@ fn generate_orders(
     station: Option<Res<StationData>>,
     mut spawner: Option<ResMut<OrderSpawner>>,
     knowledge: Option<Res<Knowledge>>,
-    shift: Res<Shift>,
+    mut shift: ResMut<Shift>,
     forecast: Option<Res<CurrentForecast>>,
     mut radio: ResMut<RadioLog>,
     active: Query<&CrewMember, crate::crew::NotResident>,
@@ -1019,7 +1046,15 @@ fn generate_orders(
     };
     let amount = deliverable_amount(&db, reagent, Units::whole(asked as i32));
 
-    let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
+    let mut patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
+    // A `CompedRound` requisition buys exactly the next order some extra
+    // patience — only this ordinary stream, never `generate_specific_orders`
+    // or any minor-thread visit, each of which has its own authored identity
+    // that "comped by the kitchen" doesn't fit.
+    if shift.requisition.patience_bonus_orders > 0 {
+        shift.requisition.patience_bonus_orders -= 1;
+        patience += crate::shift::COMPED_PATIENCE_BONUS_SECONDS;
+    }
     let crew = spawn_crew_member(&mut commands, crew_def, waiting as f32 * 0.95);
 
     // An ordinary order spawned here always describes what it needs, not
@@ -2480,6 +2515,78 @@ mod tests {
         // on a bench across the room would push vials down the counter.
         let bench = Vec3::new(COUNTER_SPOT.x, crate::lab::COUNTER_TOP, -3.0);
         assert_eq!(free_vial_lane(&[bench]).x, COUNTER_SPOT.x);
+    }
+
+    // -- order generation --------------------------------------------------
+
+    /// Enough world to run `generate_orders` for real, headless: a fresh
+    /// `Knowledge`, the real crew roster and order requests, and a spawner
+    /// timer already due. `patience_seconds` is pinned to a single value
+    /// (rather than the real file's range) so the roll it drives is
+    /// deterministic — `ShiftRules::for_tier` reproduces the base config
+    /// exactly at tier 0, which a freshly-opened `Shift` always is.
+    fn generate_orders_app() -> App {
+        let mut config = station_orders();
+        config.patience_seconds = (PINNED_PATIENCE, PINNED_PATIENCE);
+        let crew: Vec<CrewDef> =
+            ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap();
+
+        let mut app = App::new();
+        app.insert_resource(ChemDb(data()))
+            .insert_resource(Knowledge::new(&data()))
+            .insert_resource(StationData { crew, config })
+            .insert_resource(OrderSpawner {
+                timer: Timer::from_seconds(0.0, TimerMode::Once),
+            })
+            .init_resource::<Shift>()
+            .init_resource::<Time>()
+            .init_resource::<RadioLog>()
+            .add_systems(Update, generate_orders);
+        app
+    }
+
+    /// Pinned so a comped roll's result is checkable exactly, not just
+    /// "bigger than before". Above `station.orders.ron`'s own
+    /// `ramp.patience_floor` (80.0) — `ShiftRules::for_tier` clamps up to
+    /// that floor, so anything below it would silently stop testing what it
+    /// says it does.
+    const PINNED_PATIENCE: f32 = 100.0;
+
+    #[test]
+    fn a_comped_round_adds_patience_to_exactly_the_next_order() {
+        let mut app = generate_orders_app();
+        app.world_mut()
+            .resource_mut::<Shift>()
+            .requisition
+            .patience_bonus_orders = 1;
+
+        advance(&mut app, 1.0);
+
+        let mut query = app.world_mut().query::<&Order>();
+        let orders: Vec<&Order> = query.iter(app.world()).collect();
+        assert_eq!(orders.len(), 1, "exactly one order should have spawned");
+        assert_eq!(
+            orders[0].patience,
+            PINNED_PATIENCE + crate::shift::COMPED_PATIENCE_BONUS_SECONDS,
+            "a banked Comped Round should add its bonus to this order's patience"
+        );
+        assert_eq!(
+            app.world().resource::<Shift>().requisition.patience_bonus_orders,
+            0,
+            "the bonus is spent, not banked indefinitely"
+        );
+    }
+
+    #[test]
+    fn without_a_comped_round_patience_is_unmodified() {
+        let mut app = generate_orders_app();
+
+        advance(&mut app, 1.0);
+
+        let mut query = app.world_mut().query::<&Order>();
+        let orders: Vec<&Order> = query.iter(app.world()).collect();
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].patience, PINNED_PATIENCE);
     }
 
     // -- content guardrails ----------------------------------------------

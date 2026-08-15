@@ -22,7 +22,12 @@ use bevy_replicon::prelude::*;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::addiction::CarriedSuspicion;
+use crate::antagonist::SecuritySuspicion;
+use crate::chem_data::ChemDb;
+use crate::containers::{spawn_container, Container, ContainerKind};
 use crate::knowledge::Knowledge;
+use crate::lab::{COUNTER_DROP_Z, COUNTER_SPOT, COUNTER_TOP};
 use crate::machines::{Machine, MachineKind};
 use crate::net::is_authority;
 use crate::orders::{
@@ -30,6 +35,7 @@ use crate::orders::{
     SupplyDef,
 };
 use crate::produce::DeliverySchedule;
+use crate::radio::channel_for;
 use crate::radio::RadioEntry;
 use crate::radio::RadioLog;
 use crate::saves::SaveSlot;
@@ -323,18 +329,41 @@ pub fn crate_contents(count: usize, large_every: usize) -> (usize, usize) {
 // ---------------------------------------------------------------------------
 
 /// Something bought against a department's standing.
+///
+/// Most of the newer kinds are wards against a department's own minor
+/// antagonist (`quack`/`smuggler`/`saboteur`/`security::schedule_raid`) —
+/// standing spent there buys a concrete "this department has your back"
+/// payoff, not just bookkeeping. `Service` has no ward of its own: its minor
+/// (`obsessed`) is written to cost nothing mechanically, so there is nothing
+/// real to ward against.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RequisitionKind {
     Glassware,
     ProduceCrate,
     ResearchGrant,
+    AntitoxinCrate,
+    SecondOpinion,
+    QuietWord,
+    LookTheOtherWay,
+    ChainOfCustody,
+    SecondInspection,
+    KitchenCarePackage,
+    CompedRound,
 }
 
 impl RequisitionKind {
-    pub const ALL: [RequisitionKind; 3] = [
+    pub const ALL: [RequisitionKind; 11] = [
         RequisitionKind::Glassware,
         RequisitionKind::ProduceCrate,
         RequisitionKind::ResearchGrant,
+        RequisitionKind::AntitoxinCrate,
+        RequisitionKind::SecondOpinion,
+        RequisitionKind::QuietWord,
+        RequisitionKind::LookTheOtherWay,
+        RequisitionKind::ChainOfCustody,
+        RequisitionKind::SecondInspection,
+        RequisitionKind::KitchenCarePackage,
+        RequisitionKind::CompedRound,
     ];
 
     /// In the department's standing.
@@ -343,6 +372,14 @@ impl RequisitionKind {
             RequisitionKind::Glassware => 3,
             RequisitionKind::ProduceCrate => 4,
             RequisitionKind::ResearchGrant => 6,
+            RequisitionKind::AntitoxinCrate => 3,
+            RequisitionKind::SecondOpinion => 6,
+            RequisitionKind::QuietWord => 4,
+            RequisitionKind::LookTheOtherWay => 6,
+            RequisitionKind::ChainOfCustody => 5,
+            RequisitionKind::SecondInspection => 5,
+            RequisitionKind::KitchenCarePackage => 3,
+            RequisitionKind::CompedRound => 5,
         }
     }
 
@@ -351,6 +388,14 @@ impl RequisitionKind {
             RequisitionKind::Glassware => "Glassware",
             RequisitionKind::ProduceCrate => "Produce crate",
             RequisitionKind::ResearchGrant => "Research grant",
+            RequisitionKind::AntitoxinCrate => "Antitoxin crate",
+            RequisitionKind::SecondOpinion => "Second opinion",
+            RequisitionKind::QuietWord => "Quiet word",
+            RequisitionKind::LookTheOtherWay => "Look the other way",
+            RequisitionKind::ChainOfCustody => "Chain of custody",
+            RequisitionKind::SecondInspection => "Second inspection",
+            RequisitionKind::KitchenCarePackage => "Kitchen care package",
+            RequisitionKind::CompedRound => "Comped round",
         }
     }
 
@@ -359,6 +404,22 @@ impl RequisitionKind {
             RequisitionKind::Glassware => "Cargo stock the lab deeper on the next resupply",
             RequisitionKind::ProduceCrate => "Botany bring the next haul forward",
             RequisitionKind::ResearchGrant => "Two research points, right now",
+            RequisitionKind::AntitoxinCrate => "A filled dose of antitoxin, dropped at the counter",
+            RequisitionKind::SecondOpinion => {
+                "Absorbs the next time the ward's own doctor doses a bystander"
+            }
+            RequisitionKind::QuietWord => "Clears whatever suspicion has already built, right now",
+            RequisitionKind::LookTheOtherWay => {
+                "Absorbs the next raid before it's ever called in"
+            }
+            RequisitionKind::ChainOfCustody => "Absorbs the next time something walks off unwatched",
+            RequisitionKind::SecondInspection => {
+                "Absorbs the next time the glassware gets \"checked\""
+            }
+            RequisitionKind::KitchenCarePackage => {
+                "A filled bottle from the kitchen, dropped at the counter"
+            }
+            RequisitionKind::CompedRound => "The next order in arrives with extra patience",
         }
     }
 
@@ -370,8 +431,19 @@ impl RequisitionKind {
     /// be a different department if the roster grows one.
     pub fn department(self) -> Department {
         match self {
-            RequisitionKind::Glassware | RequisitionKind::ProduceCrate => Department::Cargo,
-            RequisitionKind::ResearchGrant => Department::Engineering,
+            RequisitionKind::Glassware
+            | RequisitionKind::ProduceCrate
+            | RequisitionKind::ChainOfCustody => Department::Cargo,
+            RequisitionKind::ResearchGrant | RequisitionKind::SecondInspection => {
+                Department::Engineering
+            }
+            RequisitionKind::AntitoxinCrate | RequisitionKind::SecondOpinion => {
+                Department::Medical
+            }
+            RequisitionKind::QuietWord | RequisitionKind::LookTheOtherWay => Department::Security,
+            RequisitionKind::KitchenCarePackage | RequisitionKind::CompedRound => {
+                Department::Service
+            }
         }
     }
 }
@@ -381,6 +453,13 @@ impl RequisitionKind {
 /// Early enough to be worth grinding right away, late enough that the player
 /// is not handed it the instant they buy it.
 const EXPEDITED_PRODUCE_SECONDS: f32 = 25.0;
+
+/// How much extra patience a `CompedRound` buys the next generated order.
+///
+/// Comparable to [`EXPEDITED_PRODUCE_SECONDS`]; roughly 15-20% of the base
+/// `patience_seconds` range in `station.orders.ron` (135-230s) — meaningful
+/// without trivializing the timer.
+pub(crate) const COMPED_PATIENCE_BONUS_SECONDS: f32 = 30.0;
 
 /// Standing is what you cash in for supplies.
 ///
@@ -395,14 +474,26 @@ pub fn can_afford(standing: i32, kind: RequisitionKind) -> bool {
 ///
 /// Returns whether it went through, so the caller never has to guess: a
 /// half-applied requisition that took the standing and delivered nothing is
-/// the worst outcome available here. Every kind but glassware applies at
-/// once — glassware still has to be carried in by hand, so it banks into
-/// [`Requisition::glassware`] for the next restock check to consume.
+/// the worst outcome available here. Glassware, and every ward/bonus kind,
+/// bank into a [`Requisition`] field for something else to consume later —
+/// glassware still has to be carried in by hand, and the wards pay off
+/// against something that hasn't happened yet. Everything else applies at
+/// once.
+///
+/// A plain function, not a Bevy system, so widening its signature for the
+/// newer kinds costs nothing against Bevy's 16-parameter system ceiling —
+/// unlike splitting the match across two functions, which would leave two
+/// places that both have to stay exhaustive over the same enum.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_requisition(
+    commands: &mut Commands,
     shift: &mut Shift,
     knowledge: &mut Knowledge,
     produce: Option<&mut DeliverySchedule>,
     supply: &SupplyDef,
+    db: &ChemDb,
+    suspicion: Option<&mut SecuritySuspicion>,
+    carried: Option<&mut CarriedSuspicion>,
     kind: RequisitionKind,
 ) -> bool {
     let department = kind.department();
@@ -423,12 +514,72 @@ pub fn apply_requisition(
         RequisitionKind::ResearchGrant => {
             knowledge.award_research(RESEARCH_GRANT);
         }
+        RequisitionKind::AntitoxinCrate => {
+            gift_container(commands, db, "dylovene");
+        }
+        RequisitionKind::KitchenCarePackage => {
+            gift_container(commands, db, "saline_glucose");
+        }
+        RequisitionKind::SecondOpinion => {
+            shift.requisition.quack_wards += 1;
+        }
+        RequisitionKind::LookTheOtherWay => {
+            shift.requisition.raid_wards += 1;
+        }
+        RequisitionKind::ChainOfCustody => {
+            shift.requisition.smuggler_wards += 1;
+        }
+        RequisitionKind::SecondInspection => {
+            shift.requisition.saboteur_wards += 1;
+        }
+        RequisitionKind::CompedRound => {
+            shift.requisition.patience_bonus_orders += 1;
+        }
+        RequisitionKind::QuietWord => {
+            if let Some(suspicion) = suspicion {
+                suspicion.0 = 0;
+            }
+            if let Some(carried) = carried {
+                carried.0 = 0.0;
+            }
+        }
     }
     true
 }
 
 /// What a research grant is worth.
 pub const RESEARCH_GRANT: u32 = 2;
+
+/// Drops a filled bottle at the counter's vial-drop spot, as an instant
+/// requisition's whole effect.
+///
+/// Reuses the exact "gift a filled container" idiom `obsessed::leaves_token`
+/// already uses: `spawn_container` for the empty vessel, then a queued
+/// command to fill it once it exists (`Container` isn't available to write
+/// synchronously from a plain `&mut Commands`). Filled to the bottle's full
+/// capacity rather than a token amount — this is a real crate, not a nudge.
+fn gift_container(commands: &mut Commands, db: &ChemDb, reagent_key: &str) {
+    let Some(reagent) = db.reagents.id_of(reagent_key) else {
+        warn!("requisition gifts unknown reagent '{reagent_key}'");
+        return;
+    };
+    let (_, height) = ContainerKind::Bottle.dimensions();
+    let token = spawn_container(
+        commands,
+        ContainerKind::Bottle,
+        Vec3::new(
+            COUNTER_SPOT.x - 0.6,
+            COUNTER_TOP + height * 0.5,
+            COUNTER_DROP_Z,
+        ),
+    );
+    let amount = ContainerKind::Bottle.capacity();
+    commands.queue(move |world: &mut World| {
+        if let Some(mut container) = world.get_mut::<Container>(token) {
+            let _ = container.solution.add(reagent, amount);
+        }
+    });
+}
 
 /// Spend standing on a department's supplies, any time affordability holds.
 #[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
@@ -445,13 +596,18 @@ pub struct ToggleAcceptingOrders {
     pub board: Entity,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_requisition(
+    mut commands: Commands,
     mut requests: MessageReader<FromClient<RequisitionRequested>>,
     boards: Query<&Machine>,
     station: Option<Res<StationData>>,
     mut shift: ResMut<Shift>,
     mut knowledge: ResMut<Knowledge>,
     mut produce: Option<ResMut<DeliverySchedule>>,
+    db: Res<ChemDb>,
+    mut suspicion: Option<ResMut<SecuritySuspicion>>,
+    mut carried: Option<ResMut<CarriedSuspicion>>,
     mut radio: ResMut<RadioLog>,
 ) {
     let Some(station) = station else {
@@ -462,16 +618,22 @@ fn handle_requisition(
             continue;
         }
         if !apply_requisition(
+            &mut commands,
             &mut shift,
             &mut knowledge,
             produce.as_deref_mut(),
             &station.config.supply,
+            &db,
+            suspicion.as_deref_mut(),
+            carried.as_deref_mut(),
             request.kind,
         ) {
             continue;
         }
+        // Was hardcoded to "CGO" while every kind was Cargo/Engineering
+        // flavoured; wrong the moment a Medical/Security/Service item exists.
         radio.push(RadioEntry {
-            channel: "CGO".to_string(),
+            channel: channel_for(request.kind.department().label()),
             text: format!("Requisition logged: {}.", request.kind.label()),
             good: true,
         });
@@ -1227,6 +1389,7 @@ mod tests {
         .init_resource::<Shift>()
         .init_resource::<RadioLog>()
         .insert_resource(Knowledge::new(&chemistry()))
+        .insert_resource(ChemDb(chemistry()))
         .insert_resource(station());
         app.finish();
         app.world_mut()
@@ -1435,6 +1598,79 @@ mod tests {
         requisition(&mut app, grinder, RequisitionKind::Glassware);
 
         assert_eq!(app.world().resource::<Shift>().standing(Department::Cargo), 20);
+    }
+
+    #[test]
+    fn an_instant_gift_drops_a_filled_bottle_at_the_counter() {
+        let (mut app, board) = with_standing(Department::Medical, 10);
+        requisition(&mut app, board, RequisitionKind::AntitoxinCrate);
+
+        let world = app.world_mut();
+        let mut query = world.query::<(&Container, &Transform)>();
+        let (container, transform) = query
+            .iter(world)
+            .find(|(container, _)| container.kind == ContainerKind::Bottle)
+            .expect("an Antitoxin Crate should drop a bottle");
+        assert!(
+            !container.solution.is_empty(),
+            "the bottle should arrive already filled, not just spawned"
+        );
+        assert_eq!(
+            transform.translation.z, COUNTER_DROP_Z,
+            "should land at the counter's drop spot"
+        );
+    }
+
+    #[test]
+    fn quiet_word_zeroes_both_suspicion_meters() {
+        let (mut app, board) = with_standing(Department::Security, 10);
+        app.insert_resource(SecuritySuspicion(7));
+        app.insert_resource(CarriedSuspicion(0.5));
+
+        requisition(&mut app, board, RequisitionKind::QuietWord);
+
+        assert_eq!(app.world().resource::<SecuritySuspicion>().0, 0);
+        assert_eq!(app.world().resource::<CarriedSuspicion>().0, 0.0);
+    }
+
+    /// Reads one field off a banked [`crate::orders::Requisition`].
+    type WardField = fn(&crate::orders::Requisition) -> u32;
+
+    #[test]
+    fn banked_ward_and_bonus_requisitions_stack() {
+        // All five follow the same shape as `a_glassware_requisition_stacks`:
+        // buy twice, the bank holds two.
+        let cases: [(RequisitionKind, Department, WardField); 5] = [
+            (RequisitionKind::SecondOpinion, Department::Medical, |r| {
+                r.quack_wards
+            }),
+            (
+                RequisitionKind::LookTheOtherWay,
+                Department::Security,
+                |r| r.raid_wards,
+            ),
+            (RequisitionKind::ChainOfCustody, Department::Cargo, |r| {
+                r.smuggler_wards
+            }),
+            (
+                RequisitionKind::SecondInspection,
+                Department::Engineering,
+                |r| r.saboteur_wards,
+            ),
+            (RequisitionKind::CompedRound, Department::Service, |r| {
+                r.patience_bonus_orders
+            }),
+        ];
+        for (kind, department, field) in cases {
+            let (mut app, board) = with_standing(department, 20);
+            requisition(&mut app, board, kind);
+            requisition(&mut app, board, kind);
+            assert_eq!(
+                field(&app.world().resource::<Shift>().requisition),
+                2,
+                "{kind:?} should stack like every other banked requisition"
+            );
+        }
     }
 
     // -- the accepting-orders toggle --------------------------------------

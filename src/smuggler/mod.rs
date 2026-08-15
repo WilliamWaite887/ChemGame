@@ -231,6 +231,7 @@ fn handle_smuggler_resolution(
     campaign: Option<ResMut<crate::arc::Campaign>>,
     mut resolved: MessageReader<OrderResolved>,
     mut progress: ResMut<SmugglerProgress>,
+    mut shift: ResMut<Shift>,
     mut radio: ResMut<RadioLog>,
     loose: LooseGlassware,
 ) {
@@ -246,6 +247,17 @@ fn handle_smuggler_resolution(
         }
         progress.0 = (progress.0 + 1).min(script.visits.len().saturating_sub(1));
         if report.outcome != Outcome::Expired {
+            continue;
+        }
+
+        // A `ChainOfCustody` requisition absorbs one theft before it happens.
+        if shift.requisition.smuggler_wards > 0 {
+            shift.requisition.smuggler_wards -= 1;
+            radio.push(RadioEntry {
+                channel: channel_for(&script.role),
+                text: "Cargo's paperwork actually matched, for once.".to_string(),
+                good: true,
+            });
             continue;
         }
 
@@ -289,6 +301,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(Script(script()))
             .init_resource::<SmugglerProgress>()
+            .init_resource::<Shift>()
             .init_resource::<RadioLog>()
             .add_message::<OrderResolved>()
             .add_systems(Update, handle_smuggler_resolution);
@@ -370,6 +383,35 @@ mod tests {
             1,
             "the chain still advances — they came, they were served"
         );
+    }
+
+    #[test]
+    fn a_banked_ward_absorbs_the_expiry_and_nothing_happens() {
+        let mut app = resolution_app();
+        let name = app.world().resource::<Script>().0.name.clone();
+        let beaker = loose_beaker(&mut app);
+        app.world_mut()
+            .resource_mut::<Shift>()
+            .requisition
+            .smuggler_wards = 1;
+
+        resolve(&mut app, &name, Outcome::Expired);
+
+        assert!(
+            app.world().get_entity(beaker).is_ok(),
+            "a Chain of Custody requisition should have covered this one"
+        );
+        assert_eq!(
+            app.world().resource::<Shift>().requisition.smuggler_wards,
+            0,
+            "the ward is spent, not banked indefinitely"
+        );
+        assert_eq!(
+            app.world().resource::<SmugglerProgress>().0,
+            1,
+            "the chain still advances even though nothing was taken"
+        );
+        assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
     }
 
     #[test]

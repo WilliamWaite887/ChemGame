@@ -242,6 +242,19 @@ fn handle_quack_resolution(
             continue;
         }
 
+        // A `SecondOpinion` requisition absorbs one malpractice dose before
+        // it happens — caught in time, not ignored, so the campaign is never
+        // told this one went unanswered.
+        if shift.requisition.quack_wards > 0 {
+            shift.requisition.quack_wards -= 1;
+            radio.push(RadioEntry {
+                channel: channel_for(&script.role),
+                text: format!("{}'s last patient turned out fine after all.", script.name),
+                good: true,
+            });
+            continue;
+        }
+
         let Some(improvised) = db.reagents.id_of(&script.improvised) else {
             warn!("quack improvises with unknown reagent '{}'", script.improvised);
             continue;
@@ -422,6 +435,35 @@ mod tests {
 
         assert!(app.world().get::<Bloodstream>(bystander).unwrap().0.is_empty());
         assert_eq!(app.world().resource::<QuackProgress>().0, 1);
+    }
+
+    #[test]
+    fn a_banked_ward_absorbs_the_expiry_and_nothing_happens() {
+        let mut app = resolution_app();
+        let name = app.world().resource::<Script>().0.name.clone();
+        let bystander = patient(&mut app, "Miner Sato", "Cargo");
+        app.world_mut()
+            .resource_mut::<Shift>()
+            .requisition
+            .quack_wards = 1;
+
+        resolve(&mut app, &name, Outcome::Expired);
+
+        assert!(
+            app.world().get::<Bloodstream>(bystander).unwrap().0.is_empty(),
+            "a Second Opinion requisition should have covered this one"
+        );
+        assert_eq!(
+            app.world().resource::<Shift>().requisition.quack_wards,
+            0,
+            "the ward is spent, not banked indefinitely"
+        );
+        assert_eq!(
+            app.world().resource::<QuackProgress>().0,
+            1,
+            "the chain still advances even though nobody was dosed"
+        );
+        assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
     }
 
     #[test]
