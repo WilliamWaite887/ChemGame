@@ -25,7 +25,10 @@
     requests: [
         (
             reagent: "space_drugs",
-            amounts: [15, 20],
+            // Overdoses at 20u, but the recipe yields in multiples of 3 —
+            // 20 itself can never be made exactly. See the note on
+            // "station.orders.ron" for the general case.
+            amounts: [15, 18],
             role: "Service",
             pretext: "Could I get some Space Drugs? It's for the bar — someone asked, I didn't ask why.",
             incident_line: "Security log: a crewman was seen glassy-eyed and giggling near the bar, no idea why.",
@@ -55,8 +58,10 @@
         ),
         (
             reagent: "methamphetamine",
-            // Overdoses at 10u.
-            amounts: [8, 10],
+            // Overdoses at 10u, but the recipe yields in multiples of 3 —
+            // 10 itself can never be made exactly. See the note on
+            // "station.orders.ron" for the general case.
+            amounts: [8, 9],
             role: "Engineering",
             pretext: "Any chance of some Methamphetamine? Double shift, need to stay sharp on the reactor.",
             incident_line: "Atmos flagged someone pacing the same corridor for forty minutes, talking to no one.",
@@ -73,7 +78,10 @@
         ),
         (
             reagent: "zombie_powder",
-            amounts: [8, 10],
+            // Overdoses at 10u, but the recipe yields in multiples of 3 —
+            // 10 itself can never be made exactly. See the note on
+            // "station.orders.ron" for the general case.
+            amounts: [8, 9],
             role: "Security",
             pretext: "I need some Zombie Powder for a restraint procedure. Nothing to worry about.",
             incident_line: "A crewman collapsed mid-sentence in the hallway — breathing, but unresponsive.",

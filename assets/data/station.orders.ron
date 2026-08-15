@@ -122,16 +122,20 @@
         (
             reagent: "bicaridine",
             themes: ["trauma"],
-            // Overdoses at 15u.
-            amounts: [8, 12, 15],
+            // Overdoses at 15u, but the recipe (chem.reactions.ron) only
+            // ever yields even amounts, so 15 itself can never be made
+            // exactly — a pill, bottle or syringe can only overshoot it to
+            // 16 and grade Overdose. 14 is the real ceiling.
+            amounts: [8, 12, 14],
             plea: "Got a crewman bleeding badly down here. Whatever stops it, quick as you can.",
             specific_plea: "Got a crewman bleeding badly down here. Bicaridine, quick as you can.",
         ),
         (
             reagent: "kelotane",
             themes: ["burns"],
-            // Overdoses at 15u.
-            amounts: [10, 12, 15],
+            // Overdoses at 15u. Same even-only recipe as bicaridine (see
+            // above), so 14 is the real ceiling — 15 cannot be made exactly.
+            amounts: [10, 12, 14],
             plea: "Welder burn. Nothing dramatic. Something for it would sort him out.",
             specific_plea: "Welder burn. Nothing dramatic. Some kelotane would sort it.",
         ),
@@ -139,16 +143,19 @@
             reagent: "dermaline",
             themes: ["burns"],
             // Overdoses at 10u — the tightest of the medicines, which is the
-            // trade for it being the strongest burn treatment.
-            amounts: [6, 8, 10],
+            // trade for it being the strongest burn treatment. The recipe
+            // yields in multiples of 3, so 9 is as close as it gets — 10
+            // itself would force an overshoot into Overdose.
+            amounts: [6, 8, 9],
             plea: "Plasma fire in engineering, burns are deep. Need your best burn treatment.",
             specific_plea: "Plasma fire in engineering, burns are deep. Need dermaline — nothing weaker's touching this.",
         ),
         (
             reagent: "dylovene",
             themes: ["poison"],
-            // Overdoses at 20u.
-            amounts: [12, 16, 20],
+            // Overdoses at 20u, but the recipe yields in multiples of 3, so
+            // 20 itself can never be made exactly. 18 is the real ceiling.
+            amounts: [12, 16, 18],
             plea: "Someone's been poisoned in the bar. Whatever clears it, please.",
             specific_plea: "Someone's been poisoned in the bar. Dylovene, please.",
         ),

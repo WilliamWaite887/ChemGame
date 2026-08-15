@@ -31,7 +31,10 @@
             afflicted_role: "Medical",
             responders: ["Medical"],
             cure_reagent: "dylovene",
-            cure_amount: 20,
+            // Overdoses at 20u, but the recipe yields in multiples of 3 —
+            // 20 itself can never be made exactly. See the same note on
+            // "station.orders.ron".
+            cure_amount: 18,
             alarm_line: "MEDICAL EMERGENCY, Chemistry â€” whatever's in their system is not slowing down.",
             plea: "It's eating them alive. I need an antitoxin, now, I don't care which one.",
             resolved_line: "Chemistry got there in time. Krokodil's ugly, but it's treatable if you're fast.",
@@ -44,7 +47,10 @@
             afflicted_role: "Security",
             responders: ["Medical", "Security"],
             cure_reagent: "dylovene",
-            cure_amount: 20,
+            // Overdoses at 20u, but the recipe yields in multiples of 3 —
+            // 20 itself can never be made exactly. See the same note on
+            // "station.orders.ron".
+            cure_amount: 18,
             alarm_line: "Chemistry, Security's got an officer down and combative â€” we need something in them fast.",
             plea: "Everything's too loud and my hands won't stop shaking. Give me anything for it.",
             resolved_line: "Officer's stable. Whatever you gave them, it worked â€” Security won't forget it.",
@@ -57,7 +63,10 @@
             afflicted_role: "Engineering",
             responders: ["Medical"],
             cure_reagent: "dylovene",
-            cure_amount: 20,
+            // Overdoses at 20u, but the recipe yields in multiples of 3 —
+            // 20 itself can never be made exactly. See the same note on
+            // "station.orders.ron".
+            cure_amount: 18,
             alarm_line: "Chemistry, we've got someone in Engineering who hasn't slept in two shifts and is seizing up.",
             plea: "My heart won't stop racing. Please, whatever you've got, just make it stop.",
             resolved_line: "Engineering's crewman is off the floor and breathing easy. Good work, Chemistry.",
@@ -70,7 +79,10 @@
             afflicted_role: "Cargo",
             responders: ["Medical", "Security"],
             cure_reagent: "dylovene",
-            cure_amount: 20,
+            // Overdoses at 20u, but the recipe yields in multiples of 3 —
+            // 20 itself can never be made exactly. See the same note on
+            // "station.orders.ron".
+            cure_amount: 18,
             alarm_line: "Chemistry, Cargo's got someone screaming that the crates are talking. This is not a drill.",
             plea: "Make it stop. Make the voices stop, please, I'll take anything.",
             resolved_line: "Cargo's crewman is lucid again and asking what happened. Chemistry came through.",

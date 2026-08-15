@@ -24,15 +24,19 @@
         ),
         (
             reagent: "hyperzine",
-            // Overdoses at 10u.
-            amount: 10,
+            // Overdoses at 10u, but the recipe yields in multiples of 3 —
+            // 10 itself can never be made exactly. See the note on
+            // "station.orders.ron" for the general case.
+            amount: 9,
             plea: "Not for a patient. For me. It's a double shift and I'm not asking twice.",
         ),
         (
             reagent: "synaptizine",
-            // Overdoses at 5u — the doctor asking for even this much is the
-            // point of the scene.
-            amount: 5,
+            // Overdoses at 5u, but the recipe yields in multiples of 3 — 5
+            // itself can never be made exactly, so 3 is as far as a single
+            // dose can safely go. Still most of the way to the threshold,
+            // which is the point of the doctor asking for it at all.
+            amount: 3,
             plea: "I have a theory about combining these. Don't put that in the log.",
         ),
         (

@@ -881,6 +881,33 @@ pub fn deliverable_amount(db: &ChemDb, reagent: ReagentId, asked: Units) -> Unit
     }
 }
 
+/// The step size a synthesized `reagent` can actually be produced in, or
+/// `None` if it is dispensed directly and so has no such restriction.
+///
+/// A reaction's `products` entry is a ratio, not an absolute — running it at
+/// scale 1.5 is exactly as valid to the resolver as scale 1. But a fractional
+/// scale means a fractional, unpackageable dose, and a scale bounded by
+/// anything other than an exact integer leaves an unconsumed remainder of
+/// some reactant sitting in the same beaker as the product it just made,
+/// which is contamination the moment it reaches [`grade`]. Excess upstream
+/// ingredients dodge this (the Mixing Chamber's buffer can isolate a single
+/// named reagent out of a dirty mix, so a batch can always be brewed with
+/// room to spare and only the part that's needed pulled clean) but the
+/// reaction's own product number cannot be dodged the same way: every whole,
+/// uncontaminated batch of `reagent` is some integer multiple of it.
+///
+/// Only `assert_askable` reads this today, hence `cfg(test)` — nothing at
+/// runtime needs a reagent's batch granularity yet.
+#[cfg(test)]
+pub fn synthesis_multiple(db: &ChemDb, reagent: ReagentId) -> Option<Units> {
+    let reaction = db.reactions.producer_of(reagent)?;
+    reaction
+        .products
+        .iter()
+        .find(|(id, _)| *id == reagent)
+        .map(|(_, amount)| *amount)
+}
+
 /// Decides how a delivery went, and which reagent it was actually judged
 /// against.
 ///
@@ -2652,6 +2679,33 @@ mod tests {
              ever fill it",
             db.reagents.get(id).overdose
         );
+
+        // `asked` itself being under the threshold is not enough if the
+        // recipe cannot land on it exactly (see `synthesis_multiple`): a
+        // chemist who cannot hit `amount` precisely has to round up to the
+        // next multiple their recipe actually produces, and if that
+        // overshoots the overdose threshold, no pill, bottle or syringe
+        // could ever fill this order either — only rounding it down would,
+        // which grades `Short` instead. Only the smallest such multiple
+        // matters; anything bigger that still clears the threshold is a
+        // safe overshoot, exactly as an authored amount below the ceiling
+        // already is.
+        if let (Some(multiple), Some(threshold)) =
+            (synthesis_multiple(db, id), db.reagents.get(id).overdose)
+        {
+            let remainder = asked.raw() % multiple.raw();
+            if remainder != 0 {
+                let nearest = asked + Units::from_raw(multiple.raw() - remainder);
+                assert!(
+                    nearest <= threshold,
+                    "{whose} asks for {asked} of {reagent}, but its recipe only ever yields \
+                     multiples of {multiple} — the nearest exact, uncontaminated batch is \
+                     {nearest}, past the {threshold} overdose threshold, so every dose a pill, \
+                     bottle or syringe could actually be filled with either falls short of \
+                     {asked} or overdoses"
+                );
+            }
+        }
     }
 
     #[test]
