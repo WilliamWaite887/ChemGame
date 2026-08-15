@@ -26,7 +26,8 @@ use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRe
 
 use crate::body::{Bloodstream, Body};
 use crate::containers::{Container, HeldBy, InSlot, InSlotB, Stored};
-use crate::crew::CrewMember;
+use crate::crew::{AtCounter, CrewMember};
+use crate::door::Door;
 use crate::hazards::{ActiveHazard, SmokeCloud, SmokePayload};
 use crate::machines::{Buffer, DispenseAmount, Hopper, Machine, Thermostat};
 use crate::orders::{CounterOrder, CrisisOrder, Order};
@@ -512,6 +513,13 @@ fn register_replication(app: &mut App) {
         // order queue sat empty. `patience`/`waited` are plain `f32`, so it
         // can finally ride the wire like everything else here.
         .replicate::<Order>()
+        // The one bit of the (deliberately server-side) `CrewRoute::phase` a
+        // client's order queue HUD needs — see `crew::AtCounter`'s own doc
+        // comment. Without this a joining client's queue populated with
+        // `Order`/`CrewMember` but could never tell arriving from waiting, and
+        // `update_order_queue`'s query for a `CrewRoute` that no client entity
+        // ever carries left the whole panel permanently blank.
+        .replicate::<AtCounter>()
         // Unlike `IllicitOrder`, a crisis has nothing to hide — see its own
         // doc comment. Replicated so `crisis::pulse_alert_lighting` reads the
         // same "is one active" answer on every peer with no sync message.
@@ -528,6 +536,10 @@ fn register_replication(app: &mut App) {
         // What the chamber is set to. Without this the second chemist to walk
         // up cannot see it is running and cooks the batch.
         .replicate::<Thermostat>()
+        // Whether a door is open. `door::decide_door_state` is the only
+        // writer; every peer's leaves, `Solid` and `WalkableAreas` bridge
+        // follow this one bool.
+        .replicate::<Door>()
         // Clouds are entities, so replication carries them and no snapshot
         // message is needed — which is exactly why they are entities.
         .replicate::<SmokeCloud>()

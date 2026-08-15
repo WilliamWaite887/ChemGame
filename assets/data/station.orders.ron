@@ -39,6 +39,15 @@
         stretch_step: 0.02,
         stretch_cap: 0.4,
         forecast_boost: 2.0,
+
+        // Team-size scaling, layered on top of the tier ramp above rather
+        // than replacing it — see `shift::scale_for_chemists`. Solo
+        // (one chemist) is a mathematical no-op by construction: these three
+        // are the newest and least-playtested knobs in this file, expect to
+        // re-tune them once a 3-4 person table has actually been played.
+        chemist_gap_scale: 0.85,
+        max_active_per_chemist: 1,
+        max_active_chemist_cap: 3,
     ),
 
     // Cargo tops the lab up to `glassware_target` on a periodic check.

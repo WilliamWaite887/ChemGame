@@ -83,7 +83,16 @@ impl Plugin for PlayerPlugin {
                         // rather than relying on the position of this tuple
                         // inside the outer `.chain()`, which is exactly what
                         // got lost when the pause gate was added.
-                        (mouse_look, send_move_input.after(mouse_look))
+                        (
+                            mouse_look,
+                            send_move_input.after(mouse_look),
+                            // Client only — see its own doc comment. Also
+                            // needs the fresh yaw `mouse_look` just wrote, for
+                            // the same reason `send_move_input` does.
+                            predict_local_movement
+                                .after(mouse_look)
+                                .run_if(not(is_authority)),
+                        )
                             .run_if(crate::settings::not_paused),
                         follow_chemist,
                     )
@@ -144,6 +153,22 @@ pub struct PlayerCamera {
 pub struct Look {
     pub yaw: f32,
     pub pitch: f32,
+}
+
+/// Client-only prediction of the local chemist's own position, advanced
+/// immediately from local input rather than waiting for the round trip
+/// through the server. See [`predict_local_movement`].
+///
+/// Not replicated, and not read by anything gameplay-affecting: only
+/// [`follow_chemist`] prefers this over the real, authoritative `Transform`
+/// when it exists — which is also where the camera lives, so every raycast
+/// and every highlighted panel inherits the same instant feel for free. The
+/// chemist's actual `Transform`, what the server holds and what every other
+/// peer sees, is untouched; this is purely how *your own* screen decides
+/// where to draw *you*.
+#[derive(Component)]
+pub(crate) struct Predicted {
+    translation: Vec3,
 }
 
 /// Tells a client which chemist is theirs.
@@ -455,19 +480,17 @@ fn mouse_look(
 /// book — from a packet every frame to ten a second.
 const MOVE_INPUT_RESEND_SECONDS: f32 = 0.1;
 
-fn send_move_input(
-    time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
-    settings: Res<crate::settings::Settings>,
-    players: Query<(&Look, &InteractionMode), With<LocalPlayer>>,
-    mut outgoing: MessageWriter<MoveInput>,
-    mut last: Local<Option<(Vec2, f32, bool)>>,
-    mut since_send: Local<f32>,
-) {
-    let Ok((look, mode)) = players.single() else {
-        return;
-    };
-
+/// Reads this frame's local movement intent from the keyboard:
+/// forward/strafe (already normalised) and whether sprint is held.
+///
+/// Shared by [`send_move_input`], which reports it to the server, and
+/// [`predict_local_movement`], which acts on it immediately — so the two can
+/// never disagree about what the player just pressed.
+fn read_move_intent(
+    keys: &ButtonInput<KeyCode>,
+    settings: &crate::settings::Settings,
+    mode: &InteractionMode,
+) -> (Vec2, bool) {
     let bind = &settings.bindings;
     let mut direction = Vec2::ZERO;
     if mode.is_roaming() {
@@ -488,6 +511,23 @@ fn send_move_input(
     // Only meaningful while actually roaming, for the same reason `direction`
     // is: a chemist at an open panel is not running anywhere.
     let sprint = mode.is_roaming() && keys.pressed(bind.sprint);
+    (direction, sprint)
+}
+
+fn send_move_input(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    settings: Res<crate::settings::Settings>,
+    players: Query<(&Look, &InteractionMode), With<LocalPlayer>>,
+    mut outgoing: MessageWriter<MoveInput>,
+    mut last: Local<Option<(Vec2, f32, bool)>>,
+    mut since_send: Local<f32>,
+) {
+    let Ok((look, mode)) = players.single() else {
+        return;
+    };
+
+    let (direction, sprint) = read_move_intent(&keys, &settings, mode);
 
     // Any change goes out the same frame, so this costs no responsiveness —
     // note that includes mouse-look, since `yaw` is part of the command, and
@@ -612,9 +652,97 @@ fn apply_move_input(
     }
 }
 
+/// Advances [`Predicted`] from local input immediately, instead of waiting
+/// for [`apply_move_input`]'s result to complete a round trip through the
+/// server and back.
+///
+/// The authoritative `Transform` a client receives by replication is always
+/// at least one round trip stale — barely visible on a LAN, plainly choppy
+/// over anything slower (`net::steam`'s relayed transport chiefly, which
+/// never even attempts a direct connection). Resolves collision with the
+/// same [`push_out`]/[`WalkableAreas::contain`] `apply_move_input` uses, so a
+/// future change to how a chemist collides with a wall lands on both without
+/// anyone having to remember to update this too.
+///
+/// Reconciliation is a hard rebase, not a replay: whenever a fresh
+/// authoritative `Transform` lands (`authoritative.is_changed()`, which on a
+/// client only ever fires from an incoming replication write, since nothing
+/// client-side still writes this chemist's `Transform`), the prediction
+/// snaps its baseline to it and keeps predicting forward from there. That
+/// gives up a little accuracy — a small pop backward once per round trip,
+/// bounded by how far you can run in that time — in exchange for never
+/// needing to buffer or replay past input.
+///
+/// `run_if(not(is_authority))`: the host's own chemist is already moved with
+/// zero latency by `apply_move_input` running in the very same process, so
+/// predicting it too would just be a second writer contesting the one
+/// `Predicted` a joining client actually needs this for.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn predict_local_movement(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    settings: Res<crate::settings::Settings>,
+    solids: Query<(&Transform, &Solid), Without<Chemist>>,
+    areas: Res<lab::WalkableAreas>,
+    mut commands: Commands,
+    seed: Query<(Entity, &Transform), (With<LocalPlayer>, Without<Predicted>)>,
+    mut chemist: Query<
+        (Ref<Transform>, &Look, &InteractionMode, &Body, &Bloodstream, &mut Predicted),
+        With<LocalPlayer>,
+    >,
+) {
+    // Seeds `Predicted` from whichever real `Transform` the chemist already
+    // holds — replicated in, or set at `spawn_chemist` for the host's own —
+    // rather than a default that would pop the camera to the origin for one
+    // frame. The insertion lands next frame (`Commands` are deferred), which
+    // is also why the `chemist` query below finds nothing yet the very frame
+    // this runs; that is a quiet no-op, not a bug.
+    for (entity, transform) in &seed {
+        commands.entity(entity).insert(Predicted {
+            translation: transform.translation,
+        });
+    }
+
+    let Ok((authoritative, look, mode, body, blood, mut predicted)) = chemist.single_mut() else {
+        return;
+    };
+
+    if authoritative.is_changed() {
+        predicted.translation = authoritative.translation;
+    }
+
+    let (direction, sprint) = read_move_intent(&keys, &settings, mode);
+    if direction == Vec2::ZERO {
+        return;
+    }
+    let speed = walk_speed(blood, body, sprint);
+    if speed <= 0.0 {
+        return;
+    }
+
+    let local = Vec3::new(direction.x, 0.0, direction.y);
+    let step = Quat::from_rotation_y(look.yaw) * local;
+    let mut position = predicted.translation + step * speed * time.delta_secs();
+    position.y = EYE_HEIGHT;
+    for (solid_transform, solid) in &solids {
+        position = push_out(position, solid_transform.translation, solid.half_extents);
+    }
+    predicted.translation = areas.contain(position, PLAYER_RADIUS);
+}
+
 /// Keeps the camera on the chemist's shoulders, aimed by local yaw and pitch.
-pub(crate) type LocalChemists<'w, 's> =
-    Query<'w, 's, (&'static Transform, &'static Look), (With<LocalPlayer>, Without<PlayerCamera>)>;
+///
+/// `Option<&Predicted>` rather than requiring it: the host's own chemist
+/// never gets one (`predict_local_movement` only runs `not(is_authority)`),
+/// and a joining client's chemist does not have one yet for its first frame
+/// or two — both fall back to the plain, authoritative `Transform`, exactly
+/// what this read before prediction existed.
+pub(crate) type LocalChemists<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Transform, &'static Look, Option<&'static Predicted>),
+    (With<LocalPlayer>, Without<PlayerCamera>),
+>;
 
 /// `pub(crate)` since M12, so `fx`'s camera-effect systems can order
 /// themselves `.after(follow_chemist)` from a separate plugin — Bevy resolves
@@ -627,10 +755,10 @@ pub(crate) fn follow_chemist(
     mut cameras: Query<(&mut Transform, &PlayerCamera)>,
 ) {
     for (mut camera, target) in &mut cameras {
-        let Ok((chemist, look)) = chemists.get(target.chemist) else {
+        let Ok((chemist, look, predicted)) = chemists.get(target.chemist) else {
             continue;
         };
-        camera.translation = chemist.translation;
+        camera.translation = predicted.map_or(chemist.translation, |p| p.translation);
         camera.rotation = Quat::from_rotation_y(look.yaw) * Quat::from_rotation_x(look.pitch);
     }
 }
@@ -1022,6 +1150,87 @@ mod tests {
             bursty_step, single_step,
             "a frame that receives two queued messages must move the chemist \
              once, not twice"
+        );
+    }
+
+    // -- client-side prediction ---------------------------------------------
+
+    fn predict_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<crate::settings::Settings>()
+            .insert_resource(lab::WalkableAreas::from_floor_plan())
+            .add_systems(Update, predict_local_movement);
+        app
+    }
+
+    fn local_chemist(app: &mut App) -> Entity {
+        app.world_mut()
+            .spawn((
+                LocalPlayer,
+                Look::default(),
+                InteractionMode::default(),
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_xyz(lab::SPAWN_SPOT.x, EYE_HEIGHT, lab::SPAWN_SPOT.z),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn predicted_movement_advances_the_same_frame_the_key_is_pressed() {
+        // The whole point of prediction: a client's own movement must not sit
+        // waiting on a round trip through the server before it shows up.
+        let mut app = predict_app();
+        let chemist = local_chemist(&mut app);
+
+        // Seeds `Predicted` from the starting `Transform` — nothing has moved
+        // yet, there is simply no prediction to read until this runs once.
+        tick(&mut app, 0.1);
+        assert!(
+            app.world().get::<Predicted>(chemist).is_some(),
+            "the first tick must seed Predicted from the starting Transform"
+        );
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        tick(&mut app, 0.1);
+
+        let predicted = app.world().get::<Predicted>(chemist).unwrap();
+        assert_ne!(
+            predicted.translation.z, lab::SPAWN_SPOT.z,
+            "holding forward must move the prediction immediately — no \
+             server round trip belongs anywhere in this loop"
+        );
+    }
+
+    #[test]
+    fn a_fresh_authoritative_transform_rebases_the_prediction() {
+        // Reconciliation is a hard rebase, not a blend — see
+        // `predict_local_movement`'s own doc comment. Whatever the server's
+        // replicated `Transform` says must win the instant it changes.
+        let mut app = predict_app();
+        let chemist = local_chemist(&mut app);
+        tick(&mut app, 0.1);
+
+        let elsewhere = Vec3::new(
+            lab::SPAWN_SPOT.x + 3.0,
+            EYE_HEIGHT,
+            lab::SPAWN_SPOT.z + 3.0,
+        );
+        app.world_mut()
+            .get_mut::<Transform>(chemist)
+            .unwrap()
+            .translation = elsewhere;
+        tick(&mut app, 0.1);
+
+        let predicted = app.world().get::<Predicted>(chemist).unwrap();
+        assert_eq!(
+            predicted.translation, elsewhere,
+            "a changed authoritative Transform must replace the prediction's \
+             baseline, exactly as an incoming replication write would"
         );
     }
 

@@ -3,12 +3,14 @@
 mod addiction;
 mod antagonist;
 mod arc;
+mod audio;
 mod body;
 mod chem_data;
 mod containers;
 mod crew;
 mod crisis;
 mod cult;
+mod door;
 mod ending;
 mod fx;
 mod hazards;
@@ -153,6 +155,10 @@ fn main() {
                 // What the chemistry above does to the camera and the
                 // models — reads `Bloodstream`, never mutates it.
                 fx::FxPlugin,
+                // After `crew` (above, outside this tuple) and `player`
+                // (this tuple): the proximity trigger reads `Chemist` and
+                // `CrewMember` alike to decide when to open.
+                door::DoorPlugin,
             ),
             // `settings` owns the pause overlay as well as the knobs, and
             // reuses the menu's own shell to draw it — so it goes with them.
@@ -166,6 +172,12 @@ fn main() {
                 // Unwinds a session on the way out, so quitting to the menu
                 // and opening another save does not inherit this one's career.
                 session::SessionPlugin,
+                // Reads `Settings::master_volume` and every other module's
+                // state/messages; nothing reads it back. Goes last for that
+                // reason, not because build order matters — every plugin
+                // above has already registered whatever message type it
+                // reacts to before any system actually runs.
+                audio::SfxPlugin,
             ),
         ));
 

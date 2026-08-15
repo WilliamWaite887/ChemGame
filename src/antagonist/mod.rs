@@ -24,6 +24,7 @@ use crate::crew::{spawn_crew_member, CrewMember};
 use crate::interaction::Interactable;
 use crate::net::is_authority;
 use crate::orders::{deliverable_amount, IllicitOrder, Order, OrderResolved, Shift, StationData};
+use crate::player::Chemist;
 use crate::radio::{PendingBroadcasts, RadioEntry, RadioLog};
 use crate::shift::current_rules;
 use crate::AppState;
@@ -253,6 +254,7 @@ fn generate_antagonist_orders(
     underworld: Res<UnderworldStanding>,
     mut broadcasts: ResMut<PendingBroadcasts>,
     active: Query<&CrewMember, crate::crew::NotResident>,
+    chemists: Query<(), With<Chemist>>,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
@@ -272,8 +274,9 @@ fn generate_antagonist_orders(
     // antagonist visits keep pace as the ramp tightens instead of becoming
     // relatively rarer the longer a career runs. The multiplier's own range
     // additionally narrows as underworld standing climbs — see
-    // `effective_gap_multiplier`.
-    let rules = current_rules(&station.config, &shift);
+    // `effective_gap_multiplier`. Also scaled by however many chemists are
+    // in the lab, exactly like the legitimate stream it tracks.
+    let rules = current_rules(&station.config, &shift, chemists.iter().count());
     let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
     let (lo, hi) = effective_gap_multiplier(&script, underworld.0);
     let multiplier = rng.random_range(lo..=hi);
@@ -476,7 +479,10 @@ mod tests {
                 // on a zero-duration timer's edge-case semantics.
                 timer: Timer::from_seconds(0.01, TimerMode::Once),
             })
-            .init_resource::<Shift>()
+            .insert_resource(Shift {
+                accepting_orders: true,
+                ..Default::default()
+            })
             .init_resource::<Time>()
             .init_resource::<PendingBroadcasts>()
             .init_resource::<UnderworldStanding>()

@@ -28,6 +28,7 @@ use crate::crew::{spawn_crew_member, CrewDef};
 use crate::interaction::Interactable;
 use crate::net::is_authority;
 use crate::orders::{deliverable_amount, Order, OrderResolved, Outcome, Shift, StationData};
+use crate::player::Chemist;
 use crate::radio::{channel_for, RadioEntry, RadioLog};
 use crate::shift::current_rules;
 use crate::AppState;
@@ -146,6 +147,7 @@ fn generate_saboteur_visit(
     progress: Res<SaboteurProgress>,
     shift: Res<Shift>,
     mut radio: ResMut<RadioLog>,
+    chemists: Query<(), With<Chemist>>,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
@@ -158,7 +160,7 @@ fn generate_saboteur_visit(
     }
 
     let mut rng = rand::rng();
-    let rules = current_rules(&station.config, &shift);
+    let rules = current_rules(&station.config, &shift, chemists.iter().count());
     let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
     let multiplier = rng.random_range(script.gap_multiplier.0..=script.gap_multiplier.1);
     spawner.timer = Timer::from_seconds(legit_gap * multiplier, TimerMode::Once);

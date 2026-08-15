@@ -14,10 +14,11 @@ use bevy::prelude::*;
 use chem_sim::{Category, DamageKind, Kelvin, ReactionId, ReagentId, Units};
 
 use crate::arc::{ArcScript, Campaign, Reveal};
+use crate::audio::{PlaySfx, Sfx};
 use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, InSlot, InSlotB, Stored};
-use crate::crew::{CrewMember, CrewPhase, CrewRoute};
+use crate::crew::{AtCounter, CrewMember};
 use crate::interaction::{leave_machine, InteractionMode, Interactable, LeaveMachineRequested};
 use crate::knowledge::{
     product_name, reaction_categories, BuyHintRequested, Knowledge, RecipeDiscovered,
@@ -159,6 +160,13 @@ enum PanelAction {
     ShowBoardTab(BoardTab),
     Close,
 }
+
+/// Drawn on a [`PanelAction::Requisition`] button dimmed for insufficient
+/// standing — see `draw_department_shop`. Read back at click time so a click
+/// on a dead button plays [`Sfx::UiRefused`] and sends nothing, instead of
+/// silently mailing a request the server was always going to reject.
+#[derive(Component)]
+struct Refused;
 
 /// Which of the standing board's two tabs is open.
 ///
@@ -871,9 +879,11 @@ fn draw_department_shop(panel: &mut ChildSpawnerCommands, shift: &Shift) {
                 let mut entity = row.spawn(button(caption, PanelAction::Requisition(kind)));
                 // Drawn dead rather than drawn live and silently doing
                 // nothing — a button that looks clickable but is refused
-                // reads as the game being broken.
+                // reads as the game being broken. `Refused` is what makes
+                // that literal: `handle_panel_clicks` reads it back and
+                // turns a click here into `Sfx::UiRefused`, not a request.
                 if !available {
-                    entity.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
+                    entity.insert((BackgroundColor(Color::srgb(0.11, 0.12, 0.14)), Refused));
                 }
             }
         });
@@ -2466,17 +2476,17 @@ fn update_phase_banner(shift: Res<Shift>, banner: BannerText) {
 fn update_order_queue(
     db: Res<ChemDb>,
     shift: Res<Shift>,
-    orders: Query<(&CrewMember, &Order, &CrewRoute)>,
+    orders: Query<(&CrewMember, &Order, Has<AtCounter>)>,
     mut slots: Query<(&OrderSlot, &mut Text, &mut TextColor), Without<ShiftReadout>>,
     readout: ShiftText,
     plea_line: PleaText,
 ) {
     // Most urgent first, so the one about to expire is always at the top.
-    let mut pending: Vec<(&CrewMember, &Order, &CrewRoute)> = orders.iter().collect();
+    let mut pending: Vec<(&CrewMember, &Order, bool)> = orders.iter().collect();
     pending.sort_by(|a, b| a.1.remaining().total_cmp(&b.1.remaining()));
 
     for (slot, mut text, mut color) in &mut slots {
-        let line = pending.get(slot.0).map(|(member, order, route)| {
+        let line = pending.get(slot.0).map(|(member, order, at_counter)| {
             // `order.specific` is freely queryable (nothing secret about it —
             // see its own doc comment) and always wins when set. Otherwise
             // this never queries `Has<IllicitOrder>` — see that marker's own
@@ -2494,24 +2504,21 @@ fn update_order_queue(
                     .unwrap_or_else(|| db.reagents.get(order.reagent).name.clone())
             };
             let reagent = &want;
-            match route.phase {
-                CrewPhase::Arriving => {
-                    format!(
-                        "{}\n  {} {}  ·  on the way",
-                        member.name, order.amount, reagent
-                    )
-                }
-                _ => {
-                    let remaining = order.remaining() as u32;
-                    format!(
-                        "{}\n  {} {}  ·  {}:{:02}",
-                        member.name,
-                        order.amount,
-                        reagent,
-                        remaining / 60,
-                        remaining % 60
-                    )
-                }
+            if *at_counter {
+                let remaining = order.remaining() as u32;
+                format!(
+                    "{}\n  {} {}  ·  {}:{:02}",
+                    member.name,
+                    order.amount,
+                    reagent,
+                    remaining / 60,
+                    remaining % 60
+                )
+            } else {
+                format!(
+                    "{}\n  {} {}  ·  on the way",
+                    member.name, order.amount, reagent
+                )
             }
         });
 
@@ -3240,16 +3247,24 @@ struct PanelMessages<'w> {
     leave_machine: MessageWriter<'w, LeaveMachineRequested>,
     upgrade_dispenser: MessageWriter<'w, UpgradeDispenserRequested>,
     buy_hint: MessageWriter<'w, BuyHintRequested>,
+    play: MessageWriter<'w, PlaySfx>,
 }
 
 #[allow(clippy::too_many_arguments)]
 fn handle_panel_clicks(
-    buttons: Query<(&Interaction, &PanelAction), Changed<Interaction>>,
+    buttons: Query<(Entity, &Interaction, &PanelAction), Changed<Interaction>>,
+    refused: Query<(), With<Refused>>,
     mut modes: Query<(Entity, &mut InteractionMode), With<LocalPlayer>>,
     mut machines: Query<&mut Machine>,
     mut amounts: Query<&mut DispenseAmount>,
     mut out: PanelMessages,
     thermostats: Query<&Thermostat>,
+    // Read-only mirrors of `handle_eject`'s own occupancy check — client-side,
+    // so `Sfx::Eject` (and the request itself) only fires when there is
+    // actually something to eject, not on every press of a button that is
+    // drawn live regardless of whether the slot is empty.
+    slotted: Query<(Entity, &InSlot)>,
+    slotted_b: Query<(Entity, &InSlotB)>,
     // No `ResMut<Knowledge>`/`Res<ChemDb>` here any more: buying a hint was the
     // only thing that needed them, and it now goes through the authority like
     // every other career-wide purchase. Holding a `ResMut` every frame for one
@@ -3266,7 +3281,7 @@ fn handle_panel_clicks(
         _ => None,
     };
 
-    for (interaction, action) in &buttons {
+    for (entity, interaction, action) in &buttons {
         if *interaction != Interaction::Pressed {
             continue;
         }
@@ -3321,12 +3336,20 @@ fn handle_panel_clicks(
                     machine,
                     reagent: *reagent,
                 });
+                out.play.write(PlaySfx(Sfx::DispensePour));
             }
             PanelAction::Eject(slot) => {
-                out.eject.write(EjectRequested {
-                    machine,
-                    slot: *slot,
-                });
+                let occupied = match slot {
+                    MachineSlot::A => slotted_container(machine, &slotted).is_some(),
+                    MachineSlot::B => slotted_container_b(machine, &slotted_b).is_some(),
+                };
+                if occupied {
+                    out.eject.write(EjectRequested {
+                        machine,
+                        slot: *slot,
+                    });
+                    out.play.write(PlaySfx(Sfx::Eject));
+                }
             }
             PanelAction::Take(item) => {
                 out.take.write(TakeRequested {
@@ -3348,6 +3371,7 @@ fn handle_panel_clicks(
                     direction: BufferDirection::ToBuffer,
                     slot: *slot,
                 });
+                out.play.write(PlaySfx(Sfx::BufferTransfer));
             }
             PanelAction::ToContainer(reagent, amount, slot) => {
                 out.transfer.write(BufferTransferRequested {
@@ -3357,6 +3381,7 @@ fn handle_panel_clicks(
                     direction: BufferDirection::ToContainer,
                     slot: *slot,
                 });
+                out.play.write(PlaySfx(Sfx::BufferTransfer));
             }
             PanelAction::Package(kind) => {
                 out.package.write(PackageRequested {
@@ -3369,6 +3394,7 @@ fn handle_panel_clicks(
             }
             PanelAction::Grind { all } => {
                 out.grind.write(GrindRequested { machine, all: *all });
+                out.play.write(PlaySfx(Sfx::Grinder));
             }
             PanelAction::TogglePower => {
                 let on = thermostats
@@ -3391,10 +3417,19 @@ fn handle_panel_clicks(
                 out.open_up.write(OpenUpAgain { board: machine });
             }
             PanelAction::Requisition(kind) => {
-                out.requisition.write(RequisitionRequested {
-                    board: machine,
-                    kind: *kind,
-                });
+                if refused.contains(entity) {
+                    // Dimmed for insufficient standing (`draw_department_shop`)
+                    // — a click here plays the refusal and sends nothing,
+                    // rather than mailing a request the server would only
+                    // reject.
+                    out.play.write(PlaySfx(Sfx::UiRefused));
+                } else {
+                    out.requisition.write(RequisitionRequested {
+                        board: machine,
+                        kind: *kind,
+                    });
+                    out.play.write(PlaySfx(Sfx::RequisitionConfirm));
+                }
             }
             // Handled above, before the machine guard.
             PanelAction::BuyHint(_)
@@ -3462,7 +3497,10 @@ mod tests {
 
     #[test]
     fn the_banner_reads_the_accepting_sign() {
-        let mut shift = Shift::default();
+        let mut shift = Shift {
+            accepting_orders: true,
+            ..default()
+        };
         assert!(accepting_banner_line(&shift).contains("OPEN"));
         // The number is the point of the line: it is what turns "another
         // order" into "shift six".
@@ -3486,7 +3524,10 @@ mod tests {
     fn the_board_offers_call_it_a_shift_only_once_the_counter_is_clear() {
         let (_, knowledge) = book_fixture();
 
-        let open = Shift::default();
+        let open = Shift {
+            accepting_orders: true,
+            ..default()
+        };
         assert!(matches!(
             board_stage(&open, &knowledge, 0),
             BoardStage::Open

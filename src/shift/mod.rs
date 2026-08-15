@@ -153,9 +153,37 @@ impl ShiftRules {
 /// alone makes `orders_per_tier` mean what it reads as — "five *good*
 /// deliveries" — and means a bad run costs standing, which is recoverable,
 /// rather than difficulty, which was not.
-pub fn current_rules(config: &OrderConfig, shift: &Shift) -> ShiftRules {
+pub fn current_rules(config: &OrderConfig, shift: &Shift, chemist_count: usize) -> ShiftRules {
     let tier = shift.succeeded / config.ramp.orders_per_tier.max(1);
-    ShiftRules::for_tier(config, &config.ramp, tier)
+    let base = ShiftRules::for_tier(config, &config.ramp, tier);
+    scale_for_chemists(base, chemist_count, &config.ramp)
+}
+
+/// Widens the counter and shortens arrival gaps for however many chemists
+/// are actually in the lab right now, independent of the difficulty tier
+/// above.
+///
+/// `chemist_count` is read fresh from a live query at every call site, never
+/// cached, so this responds within one gap interval of someone joining or
+/// leaving mid-shift — the same way the tier above was already never frozen
+/// against a shift boundary.
+///
+/// Solo (`chemist_count <= 1`) reproduces the input unchanged: `extra` is
+/// `0`, `chemist_gap_scale.powi(0)` is `1.0`, and the `max_active` bonus is
+/// `0`. Nothing about today's tuning moves for a chemist working alone.
+fn scale_for_chemists(rules: ShiftRules, chemist_count: usize, ramp: &RampDef) -> ShiftRules {
+    let extra = chemist_count.saturating_sub(1);
+    let decay = ramp.chemist_gap_scale.powi(extra as i32);
+    let gap_seconds = (
+        (rules.gap_seconds.0 * decay).max(ramp.gap_floor),
+        (rules.gap_seconds.1 * decay).max(ramp.gap_floor),
+    );
+    let bonus = (extra * ramp.max_active_per_chemist).min(ramp.max_active_chemist_cap);
+    ShiftRules {
+        gap_seconds,
+        max_active: rules.max_active + bonus,
+        ..rules
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1250,7 +1278,7 @@ mod tests {
             ..Shift::default()
         };
 
-        let rules = current_rules(&base, &shift);
+        let rules = current_rules(&base, &shift, 1);
         let expected = ShiftRules::for_tier(&base, &base.ramp, 2);
         assert_eq!(rules, expected);
     }
@@ -1268,7 +1296,7 @@ mod tests {
         };
 
         assert_eq!(
-            current_rules(&base, &drowning),
+            current_rules(&base, &drowning, 1),
             ShiftRules::for_tier(&base, &base.ramp, 0),
             "a career of nothing but failures must stay at tier 0"
         );
@@ -1286,7 +1314,86 @@ mod tests {
             ..clean.clone()
         };
 
-        assert_eq!(current_rules(&base, &clean), current_rules(&base, &messy));
+        assert_eq!(
+            current_rules(&base, &clean, 1),
+            current_rules(&base, &messy, 1)
+        );
+    }
+
+    #[test]
+    fn a_solo_chemist_sees_todays_numbers_exactly() {
+        // `chemist_count <= 1` must be a no-op — solo pacing does not move a
+        // single second or slot for this feature, by construction rather
+        // than by a separate tuning pass.
+        let base = config();
+        let shift = Shift::default();
+
+        assert_eq!(
+            current_rules(&base, &shift, 1),
+            current_rules(&base, &shift, 0),
+            "zero and one connected chemist must read identically"
+        );
+        assert_eq!(
+            current_rules(&base, &shift, 1),
+            ShiftRules::for_tier(&base, &base.ramp, 0)
+        );
+    }
+
+    #[test]
+    fn more_chemists_shorten_the_gap_and_widen_the_counter() {
+        let base = config();
+        let shift = Shift::default();
+
+        let solo = current_rules(&base, &shift, 1);
+        let duo = current_rules(&base, &shift, 2);
+        let quad = current_rules(&base, &shift, 4);
+
+        assert!(
+            duo.gap_seconds.0 < solo.gap_seconds.0 && duo.gap_seconds.1 < solo.gap_seconds.1,
+            "a second chemist should shorten the gap, not just the tier ramp"
+        );
+        assert!(
+            quad.gap_seconds.0 < duo.gap_seconds.0,
+            "each additional chemist should keep shortening the gap"
+        );
+        assert!(
+            quad.max_active > duo.max_active && duo.max_active > solo.max_active,
+            "the counter should widen as more chemists join"
+        );
+    }
+
+    #[test]
+    fn the_player_driven_bonus_stops_at_its_own_cap() {
+        let base = config();
+        let shift = Shift::default();
+
+        let quad = current_rules(&base, &shift, 4);
+        let ridiculous = current_rules(&base, &shift, 40);
+
+        assert_eq!(
+            quad.max_active, ridiculous.max_active,
+            "the player-count bonus must not grow without bound"
+        );
+        assert_eq!(
+            quad.max_active,
+            base.max_active + base.ramp.max_active_chemist_cap
+        );
+    }
+
+    #[test]
+    fn the_chemist_gap_never_crosses_the_same_floor_the_tier_ramp_uses() {
+        let base = config();
+        // A late-tier shift, so the tier ramp has already pushed the gap
+        // down near `gap_floor` on its own — the player-count decay must
+        // not push it any lower than that same floor.
+        let shift = Shift {
+            succeeded: base.ramp.orders_per_tier * 50,
+            ..Shift::default()
+        };
+
+        let rules = current_rules(&base, &shift, 4);
+        assert!(rules.gap_seconds.0 >= base.ramp.gap_floor);
+        assert!(rules.gap_seconds.1 >= base.ramp.gap_floor);
     }
 
     // -- forecast weighting -----------------------------------------------
@@ -1679,6 +1786,13 @@ mod tests {
     fn either_chemist_can_flip_the_sign() {
         let mut app = shift_app();
         let board = board(&mut app);
+        assert!(!app.world().resource::<Shift>().accepting_orders, "the sign starts down");
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: ToggleAcceptingOrders { board },
+        });
+        app.update();
         assert!(app.world().resource::<Shift>().accepting_orders);
 
         app.world_mut().write_message(FromClient {
@@ -1687,13 +1801,6 @@ mod tests {
         });
         app.update();
         assert!(!app.world().resource::<Shift>().accepting_orders);
-
-        app.world_mut().write_message(FromClient {
-            client_id: ClientId::Server,
-            message: ToggleAcceptingOrders { board },
-        });
-        app.update();
-        assert!(app.world().resource::<Shift>().accepting_orders);
     }
 
     // -- calling a shift --------------------------------------------------
@@ -1729,12 +1836,29 @@ mod tests {
         app.update();
     }
 
+    /// Ensures the sign is down, regardless of which way `Shift::default`
+    /// currently starts it — a plain toggle would silently flip the wrong
+    /// way if that default ever changes again, exactly as it did once
+    /// already (the sign now starts down; this used to be a bare toggle).
     fn put_the_sign_down(app: &mut App, board: Entity) {
-        app.world_mut().write_message(FromClient {
-            client_id: ClientId::Server,
-            message: ToggleAcceptingOrders { board },
-        });
-        app.update();
+        if app.world().resource::<Shift>().accepting_orders {
+            app.world_mut().write_message(FromClient {
+                client_id: ClientId::Server,
+                message: ToggleAcceptingOrders { board },
+            });
+            app.update();
+        }
+    }
+
+    /// The other absolute direction — see [`put_the_sign_down`].
+    fn put_the_sign_up(app: &mut App, board: Entity) {
+        if !app.world().resource::<Shift>().accepting_orders {
+            app.world_mut().write_message(FromClient {
+                client_id: ClientId::Server,
+                message: ToggleAcceptingOrders { board },
+            });
+            app.update();
+        }
     }
 
     #[test]
@@ -1765,6 +1889,7 @@ mod tests {
         // in would strand whoever arrives the next second.
         let mut app = shift_app();
         let board = board(&mut app);
+        put_the_sign_up(&mut app, board);
 
         call_it(&mut app, board);
         assert!(!app.world().resource::<Shift>().called);
@@ -1899,7 +2024,10 @@ mod tests {
 
     #[test]
     fn the_call_it_rule_is_the_one_the_button_draws_from() {
-        let open = Shift::default();
+        let open = Shift {
+            accepting_orders: true,
+            ..default()
+        };
         assert!(!can_call_it(&open, 0), "the sign is still up");
 
         let closing = Shift {

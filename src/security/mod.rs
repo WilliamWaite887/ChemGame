@@ -325,7 +325,10 @@ mod tests {
         ))
         .init_resource::<RaidSchedule>()
         .init_resource::<SecuritySuspicion>()
-        .init_resource::<Shift>()
+        .insert_resource(Shift {
+            accepting_orders: true,
+            ..Default::default()
+        })
         .init_resource::<Time>()
         .init_resource::<RadioLog>()
         .add_systems(Update, schedule_raid);

@@ -161,6 +161,18 @@ impl CrewRoute {
     }
 }
 
+/// Marks a crew member as having reached the counter — the one bit of
+/// [`CrewRoute::phase`] the order queue HUD needs. `CrewRoute` itself
+/// deliberately stays server-side (see the comment in [`spawn_crew_member`]):
+/// its waypoints and pending destination are simulation detail nobody else
+/// needs, but a client still has to tell "on the way" from "waiting, and the
+/// clock is running" to draw its own copy of the queue. Inserted the instant
+/// [`walk_route`] flips `phase` to [`CrewPhase::Waiting`] and never removed —
+/// once an order is delivered or expires its `Order` component goes with it,
+/// which is what actually drops a crew member out of the queue, on both ends.
+#[derive(Component, Serialize, Deserialize)]
+pub struct AtCounter;
+
 fn door_x() -> f32 {
     (DOOR_MIN_X + DOOR_MAX_X) * 0.5
 }
@@ -533,6 +545,7 @@ fn walk_route(
                 commands.entity(entity).despawn();
             } else if route.phase == CrewPhase::Arriving {
                 route.phase = CrewPhase::Waiting;
+                commands.entity(entity).insert(AtCounter);
             }
             continue;
         };

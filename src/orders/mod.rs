@@ -177,6 +177,41 @@ pub struct RampDef {
     /// How much harder a forecast leans on the requests it names. `2.0` makes a
     /// themed request three times as likely as an untagged one.
     pub forecast_boost: f64,
+    /// Multiplied into the gap between orders once per chemist beyond the
+    /// first, same shape as `gap_scale`'s tier decay but keyed on the live
+    /// headcount instead — see [`current_rules`]. `1.0` at solo by
+    /// construction (zero chemists beyond the first), so this is inert
+    /// unless someone else is actually in the lab.
+    #[serde(default = "default_chemist_gap_scale")]
+    pub chemist_gap_scale: f32,
+    /// How many more crew the counter can support per chemist beyond the
+    /// first, on top of whatever the tier ramp already grants.
+    #[serde(default = "default_max_active_per_chemist")]
+    pub max_active_per_chemist: usize,
+    /// Ceiling on the *player-driven* `max_active` bonus alone — independent
+    /// of `max_active_cap`, which still governs the tier-driven ceiling a
+    /// solo chemist eventually hits. Keeps a full table from ballooning the
+    /// queue into something nobody can read.
+    #[serde(default = "default_max_active_chemist_cap")]
+    pub max_active_chemist_cap: usize,
+}
+
+/// Matches `station.orders.ron`'s own default — see
+/// `RampDef::chemist_gap_scale`.
+fn default_chemist_gap_scale() -> f32 {
+    0.85
+}
+
+/// Matches `station.orders.ron`'s own default — see
+/// `RampDef::max_active_per_chemist`.
+fn default_max_active_per_chemist() -> usize {
+    1
+}
+
+/// Matches `station.orders.ron`'s own default — see
+/// `RampDef::max_active_chemist_cap`.
+fn default_max_active_chemist_cap() -> usize {
+    3
 }
 
 impl Default for RampDef {
@@ -193,6 +228,9 @@ impl Default for RampDef {
             stretch_step: 0.02,
             stretch_cap: 0.4,
             forecast_boost: 2.0,
+            chemist_gap_scale: default_chemist_gap_scale(),
+            max_active_per_chemist: default_max_active_per_chemist(),
+            max_active_chemist_cap: default_max_active_chemist_cap(),
         }
     }
 }
@@ -317,8 +355,13 @@ fn arm_arrival_clocks(commands: &mut Commands, config: &OrderConfig, shift: &Shi
     // The first specific ask is armed on the same ramp-scaled cadence its
     // own re-arm uses — `Shift` is already at its tier-0 default here, so
     // (unlike the antagonist thread's very first visit) this needs no
-    // separate flat constant.
-    let rules = current_rules(config, shift);
+    // separate flat constant. A flat `1` for the chemist count: this runs
+    // once at session start, before the shift's own `accepting_orders` sign
+    // is even up (it now starts closed — see `Shift::default`), so nothing
+    // real can consume this timer's value before `generate_specific_orders`
+    // re-arms it for real against however many chemists have actually
+    // joined by then.
+    let rules = current_rules(config, shift, 1);
     let mut rng = rand::rng();
     let first_specific_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1)
         * rng.random_range(config.specific_gap_multiplier.0..=config.specific_gap_multiplier.1);
@@ -745,7 +788,13 @@ impl Default for Shift {
             botched: 0,
             department_standing: HashMap::new(),
             requisition: Requisition::default(),
-            accepting_orders: true,
+            // The sign starts down. A save always resumes into a closed lab
+            // (this field is not persisted, same as `called` — see its own
+            // doc comment), and a brand new career starts here too: the
+            // player opens up when they — and in co-op, their teammates —
+            // are actually ready, rather than crew already walking in on
+            // the very first frame.
+            accepting_orders: false,
             shift_number: 1,
             opened_at: None,
             called: false,
@@ -973,6 +1022,7 @@ fn generate_orders(
     forecast: Option<Res<CurrentForecast>>,
     mut radio: ResMut<RadioLog>,
     active: Query<&CrewMember, crate::crew::NotResident>,
+    chemists: Query<(), With<Chemist>>,
 ) {
     let Some(knowledge) = knowledge else {
         return;
@@ -988,8 +1038,10 @@ fn generate_orders(
     }
 
     // Computed fresh from career totals rather than frozen per shift — there
-    // is no shift boundary left to freeze a snapshot against.
-    let rules = current_rules(&station.config, &shift);
+    // is no shift boundary left to freeze a snapshot against. Also fresh
+    // every call on how many chemists are actually in the lab right now, so
+    // a mid-shift join or leave takes effect on the next re-arm below.
+    let rules = current_rules(&station.config, &shift, chemists.iter().count());
     let rules = &rules;
 
     if !spawner.timer.tick(time.delta()).just_finished() {
@@ -1143,6 +1195,7 @@ fn generate_specific_orders(
     forecast: Option<Res<CurrentForecast>>,
     mut radio: ResMut<RadioLog>,
     active: Query<&CrewMember, crate::crew::NotResident>,
+    chemists: Query<(), With<Chemist>>,
 ) {
     let Some(knowledge) = knowledge else {
         return;
@@ -1154,7 +1207,7 @@ fn generate_specific_orders(
         return;
     }
 
-    let rules = current_rules(&station.config, &shift);
+    let rules = current_rules(&station.config, &shift, chemists.iter().count());
     let rules = &rules;
 
     if !spawner.timer.tick(time.delta()).just_finished() {
@@ -2565,7 +2618,10 @@ mod tests {
             .insert_resource(OrderSpawner {
                 timer: Timer::from_seconds(0.0, TimerMode::Once),
             })
-            .init_resource::<Shift>()
+            .insert_resource(Shift {
+                accepting_orders: true,
+                ..Default::default()
+            })
             .init_resource::<Time>()
             .init_resource::<RadioLog>()
             .add_systems(Update, generate_orders);

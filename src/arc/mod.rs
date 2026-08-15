@@ -43,6 +43,7 @@ use crate::orders::{
     deliverable_amount, reference_category, CounterOrder, Order, OrderKind, OrderResolved, Shift,
     StationData,
 };
+use crate::player::Chemist;
 use crate::radio::{announce_request, RadioEntry, RadioLog};
 use crate::shift::current_rules;
 use crate::AppState;
@@ -648,6 +649,7 @@ fn generate_counter_orders(
     mut radio: ResMut<RadioLog>,
     active: Query<(), With<CounterOrder>>,
     waiting: Query<&CrewMember, crate::crew::NotResident>,
+    chemists: Query<(), With<Chemist>>,
 ) {
     let (Some(station), Some(script), Some(campaign)) = (station, script, campaign) else {
         return;
@@ -682,7 +684,7 @@ fn generate_counter_orders(
     }
 
     let mut rng = rand::rng();
-    let rules = current_rules(&station.config, &shift);
+    let rules = current_rules(&station.config, &shift, chemists.iter().count());
     let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
     let multiplier =
         rng.random_range(script.counter_gap_multiplier.0..=script.counter_gap_multiplier.1);
@@ -998,8 +1000,12 @@ mod tests {
             .init_resource::<RadioLog>()
             .init_resource::<Time>()
             // `advance_plot` reads the accepting-orders sign to decide whether
-            // the drift runs at all.
-            .init_resource::<Shift>()
+            // the drift runs at all — the sign now starts down by default, so
+            // this test app opens it explicitly.
+            .insert_resource(Shift {
+                accepting_orders: true,
+                ..Default::default()
+            })
             .add_message::<OrderResolved>()
             .add_systems(
                 Update,

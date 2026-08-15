@@ -52,13 +52,13 @@ pub const ROOM_HEIGHT: f32 = 3.2;
 #[cfg_attr(not(feature = "trenchbroom"), allow(dead_code))]
 pub const TB_SCALE: f32 = 40.0;
 
-const WALL_THICKNESS: f32 = 0.25;
+pub(crate) const WALL_THICKNESS: f32 = 0.25;
 /// Width of every doorway. The walkable slab through a door is this less the
 /// player's diameter, so much under 1.4 becomes a funnel you have to aim at.
-const DOOR_WIDTH: f32 = 1.8;
+pub(crate) const DOOR_WIDTH: f32 = 1.8;
 /// Head height of a doorway. The wall above one is filled in, so you cannot see
 /// over the top into the gap between two rooms.
-const DOOR_HEIGHT: f32 = 2.3;
+pub(crate) const DOOR_HEIGHT: f32 = 2.3;
 
 /// Centre of the crew door, in world x. Lines up with [`COUNTER_SPOT`] so crew
 /// walk a straight line in from the station to the counter.
@@ -218,9 +218,9 @@ pub const ROOMS: [Room; 5] = [
 /// know whether it is an outer wall, a wall shared with the next room, or a
 /// shared wall with a door in it. Twelve runs is little enough to read at a
 /// glance, and `every_room_is_walled_in` catches a gap left by a mistyped span.
-struct WallRun {
+pub(crate) struct WallRun {
     /// True if the run travels along x — that is, a north or south wall.
-    along_x: bool,
+    pub(crate) along_x: bool,
     /// The fixed axis: z for a run along x, x for a run along z.
     fixed: f32,
     from: f32,
@@ -294,7 +294,7 @@ impl WallRun {
     }
 
     /// Centre of a span on this run, in world space.
-    fn point(&self, along: f32) -> Vec3 {
+    pub(crate) fn point(&self, along: f32) -> Vec3 {
         if self.along_x {
             Vec3::new(along, 0.0, self.fixed)
         } else {
@@ -313,7 +313,12 @@ impl WallRun {
 }
 
 /// Every doorway in the suite, as (the run it is cut into, its centre).
-fn doorways() -> impl Iterator<Item = (&'static WallRun, f32)> {
+///
+/// `pub(crate)`: `door::spawn_doors` walks this to place one door per
+/// opening, in the same order `WalkableAreas::from_floor_plan` bridges them
+/// in — `Door::doorway_index` is a position in *this* iterator, and both
+/// sides rely on it being stable and deterministic.
+pub(crate) fn doorways() -> impl Iterator<Item = (&'static WallRun, f32)> {
     WALLS
         .iter()
         .flat_map(|run| run.doors.iter().map(move |center| (run, *center)))
@@ -448,6 +453,16 @@ pub struct Bounds {
 }
 
 impl Bounds {
+    /// An inverted rectangle — `is_standable()` is false and `holds()` is
+    /// false for every point. What a doorway bridge collapses to while its
+    /// door is shut; see [`WalkableAreas::set_door_blocked`].
+    pub const EMPTY: Bounds = Bounds {
+        min_x: 0.0,
+        max_x: -1.0,
+        min_z: 0.0,
+        max_z: -1.0,
+    };
+
     pub fn holds(&self, point: Vec3) -> bool {
         point.x >= self.min_x
             && point.x <= self.max_x
@@ -524,6 +539,25 @@ const MAX_BODY_RADIUS: f32 = 0.4;
 /// reintroduced from the other direction.
 const DOOR_BRIDGE_REACH: f32 = 2.0 * MAX_BODY_RADIUS + WALL_THICKNESS * 0.5;
 
+/// The healthy (open) walkable bridge for the doorway cut into `run` at
+/// `center`. Factored out of [`WalkableAreas::from_floor_plan`] so
+/// [`WalkableAreas::set_door_blocked`] can recompute exactly the same
+/// rectangle to reopen a door, rather than caching a copy of it somewhere.
+fn doorway_bridge_bounds(run: &WallRun, center: f32) -> Bounds {
+    let (half_x, half_z) = if run.along_x {
+        (DOOR_WIDTH * 0.5, DOOR_BRIDGE_REACH)
+    } else {
+        (DOOR_BRIDGE_REACH, DOOR_WIDTH * 0.5)
+    };
+    let at = run.point(center);
+    Bounds {
+        min_x: at.x - half_x,
+        max_x: at.x + half_x,
+        min_z: at.z - half_z,
+        max_z: at.z + half_z,
+    }
+}
+
 /// A rectangle of standable floor.
 #[derive(Debug, Clone)]
 pub struct Region {
@@ -562,21 +596,7 @@ impl WalkableAreas {
         // the wall itself, so without a region spanning the opening a chemist
         // would be sealed into whichever room they started in.
         for (run, center) in doorways() {
-            let (half_x, half_z) = if run.along_x {
-                (DOOR_WIDTH * 0.5, DOOR_BRIDGE_REACH)
-            } else {
-                (DOOR_BRIDGE_REACH, DOOR_WIDTH * 0.5)
-            };
-            let at = run.point(center);
-            areas.push(
-                Bounds {
-                    min_x: at.x - half_x,
-                    max_x: at.x + half_x,
-                    min_z: at.z - half_z,
-                    max_z: at.z + half_z,
-                },
-                None,
-            );
+            areas.push(doorway_bridge_bounds(run, center), None);
         }
 
         areas
@@ -588,6 +608,30 @@ impl WalkableAreas {
 
     pub fn regions(&self) -> &[Region] {
         &self.regions
+    }
+
+    /// Opens or closes the `doorway_index`-th doorway (`lab::doorways()`
+    /// order) for navigation and containment alike.
+    ///
+    /// A closed bridge collapses to [`Bounds::EMPTY`] rather than being
+    /// removed from the list — `NavGraph::build` and `contain` both already
+    /// skip a non-standable region, so a shut door needs no separate "is this
+    /// one blocked" bookkeeping anywhere else, and reopening it is just
+    /// recomputing the same healthy bounds `from_floor_plan` used originally.
+    /// The room regions are pushed first, so the bridge for doorway `n` is
+    /// always at index `ROOMS.len() + n` — this is what keeps that true.
+    pub fn set_door_blocked(&mut self, doorway_index: usize, blocked: bool) {
+        let Some((run, center)) = doorways().nth(doorway_index) else {
+            return;
+        };
+        let Some(region) = self.regions.get_mut(ROOMS.len() + doorway_index) else {
+            return;
+        };
+        region.bounds = if blocked {
+            Bounds::EMPTY
+        } else {
+            doorway_bridge_bounds(run, center)
+        };
     }
 
     /// Keeps `position` on the floor.
@@ -1483,6 +1527,34 @@ mod tests {
                 region.bounds.inset(BODY).is_standable(),
                 "{} is too narrow for a chemist to stand in",
                 room.name
+            );
+        }
+    }
+
+    #[test]
+    fn blocking_a_door_seals_it_and_reopening_recovers_the_original_bridge() {
+        // `door::toggle_door_nav` is the only real caller, but it only ever
+        // reacts to `Changed<Door>` inside a full app — this exercises the
+        // actual floor-plan math without needing one.
+        for index in 0..doorways().count() {
+            let mut areas = WalkableAreas::from_floor_plan();
+            let healthy = areas.regions()[ROOMS.len() + index].bounds;
+
+            areas.set_door_blocked(index, true);
+            let blocked = areas.regions()[ROOMS.len() + index].bounds;
+            assert!(
+                !blocked.is_standable(),
+                "doorway {index} still stands after being blocked"
+            );
+
+            areas.set_door_blocked(index, false);
+            let reopened = areas.regions()[ROOMS.len() + index].bounds;
+            assert!(
+                (reopened.min_x - healthy.min_x).abs() < 0.001
+                    && (reopened.max_x - healthy.max_x).abs() < 0.001
+                    && (reopened.min_z - healthy.min_z).abs() < 0.001
+                    && (reopened.max_z - healthy.max_z).abs() < 0.001,
+                "doorway {index} did not recover its original bridge: {reopened:?} vs {healthy:?}"
             );
         }
     }

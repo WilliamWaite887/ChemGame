@@ -227,6 +227,7 @@ fn schedule_rogue_encounter(
     shift: Res<Shift>,
     mut radio: ResMut<RadioLog>,
     active: Query<(), With<RogueOfficer>>,
+    chemists: Query<(), With<Chemist>>,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
@@ -247,7 +248,7 @@ fn schedule_rogue_encounter(
     }
 
     let mut rng = rand::rng();
-    let rules = current_rules(&station.config, &shift);
+    let rules = current_rules(&station.config, &shift, chemists.iter().count());
     let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
     let multiplier = rng.random_range(script.gap_multiplier.0..=script.gap_multiplier.1);
     spawner.timer = Timer::from_seconds(legit_gap * multiplier, TimerMode::Once);
@@ -589,7 +590,10 @@ mod tests {
                 timer: Timer::from_seconds(0.01, TimerMode::Once),
             })
             .insert_resource(RogueRedeemed(false))
-            .init_resource::<Shift>()
+            .insert_resource(Shift {
+                accepting_orders: true,
+                ..Default::default()
+            })
             .init_resource::<Time>()
             .init_resource::<RadioLog>()
             .add_systems(Update, schedule_rogue_encounter);
