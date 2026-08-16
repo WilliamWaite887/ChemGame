@@ -243,9 +243,7 @@ fn generate_obsessed_visit(
         );
         commands.queue(move |world: &mut World| {
             if let Some(mut container) = world.get_mut::<crate::containers::Container>(token) {
-                let _ = container
-                    .solution
-                    .add(reagent, chem_sim::Units::whole(5));
+                let _ = container.solution.add(reagent, chem_sim::Units::whole(5));
             }
         });
     }
@@ -302,7 +300,10 @@ mod tests {
             "'{}' names a role no department recognises",
             script.role
         );
-        assert!(script.visits.len() >= 2, "no escalation without at least two beats");
+        assert!(
+            script.visits.len() >= 2,
+            "no escalation without at least two beats"
+        );
         let roster: Vec<crate::crew::CrewDef> =
             ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap();
         assert!(

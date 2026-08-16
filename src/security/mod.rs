@@ -230,12 +230,7 @@ fn run_sweep(
         let mut found = false;
         for mut container in &mut containers {
             let contraband = container.solution.iter().any(|(id, amount)| {
-                amount.is_positive()
-                    && db
-                        .reagents
-                        .get(id)
-                        .categories
-                        .contains(&Category::Illicit)
+                amount.is_positive() && db.reagents.get(id).categories.contains(&Category::Illicit)
             });
             if contraband {
                 found = true;
@@ -312,9 +307,7 @@ mod tests {
     fn officer_waiting(app: &mut App, dwell: f32) -> Entity {
         let mut route = CrewRoute::arrival(0.0);
         route.phase = CrewPhase::Waiting;
-        app.world_mut()
-            .spawn((RaidOfficer { dwell }, route))
-            .id()
+        app.world_mut().spawn((RaidOfficer { dwell }, route)).id()
     }
 
     /// Enough app to run `schedule_raid` directly, headless.
@@ -415,7 +408,9 @@ mod tests {
             "contraband should be confiscated"
         );
         assert_eq!(
-            app.world().resource::<Shift>().standing(Department::Security),
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Security),
             RAID_PENALTY
         );
     }
@@ -429,7 +424,9 @@ mod tests {
         advance(&mut app, 1.0);
 
         assert_eq!(
-            app.world().resource::<Shift>().standing(Department::Security),
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Security),
             0
         );
     }
@@ -452,14 +449,18 @@ mod tests {
             .clear();
         advance(&mut app, 1.0);
         assert_eq!(
-            app.world().resource::<Shift>().standing(Department::Security),
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Security),
             0,
             "the beaker was empty before the dwell ran out; too early to sweep it"
         );
 
         advance(&mut app, 5.0);
         assert_eq!(
-            app.world().resource::<Shift>().standing(Department::Security),
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Security),
             0,
             "an empty beaker gives the sweep nothing to find"
         );

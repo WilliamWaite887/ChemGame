@@ -31,8 +31,8 @@ use crate::lab::{COUNTER_DROP_Z, COUNTER_SPOT, COUNTER_TOP};
 use crate::machines::{Machine, MachineKind};
 use crate::net::is_authority;
 use crate::orders::{
-    Department, ForecastDef, OrderConfig, RampDef, RequestDef, Shift, ShiftSnapshot, StationData,
-    SupplyDef,
+    Department, ForecastDef, OrderConfig, RampDef, RequestDef, Requisition, Shift, ShiftSnapshot,
+    StationData, SupplyDef,
 };
 use crate::produce::DeliverySchedule;
 use crate::radio::channel_for;
@@ -437,10 +437,10 @@ impl RequisitionKind {
                 "Absorbs the next time the ward's own doctor doses a bystander"
             }
             RequisitionKind::QuietWord => "Clears whatever suspicion has already built, right now",
-            RequisitionKind::LookTheOtherWay => {
-                "Absorbs the next raid before it's ever called in"
+            RequisitionKind::LookTheOtherWay => "Absorbs the next raid before it's ever called in",
+            RequisitionKind::ChainOfCustody => {
+                "Absorbs the next time something walks off unwatched"
             }
-            RequisitionKind::ChainOfCustody => "Absorbs the next time something walks off unwatched",
             RequisitionKind::SecondInspection => {
                 "Absorbs the next time the glassware gets \"checked\""
             }
@@ -465,9 +465,7 @@ impl RequisitionKind {
             RequisitionKind::ResearchGrant | RequisitionKind::SecondInspection => {
                 Department::Engineering
             }
-            RequisitionKind::AntitoxinCrate | RequisitionKind::SecondOpinion => {
-                Department::Medical
-            }
+            RequisitionKind::AntitoxinCrate | RequisitionKind::SecondOpinion => Department::Medical,
             RequisitionKind::QuietWord | RequisitionKind::LookTheOtherWay => Department::Security,
             RequisitionKind::KitchenCarePackage | RequisitionKind::CompedRound => {
                 Department::Service
@@ -868,7 +866,10 @@ fn handle_open_up_again(
         shift.accepting_orders = true;
         radio.push(RadioEntry {
             channel: "COM".to_string(),
-            text: format!("Chemistry: shift {}, open for business.", shift.shift_number),
+            text: format!(
+                "Chemistry: shift {}, open for business.",
+                shift.shift_number
+            ),
             good: true,
         });
     }
@@ -908,15 +909,15 @@ impl Plugin for ProgressPlugin {
         app.init_resource::<PersistedProgress>()
             .init_resource::<ThwartingRecorded>()
             .add_systems(
-            OnEnter(AppState::Playing),
-            load_progress.run_if(is_authority),
-        )
-        .add_systems(
-            Update,
-            (persist_progress, record_thwarting)
-                .run_if(in_state(AppState::Playing))
-                .run_if(is_authority),
-        );
+                OnEnter(AppState::Playing),
+                load_progress.run_if(is_authority),
+            )
+            .add_systems(
+                Update,
+                (persist_progress, record_thwarting)
+                    .run_if(in_state(AppState::Playing))
+                    .run_if(is_authority),
+            );
     }
 }
 
@@ -946,6 +947,20 @@ struct ProgressSave {
     /// [`open_the_shift`] takes a fresh one on the first frame instead.
     #[serde(default)]
     opened_at: Option<ShiftSnapshot>,
+    /// Purchases that have been paid for but are waiting for their next use.
+    /// This is live lab state, not merely a career total: losing a ward or a
+    /// glassware requisition on reload makes closing the game an exploit.
+    #[serde(default)]
+    requisition: Requisition,
+    /// The service sign is a player decision and must return exactly as it
+    /// was, otherwise reloading can silently start traffic the player stopped.
+    #[serde(default)]
+    accepting_orders: bool,
+    /// Whether the player had already called the current shift. The debrief
+    /// itself is derived from `opened_at`, so restoring this does not need a
+    /// separate UI snapshot.
+    #[serde(default)]
+    called: bool,
     /// A career fact like any other — this game keeps no secrets from a
     /// player willing to open a save file in a text editor.
     #[serde(default)]
@@ -1024,6 +1039,9 @@ fn load_progress(
     // deserialises to, and reading it as "shift 1" is exactly right for one.
     shift.shift_number = save.shift_number.max(1);
     shift.opened_at = save.opened_at;
+    shift.requisition = save.requisition;
+    shift.accepting_orders = save.accepting_orders;
+    shift.called = save.called;
     if let Some(mut underworld) = underworld {
         underworld.0 = save.underworld_standing;
     }
@@ -1061,20 +1079,14 @@ fn load_progress(
 
 /// The career on disk, or `None` if there is not a readable one.
 fn read_progress(path: &std::path::Path) -> Option<ProgressSave> {
-    if !path.exists() {
-        return None;
-    }
     // A corrupt save should cost the player their progress, not the session.
-    match std::fs::read_to_string(path).map(|text| ron::from_str::<ProgressSave>(&text)) {
-        Ok(Ok(save)) => Some(save),
-        Ok(Err(error)) => {
+    match crate::saves::read_slot_text(path).map(|text| ron::from_str::<ProgressSave>(&text)) {
+        Some(Ok(save)) => Some(save),
+        Some(Err(error)) => {
             warn!("ignoring unreadable {}: {error}", path.display());
             None
         }
-        Err(error) => {
-            warn!("could not read {}: {error}", path.display());
-            None
-        }
+        None => None,
     }
 }
 
@@ -1124,6 +1136,9 @@ fn persist_progress(
         department_standing: shift.department_standing.clone(),
         shift_number: shift.shift_number,
         opened_at: shift.opened_at.clone(),
+        requisition: shift.requisition,
+        accepting_orders: shift.accepting_orders,
+        called: shift.called,
         underworld_standing: underworld.map(|u| u.0).unwrap_or(0),
         rogue_redeemed: rogue_redeemed.map(|r| r.0).unwrap_or(false),
         obsessed_progress: obsessed_progress.map(|p| p.0).unwrap_or(0),
@@ -1532,12 +1547,7 @@ mod tests {
             app.world().resource::<CurrentForecast>().0.is_some(),
             "the first redraw should not wait out a full interval"
         );
-        let pick = app
-            .world()
-            .resource::<CurrentForecast>()
-            .0
-            .clone()
-            .unwrap();
+        let pick = app.world().resource::<CurrentForecast>().0.clone().unwrap();
         assert!(
             app.world()
                 .resource::<RadioLog>()
@@ -1688,7 +1698,10 @@ mod tests {
         requisition(&mut app, board, RequisitionKind::ResearchGrant);
 
         let world = app.world();
-        assert_eq!(world.resource::<Shift>().standing(Department::Engineering), 1);
+        assert_eq!(
+            world.resource::<Shift>().standing(Department::Engineering),
+            1
+        );
     }
 
     #[test]
@@ -1704,7 +1717,10 @@ mod tests {
 
         requisition(&mut app, grinder, RequisitionKind::Glassware);
 
-        assert_eq!(app.world().resource::<Shift>().standing(Department::Cargo), 20);
+        assert_eq!(
+            app.world().resource::<Shift>().standing(Department::Cargo),
+            20
+        );
     }
 
     #[test]
@@ -1786,7 +1802,10 @@ mod tests {
     fn either_chemist_can_flip_the_sign() {
         let mut app = shift_app();
         let board = board(&mut app);
-        assert!(!app.world().resource::<Shift>().accepting_orders, "the sign starts down");
+        assert!(
+            !app.world().resource::<Shift>().accepting_orders,
+            "the sign starts down"
+        );
 
         app.world_mut().write_message(FromClient {
             client_id: ClientId::Server,
@@ -2150,11 +2169,8 @@ mod tests {
 
     #[test]
     fn a_campaign_survives_a_round_trip_through_the_save_file() {
-        let mut campaign = crate::arc::Campaign::new(
-            crate::arc::AntagId::Blob,
-            crate::arc::Mode::Antagonist,
-            3,
-        );
+        let mut campaign =
+            crate::arc::Campaign::new(crate::arc::AntagId::Blob, crate::arc::Mode::Antagonist, 3);
         campaign.plot = 62;
         campaign.reveal = crate::arc::Reveal::Named;
         campaign.countered = vec![true, false, true];
@@ -2167,6 +2183,29 @@ mod tests {
         let back: ProgressSave = ron::from_str(&text).unwrap();
 
         assert_eq!(back.campaign, Some(campaign));
+    }
+
+    #[test]
+    fn a_shift_resume_keeps_its_live_service_state() {
+        let save = ProgressSave {
+            requisition: Requisition {
+                glassware: 2,
+                quack_wards: 1,
+                patience_bonus_orders: 1,
+                ..default()
+            },
+            accepting_orders: true,
+            called: true,
+            ..default()
+        };
+        let text = ron::ser::to_string(&save).unwrap();
+        let restored: ProgressSave = ron::from_str(&text).unwrap();
+
+        assert!(restored.accepting_orders);
+        assert!(restored.called);
+        assert_eq!(restored.requisition.glassware, 2);
+        assert_eq!(restored.requisition.quack_wards, 1);
+        assert_eq!(restored.requisition.patience_bonus_orders, 1);
     }
 
     #[test]

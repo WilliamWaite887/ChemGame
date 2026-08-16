@@ -301,7 +301,11 @@ fn animate_chemist_body(
     time: Res<Time>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     bloods: Query<&Bloodstream>,
-    mut parts: Query<(&ChemistBody, &mut Transform, &MeshMaterial3d<StandardMaterial>)>,
+    mut parts: Query<(
+        &ChemistBody,
+        &mut Transform,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
 ) {
     let t = time.elapsed_secs();
     for (part, mut transform, material) in &mut parts {

@@ -504,20 +504,14 @@ fn load_save(db: &ChemDb, path: &Path) -> Option<Knowledge> {
 
 /// The notebook on disk, or `None` if there is not a readable one.
 fn read_save(path: &Path) -> Option<SaveData> {
-    if !path.exists() {
-        return None;
-    }
     // A corrupt save should cost the player their progress, not the session.
-    match std::fs::read_to_string(path).map(|text| ron::from_str::<SaveData>(&text)) {
-        Ok(Ok(save)) => Some(save),
-        Ok(Err(error)) => {
+    match crate::saves::read_slot_text(path).map(|text| ron::from_str::<SaveData>(&text)) {
+        Some(Ok(save)) => Some(save),
+        Some(Err(error)) => {
             warn!("ignoring unreadable {}: {error}", path.display());
             None
         }
-        Err(error) => {
-            warn!("could not read {}: {error}", path.display());
-            None
-        }
+        None => None,
     }
 }
 
@@ -571,7 +565,11 @@ fn learn_from_experiments(
             // Only worth a line if something was actually missed — a crowded
             // beaker that only ever touches recipes already known costs
             // nothing, so nagging about it would just be noise.
-            if event.reactions.iter().any(|reaction| !knowledge.is_known(*reaction)) {
+            if event
+                .reactions
+                .iter()
+                .any(|reaction| !knowledge.is_known(*reaction))
+            {
                 radio.push(RadioEntry {
                     channel: "LAB".to_string(),
                     text: "Too much going on in that beaker to tell what did what.".to_string(),
@@ -752,7 +750,10 @@ mod tests {
 
         // The next tier is a separate purchase — this one didn't come free.
         knowledge.award_research(cost);
-        assert!(!knowledge.upgrade_dispenser(&data), "tier 2 costs more than tier 1 did");
+        assert!(
+            !knowledge.upgrade_dispenser(&data),
+            "tier 2 costs more than tier 1 did"
+        );
         assert_eq!(knowledge.research_points, cost);
     }
 
@@ -767,7 +768,10 @@ mod tests {
         assert_eq!(knowledge.next_upgrade_cost(), None);
         let leftover = knowledge.research_points;
         assert!(!knowledge.upgrade_dispenser(&data));
-        assert_eq!(knowledge.research_points, leftover, "nothing should have been spent");
+        assert_eq!(
+            knowledge.research_points, leftover,
+            "nothing should have been spent"
+        );
     }
 
     #[test]
@@ -800,8 +804,20 @@ mod tests {
     #[test]
     fn a_crowded_experiment_teaches_nothing_but_a_focused_one_does() {
         let mut app = learn_app();
-        let bicaridine = app.world().resource::<ChemDb>().reactions.find("bicaridine").unwrap().id;
-        let dexalin = app.world().resource::<ChemDb>().reactions.find("dexalin").unwrap().id;
+        let bicaridine = app
+            .world()
+            .resource::<ChemDb>()
+            .reactions
+            .find("bicaridine")
+            .unwrap()
+            .id;
+        let dexalin = app
+            .world()
+            .resource::<ChemDb>()
+            .reactions
+            .find("dexalin")
+            .unwrap()
+            .id;
 
         app.world_mut().write_message(ReactionsFired {
             reactions: vec![bicaridine],
@@ -1004,7 +1020,10 @@ mod tests {
         knowledge.discover(&data, bicaridine);
         let banked = knowledge.research_points;
         assert_eq!(knowledge.discover(&data, bicaridine), None);
-        assert_eq!(knowledge.research_points, banked, "paid once, not per batch");
+        assert_eq!(
+            knowledge.research_points, banked,
+            "paid once, not per batch"
+        );
     }
 
     #[test]

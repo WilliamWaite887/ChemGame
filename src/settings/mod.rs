@@ -242,33 +242,35 @@ fn draw_root(commands: &mut Commands, co_op: bool) {
     } else {
         "The lab is holding still."
     };
-    menu_shell(commands, (PauseRoot, crate::until_we_leave_the_lab()), "Paused", subtitle, |panel| {
-        panel.spawn(choice(
-            "Resume",
-            "Back to the bench.",
-            PauseAction::Resume,
-        ));
-        panel.spawn(choice(
-            "Settings",
-            "Look sensitivity, field of view, volume.",
-            PauseAction::OpenSettings,
-        ));
-        panel.spawn(choice(
-            "Controls",
-            "What every key does, and how to change it.",
-            PauseAction::OpenControls,
-        ));
-        panel.spawn(choice(
-            "Quit to menu",
-            "Leaves the lab. Your notebook and career are already saved.",
-            PauseAction::QuitToMenu,
-        ));
-        panel.spawn(choice(
-            "Quit to desktop",
-            "Same, and closes the game.",
-            PauseAction::QuitToDesktop,
-        ));
-    });
+    menu_shell(
+        commands,
+        (PauseRoot, crate::until_we_leave_the_lab()),
+        "Paused",
+        subtitle,
+        |panel| {
+            panel.spawn(choice("Resume", "Back to the bench.", PauseAction::Resume));
+            panel.spawn(choice(
+                "Settings",
+                "Look sensitivity, field of view, volume.",
+                PauseAction::OpenSettings,
+            ));
+            panel.spawn(choice(
+                "Controls",
+                "What every key does, and how to change it.",
+                PauseAction::OpenControls,
+            ));
+            panel.spawn(choice(
+                "Quit to menu",
+                "Leaves the lab. Your notebook and career are already saved.",
+                PauseAction::QuitToMenu,
+            ));
+            panel.spawn(choice(
+                "Quit to desktop",
+                "Same, and closes the game.",
+                PauseAction::QuitToDesktop,
+            ));
+        },
+    );
 }
 
 /// Which continuous setting a [`Slider`] drives.
@@ -335,7 +337,6 @@ impl Knob {
             Knob::Volume => format!("{:.0}%", value * 100.0),
         }
     }
-
 }
 
 /// The draggable track of one setting.

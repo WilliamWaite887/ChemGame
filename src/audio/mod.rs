@@ -50,7 +50,10 @@ const CALM_AMBIENCE: [&str; 8] = [
 /// into ordinary rotation. Only eligible while [`tense_moment`] holds, which
 /// is the minority of a shift, so the calm pool still plays the most overall
 /// with no weighting needed.
-const TENSE_AMBIENCE: [&str; 2] = ["sounds/ambience/ambigen10.ogg", "sounds/ambience/ambigen11.ogg"];
+const TENSE_AMBIENCE: [&str; 2] = [
+    "sounds/ambience/ambigen10.ogg",
+    "sounds/ambience/ambigen11.ogg",
+];
 
 /// Quieter than any one-shot — this is a bed, not a cue.
 const AMBIENCE_VOLUME: f32 = 0.35;
@@ -67,9 +70,12 @@ impl Plugin for SfxPlugin {
             // rather than replaying an old save's chatter as fresh blips.
             .add_systems(
                 OnEnter(AppState::Playing),
-                (reset_radio_cursor, |mut cooldown: ResMut<AmbienceCooldown>| {
-                    cooldown.0 = None;
-                }),
+                (
+                    reset_radio_cursor,
+                    |mut cooldown: ResMut<AmbienceCooldown>| {
+                        cooldown.0 = None;
+                    },
+                ),
             )
             .add_systems(
                 Update,
@@ -196,8 +202,14 @@ fn load_sfx(mut commands: Commands, assets: Res<AssetServer>) {
         requisition_confirm: assets.load("sounds/requisition_confirm.ogg"),
         ui_click: assets.load("sounds/ui_click.ogg"),
         ui_refused: assets.load("sounds/ui_refused.ogg"),
-        calm_ambience: CALM_AMBIENCE.iter().map(|path| assets.load(*path)).collect(),
-        tense_ambience: TENSE_AMBIENCE.iter().map(|path| assets.load(*path)).collect(),
+        calm_ambience: CALM_AMBIENCE
+            .iter()
+            .map(|path| assets.load(*path))
+            .collect(),
+        tense_ambience: TENSE_AMBIENCE
+            .iter()
+            .map(|path| assets.load(*path))
+            .collect(),
     });
 }
 
@@ -273,7 +285,10 @@ fn play_collapse_sfx(
 /// leans on the same guarantee for `crisis::pulse_alert_lighting`) — every
 /// peer sees the same victim entity appear at the same moment, so the alarm
 /// needs no message of its own.
-fn play_crisis_alarm_sfx(new_crises: Query<(), Added<CrisisOrder>>, mut play: MessageWriter<PlaySfx>) {
+fn play_crisis_alarm_sfx(
+    new_crises: Query<(), Added<CrisisOrder>>,
+    mut play: MessageWriter<PlaySfx>,
+) {
     for () in &new_crises {
         play.write(PlaySfx(Sfx::MajorAlarm));
     }
@@ -301,7 +316,11 @@ fn reset_radio_cursor(mut cursor: ResMut<RadioCursor>) {
 /// accept one skipped blip on that rare edge than to give `RadioEntry` — with
 /// its several dozen construction sites across every antagonist thread — a
 /// sequence number just to close it.
-fn play_radio_sfx(log: Res<RadioLog>, mut cursor: ResMut<RadioCursor>, mut play: MessageWriter<PlaySfx>) {
+fn play_radio_sfx(
+    log: Res<RadioLog>,
+    mut cursor: ResMut<RadioCursor>,
+    mut play: MessageWriter<PlaySfx>,
+) {
     let len = log.entries.len();
     let Some(last) = cursor.0 else {
         cursor.0 = Some(len);
@@ -309,7 +328,11 @@ fn play_radio_sfx(log: Res<RadioLog>, mut cursor: ResMut<RadioCursor>, mut play:
     };
     if len > last {
         for entry in log.entries.iter().skip(last).take(len - last) {
-            play.write(PlaySfx(if entry.good { Sfx::OrderSuccess } else { Sfx::RadioBlip }));
+            play.write(PlaySfx(if entry.good {
+                Sfx::OrderSuccess
+            } else {
+                Sfx::RadioBlip
+            }));
         }
     }
     cursor.0 = Some(len);
@@ -320,7 +343,11 @@ fn play_radio_sfx(log: Res<RadioLog>, mut cursor: ResMut<RadioCursor>, mut play:
 /// `play_collapse_sfx`.
 fn play_door_sfx(doors: Query<&Door, Changed<Door>>, mut play: MessageWriter<PlaySfx>) {
     for door in &doors {
-        play.write(PlaySfx(if door.open { Sfx::DoorOpen } else { Sfx::DoorClosed }));
+        play.write(PlaySfx(if door.open {
+            Sfx::DoorOpen
+        } else {
+            Sfx::DoorClosed
+        }));
     }
 }
 

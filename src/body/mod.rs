@@ -80,8 +80,7 @@ impl Plugin for BodyPlugin {
                     // collapsing does not, since nothing about being paused
                     // makes a panel safe to leave open on a chemist who just
                     // went down.
-                    (request_consume, request_apply_held)
-                        .run_if(crate::settings::not_paused),
+                    (request_consume, request_apply_held).run_if(crate::settings::not_paused),
                     close_panel_on_collapse,
                 )
                     .run_if(in_state(AppState::Playing)),

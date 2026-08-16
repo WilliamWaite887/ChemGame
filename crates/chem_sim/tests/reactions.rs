@@ -1050,14 +1050,13 @@ fn a_step_of_zero_runs_the_instant_chemistry_and_leaves_the_slow_alone() {
     // everything instant — grading and the panel both read it the same frame —
     // without secretly advancing a batch already running in it.
     let data = data();
-    let mut solution = beaker(
-        &data,
-        100,
-        &[("oxygen", 5), ("carbon", 15), ("sugar", 5)],
-    );
+    let mut solution = beaker(&data, 100, &[("oxygen", 5), ("carbon", 15), ("sugar", 5)]);
 
     let report = resolve_step(&mut solution, &data.reactions, 0.0);
-    assert!(report.reacted(), "inaprovaline is instant and must still run");
+    assert!(
+        report.reacted(),
+        "inaprovaline is instant and must still run"
+    );
     // Inaprovaline formed; the bicaridine it now enables did not, because that
     // one is rated and zero seconds have passed.
     assert_contents(&data, &solution, &[("inaprovaline", 15), ("carbon", 10)]);
@@ -1089,9 +1088,7 @@ fn a_rated_reaction_always_creeps_forward_however_short_the_frame() {
 
     let report = resolve_step(&mut solution, &data.reactions, 0.001);
     assert!(report.reacted());
-    assert!(solution
-        .volume_of(data.reagent("bicaridine"))
-        .is_positive());
+    assert!(solution.volume_of(data.reagent("bicaridine")).is_positive());
 }
 
 #[test]

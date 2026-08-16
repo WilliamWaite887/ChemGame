@@ -74,7 +74,7 @@ impl Plugin for RogueSecurityPlugin {
         ]))
         .init_resource::<RogueRedeemed>()
         .add_systems(Startup, start_loading)
-            .add_systems(OnEnter(AppState::Playing), arm_spawner)
+        .add_systems(OnEnter(AppState::Playing), arm_spawner)
         .add_systems(
             Update,
             (
@@ -262,7 +262,10 @@ fn schedule_rogue_encounter(
         return;
     };
     let Some(reagent) = db.reagents.id_of(&encounter.reagent) else {
-        warn!("rogue security encounter names unknown reagent '{}'", encounter.reagent);
+        warn!(
+            "rogue security encounter names unknown reagent '{}'",
+            encounter.reagent
+        );
         return;
     };
     let Some(&amount) = encounter.amounts.choose(&mut rng) else {
@@ -301,7 +304,11 @@ fn schedule_rogue_encounter(
 
 /// Finds the encounter definition a live [`RogueOfficer`] was built from, by
 /// its reagent — the one field that round-trips back to content.
-fn encounter_for<'a>(script: &'a RogueSecurityScript, db: &ChemDb, reagent: ReagentId) -> Option<&'a RogueEncounterDef> {
+fn encounter_for<'a>(
+    script: &'a RogueSecurityScript,
+    db: &ChemDb,
+    reagent: ReagentId,
+) -> Option<&'a RogueEncounterDef> {
     script
         .encounters
         .iter()
@@ -331,9 +338,8 @@ fn handle_rogue_delivery(
         let Ok((mut route, officer)) = officers.get_mut(request.target) else {
             continue;
         };
-        let Some((container_entity, container, _)) = containers
-            .iter()
-            .find(|(_, _, holder)| holder.0 == player)
+        let Some((container_entity, container, _)) =
+            containers.iter().find(|(_, _, holder)| holder.0 == player)
         else {
             continue;
         };
@@ -419,8 +425,10 @@ fn expire_rogue_encounters(
                 .collect();
             if let Some(&(target, client)) = candidates.choose(&mut rng) {
                 if let Ok(mut body) = bodies.get_mut(target) {
-                    body.0
-                        .apply(Damage::of(DamageKind::Brute, Units::whole(ROGUE_ASSAULT_BRUTE)));
+                    body.0.apply(Damage::of(
+                        DamageKind::Brute,
+                        Units::whole(ROGUE_ASSAULT_BRUTE),
+                    ));
                     felt.write(ToClients {
                         targets: SendTargets::Single(client),
                         message: HazardFelt {
@@ -432,7 +440,10 @@ fn expire_rogue_encounters(
             }
         }
 
-        commands.entity(entity).remove::<RogueOfficer>().remove::<Interactable>();
+        commands
+            .entity(entity)
+            .remove::<RogueOfficer>()
+            .remove::<Interactable>();
         route.leave();
     }
 }
@@ -525,7 +536,10 @@ fn handle_deterrent_use(
             continue;
         }
         deterrent.charges -= 1;
-        commands.entity(target).remove::<RogueOfficer>().remove::<Interactable>();
+        commands
+            .entity(target)
+            .remove::<RogueOfficer>()
+            .remove::<Interactable>();
         route.leave();
     }
 }
@@ -750,7 +764,9 @@ mod tests {
         tick(&mut app, 1.5);
 
         assert_eq!(
-            app.world().resource::<Shift>().standing(Department::Security),
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Security),
             ROGUE_REFUSE_PENALTY
         );
         assert!(

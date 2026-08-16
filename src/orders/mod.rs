@@ -12,7 +12,7 @@ use chem_sim::{Category, ReagentId, Route, Solution, Units};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::body::{Body, Bloodstream};
+use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlot, Stored};
 use crate::crew::{spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewRoute};
@@ -667,9 +667,7 @@ impl Department {
                 "Wants burns treated fast and the lab not blowing the breaker."
             }
             Department::Cargo => "Wants glassware back in circulation and crates signed for.",
-            Department::Service => {
-                "Wants the bar and the kitchen kept stocked, not complaining."
-            }
+            Department::Service => "Wants the bar and the kitchen kept stocked, not complaining.",
         }
     }
 
@@ -773,11 +771,9 @@ pub struct Shift {
     /// set — it only changes what the board draws — because in co-op one
     /// chemist reading the debrief must not stop the other working.
     ///
-    /// Not persisted, for the same reason `accepting_orders` is not: a save
-    /// always resumes into an open lab, with whatever shift it was saved
-    /// during still running. Quitting while reading a debrief therefore comes
-    /// back as "you never finished closing up", which is truer than resuming
-    /// into a debrief with the sign somehow back up.
+    /// Persisted with the service sign, so a reload does not quietly reopen a
+    /// shift the player has already closed. The board reconstructs the
+    /// debrief from the opening snapshot and career totals.
     pub called: bool,
 }
 
@@ -788,10 +784,9 @@ impl Default for Shift {
             botched: 0,
             department_standing: HashMap::new(),
             requisition: Requisition::default(),
-            // The sign starts down. A save always resumes into a closed lab
-            // (this field is not persisted, same as `called` — see its own
-            // doc comment), and a brand new career starts here too: the
-            // player opens up when they — and in co-op, their teammates —
+            // A brand new career starts closed; a resumed one restores its
+            // saved sign state through `ProgressSave`. The player opens up
+            // when they — and in co-op, their teammates —
             // are actually ready, rather than crew already walking in on
             // the very first frame.
             accepting_orders: false,
@@ -1253,8 +1248,7 @@ fn generate_specific_orders(
 
     let no_themes: &[String] = &[];
     let themes = forecast.as_ref().map(|f| f.themes()).unwrap_or(no_themes);
-    let Some(request) =
-        weighted_pick(&in_reach, themes, rules.forecast_boost, rng.random::<f64>())
+    let Some(request) = weighted_pick(&in_reach, themes, rules.forecast_boost, rng.random::<f64>())
     else {
         return;
     };
@@ -1286,7 +1280,12 @@ fn generate_specific_orders(
         )),
     ));
 
-    announce_request(&mut radio, &crew_def.name, &crew_def.role, &request.specific_plea);
+    announce_request(
+        &mut radio,
+        &crew_def.name,
+        &crew_def.role,
+        &request.specific_plea,
+    );
 
     info!(
         "{} ({}) specifically wants {} {}",
@@ -1354,7 +1353,14 @@ fn expire_orders(
         // Nothing was ever delivered, so there is nothing to grade for
         // quality — `0` is inert anyway, since `reputation_delta` only ever
         // applies a potency bonus on `Success`.
-        adjust_for_role(&mut shift, &crew.role, Outcome::Expired, order.waited, order.patience, 0);
+        adjust_for_role(
+            &mut shift,
+            &crew.role,
+            Outcome::Expired,
+            order.waited,
+            order.patience,
+            0,
+        );
 
         commands.entity(entity).remove::<Order>();
         route.leave();
@@ -1376,7 +1382,10 @@ fn adjust_for_role(
         warn!("order resolved for unrecognised department role '{role}'");
         return;
     };
-    shift.adjust(department, reputation_delta(outcome, waited, patience, potency));
+    shift.adjust(
+        department,
+        reputation_delta(outcome, waited, patience, potency),
+    );
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -1403,8 +1412,7 @@ fn handle_delivery(
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
-        let Ok((member, order, mut route, illicit, crisis, counter)) =
-            crew.get_mut(request.target)
+        let Ok((member, order, mut route, illicit, crisis, counter)) = crew.get_mut(request.target)
         else {
             continue;
         };
@@ -1529,7 +1537,14 @@ fn complete_delivery(
     // declined illicit order — falls through to the ordinary path below,
     // unchanged.
     if !(kind.is_illicit() && outcome.is_good()) {
-        adjust_for_role(shift, &member.role, outcome, order.waited, order.patience, potency);
+        adjust_for_role(
+            shift,
+            &member.role,
+            outcome,
+            order.waited,
+            order.patience,
+            potency,
+        );
     }
 
     info!(
@@ -1585,9 +1600,9 @@ fn container_matches(contents: &Solution, order: &Order, kind: OrderKind, db: &C
         return contents.volume_of(order.reagent).is_positive();
     }
     match reference_category(db, order.reagent) {
-        Some(cat) => contents
-            .iter()
-            .any(|(id, amount)| amount.is_positive() && db.reagents.get(id).categories.contains(&cat)),
+        Some(cat) => contents.iter().any(|(id, amount)| {
+            amount.is_positive() && db.reagents.get(id).categories.contains(&cat)
+        }),
         None => contents.volume_of(order.reagent).is_positive(),
     }
 }
@@ -1663,9 +1678,16 @@ fn handle_window_delivery(
             continue;
         }
 
-        let candidates = crew.iter().map(|(entity, _, order, route, illicit, crisis, counter)| {
-            (entity, order, route, OrderKind::of(illicit, crisis, counter))
-        });
+        let candidates = crew
+            .iter()
+            .map(|(entity, _, order, route, illicit, crisis, counter)| {
+                (
+                    entity,
+                    order,
+                    route,
+                    OrderKind::of(illicit, crisis, counter),
+                )
+            });
         let Some(recipient) = window_recipient(&container.solution, candidates, &db) else {
             continue;
         };
@@ -2046,7 +2068,9 @@ mod tests {
         );
         assert!(app.world().get_entity(beaker).is_err());
         assert_eq!(
-            app.world().resource::<Shift>().standing(Department::Medical),
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Medical),
             0,
             "a successful illicit delivery must not move the pretext department"
         );
@@ -2061,19 +2085,26 @@ mod tests {
             let crew = waiting_crew(&mut app, "Dr. Vance", "kelotane", 20, 1.0, true);
             app.world_mut().entity_mut(crew).insert(IllicitOrder);
             advance(&mut app, 1.5);
-            app.world().resource::<Shift>().standing(Department::Medical)
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Medical)
         };
         let legitimate_delta = {
             let mut app = expiry_app();
             waiting_crew(&mut app, "Dr. Vance", "kelotane", 20, 1.0, true);
             advance(&mut app, 1.5);
-            app.world().resource::<Shift>().standing(Department::Medical)
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Medical)
         };
         assert_eq!(
             illicit_delta, legitimate_delta,
             "a declined illicit order must cost exactly what an ordinary one does"
         );
-        assert_ne!(illicit_delta, 0, "an expired order should have cost something");
+        assert_ne!(
+            illicit_delta, 0,
+            "an expired order should have cost something"
+        );
     }
 
     #[test]
@@ -2372,7 +2403,10 @@ mod tests {
         );
 
         assert_eq!(outcome, Outcome::Wrong);
-        assert_eq!(matched, None, "nothing should be named back for an unmatched category order");
+        assert_eq!(
+            matched, None,
+            "nothing should be named back for an unmatched category order"
+        );
     }
 
     #[test]
@@ -2654,7 +2688,10 @@ mod tests {
             "a banked Comped Round should add its bonus to this order's patience"
         );
         assert_eq!(
-            app.world().resource::<Shift>().requisition.patience_bonus_orders,
+            app.world()
+                .resource::<Shift>()
+                .requisition
+                .patience_bonus_orders,
             0,
             "the bonus is spent, not banked indefinitely"
         );
@@ -2835,7 +2872,12 @@ mod tests {
             // Only the cure. `harm_amount` is what the casualty was dosed with
             // before they walked in, and a poisoning past the threshold is the
             // whole crisis.
-            assert_askable(&db, &case.cure_reagent, case.cure_amount, "station.crisis.ron");
+            assert_askable(
+                &db,
+                &case.cure_reagent,
+                case.cure_amount,
+                "station.crisis.ron",
+            );
         }
     }
 

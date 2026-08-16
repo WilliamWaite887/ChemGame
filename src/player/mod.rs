@@ -271,11 +271,7 @@ fn spawn_chemist(commands: &mut Commands, client: ClientId, lane: f32) -> Entity
             // how the other is doing without asking.
             Body::default(),
             Bloodstream::default(),
-            Transform::from_xyz(
-                lab::SPAWN_SPOT.x + lane,
-                EYE_HEIGHT,
-                lab::SPAWN_SPOT.z,
-            ),
+            Transform::from_xyz(lab::SPAWN_SPOT.x + lane, EYE_HEIGHT, lab::SPAWN_SPOT.z),
             Visibility::default(),
             Replicated,
             crate::until_we_leave_the_lab(),
@@ -687,7 +683,14 @@ fn predict_local_movement(
     mut commands: Commands,
     seed: Query<(Entity, &Transform), (With<LocalPlayer>, Without<Predicted>)>,
     mut chemist: Query<
-        (Ref<Transform>, &Look, &InteractionMode, &Body, &Bloodstream, &mut Predicted),
+        (
+            Ref<Transform>,
+            &Look,
+            &InteractionMode,
+            &Body,
+            &Bloodstream,
+            &mut Predicted,
+        ),
         With<LocalPlayer>,
     >,
 ) {
@@ -740,7 +743,11 @@ fn predict_local_movement(
 pub(crate) type LocalChemists<'w, 's> = Query<
     'w,
     's,
-    (&'static Transform, &'static Look, Option<&'static Predicted>),
+    (
+        &'static Transform,
+        &'static Look,
+        Option<&'static Predicted>,
+    ),
     (With<LocalPlayer>, Without<PlayerCamera>),
 >;
 
@@ -1109,7 +1116,10 @@ mod tests {
         send_input(&mut app, client, Vec2::new(0.0, -1.0));
         tick(&mut app, 0.1);
         let after_first = app.world().get::<Transform>(chemist).unwrap().translation;
-        assert_ne!(after_first.z, 0.0, "the first frame should move the chemist");
+        assert_ne!(
+            after_first.z, 0.0,
+            "the first frame should move the chemist"
+        );
 
         // No new `MoveInput` this frame — exactly what a dropped packet
         // looks like from the server's side.
@@ -1132,7 +1142,11 @@ mod tests {
         let solo_chemist = moving_chemist(&mut solo, solo_client);
         send_input(&mut solo, solo_client, Vec2::new(0.0, -1.0));
         tick(&mut solo, 0.1);
-        let single_step = solo.world().get::<Transform>(solo_chemist).unwrap().translation;
+        let single_step = solo
+            .world()
+            .get::<Transform>(solo_chemist)
+            .unwrap()
+            .translation;
 
         let mut bursty = move_app();
         let bursty_client = ClientId::Client(bursty.world_mut().spawn_empty().id());
@@ -1200,7 +1214,8 @@ mod tests {
 
         let predicted = app.world().get::<Predicted>(chemist).unwrap();
         assert_ne!(
-            predicted.translation.z, lab::SPAWN_SPOT.z,
+            predicted.translation.z,
+            lab::SPAWN_SPOT.z,
             "holding forward must move the prediction immediately — no \
              server round trip belongs anywhere in this loop"
         );
@@ -1215,11 +1230,7 @@ mod tests {
         let chemist = local_chemist(&mut app);
         tick(&mut app, 0.1);
 
-        let elsewhere = Vec3::new(
-            lab::SPAWN_SPOT.x + 3.0,
-            EYE_HEIGHT,
-            lab::SPAWN_SPOT.z + 3.0,
-        );
+        let elsewhere = Vec3::new(lab::SPAWN_SPOT.x + 3.0, EYE_HEIGHT, lab::SPAWN_SPOT.z + 3.0);
         app.world_mut()
             .get_mut::<Transform>(chemist)
             .unwrap()

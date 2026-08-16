@@ -83,7 +83,9 @@ impl Category {
     /// The line under the heading, telling a chemist what they are looking at.
     pub fn blurb(self) -> &'static str {
         match self {
-            Category::Trauma => "Physical injury. Bleeding, breaks, and what security leave behind.",
+            Category::Trauma => {
+                "Physical injury. Bleeding, breaks, and what security leave behind."
+            }
             Category::Burns => "Heat, plasma fires and welding accidents.",
             Category::Antitoxins => "Poisoning, and getting it back out again.",
             Category::Airloss => "Suffocation, breaches, and holding a crashing patient steady.",
@@ -93,7 +95,9 @@ impl Category {
             Category::Pyrotechnics => "Fire, smoke and pressure. Not for people.",
             Category::Precursors => "Nothing on its own. Everything downstream needs it.",
             Category::Utility => "Neither medicine nor weapon.",
-            Category::Illicit => "Nobody will ever legitimately order these. Somebody might anyway.",
+            Category::Illicit => {
+                "Nobody will ever legitimately order these. Somebody might anyway."
+            }
         }
     }
 

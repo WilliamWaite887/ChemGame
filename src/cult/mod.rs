@@ -270,7 +270,10 @@ mod tests {
             "'{}' names a role no department recognises",
             script.role
         );
-        assert!(script.stages.len() >= 2, "no escalation without at least two stages");
+        assert!(
+            script.stages.len() >= 2,
+            "no escalation without at least two stages"
+        );
         let roster: Vec<crate::crew::CrewDef> =
             ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap();
         assert!(roster.iter().all(|member| member.name != script.name));

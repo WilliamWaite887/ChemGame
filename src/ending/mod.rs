@@ -22,11 +22,11 @@ use bevy::prelude::*;
 use crate::arc::{ArcOutcome, Campaign, Mode, ThwartedAntags};
 use crate::chem_data::ChemDb;
 use crate::knowledge::Knowledge;
+use crate::menu::choice;
 use crate::orders::Shift;
 use crate::settings::{PauseAction, PauseScreen, Paused};
 use crate::ui::{arc_headline, label, TEXT, TEXT_DIM};
 use crate::AppState;
-use crate::menu::choice;
 
 pub struct EndingPlugin;
 
@@ -369,8 +369,7 @@ mod tests {
     #[test]
     fn keeping_playing_does_not_bring_the_ending_back() {
         let mut app = ending_app(live_campaign());
-        app.world_mut().resource_mut::<Campaign>().outcome =
-            Some(ArcOutcome::StoppedByDepartments);
+        app.world_mut().resource_mut::<Campaign>().outcome = Some(ArcOutcome::StoppedByDepartments);
         app.update();
         assert!(is_up(&app));
 
@@ -380,7 +379,10 @@ mod tests {
         app.update();
         app.update();
 
-        assert!(!is_up(&app), "it is raised once per arc, not once per frame");
+        assert!(
+            !is_up(&app),
+            "it is raised once per arc, not once per frame"
+        );
     }
 
     #[test]
@@ -404,12 +406,13 @@ mod tests {
             .insert_resource(ThwartedAntags(vec![AntagId::Cult]));
         app.world_mut().resource_mut::<Campaign>().outcome = Some(ArcOutcome::StoppedDirectly);
         app.update();
-        assert!(!app
-            .world()
-            .resource::<FinishedArc>()
-            .showing()
-            .unwrap()
-            .unlocked);
+        assert!(
+            !app.world()
+                .resource::<FinishedArc>()
+                .showing()
+                .unwrap()
+                .unlocked
+        );
     }
 
     #[test]

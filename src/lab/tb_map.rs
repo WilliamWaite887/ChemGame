@@ -99,7 +99,11 @@ fn every_brush_encloses_a_volume() {
                     count += 1.0;
                 }
             }
-            let centroid = [centroid[0] / count, centroid[1] / count, centroid[2] / count];
+            let centroid = [
+                centroid[0] / count,
+                centroid[1] / count,
+                centroid[2] / count,
+            ];
 
             for surface in brush.iter() {
                 let [p1, p2, p3] = surface.half_space;
@@ -277,7 +281,8 @@ fn the_station_is_one_connected_space() {
 
     let stranded = reached.iter().filter(|seen| !**seen).count();
     assert_eq!(
-        stranded, 0,
+        stranded,
+        0,
         "{stranded} of {} walkable regions cannot be walked to from the first",
         inset.len(),
     );

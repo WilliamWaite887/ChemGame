@@ -280,7 +280,9 @@ fn warn_if_steam_unavailable(
             error!("Steam is not available, so a Steam lobby cannot be opened. Is Steam running?")
         }
         Some(LaunchMode::JoinSteam(_)) => {
-            error!("Steam is not available, so this Steam lobby cannot be joined. Is Steam running?");
+            error!(
+                "Steam is not available, so this Steam lobby cannot be joined. Is Steam running?"
+            );
             failed.write(ConnectFailed {
                 reason: "Steam is not available. Is Steam running?".to_string(),
             });

@@ -168,7 +168,10 @@ mod tests {
         assert_eq!(shift.succeeded, 0);
         assert_eq!(shift.botched, 0);
         assert_eq!(shift.standing(Department::Medical), 0);
-        assert!(!shift.accepting_orders, "the sign starts down, so the player opens it when ready");
+        assert!(
+            !shift.accepting_orders,
+            "the sign starts down, so the player opens it when ready"
+        );
         // The debrief is a difference against `opened_at`. Carrying the last
         // career's snapshot over would make the next save's first debrief read
         // as a career of deliveries it never made.
@@ -214,7 +217,10 @@ mod tests {
         let mut world = dirty_world();
         clear(&mut world);
 
-        assert_eq!(world.resource::<crate::antagonist::UnderworldStanding>().0, 0);
+        assert_eq!(
+            world.resource::<crate::antagonist::UnderworldStanding>().0,
+            0
+        );
         assert_eq!(world.resource::<crate::obsessed::ObsessedProgress>().0, 0);
     }
 

@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::body::{Body, Bloodstream, COLLAPSE_PENALTY};
+use crate::body::{Bloodstream, Body, COLLAPSE_PENALTY};
 use crate::lab::{COUNTER_SPOT, DOOR_MAX_X, DOOR_MIN_X};
 use crate::net::is_authority;
 use crate::orders::{Department, Shift};
@@ -36,8 +36,7 @@ impl Plugin for CrewPlugin {
                     (
                         start_crew_at_their_department,
                         // Ambient crew decide where to be, then everyone walks.
-                        populate_departments
-                            .run_if(resource_exists_and_changed::<Departments>),
+                        populate_departments.run_if(resource_exists_and_changed::<Departments>),
                         ambient_behaviour,
                         walk_route,
                         handle_crew_collapse,
@@ -289,9 +288,7 @@ fn dress_crew(
         // A replicated crew member arrives without `Visibility` — presentation
         // is not on the wire — and a parent with none cannot propagate it to
         // the children below. Mirrors `player::dress_chemists`'s identical fix.
-        commands
-            .entity(entity)
-            .insert_if_new(Visibility::default());
+        commands.entity(entity).insert_if_new(Visibility::default());
 
         let body_rest = Vec3::ZERO;
         commands.spawn((
@@ -456,10 +453,7 @@ fn ambient_behaviour(
         }
 
         if let Some((casualty, response)) = emergency {
-            let wanted = response
-                .responders
-                .iter()
-                .any(|role| role == &member.role);
+            let wanted = response.responders.iter().any(|role| role == &member.role);
             let post = if wanted {
                 Some(casualty.translation)
             } else {
@@ -589,10 +583,7 @@ mod tests {
                 &crate::lab::WalkableAreas::from_floor_plan(),
                 crate::nav::NAV_RADIUS,
             ))
-            .add_systems(
-                Update,
-                (start_crew_at_their_department, walk_route).chain(),
-            );
+            .add_systems(Update, (start_crew_at_their_department, walk_route).chain());
         app
     }
 
@@ -719,8 +710,7 @@ mod tests {
             .last()
             .expect("a route home");
         assert!(
-            (heading_for.x - medical.x).abs() < 0.01
-                && (heading_for.z - medical.z).abs() < 0.01,
+            (heading_for.x - medical.x).abs() < 0.01 && (heading_for.z - medical.z).abs() < 0.01,
             "left towards {heading_for:?} instead of back to Medical",
         );
     }
@@ -841,10 +831,9 @@ mod tests {
         let mut all = app.world_mut().query::<&CrewMember>();
         assert_eq!(all.iter(app.world()).count(), 4, "four crew exist");
 
-        let mut visiting = app.world_mut().query_filtered::<Entity, (
-            With<CrewMember>,
-            NotResident,
-        )>();
+        let mut visiting = app
+            .world_mut()
+            .query_filtered::<Entity, (With<CrewMember>, NotResident)>();
         let counted: Vec<Entity> = visiting.iter(app.world()).collect();
         assert_eq!(
             counted,
@@ -986,7 +975,9 @@ mod tests {
             "a crew member who goes down should be sent for the door, not left standing"
         );
         assert_eq!(
-            app.world().resource::<Shift>().standing(Department::Medical),
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Medical),
             COLLAPSE_PENALTY
         );
 
@@ -995,7 +986,9 @@ mod tests {
         app.update();
         app.update();
         assert_eq!(
-            app.world().resource::<Shift>().standing(Department::Medical),
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Medical),
             COLLAPSE_PENALTY,
             "the penalty is for going down, not for staying down"
         );
@@ -1024,7 +1017,9 @@ mod tests {
             "nothing collapsed, so nothing should have sent them for the door"
         );
         assert_eq!(
-            app.world().resource::<Shift>().standing(Department::Medical),
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Medical),
             0
         );
     }

@@ -48,7 +48,11 @@ impl Plugin for QuackPlugin {
             .add_systems(OnEnter(AppState::Playing), arm_spawner)
             .add_systems(
                 Update,
-                (promote_script, generate_quack_visit, handle_quack_resolution)
+                (
+                    promote_script,
+                    generate_quack_visit,
+                    handle_quack_resolution,
+                )
                     .chain()
                     .run_if(is_authority)
                     // No `arc::is_active` gate, unlike a main antagonist.
@@ -258,7 +262,10 @@ fn handle_quack_resolution(
         }
 
         let Some(improvised) = db.reagents.id_of(&script.improvised) else {
-            warn!("quack improvises with unknown reagent '{}'", script.improvised);
+            warn!(
+                "quack improvises with unknown reagent '{}'",
+                script.improvised
+            );
             continue;
         };
 
@@ -407,11 +414,19 @@ mod tests {
         let mut app = resolution_app();
         let name = app.world().resource::<Script>().0.name.clone();
         let leaving = patient(&mut app, "Miner Sato", "Cargo");
-        app.world_mut().get_mut::<CrewRoute>(leaving).unwrap().leave();
+        app.world_mut()
+            .get_mut::<CrewRoute>(leaving)
+            .unwrap()
+            .leave();
 
         resolve(&mut app, &name, Outcome::Expired);
 
-        assert!(app.world().get::<Bloodstream>(leaving).unwrap().0.is_empty());
+        assert!(app
+            .world()
+            .get::<Bloodstream>(leaving)
+            .unwrap()
+            .0
+            .is_empty());
     }
 
     #[test]
@@ -435,7 +450,12 @@ mod tests {
 
         resolve(&mut app, &name, Outcome::Success);
 
-        assert!(app.world().get::<Bloodstream>(bystander).unwrap().0.is_empty());
+        assert!(app
+            .world()
+            .get::<Bloodstream>(bystander)
+            .unwrap()
+            .0
+            .is_empty());
         assert_eq!(app.world().resource::<QuackProgress>().0, 1);
     }
 
@@ -452,7 +472,11 @@ mod tests {
         resolve(&mut app, &name, Outcome::Expired);
 
         assert!(
-            app.world().get::<Bloodstream>(bystander).unwrap().0.is_empty(),
+            app.world()
+                .get::<Bloodstream>(bystander)
+                .unwrap()
+                .0
+                .is_empty(),
             "a Second Opinion requisition should have covered this one"
         );
         assert_eq!(
@@ -482,7 +506,10 @@ mod tests {
         assert!(script.malpractice_penalty < 0);
         assert!(script.improvised_units > 0);
         assert!(
-            script.malpractice_lines.iter().all(|line| line.contains("{name}")),
+            script
+                .malpractice_lines
+                .iter()
+                .all(|line| line.contains("{name}")),
             "a line that never names the patient reads as unrelated chatter"
         );
         let improvised = data

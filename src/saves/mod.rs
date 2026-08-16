@@ -12,16 +12,29 @@
 //! save file describing someone else's lab.
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::arc::AntagId;
 
+/// The directory below `%LOCALAPPDATA%` used by release builds.
+///
+/// Steam Auto-Cloud can map this exact root (`WinAppDataLocal/ChemGame/saves`)
+/// without ever trying to write into the installed game directory. The
+/// relative fallback keeps command-line/test builds usable on platforms which
+/// do not expose `LOCALAPPDATA`.
 const SAVES_DIR: &str = "saves";
+const APP_DATA_DIR: &str = "ChemGame";
 const KNOWLEDGE_FILE: &str = "save.ron";
 const PROGRESS_FILE: &str = "progress.ron";
+const ENVELOPE_MAGIC: &[u8; 8] = b"CHEMSV01";
+const TAG_BYTES: usize = 32;
+const INTEGRITY_KEY_FILE: &str = ".integrity-key";
 
 /// Where a pre-menu save ends up, and the slot the command-line flags use.
 const DEFAULT_SLOT: &str = "Chemist";
@@ -50,7 +63,7 @@ impl SaveSlot {
     }
 
     pub fn dir(&self) -> PathBuf {
-        Path::new(SAVES_DIR).join(&self.name)
+        saves_root().join(&self.name)
     }
 
     pub fn knowledge_path(&self) -> PathBuf {
@@ -61,7 +74,7 @@ impl SaveSlot {
         self.dir().join(PROGRESS_FILE)
     }
 
-    /// Writes the notebook.
+    /// Writes the notebook as a signed, recoverable save envelope.
     pub fn write_knowledge(&self, text: &str) {
         self.write(&self.knowledge_path(), text);
     }
@@ -71,22 +84,205 @@ impl SaveSlot {
         self.write(&self.progress_path(), text);
     }
 
-    /// Creates the directory on the way past.
+    /// Creates the directory on the way past, signs the payload with this
+    /// machine's private integrity key, and preserves the prior complete save
+    /// as `.bak`. The payload remains RON *inside* the envelope so format
+    /// migrations stay pleasant to write, but changing a number in a text
+    /// editor no longer produces a valid save.
     ///
     /// Here rather than when the slot is chosen so that picking "New save" and
     /// quitting before anything happens leaves nothing behind — and so that
     /// choosing a save is a decision about state, not a disk write.
     fn write(&self, path: &Path, text: &str) {
-        if let Err(error) = std::fs::create_dir_all(self.dir()) {
-            warn!("could not create {}: {error}", self.dir().display());
+        write_slot_text(path, text);
+    }
+}
+
+/// Writes a signed save payload. Shared by slot-local files and the small
+/// cross-save campaign file, so neither becomes the weak editable exception.
+pub fn write_slot_text(path: &Path, text: &str) {
+    let Some(parent) = path.parent() else {
+        warn!(
+            "could not determine a parent directory for {}",
+            path.display()
+        );
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(parent) {
+        warn!("could not create {}: {error}", parent.display());
+        return;
+    }
+
+    let key = match integrity_key() {
+        Ok(key) => key,
+        Err(error) => {
+            warn!("could not prepare save integrity key: {error}");
             return;
         }
-        // Fire and forget by design: a failed save warns and lets the shift
-        // carry on rather than interrupting it.
-        if let Err(error) = std::fs::write(path, text) {
-            warn!("could not write {}: {error}", path.display());
+    };
+    let bytes = encode_envelope(text.as_bytes(), &key);
+    if let Err(error) = write_recoverable(path, &bytes) {
+        warn!("could not write {}: {error}", path.display());
+    }
+}
+
+/// Where all mutable career data lives. Keeping this under Local AppData is
+/// important for Steam Cloud: Steam owns the install directory, while this is
+/// a documented per-user data root that Auto-Cloud can sync safely.
+pub fn saves_root() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|root| root.join(APP_DATA_DIR).join(SAVES_DIR))
+        .unwrap_or_else(|| PathBuf::from(SAVES_DIR))
+}
+
+/// Reads a slot file, rejecting modified/truncated signed files and falling
+/// back to the last complete backup. Plain RON is accepted only as a legacy
+/// import path; the next normal save upgrades it to the signed format.
+pub fn read_slot_text(path: &Path) -> Option<String> {
+    match read_slot_text_at(path) {
+        Ok(Some(text)) => Some(text),
+        Ok(None) => None,
+        Err(error) => {
+            warn!("ignoring invalid save {}: {error}", path.display());
+            let backup = backup_path(path);
+            match read_slot_text_at(&backup) {
+                Ok(Some(text)) => {
+                    warn!("restored {} from {}", path.display(), backup.display());
+                    Some(text)
+                }
+                Ok(None) => None,
+                Err(backup_error) => {
+                    warn!(
+                        "backup {} is also invalid: {backup_error}",
+                        backup.display()
+                    );
+                    None
+                }
+            }
         }
     }
+}
+
+fn read_slot_text_at(path: &Path) -> Result<Option<String>, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if !bytes.starts_with(ENVELOPE_MAGIC) {
+        return String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| "unrecognised legacy save encoding".to_string());
+    }
+    let key = integrity_key().map_err(|error| error.to_string())?;
+    decode_envelope(&bytes, &key)
+        .and_then(|payload| {
+            String::from_utf8(payload).map_err(|_| "save payload is not UTF-8".to_string())
+        })
+        .map(Some)
+}
+
+fn integrity_key() -> std::io::Result<[u8; TAG_BYTES]> {
+    let path = saves_root().join(INTEGRITY_KEY_FILE);
+    match std::fs::read(&path) {
+        Ok(bytes) if bytes.len() == TAG_BYTES => {
+            let mut key = [0; TAG_BYTES];
+            key.copy_from_slice(&bytes);
+            Ok(key)
+        }
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "integrity key has the wrong length",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(saves_root())?;
+            let mut key = [0; TAG_BYTES];
+            rand::rng().fill_bytes(&mut key);
+            write_atomic(&path, &key)?;
+            Ok(key)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn encode_envelope(payload: &[u8], key: &[u8; TAG_BYTES]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(ENVELOPE_MAGIC.len() + 8 + payload.len());
+    body.extend_from_slice(ENVELOPE_MAGIC);
+    body.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    body.extend_from_slice(payload);
+    let tag = hmac_sha256(key, &body);
+    body.extend_from_slice(&tag);
+    body
+}
+
+fn decode_envelope(bytes: &[u8], key: &[u8; TAG_BYTES]) -> Result<Vec<u8>, String> {
+    if bytes.len() < ENVELOPE_MAGIC.len() + 8 + TAG_BYTES {
+        return Err("save envelope is truncated".to_string());
+    }
+    let signed_len = bytes.len() - TAG_BYTES;
+    let expected = hmac_sha256(key, &bytes[..signed_len]);
+    if !constant_time_eq(&expected, &bytes[signed_len..]) {
+        return Err("save integrity check failed (the file was changed or damaged)".to_string());
+    }
+    let length_at = ENVELOPE_MAGIC.len();
+    let mut length = [0; 8];
+    length.copy_from_slice(&bytes[length_at..length_at + 8]);
+    let payload_len = u64::from_le_bytes(length) as usize;
+    let payload_start = length_at + 8;
+    if payload_start.checked_add(payload_len) != Some(signed_len) {
+        return Err("save envelope has an invalid payload length".to_string());
+    }
+    Ok(bytes[payload_start..signed_len].to_vec())
+}
+
+fn hmac_sha256(key: &[u8; TAG_BYTES], message: &[u8]) -> [u8; TAG_BYTES] {
+    let mut inner_pad = [0x36; 64];
+    let mut outer_pad = [0x5c; 64];
+    for (index, byte) in key.iter().enumerate() {
+        inner_pad[index] ^= byte;
+        outer_pad[index] ^= byte;
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(message);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner);
+    outer.finalize().into()
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0u8, |difference, (a, b)| difference | (a ^ b))
+            == 0
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    let mut backup = path.as_os_str().to_os_string();
+    backup.push(".bak");
+    PathBuf::from(backup)
+}
+
+fn write_recoverable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if path.exists() {
+        std::fs::copy(path, backup_path(path))?;
+    }
+    write_atomic(path, bytes)
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut temporary = path.as_os_str().to_os_string();
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
+    let mut file = std::fs::File::create(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::rename(temporary, path)
 }
 
 /// What the menu shows about a save without loading it.
@@ -149,7 +345,7 @@ impl SlotSummary {
 /// in the middle of is the top button, and because "Save 10" sorts before
 /// "Save 2" every other way.
 pub fn list_slots() -> Vec<SlotSummary> {
-    let Ok(entries) = std::fs::read_dir(SAVES_DIR) else {
+    let Ok(entries) = std::fs::read_dir(saves_root()) else {
         // No directory yet is the normal first-run reading, not a problem.
         return Vec::new();
     };
@@ -179,9 +375,7 @@ pub fn list_slots() -> Vec<SlotSummary> {
         })
         .collect();
 
-    found.sort_by(|(a_time, a), (b_time, b)| {
-        b_time.cmp(a_time).then_with(|| a.name.cmp(&b.name))
-    });
+    found.sort_by(|(a_time, a), (b_time, b)| b_time.cmp(a_time).then_with(|| a.name.cmp(&b.name)));
     found.into_iter().map(|(_, summary)| summary).collect()
 }
 
@@ -217,7 +411,7 @@ struct CampaignUnlocks {
 }
 
 fn campaign_path() -> PathBuf {
-    Path::new(SAVES_DIR).join(CAMPAIGN_FILE)
+    saves_root().join(CAMPAIGN_FILE)
 }
 
 /// Every antagonist beaten on this machine, in no particular order.
@@ -226,7 +420,7 @@ fn campaign_path() -> PathBuf {
 /// hand-editable like every other save in this game, and a typo should cost
 /// one unlock, not the launch.
 pub fn thwarted_antags() -> Vec<AntagId> {
-    let Ok(text) = std::fs::read_to_string(campaign_path()) else {
+    let Some(text) = read_slot_text(&campaign_path()) else {
         // No file yet is the normal first-run reading, not a problem.
         return Vec::new();
     };
@@ -255,20 +449,13 @@ pub fn record_thwarted(antag: AntagId) {
     }
     thwarted.push(antag);
 
-    if let Err(error) = std::fs::create_dir_all(SAVES_DIR) {
-        warn!("could not create {SAVES_DIR}: {error}");
-        return;
-    }
     let unlocks = CampaignUnlocks {
         thwarted: thwarted.iter().map(|id| id.key().to_string()).collect(),
     };
     let Ok(text) = ron::ser::to_string_pretty(&unlocks, default()) else {
         return;
     };
-    if let Err(error) = std::fs::write(campaign_path(), text) {
-        warn!("could not record the unlock: {error}");
-        return;
-    }
+    write_slot_text(&campaign_path(), &text);
     info!("{} thwarted — antagonist runs unlocked", antag.label());
 }
 
@@ -277,7 +464,7 @@ pub fn record_thwarted(antag: AntagId) {
 /// Alongside the saves rather than in a slot: it belongs to this machine, not
 /// to a career, and the whole point is that it survives starting a new game.
 fn last_host_path() -> PathBuf {
-    Path::new(SAVES_DIR).join("last_host.txt")
+    saves_root().join("last_host.txt")
 }
 
 /// Remembers an address so rejoining the same lab is one keystroke.
@@ -285,8 +472,8 @@ fn last_host_path() -> PathBuf {
 /// Typing an IP with a mouse-locked game either side of it is the worst part
 /// of joining, and on a home network it is the same address every time.
 pub fn remember_host(address: &str) {
-    if let Err(error) = std::fs::create_dir_all(SAVES_DIR) {
-        warn!("could not create {SAVES_DIR}: {error}");
+    if let Err(error) = std::fs::create_dir_all(saves_root()) {
+        warn!("could not create {}: {error}", saves_root().display());
         return;
     }
     if let Err(error) = std::fs::write(last_host_path(), address) {
@@ -308,7 +495,28 @@ pub fn remembered_host() -> Option<String> {
 /// launch after this change looks like the career was wiped: the old files sit
 /// in the project root where nothing reads them any more.
 pub fn migrate_legacy_saves() {
-    if Path::new(SAVES_DIR).exists() {
+    let destination = saves_root();
+    if destination.exists() {
+        return;
+    }
+    // Slots used to live below the working directory. Copy the whole tree on
+    // the first launch after this move: it preserves every named career, and
+    // leaving the source intact makes an interrupted migration harmless.
+    let legacy_root = Path::new(SAVES_DIR);
+    if legacy_root.exists() {
+        if let Err(error) = copy_directory(legacy_root, &destination) {
+            warn!(
+                "could not copy existing saves from {} to {}: {error}",
+                legacy_root.display(),
+                destination.display()
+            );
+        } else {
+            info!(
+                "copied existing saves from {} to {}",
+                legacy_root.display(),
+                destination.display()
+            );
+        }
         return;
     }
     let legacy: Vec<&str> = [KNOWLEDGE_FILE, PROGRESS_FILE]
@@ -329,7 +537,10 @@ pub fn migrate_legacy_saves() {
         // Copy-then-remove rather than `rename`, which fails across volumes —
         // and a save that is copied but not cleaned up still loads.
         if let Err(error) = std::fs::copy(file, &to) {
-            warn!("could not move {file} into {}: {error}", slot.dir().display());
+            warn!(
+                "could not move {file} into {}: {error}",
+                slot.dir().display()
+            );
             continue;
         }
         if let Err(error) = std::fs::remove_file(file) {
@@ -337,6 +548,20 @@ pub fn migrate_legacy_saves() {
         }
     }
     info!("moved your existing save into '{}'", slot.name());
+}
+
+fn copy_directory(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_directory(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -353,6 +578,25 @@ mod tests {
         );
         assert!(slot.knowledge_path().ends_with("Chemist 4/save.ron"));
         assert!(slot.progress_path().ends_with("Chemist 4/progress.ron"));
+    }
+
+    #[test]
+    fn signed_save_rejects_a_changed_payload() {
+        let key = [7; TAG_BYTES];
+        let mut envelope = encode_envelope(b"(research_points: 3)", &key);
+        let payload_start = ENVELOPE_MAGIC.len() + 8;
+        envelope[payload_start] ^= 1;
+        assert!(decode_envelope(&envelope, &key).is_err());
+    }
+
+    #[test]
+    fn signed_save_round_trips_its_payload() {
+        let key = [42; TAG_BYTES];
+        let payload = b"(known: [\"epinephrine\"])";
+        assert_eq!(
+            decode_envelope(&encode_envelope(payload, &key), &key).unwrap(),
+            payload
+        );
     }
 
     #[test]

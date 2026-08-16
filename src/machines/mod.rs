@@ -442,10 +442,7 @@ pub fn slotted_container(machine: Entity, slotted: &Query<(Entity, &InSlot)>) ->
 }
 
 /// The same, for a [`MachineKind::MixingChamber`]'s second slot.
-pub fn slotted_container_b(
-    machine: Entity,
-    slotted: &Query<(Entity, &InSlotB)>,
-) -> Option<Entity> {
+pub fn slotted_container_b(machine: Entity, slotted: &Query<(Entity, &InSlotB)>) -> Option<Entity> {
     slotted
         .iter()
         .find(|(_, slot)| slot.0 == machine)
@@ -552,9 +549,7 @@ fn handle_machine_interact(
             (Some(slot), _) if slotted_container(request.target, &slotted).is_none() => {
                 Some((slot.offset, false))
             }
-            (_, Some(slot_b))
-                if slotted_container_b(request.target, &slotted_b).is_none() =>
-            {
+            (_, Some(slot_b)) if slotted_container_b(request.target, &slotted_b).is_none() => {
                 Some((slot_b.offset, true))
             }
             _ => None,
@@ -1603,7 +1598,9 @@ mod tests {
             .get_ref::<Container>()
             .expect("the beaker is still there");
         assert!(
-            !container.last_changed().is_newer_than(tick, app.world().read_change_tick()),
+            !container
+                .last_changed()
+                .is_newer_than(tick, app.world().read_change_tick()),
             "carbon on its own reacts with nothing and must not be re-sent"
         );
     }
@@ -1796,7 +1793,10 @@ mod tests {
         let (client, chemist) = chemist(&mut app);
         let machine = app
             .world_mut()
-            .spawn((Machine::new(MachineKind::MixingChamber), Transform::default()))
+            .spawn((
+                Machine::new(MachineKind::MixingChamber),
+                Transform::default(),
+            ))
             .id();
         let beaker_a = app
             .world_mut()
@@ -2193,7 +2193,10 @@ mod tests {
         app.world_mut()
             .entity_mut(machine)
             .insert(Facing(Vec3::NEG_Z));
-        app.world_mut().get_mut::<Machine>(machine).unwrap().in_use_by = Some(other);
+        app.world_mut()
+            .get_mut::<Machine>(machine)
+            .unwrap()
+            .in_use_by = Some(other);
 
         let beaker = {
             let mut query = app.world_mut().query_filtered::<Entity, With<InSlot>>();
@@ -2367,7 +2370,10 @@ mod tests {
         let mut app = test_app();
         let machine = app
             .world_mut()
-            .spawn((Machine::new(MachineKind::ChemMaster5000), Transform::default()))
+            .spawn((
+                Machine::new(MachineKind::ChemMaster5000),
+                Transform::default(),
+            ))
             .id();
         let client = ClientId::Client(app.world_mut().spawn_empty().id());
         let chemist = app
@@ -2413,7 +2419,10 @@ mod tests {
         let mut app = test_app();
         let machine = app
             .world_mut()
-            .spawn((Machine::new(MachineKind::ChemMaster5000), Transform::default()))
+            .spawn((
+                Machine::new(MachineKind::ChemMaster5000),
+                Transform::default(),
+            ))
             .id();
         // Two real connections, each driving their own chemist.
         let first_client = ClientId::Client(app.world_mut().spawn_empty().id());
@@ -2802,5 +2811,4 @@ mod tests {
             "and the reactants go in full regardless — that is what overheating costs"
         );
     }
-
 }

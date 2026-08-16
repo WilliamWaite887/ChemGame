@@ -220,9 +220,8 @@ fn schedule_crisis(
     if underworld.0 >= script.underworld_threshold {
         let mut rng = rand::rng();
         schedule.case = rng.random_range(0..script.cases.len().max(1));
-        schedule.warning_in = Some(
-            rng.random_range(script.warning_seconds.0..=script.warning_seconds.1),
-        );
+        schedule.warning_in =
+            Some(rng.random_range(script.warning_seconds.0..=script.warning_seconds.1));
         let Some(case) = script.cases.get(schedule.case) else {
             return;
         };
@@ -246,11 +245,17 @@ fn afflict_victim(
     radio: &mut RadioLog,
 ) {
     let Some(harm) = db.reagents.id_of(&case.harm_reagent) else {
-        warn!("crisis case names unknown harm reagent '{}'", case.harm_reagent);
+        warn!(
+            "crisis case names unknown harm reagent '{}'",
+            case.harm_reagent
+        );
         return;
     };
     let Some(cure) = db.reagents.id_of(&case.cure_reagent) else {
-        warn!("crisis case names unknown cure reagent '{}'", case.cure_reagent);
+        warn!(
+            "crisis case names unknown cure reagent '{}'",
+            case.cure_reagent
+        );
         return;
     };
 
@@ -260,7 +265,10 @@ fn afflict_victim(
         .filter(|def| def.role == case.afflicted_role)
         .collect();
     let Some(crew_def) = candidates.choose(&mut rand::rng()).copied() else {
-        warn!("no crew member with role '{}' for a crisis", case.afflicted_role);
+        warn!(
+            "no crew member with role '{}' for a crisis",
+            case.afflicted_role
+        );
         return;
     };
 
@@ -538,7 +546,11 @@ mod tests {
 
         advance(&mut app, 1.0);
 
-        assert!(app.world().resource::<CrisisSchedule>().warning_in.is_none());
+        assert!(app
+            .world()
+            .resource::<CrisisSchedule>()
+            .warning_in
+            .is_none());
         let mut victims = app.world_mut().query::<&CrisisOrder>();
         assert!(victims.iter(app.world()).next().is_none());
     }
@@ -552,7 +564,11 @@ mod tests {
 
         advance(&mut app, 0.1);
 
-        assert!(app.world().resource::<CrisisSchedule>().warning_in.is_some());
+        assert!(app
+            .world()
+            .resource::<CrisisSchedule>()
+            .warning_in
+            .is_some());
         assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
     }
 
@@ -561,11 +577,7 @@ mod tests {
         let mut app = crisis_app();
         app.world_mut().resource_mut::<UnderworldStanding>().0 = 8;
         advance(&mut app, 0.1);
-        let warning = app
-            .world()
-            .resource::<CrisisSchedule>()
-            .warning_in
-            .unwrap();
+        let warning = app.world().resource::<CrisisSchedule>().warning_in.unwrap();
 
         advance(&mut app, warning + 0.5);
 

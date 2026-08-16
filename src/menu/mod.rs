@@ -204,7 +204,11 @@ fn show_mode_screen(mut commands: Commands, error: Res<ConnectError>) {
         "A shift in the chemistry lab.",
         |panel| {
             if let Some(reason) = &error.0 {
-                panel.spawn(label(format!("Could not connect: {reason}"), 13.0, ERROR_TEXT));
+                panel.spawn(label(
+                    format!("Could not connect: {reason}"),
+                    13.0,
+                    ERROR_TEXT,
+                ));
             }
             panel.spawn(choice(
                 "Solo",
@@ -237,26 +241,32 @@ fn show_save_screen(mut commands: Commands, pending: Res<PendingMode>) {
     };
     let slots = saves::list_slots();
 
-    menu_shell(&mut commands, MenuRoot, "Choose a save", subtitle, |panel| {
-        panel.spawn(choice(
-            "New save",
-            "Start over: shift 1, an empty notebook.",
-            MenuAction::NewSave,
-        ));
+    menu_shell(
+        &mut commands,
+        MenuRoot,
+        "Choose a save",
+        subtitle,
+        |panel| {
+            panel.spawn(choice(
+                "New save",
+                "Start over: shift 1, an empty notebook.",
+                MenuAction::NewSave,
+            ));
 
-        if slots.is_empty() {
-            panel.spawn(label("No saved games yet.", 14.0, TEXT_DIM));
-        } else {
-            for slot in slots {
-                let action = MenuAction::LoadSave(slot.name.clone());
-                panel.spawn(choice(slot.name.clone(), &slot.detail(), action));
+            if slots.is_empty() {
+                panel.spawn(label("No saved games yet.", 14.0, TEXT_DIM));
+            } else {
+                for slot in slots {
+                    let action = MenuAction::LoadSave(slot.name.clone());
+                    panel.spawn(choice(slot.name.clone(), &slot.detail(), action));
+                }
             }
-        }
 
-        panel.spawn(row()).with_children(|row| {
-            row.spawn(button("Back", MenuAction::Back));
-        });
-    });
+            panel.spawn(row()).with_children(|row| {
+                row.spawn(button("Back", MenuAction::Back));
+            });
+        },
+    );
 }
 
 /// Which side to play a new save from.
@@ -1041,7 +1051,10 @@ mod tests {
         // The port filling itself in is the part nobody expects, so the field
         // says what it will actually dial before the click rather than after.
         assert_eq!(hint_for("192.168.1.40"), "connects to 192.168.1.40:5327");
-        assert_eq!(hint_for("192.168.1.40:9999"), "connects to 192.168.1.40:9999");
+        assert_eq!(
+            hint_for("192.168.1.40:9999"),
+            "connects to 192.168.1.40:9999"
+        );
         assert_eq!(hint_for("nonsense"), "not an address yet");
         assert_eq!(hint_for("  "), "for example 192.168.1.40");
     }

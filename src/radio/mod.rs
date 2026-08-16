@@ -172,13 +172,20 @@ fn pick_line<'a>(
     role: &str,
     rng: &mut impl Rng,
 ) -> Option<&'a RadioLineDef> {
-    let matching: Vec<&RadioLineDef> = lines.iter().filter(|line| line.outcome == outcome).collect();
+    let matching: Vec<&RadioLineDef> = lines
+        .iter()
+        .filter(|line| line.outcome == outcome)
+        .collect();
     let role_specific: Vec<&RadioLineDef> = matching
         .iter()
         .copied()
         .filter(|line| line.role.as_deref() == Some(role))
         .collect();
-    let general: Vec<&RadioLineDef> = matching.iter().copied().filter(|line| line.role.is_none()).collect();
+    let general: Vec<&RadioLineDef> = matching
+        .iter()
+        .copied()
+        .filter(|line| line.role.is_none())
+        .collect();
 
     if !role_specific.is_empty() && rng.random_bool(0.6) {
         role_specific.choose(rng).copied()
@@ -211,7 +218,8 @@ fn queue_reports(
         // its category (Wrong/Expired) reads from `category_lines` instead,
         // which never gets a real chemical name to substitute in.
         let text = if let Some(reagent) = report.reagent {
-            let Some(line) = pick_line(&script.lines, report.outcome, &report.role, &mut rng) else {
+            let Some(line) = pick_line(&script.lines, report.outcome, &report.role, &mut rng)
+            else {
                 warn!("no radio line for outcome {:?}", report.outcome);
                 continue;
             };
@@ -221,12 +229,19 @@ fn queue_reports(
                 .replace("{role}", &report.role)
                 .replace("{reagent}", &reagent)
         } else {
-            let Some(line) = pick_line(&script.category_lines, report.outcome, &report.role, &mut rng)
-            else {
+            let Some(line) = pick_line(
+                &script.category_lines,
+                report.outcome,
+                &report.role,
+                &mut rng,
+            ) else {
                 warn!("no category radio line for outcome {:?}", report.outcome);
                 continue;
             };
-            let phrase = report.category.map(|cat| cat.want_phrase()).unwrap_or_default();
+            let phrase = report
+                .category
+                .map(|cat| cat.want_phrase())
+                .unwrap_or_default();
             line.text
                 .replace("{name}", &report.name)
                 .replace("{role}", &report.role)

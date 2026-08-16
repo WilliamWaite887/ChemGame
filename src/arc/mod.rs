@@ -439,13 +439,21 @@ fn promote_script(
 /// them before seeing a repeat, and falls back to the full roster once they
 /// have all been thwarted rather than running out of game. Pure, so the
 /// preference is testable without an `App` or a save file.
-pub fn pick_antag(available: &[AntagId], thwarted: &[AntagId], rng: &mut impl Rng) -> Option<AntagId> {
+pub fn pick_antag(
+    available: &[AntagId],
+    thwarted: &[AntagId],
+    rng: &mut impl Rng,
+) -> Option<AntagId> {
     let unbeaten: Vec<AntagId> = available
         .iter()
         .copied()
         .filter(|id| !thwarted.contains(id))
         .collect();
-    let pool = if unbeaten.is_empty() { available } else { &unbeaten };
+    let pool = if unbeaten.is_empty() {
+        available
+    } else {
+        &unbeaten
+    };
     pool.choose(rng).copied()
 }
 
@@ -717,7 +725,10 @@ fn generate_counter_orders(
         .filter(|def| def.role == step.role)
         .collect();
     let Some(crew_def) = candidates.choose(&mut rng).copied() else {
-        warn!("no crew member with role '{}' to ask for a countermeasure", step.role);
+        warn!(
+            "no crew member with role '{}' to ask for a countermeasure",
+            step.role
+        );
         return;
     };
 
@@ -894,7 +905,10 @@ pub fn finish(
         text,
         good: won,
     });
-    info!("campaign resolved: {outcome:?} ({})", if won { "win" } else { "loss" });
+    info!(
+        "campaign resolved: {outcome:?} ({})",
+        if won { "win" } else { "loss" }
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1159,7 +1173,11 @@ mod tests {
         app.world_mut().resource_mut::<Campaign>().plot = 2;
 
         // Down: a counter step is worth far more than 2 points.
-        let role = app.world().resource::<Script>().antagonist(AntagId::Cult).unwrap()
+        let role = app
+            .world()
+            .resource::<Script>()
+            .antagonist(AntagId::Cult)
+            .unwrap()
             .counter_steps[0]
             .role
             .clone();
@@ -1208,7 +1226,10 @@ mod tests {
         advance(&mut app, FIRST_COUNTER_SECONDS * 3.0);
 
         assert_eq!(
-            app.world_mut().query::<&CounterOrder>().iter(app.world()).count(),
+            app.world_mut()
+                .query::<&CounterOrder>()
+                .iter(app.world())
+                .count(),
             0,
             "there is nothing to ask for before anyone knows there is a problem"
         );
@@ -1219,17 +1240,26 @@ mod tests {
         let mut app = counter_app(AntagId::Cult);
         open_the_track(&mut app);
 
-        let mut counters = app.world_mut().query::<(&CounterOrder, &Order, &CrewMember)>();
+        let mut counters = app
+            .world_mut()
+            .query::<(&CounterOrder, &Order, &CrewMember)>();
         let (_, order, member) = counters
             .iter(app.world())
             .next()
             .expect("a counter-track request should be at the counter");
 
-        let expected = app.world().resource::<Script>().antagonist(AntagId::Cult).unwrap()
+        let expected = app
+            .world()
+            .resource::<Script>()
+            .antagonist(AntagId::Cult)
+            .unwrap()
             .counter_steps[0]
             .role
             .clone();
-        assert_eq!(member.role, expected, "the track runs in its authored order");
+        assert_eq!(
+            member.role, expected,
+            "the track runs in its authored order"
+        );
         assert!(
             !order.specific,
             "a counter step must stay lenient, or it demands one exact reagent \
@@ -1248,7 +1278,10 @@ mod tests {
         open_the_track(&mut app);
 
         assert_eq!(
-            app.world_mut().query::<&CounterOrder>().iter(app.world()).count(),
+            app.world_mut()
+                .query::<&CounterOrder>()
+                .iter(app.world())
+                .count(),
             1,
             "a countermeasure has to be able to reach a closed lab"
         );
@@ -1263,7 +1296,10 @@ mod tests {
         advance(&mut app, 600.0);
 
         assert_eq!(
-            app.world_mut().query::<&CounterOrder>().iter(app.world()).count(),
+            app.world_mut()
+                .query::<&CounterOrder>()
+                .iter(app.world())
+                .count(),
             1,
             "the counter-track is a sequence, not a queue"
         );
@@ -1277,7 +1313,11 @@ mod tests {
             app.world_mut().resource_mut::<Campaign>().plot = suspected_at;
             suspected_at
         };
-        let role = app.world().resource::<Script>().antagonist(AntagId::Cult).unwrap()
+        let role = app
+            .world()
+            .resource::<Script>()
+            .antagonist(AntagId::Cult)
+            .unwrap()
             .counter_steps[0]
             .role
             .clone();
@@ -1295,7 +1335,11 @@ mod tests {
     #[test]
     fn a_botched_counter_step_leaves_it_outstanding() {
         let mut app = counter_app(AntagId::Cult);
-        let role = app.world().resource::<Script>().antagonist(AntagId::Cult).unwrap()
+        let role = app
+            .world()
+            .resource::<Script>()
+            .antagonist(AntagId::Cult)
+            .unwrap()
             .counter_steps[0]
             .role
             .clone();
@@ -1400,7 +1444,12 @@ mod tests {
     #[test]
     fn completing_the_counter_track_ends_the_arc() {
         let mut app = arc_app(AntagId::Cult);
-        for flag in app.world_mut().resource_mut::<Campaign>().countered.iter_mut() {
+        for flag in app
+            .world_mut()
+            .resource_mut::<Campaign>()
+            .countered
+            .iter_mut()
+        {
             *flag = true;
         }
 
@@ -1433,7 +1482,11 @@ mod tests {
     #[test]
     fn an_antagonist_run_reads_the_same_outcomes_the_other_way_round() {
         // The whole reason the inversion needs no mechanics of its own.
-        let steps = script().antagonist(AntagId::Cult).unwrap().counter_steps.len();
+        let steps = script()
+            .antagonist(AntagId::Cult)
+            .unwrap()
+            .counter_steps
+            .len();
         let mut run = Campaign::new(AntagId::Cult, Mode::Antagonist, steps);
 
         run.outcome = Some(ArcOutcome::PlotSucceeded);
@@ -1458,7 +1511,12 @@ mod tests {
     #[test]
     fn an_unbeaten_antagonist_is_preferred() {
         let mut rng = rand::rng();
-        let thwarted = [AntagId::Cult, AntagId::Spy, AntagId::Changeling, AntagId::Ai];
+        let thwarted = [
+            AntagId::Cult,
+            AntagId::Spy,
+            AntagId::Changeling,
+            AntagId::Ai,
+        ];
         for _ in 0..50 {
             assert_eq!(
                 pick_antag(&AntagId::ALL, &thwarted, &mut rng),
@@ -1560,7 +1618,10 @@ mod tests {
         assert!(script.suspected_at < script.named_at);
         assert!(script.named_at < script.showdown_at);
         assert!(script.showdown_at < PLOT_MAX);
-        assert!(script.drift_per_minute > 0, "a stalled meter can never resolve");
+        assert!(
+            script.drift_per_minute > 0,
+            "a stalled meter can never resolve"
+        );
         assert!(script.plot_per_aid > 0);
         assert!(
             script.plot_per_counter_step < 0,

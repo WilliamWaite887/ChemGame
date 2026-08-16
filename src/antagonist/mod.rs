@@ -306,7 +306,10 @@ fn generate_antagonist_orders(
         return;
     };
     let Some(reagent) = db.reagents.id_of(&request.reagent) else {
-        warn!("antagonist request names unknown reagent '{}'", request.reagent);
+        warn!(
+            "antagonist request names unknown reagent '{}'",
+            request.reagent
+        );
         return;
     };
     let Some(&amount) = request.amounts.choose(&mut rng) else {
@@ -345,8 +348,7 @@ fn generate_antagonist_orders(
         )),
     ));
 
-    let priming_delay =
-        rng.random_range(PRIMING_DELAY_SECONDS.0..=PRIMING_DELAY_SECONDS.1);
+    let priming_delay = rng.random_range(PRIMING_DELAY_SECONDS.0..=PRIMING_DELAY_SECONDS.1);
     broadcasts.push_delayed(
         priming_delay,
         RadioEntry {
@@ -572,7 +574,10 @@ mod tests {
         assert_eq!(lo0, script.gap_multiplier.0, "the floor never moves");
         assert_eq!(lo_mid, script.gap_multiplier.0);
         assert_eq!(lo_full, script.gap_multiplier.0);
-        assert!(hi0 >= hi_mid, "the ceiling must not rise as standing climbs");
+        assert!(
+            hi0 >= hi_mid,
+            "the ceiling must not rise as standing climbs"
+        );
         assert!(hi_mid >= hi_full);
         assert_eq!(
             hi_full, script.gap_multiplier.0,
@@ -658,7 +663,11 @@ mod tests {
         resolve_illicit(&mut app, "space_drugs"); // sting_chance defaults to 0.0
 
         assert_eq!(app.world().resource::<PendingBroadcasts>().len(), 1);
-        assert!(app.world().resource::<crate::radio::RadioLog>().entries.is_empty());
+        assert!(app
+            .world()
+            .resource::<crate::radio::RadioLog>()
+            .entries
+            .is_empty());
     }
 
     #[test]

@@ -25,7 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::crew::CrewMember;
 use crate::lab::{
-    doorways, Solid, WalkableAreas, CREW_DOOR_X, DOOR_HEIGHT, DOOR_WIDTH, LOBBY, ROOMS, WALL_THICKNESS,
+    doorways, Solid, WalkableAreas, CREW_DOOR_X, DOOR_HEIGHT, DOOR_WIDTH, LOBBY, ROOMS,
+    WALL_THICKNESS,
 };
 use crate::net::is_authority;
 use crate::player::Chemist;
@@ -220,12 +221,20 @@ fn animate_door_leaves(
         let Ok(door) = doors.get(leaf.door) else {
             continue;
         };
-        let target = if door.open { leaf.open_local } else { leaf.closed_local };
+        let target = if door.open {
+            leaf.open_local
+        } else {
+            leaf.closed_local
+        };
         if transform.translation == target {
             continue;
         }
         let next = transform.translation.lerp(target, t);
-        transform.translation = if next.distance(target) < 0.01 { target } else { next };
+        transform.translation = if next.distance(target) < 0.01 {
+            target
+        } else {
+            next
+        };
     }
 }
 
@@ -278,7 +287,10 @@ mod tests {
         let (run, center) = doorways().nth(doorway_index).expect("a real doorway");
         app.world_mut()
             .spawn((
-                Door { open: false, doorway_index },
+                Door {
+                    open: false,
+                    doorway_index,
+                },
                 Transform::from_translation(run.point(center)),
             ))
             .id()
@@ -287,7 +299,9 @@ mod tests {
     fn chemist_at(app: &mut App, position: Vec3) -> Entity {
         app.world_mut()
             .spawn((
-                Chemist { client: ClientId::Server },
+                Chemist {
+                    client: ClientId::Server,
+                },
                 Transform::from_translation(position),
             ))
             .id()
@@ -318,12 +332,21 @@ mod tests {
         let chemist = chemist_at(&mut app, at);
 
         app.update();
-        assert!(is_open(&app, door), "a chemist standing in the doorway did not open it");
+        assert!(
+            is_open(&app, door),
+            "a chemist standing in the doorway did not open it"
+        );
 
-        app.world_mut().entity_mut(chemist).get_mut::<Transform>().unwrap().translation =
-            at + Vec3::new(50.0, 0.0, 50.0);
+        app.world_mut()
+            .entity_mut(chemist)
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation = at + Vec3::new(50.0, 0.0, 50.0);
         app.update();
-        assert!(!is_open(&app, door), "the door stayed open once the chemist walked far away");
+        assert!(
+            !is_open(&app, door),
+            "the door stayed open once the chemist walked far away"
+        );
     }
 
     #[test]
@@ -334,7 +357,10 @@ mod tests {
         crew_at(&mut app, run.point(center));
 
         app.update();
-        assert!(is_open(&app, door), "a crew member standing in the doorway did not open it");
+        assert!(
+            is_open(&app, door),
+            "a crew member standing in the doorway did not open it"
+        );
     }
 
     #[test]
@@ -358,7 +384,12 @@ mod tests {
 
         let mut doors = app.world_mut().query::<(&Door, &Transform)>();
         let found: Vec<(&Door, &Transform)> = doors.iter(app.world()).collect();
-        assert_eq!(found.len(), 1, "expected exactly one door, found {}", found.len());
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one door, found {}",
+            found.len()
+        );
 
         let (door, transform) = found[0];
         assert!(

@@ -52,7 +52,11 @@ fn set_stopped(mut state: ResMut<NextState<ServerState>>) {
     state.set(ServerState::Stopped);
 }
 
-fn process_server_events(mut commands: Commands, mut server_events: MessageReader<ServerEvent>, network_map: Res<NetworkIdMap>) {
+fn process_server_events(
+    mut commands: Commands,
+    mut server_events: MessageReader<ServerEvent>,
+    network_map: Res<NetworkIdMap>,
+) {
     for event in server_events.read() {
         match event {
             ServerEvent::ClientConnected { client_id } => {
@@ -89,7 +93,10 @@ fn receive_packets(
     for (client_entity, network_id, mut stats) in &mut clients {
         for channel_id in 0..channels.client_channels().len() as u8 {
             while let Some(message) = server.receive_message(network_id.get(), channel_id) {
-                trace!("forwarding {} received bytes over channel {channel_id}", message.len());
+                trace!(
+                    "forwarding {} received bytes over channel {channel_id}",
+                    message.len()
+                );
                 messages.insert_received(client_entity, channel_id, message);
             }
         }
@@ -104,9 +111,16 @@ fn receive_packets(
     }
 }
 
-fn send_packets(mut server: ResMut<RenetServer>, mut messages: ResMut<ServerMessages>, clients: Query<&NetworkId>) {
+fn send_packets(
+    mut server: ResMut<RenetServer>,
+    mut messages: ResMut<ServerMessages>,
+    clients: Query<&NetworkId>,
+) {
     for (client_entity, channel_id, message) in messages.drain_sent() {
-        trace!("forwarding {} sent bytes over channel {channel_id}", message.len());
+        trace!(
+            "forwarding {} sent bytes over channel {channel_id}",
+            message.len()
+        );
         let network_id = clients
             .get(client_entity)
             .expect("messages should be sent only to connected clients");
@@ -114,14 +128,24 @@ fn send_packets(mut server: ResMut<RenetServer>, mut messages: ResMut<ServerMess
     }
 }
 
-fn disconnect_by_request(mut commands: Commands, mut disconnects: MessageReader<DisconnectRequest>) {
+fn disconnect_by_request(
+    mut commands: Commands,
+    mut disconnects: MessageReader<DisconnectRequest>,
+) {
     for disconnect in disconnects.read() {
-        debug!("despawning client `{}` by disconnect request", disconnect.client);
+        debug!(
+            "despawning client `{}` by disconnect request",
+            disconnect.client
+        );
         commands.entity(disconnect.client).despawn();
     }
 }
 
-fn disconnect_client(remove: On<Remove, ConnectedClient>, server: Option<ResMut<RenetServer>>, clients: Query<&NetworkId>) {
+fn disconnect_client(
+    remove: On<Remove, ConnectedClient>,
+    server: Option<ResMut<RenetServer>>,
+    clients: Query<&NetworkId>,
+) {
     if let Some(mut server) = server {
         debug!("disconnecting despawned client `{}`", remove.entity);
 

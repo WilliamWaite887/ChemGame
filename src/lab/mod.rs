@@ -347,7 +347,9 @@ impl Plugin for LabPlugin {
         #[cfg(not(feature = "trenchbroom"))]
         app.add_systems(
             OnEnter(AppState::Playing),
-            (spawn_shell, spawn_fixtures).chain().after(load_machine_assets),
+            (spawn_shell, spawn_fixtures)
+                .chain()
+                .after(load_machine_assets),
         );
 
         app.add_systems(
@@ -1144,11 +1146,17 @@ pub(crate) fn dress_machines(
                 // own left-right axis, wherever it is standing.
                 let lateral = Vec3::new(fit.facing.z, 0.0, -fit.facing.x) * 0.28;
                 commands.entity(entity).insert((
-                    ContainerSlot { offset: lift - lateral },
-                    ContainerSlotB { offset: lift + lateral },
+                    ContainerSlot {
+                        offset: lift - lateral,
+                    },
+                    ContainerSlotB {
+                        offset: lift + lateral,
+                    },
                 ));
             } else {
-                commands.entity(entity).insert(ContainerSlot { offset: lift });
+                commands
+                    .entity(entity)
+                    .insert(ContainerSlot { offset: lift });
             }
         }
 

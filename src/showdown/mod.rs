@@ -629,7 +629,10 @@ mod tests {
             "it should arrive on the ordinary crew route, indistinguishable from a visitor"
         );
         assert_eq!(
-            app.world_mut().query::<&Pursuit>().iter(app.world()).count(),
+            app.world_mut()
+                .query::<&Pursuit>()
+                .iter(app.world())
+                .count(),
             0,
             "it must not start hunting before it has even got through the door"
         );
@@ -646,10 +649,7 @@ mod tests {
             .iter(app.world())
             .next()
             .unwrap();
-        app.world_mut()
-            .get_mut::<CrewRoute>(entity)
-            .unwrap()
-            .phase = CrewPhase::Waiting;
+        app.world_mut().get_mut::<CrewRoute>(entity).unwrap().phase = CrewPhase::Waiting;
         advance(&mut app, 0.1);
 
         assert!(
@@ -683,7 +683,10 @@ mod tests {
 
         advance(&mut app, 5.0);
 
-        assert_eq!(app.world_mut().query::<&Breach>().iter(app.world()).count(), 0);
+        assert_eq!(
+            app.world_mut().query::<&Breach>().iter(app.world()).count(),
+            0
+        );
     }
 
     #[test]
@@ -757,7 +760,10 @@ mod tests {
                 "{antag:?} left a breach in the wall after its arc ended"
             );
             assert_eq!(
-                app.world_mut().query::<&Assailant>().iter(app.world()).count(),
+                app.world_mut()
+                    .query::<&Assailant>()
+                    .iter(app.world())
+                    .count(),
                 0,
                 "{antag:?} left an assailant standing after its arc ended"
             );
@@ -811,7 +817,10 @@ mod tests {
     #[test]
     fn the_showdown_tuning_is_survivable_and_winnable() {
         let showdown = script().showdown;
-        assert!(showdown.deadline_seconds > 60.0, "no time to synthesise anything");
+        assert!(
+            showdown.deadline_seconds > 60.0,
+            "no time to synthesise anything"
+        );
         assert!(showdown.gas_every_seconds > 0.0);
         assert!(showdown.cure_units_needed > 0);
         assert!(showdown.hit_every_seconds > 0.0);

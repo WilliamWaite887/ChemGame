@@ -348,11 +348,13 @@ fn notice_the_high(
 
     // Only crew actually in the room count. Someone still walking in through
     // the door has not been seen by anyone yet.
-    let present = || crew.iter().filter(|(_, route, _)| route.phase != CrewPhase::Leaving);
+    let present = || {
+        crew.iter()
+            .filter(|(_, route, _)| route.phase != CrewPhase::Leaving)
+    };
 
-    let security_watching = present().any(|(member, _, _)| {
-        Department::from_role(&member.role) == Some(Department::Security)
-    });
+    let security_watching = present()
+        .any(|(member, _, _)| Department::from_role(&member.role) == Some(Department::Security));
     if !security_watching {
         return;
     }
@@ -367,9 +369,7 @@ fn notice_the_high(
         // "Visibly" high is exactly the set of statuses `crate::fx` already
         // draws as a stagger and a tint, so what Security can notice is the
         // same thing the player can see across the room.
-        .any(|(_, _, blood)| {
-            blood.is_some_and(|blood| blood.0.active_statuses().next().is_some())
-        });
+        .any(|(_, _, blood)| blood.is_some_and(|blood| blood.0.active_statuses().next().is_some()));
     if !visibly_high {
         return;
     }
@@ -486,7 +486,10 @@ fn generate_addict_visits(
         )),
     ));
 
-    info!("addiction: {} is back for {} {}", crew_def.name, amount, reagent_name);
+    info!(
+        "addiction: {} is back for {} {}",
+        crew_def.name, amount, reagent_name
+    );
 }
 
 /// Pays for a sale, and resets the customer's clock.
@@ -552,9 +555,7 @@ fn handle_withdrawal(
         .0
         .iter()
         .filter(|(_, habit)| {
-            !habit.withdrawn
-                && habit.hooked(&script)
-                && habit.dry_for >= script.withdrawal_after
+            !habit.withdrawn && habit.hooked(&script) && habit.dry_for >= script.withdrawal_after
         })
         .map(|(name, _)| name.clone())
         .collect();
@@ -638,7 +639,10 @@ mod tests {
                 config,
             })
             .insert_resource(Script(script))
-            .insert_resource(DoseClock(Timer::from_seconds(interval, TimerMode::Repeating)))
+            .insert_resource(DoseClock(Timer::from_seconds(
+                interval,
+                TimerMode::Repeating,
+            )))
             .init_resource::<Addictions>()
             .init_resource::<SecuritySuspicion>()
             .init_resource::<CarriedSuspicion>()
@@ -715,7 +719,10 @@ mod tests {
             .get("Chef Dubois")
             .expect("someone kept full of space drugs should end up with a habit");
         assert_eq!(habit.reagent, "space_drugs");
-        assert!(habit.weight >= hooked_at, "the habit should have taken hold");
+        assert!(
+            habit.weight >= hooked_at,
+            "the habit should have taken hold"
+        );
     }
 
     #[test]
@@ -822,7 +829,10 @@ mod tests {
         let while_watched = app.world().resource::<SecuritySuspicion>().0;
         assert!(while_watched > 0);
 
-        app.world_mut().get_mut::<CrewRoute>(addict).unwrap().leave();
+        app.world_mut()
+            .get_mut::<CrewRoute>(addict)
+            .unwrap()
+            .leave();
         advance(&mut app, 60.0);
 
         assert_eq!(
@@ -935,7 +945,9 @@ mod tests {
             "and must not repeat every frame afterwards"
         );
         assert_eq!(
-            app.world().resource::<Shift>().standing(Department::Service),
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Service),
             penalty,
             "their department notices"
         );
@@ -1004,7 +1016,10 @@ mod tests {
         let addictions = app.world().resource::<Addictions>();
         let habit = &addictions.0["Chef Dubois"];
         assert_eq!(habit.dry_for, 0.0, "they are topped up again");
-        assert!(!habit.withdrawn, "and the next dry spell can complain afresh");
+        assert!(
+            !habit.withdrawn,
+            "and the next dry spell can complain afresh"
+        );
     }
 
     #[test]
@@ -1047,7 +1062,10 @@ mod tests {
         assert!(!script.pleas.is_empty());
         assert!(!script.withdrawal_lines.is_empty());
         assert!(
-            script.withdrawal_lines.iter().all(|line| line.contains("{name}")),
+            script
+                .withdrawal_lines
+                .iter()
+                .all(|line| line.contains("{name}")),
             "a withdrawal line that never names anyone reads as unrelated chatter"
         );
         assert!(script.withdrawal_penalty < 0);

@@ -93,11 +93,7 @@ impl NavGraph {
     /// body nudged a few centimetres into a wall by a collision still has to be
     /// able to ask for a route home.
     fn locate(&self, point: Vec3) -> Option<usize> {
-        if let Some(index) = self
-            .nodes
-            .iter()
-            .position(|node| node.bounds.holds(point))
-        {
+        if let Some(index) = self.nodes.iter().position(|node| node.bounds.holds(point)) {
             return Some(index);
         }
 

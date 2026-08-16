@@ -19,7 +19,7 @@ use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, InSlot, InSlotB, Stored};
 use crate::crew::{AtCounter, CrewMember};
-use crate::interaction::{leave_machine, InteractionMode, Interactable, LeaveMachineRequested};
+use crate::interaction::{leave_machine, Interactable, InteractionMode, LeaveMachineRequested};
 use crate::knowledge::{
     product_name, reaction_categories, BuyHintRequested, Knowledge, RecipeDiscovered,
     UpgradeDispenserRequested, HINT_COST,
@@ -147,7 +147,9 @@ enum PanelAction {
     ToContainer(ReagentId, Units, MachineSlot),
     Package(ContainerKind),
     Analyze,
-    Grind { all: bool },
+    Grind {
+        all: bool,
+    },
     TogglePower,
     BuyHint(ReactionId),
     ShowCategory(Option<Category>),
@@ -365,24 +367,20 @@ pub(crate) struct ArcHeadline {
 ///
 /// `None` while the antagonist is still [`Reveal::Hidden`]: the board is a
 /// public notice, and the whole arc depends on it not being one yet.
-pub(crate) fn arc_headline(
-    campaign: &Campaign,
-    script: Option<&ArcScript>,
-) -> Option<ArcHeadline> {
+pub(crate) fn arc_headline(campaign: &Campaign, script: Option<&ArcScript>) -> Option<ArcHeadline> {
     if campaign.reveal == Reveal::Hidden && campaign.outcome.is_none() {
         return None;
     }
     let named = campaign.reveal == Reveal::Named || campaign.outcome.is_some();
     Some(ArcHeadline {
-        name: named
-            .then(|| {
-                script
-                    .and_then(|script| script.antagonist(campaign.antag))
-                    .map(|def| def.display.clone())
-                    // The script is an asset; if it somehow is not loaded, the
-                    // short menu label still names the right thing.
-                    .unwrap_or_else(|| campaign.antag.label().to_string())
-            }),
+        name: named.then(|| {
+            script
+                .and_then(|script| script.antagonist(campaign.antag))
+                .map(|def| def.display.clone())
+                // The script is an asset; if it somehow is not loaded, the
+                // short menu label still names the right thing.
+                .unwrap_or_else(|| campaign.antag.label().to_string())
+        }),
         countered: campaign.countered.iter().filter(|done| **done).count(),
         total: campaign.countered.len(),
         resolved: campaign.player_won(),
@@ -554,17 +552,15 @@ fn sync_panel(
     // The Mixing Chamber's second beaker. `slotted_container_b` simply never
     // matches for any other machine, since only the Mixing Chamber ever gets
     // an `InSlotB` in the first place.
-    let loaded_entity_b =
-        open_machine.and_then(|machine| slotted_container_b(machine, &slotted_b));
+    let loaded_entity_b = open_machine.and_then(|machine| slotted_container_b(machine, &slotted_b));
     let loaded_b = loaded_entity_b.and_then(|entity| containers.get(entity).ok());
     // Derived from the beaker and the chemistry rather than read off a marker
     // component, so a guest can answer it too. `machines::Reacting` is the
     // authority's own bookkeeping and is deliberately not on the wire; a
     // client holds the same solution and the same recipes, so it does not need
     // to be told.
-    let reacting = loaded.is_some_and(|container| {
-        chem_sim::is_reacting(&container.solution, &db.reactions)
-    });
+    let reacting =
+        loaded.is_some_and(|container| chem_sim::is_reacting(&container.solution, &db.reactions));
     let machine_parts = open_machine.and_then(|machine| machines.get(machine).ok());
 
     // Built before the signature so both the comparison and the panel body can
@@ -950,7 +946,11 @@ fn draw_sign_controls(panel: &mut ChildSpawnerCommands, shift: &Shift, stage: &B
 /// possibly still working. Stopping the game to show a summary would make
 /// reading it a cost.
 fn draw_debrief(panel: &mut ChildSpawnerCommands, report: &ShiftReport) {
-    panel.spawn(label(format!("SHIFT {} — DEBRIEF", report.number), 18.0, TEXT));
+    panel.spawn(label(
+        format!("SHIFT {} — DEBRIEF", report.number),
+        18.0,
+        TEXT,
+    ));
 
     if report.is_quiet() {
         panel.spawn(label(
@@ -1039,7 +1039,9 @@ fn draw_arc_notice(panel: &mut ChildSpawnerCommands, arc: &ArcHeadline) {
     panel.spawn(label(heading, 16.0, tone));
 
     let detail = match arc.resolved {
-        Some(true) => "Whatever they were building, it isn't happening. Command sends thanks.".to_string(),
+        Some(true) => {
+            "Whatever they were building, it isn't happening. Command sends thanks.".to_string()
+        }
         Some(false) => "Command has stopped answering. There is nothing left to fill.".to_string(),
         None if arc.name.is_none() => {
             "Command won't say what. Departments are filing requests they won't explain."
@@ -1134,12 +1136,19 @@ fn dispenser_body(
         panel.spawn(wrap_row()).with_children(|row| {
             for reagent in &reagents[index..end] {
                 if unlocked {
-                    row.spawn(button(reagent.name.clone(), PanelAction::Dispense(reagent.id)));
+                    row.spawn(button(
+                        reagent.name.clone(),
+                        PanelAction::Dispense(reagent.id),
+                    ));
                 } else {
                     // Not yet unlocked at this dispenser tier: shown so a
                     // chemist can see what's coming, but inert — upgrading
                     // is the only way to reach it, not a per-reagent buy.
-                    let caption = if revealed { reagent.name.clone() } else { "???".to_string() };
+                    let caption = if revealed {
+                        reagent.name.clone()
+                    } else {
+                        "???".to_string()
+                    };
                     let mut entity = row.spawn(button(caption, PanelAction::Dispense(reagent.id)));
                     entity.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
                 }
@@ -1299,7 +1308,10 @@ fn heater_body(
         if thermostat.powered {
             entity.insert(BackgroundColor(BUTTON_ACTIVE));
         }
-        row.spawn(button("Eject container", PanelAction::Eject(MachineSlot::A)));
+        row.spawn(button(
+            "Eject container",
+            PanelAction::Eject(MachineSlot::A),
+        ));
     });
 
     container_readout(panel, db, loaded, reacting, false);
@@ -1379,9 +1391,10 @@ fn sync_thermostat_slider(
     let value = match drag.0 {
         Some(value) => Some(value),
         None => match modes.iter().next().copied() {
-            Some(InteractionMode::UsingMachine(machine)) => {
-                thermostats.get(machine).ok().map(|thermostat| thermostat.target.0)
-            }
+            Some(InteractionMode::UsingMachine(machine)) => thermostats
+                .get(machine)
+                .ok()
+                .map(|thermostat| thermostat.target.0),
             _ => None,
         },
     };
@@ -2016,7 +2029,10 @@ fn book_entry(
                 if known {
                     "Tap to see the formula.".to_string()
                 } else {
-                    format!("{} ingredients — tap to research.", reaction.reactants.len())
+                    format!(
+                        "{} ingredients — tap to research.",
+                        reaction.reactants.len()
+                    )
                 },
                 12.0,
                 TEXT_DIM,
@@ -2093,7 +2109,11 @@ fn render_recipe_node(
         return;
     }
     if !visited.insert(reaction.id) {
-        pane.spawn(label("…already shown further up this branch.", 12.0, TEXT_DIM));
+        pane.spawn(label(
+            "…already shown further up this branch.",
+            12.0,
+            TEXT_DIM,
+        ));
         return;
     }
 
@@ -2108,77 +2128,99 @@ fn render_recipe_node(
     node.margin.left = px(depth as f32 * TREE_INDENT);
     node.border = UiRect::left(px(2.0));
 
-    pane.spawn((node, BackgroundColor(SECTION_BG), BorderColor::from(TEXT_DIM)))
-        .with_children(|entry| {
-            entry.spawn(label(
-                if known {
-                    title.clone()
-                } else {
-                    format!("{title}   —   not yet worked out")
-                },
-                16.0,
-                if known { TEXT } else { TEXT_DIM },
-            ));
-
-            if depth == 0 {
-                if let Some(treats) = product.and_then(|p| p.treats.as_ref()) {
-                    entry.spawn(label(treats.clone(), 13.0, TEXT_DIM));
-                }
-            }
-
+    pane.spawn((
+        node,
+        BackgroundColor(SECTION_BG),
+        BorderColor::from(TEXT_DIM),
+    ))
+    .with_children(|entry| {
+        entry.spawn(label(
             if known {
-                entry.spawn(label(recipe_line(db, reaction), 14.0, TEXT));
-                if let Some(overdose) = product.and_then(|p| p.overdose) {
-                    entry.spawn(label(
-                        format!("Overdoses above {overdose} in a single dose."),
-                        13.0,
-                        Color::srgb(0.90, 0.62, 0.45),
-                    ));
-                }
-                return;
-            }
+                title.clone()
+            } else {
+                format!("{title}   —   not yet worked out")
+            },
+            16.0,
+            if known { TEXT } else { TEXT_DIM },
+        ));
 
-            entry.spawn(label(
-                format!("{} ingredients.", reaction.reactants.len()),
-                13.0,
-                TEXT_DIM,
-            ));
-            for hint in knowledge.visible_hints(db, reaction.id) {
+        if depth == 0 {
+            if let Some(treats) = product.and_then(|p| p.treats.as_ref()) {
+                entry.spawn(label(treats.clone(), 13.0, TEXT_DIM));
+            }
+        }
+
+        if known {
+            entry.spawn(label(recipe_line(db, reaction), 14.0, TEXT));
+            if let Some(overdose) = product.and_then(|p| p.overdose) {
                 entry.spawn(label(
-                    format!("· {hint}"),
+                    format!("Overdoses above {overdose} in a single dose."),
                     13.0,
-                    Color::srgb(0.70, 0.78, 0.62),
+                    Color::srgb(0.90, 0.62, 0.45),
                 ));
             }
-            // Only offer the purchase when it can actually go through; a button
-            // that silently does nothing is worse than none.
-            if knowledge.hint_available(db, reaction.id) {
-                let affordable = knowledge.research_points >= HINT_COST;
-                entry.spawn(row()).with_children(|row| {
-                    if affordable {
-                        row.spawn(button(
-                            format!("Study further  ({HINT_COST} research)"),
-                            PanelAction::BuyHint(reaction.id),
-                        ));
-                    } else {
-                        row.spawn(label(
-                            format!("Needs {HINT_COST} research to study further."),
-                            12.0,
-                            TEXT_DIM,
-                        ));
-                    }
-                });
-            }
-        });
+            return;
+        }
+
+        entry.spawn(label(
+            format!("{} ingredients.", reaction.reactants.len()),
+            13.0,
+            TEXT_DIM,
+        ));
+        for hint in knowledge.visible_hints(db, reaction.id) {
+            entry.spawn(label(
+                format!("· {hint}"),
+                13.0,
+                Color::srgb(0.70, 0.78, 0.62),
+            ));
+        }
+        // Only offer the purchase when it can actually go through; a button
+        // that silently does nothing is worse than none.
+        if knowledge.hint_available(db, reaction.id) {
+            let affordable = knowledge.research_points >= HINT_COST;
+            entry.spawn(row()).with_children(|row| {
+                if affordable {
+                    row.spawn(button(
+                        format!("Study further  ({HINT_COST} research)"),
+                        PanelAction::BuyHint(reaction.id),
+                    ));
+                } else {
+                    row.spawn(label(
+                        format!("Needs {HINT_COST} research to study further."),
+                        12.0,
+                        TEXT_DIM,
+                    ));
+                }
+            });
+        }
+    });
 
     // A locked node's own ingredients stay hidden — the same spoiler
     // discipline the hint system already enforces everywhere else.
     if known {
         for &(reagent_id, amount) in &reaction.reactants {
-            render_ingredient_node(pane, db, knowledge, reagent_id, amount, false, depth + 1, visited);
+            render_ingredient_node(
+                pane,
+                db,
+                knowledge,
+                reagent_id,
+                amount,
+                false,
+                depth + 1,
+                visited,
+            );
         }
         for &(reagent_id, amount) in &reaction.catalysts {
-            render_ingredient_node(pane, db, knowledge, reagent_id, amount, true, depth + 1, visited);
+            render_ingredient_node(
+                pane,
+                db,
+                knowledge,
+                reagent_id,
+                amount,
+                true,
+                depth + 1,
+                visited,
+            );
         }
     }
 
@@ -2222,17 +2264,21 @@ fn render_ingredient_node(
     node.margin.left = px(depth as f32 * TREE_INDENT);
     node.border = UiRect::left(px(2.0));
 
-    pane.spawn((node, BackgroundColor(SECTION_BG), BorderColor::from(TEXT_DIM)))
-        .with_children(|entry| {
-            entry.spawn(label(line, 14.0, TEXT_DIM));
-            if definition.dispensable && !knowledge.is_reagent_unlocked(db, reagent) {
-                entry.spawn(label(
-                    format!("locked at dispenser  (tier {})", definition.tier),
-                    12.0,
-                    Color::srgb(0.80, 0.60, 0.45),
-                ));
-            }
-        });
+    pane.spawn((
+        node,
+        BackgroundColor(SECTION_BG),
+        BorderColor::from(TEXT_DIM),
+    ))
+    .with_children(|entry| {
+        entry.spawn(label(line, 14.0, TEXT_DIM));
+        if definition.dispensable && !knowledge.is_reagent_unlocked(db, reagent) {
+            entry.spawn(label(
+                format!("locked at dispenser  (tier {})", definition.tier),
+                12.0,
+                Color::srgb(0.80, 0.60, 0.45),
+            ));
+        }
+    });
 }
 
 /// The recipes filed under a heading, or every recipe when none is chosen.
@@ -2706,7 +2752,10 @@ fn announce_accepting_toggle(
         // announcing the lesser half of what just happened.
         (_, true) => (
             "SHIFT OVER",
-            format!("Shift {} closed out. Debrief at the board.", shift.shift_number),
+            format!(
+                "Shift {} closed out. Debrief at the board.",
+                shift.shift_number
+            ),
             Color::srgba(0.12, 0.16, 0.24, 0.94),
         ),
         (true, false) => (
@@ -3453,7 +3502,11 @@ mod tests {
         // absolute index 0 — that only coincided back when the log's own
         // capacity happened to equal the HUD's slot count.
         assert_eq!(radio_window_start(3, 6), 0, "a short log needs no offset");
-        assert_eq!(radio_window_start(6, 6), 0, "exactly full still starts at 0");
+        assert_eq!(
+            radio_window_start(6, 6),
+            0,
+            "exactly full still starts at 0"
+        );
         assert_eq!(
             radio_window_start(40, 6),
             34,
@@ -3648,8 +3701,7 @@ mod tests {
     // -- the standing board's campaign notice ------------------------------
 
     fn campaign_at(reveal: Reveal) -> Campaign {
-        let mut campaign =
-            Campaign::new(crate::arc::AntagId::Cult, crate::arc::Mode::Chemist, 4);
+        let mut campaign = Campaign::new(crate::arc::AntagId::Cult, crate::arc::Mode::Chemist, 4);
         campaign.reveal = reveal;
         campaign
     }

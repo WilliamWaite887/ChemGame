@@ -102,9 +102,15 @@ fn blocks_a_body(min_y: f32, max_y: f32) -> bool {
 pub struct LabWorldspawn;
 
 impl LabWorldspawn {
-    fn spawn_brush_colliders(view: &mut QuakeClassSpawnView) -> bevy_trenchbroom::anyhow::Result<()> {
+    fn spawn_brush_colliders(
+        view: &mut QuakeClassSpawnView,
+    ) -> bevy_trenchbroom::anyhow::Result<()> {
         for brush in &view.src_entity.brushes {
-            if brush.surfaces.iter().all(|surface| is_scenery(&surface.texture)) {
+            if brush
+                .surfaces
+                .iter()
+                .all(|surface| is_scenery(&surface.texture))
+            {
                 continue;
             }
 

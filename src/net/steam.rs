@@ -58,8 +58,8 @@ use bevy_renet2::steam::{
 use bevy_replicon::prelude::{ClientState, RepliconChannels};
 use bevy_replicon_renet2::renet2::{ConnectionConfig, DisconnectReason, RenetClient, RenetServer};
 use bevy_replicon_renet2::{RenetChannelsExt, RepliconRenetPlugins};
-pub use bevy_steamworks::{Client, LobbyId};
 use bevy_steamworks::{CallbackResult, LobbyType, SResult, SteamId, SteamworksEvent};
+pub use bevy_steamworks::{Client, LobbyId};
 
 use super::{hosting_steam, joining_steam, ConnectFailed};
 use crate::AppState;
@@ -189,7 +189,10 @@ impl Plugin for SteamPlugin {
             // initialised successfully, so `SteamworksEvent` is guaranteed
             // registered by the time these systems run — see main.rs.
             .add_systems(Startup, prewarm_relay_network)
-            .add_systems(OnEnter(AppState::Playing), start_hosting_steam.run_if(hosting_steam))
+            .add_systems(
+                OnEnter(AppState::Playing),
+                start_hosting_steam.run_if(hosting_steam),
+            )
             // A joining process stops at `AppState::Connecting` — see its doc
             // comment on `AppState` — instead of running the full simulation
             // against a lobby that may never answer.
@@ -463,7 +466,10 @@ fn handle_lobby_join_requested(
         // so the half-open client and the lobby already joined have to go.
         abandon_join(&mut commands);
 
-        info!("accepting a Steam invite to lobby {:?}", request.lobby_steam_id);
+        info!(
+            "accepting a Steam invite to lobby {:?}",
+            request.lobby_steam_id
+        );
         *mode = super::LaunchMode::JoinSteam(request.lobby_steam_id);
 
         match *current.get() {
@@ -709,8 +715,7 @@ mod tests {
         // and a host would hold a `RenetServer` and a `RenetClient` at once,
         // which is replicon's replication loop by name.
         let mut app = invite_app(AppState::Playing);
-        app.world_mut()
-            .insert_resource(LaunchMode::HostSteam);
+        app.world_mut().insert_resource(LaunchMode::HostSteam);
         accept_invite(&mut app);
 
         assert_eq!(

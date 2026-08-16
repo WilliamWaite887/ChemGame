@@ -211,12 +211,8 @@ fn generate_saboteur_visit(
 /// Glassware they can get at, exactly as `smuggler` defines it: anything held,
 /// slotted or shut in a locker is under someone's eye, and "keep hold of it"
 /// has to remain the answer.
-type LooseGlassware<'w, 's> = Query<
-    'w,
-    's,
-    &'static mut Container,
-    (Without<HeldBy>, Without<InSlot>, Without<Stored>),
->;
+type LooseGlassware<'w, 's> =
+    Query<'w, 's, &'static mut Container, (Without<HeldBy>, Without<InSlot>, Without<Stored>)>;
 
 /// Advances the chain — and, on an expired visit, has a fiddle.
 ///
@@ -363,7 +359,12 @@ mod tests {
         let mut app = resolution_app();
         let name = app.world().resource::<Script>().0.name.clone();
         let beaker = loose_batch(&mut app);
-        let before = app.world().get::<Container>(beaker).unwrap().solution.clone();
+        let before = app
+            .world()
+            .get::<Container>(beaker)
+            .unwrap()
+            .solution
+            .clone();
 
         resolve(&mut app, &name, Outcome::Expired);
 
@@ -396,7 +397,12 @@ mod tests {
 
         resolve(&mut app, &name, Outcome::Expired);
 
-        assert!(app.world().get::<Container>(empty).unwrap().solution.is_empty());
+        assert!(app
+            .world()
+            .get::<Container>(empty)
+            .unwrap()
+            .solution
+            .is_empty());
         assert!(app.world().resource::<RadioLog>().entries.is_empty());
     }
 
@@ -407,12 +413,21 @@ mod tests {
         let beaker = loose_batch(&mut app);
         let holder = app.world_mut().spawn_empty().id();
         app.world_mut().entity_mut(beaker).insert(HeldBy(holder));
-        let before = app.world().get::<Container>(beaker).unwrap().solution.clone();
+        let before = app
+            .world()
+            .get::<Container>(beaker)
+            .unwrap()
+            .solution
+            .clone();
 
         resolve(&mut app, &name, Outcome::Expired);
 
         assert_eq!(
-            app.world().get::<Container>(beaker).unwrap().solution.total_volume(),
+            app.world()
+                .get::<Container>(beaker)
+                .unwrap()
+                .solution
+                .total_volume(),
             before.total_volume(),
             "keeping hold of it has to actually be the answer"
         );
@@ -423,12 +438,21 @@ mod tests {
         let mut app = resolution_app();
         let name = app.world().resource::<Script>().0.name.clone();
         let beaker = loose_batch(&mut app);
-        let before = app.world().get::<Container>(beaker).unwrap().solution.clone();
+        let before = app
+            .world()
+            .get::<Container>(beaker)
+            .unwrap()
+            .solution
+            .clone();
 
         resolve(&mut app, &name, Outcome::Success);
 
         assert_eq!(
-            app.world().get::<Container>(beaker).unwrap().solution.total_volume(),
+            app.world()
+                .get::<Container>(beaker)
+                .unwrap()
+                .solution
+                .total_volume(),
             before.total_volume()
         );
         assert_eq!(app.world().resource::<SaboteurProgress>().0, 1);
@@ -439,7 +463,12 @@ mod tests {
         let mut app = resolution_app();
         let name = app.world().resource::<Script>().0.name.clone();
         let beaker = loose_batch(&mut app);
-        let before = app.world().get::<Container>(beaker).unwrap().solution.clone();
+        let before = app
+            .world()
+            .get::<Container>(beaker)
+            .unwrap()
+            .solution
+            .clone();
         app.world_mut()
             .resource_mut::<Shift>()
             .requisition
@@ -448,7 +477,11 @@ mod tests {
         resolve(&mut app, &name, Outcome::Expired);
 
         assert_eq!(
-            app.world().get::<Container>(beaker).unwrap().solution.total_volume(),
+            app.world()
+                .get::<Container>(beaker)
+                .unwrap()
+                .solution
+                .total_volume(),
             before.total_volume(),
             "a Second Inspection requisition should have covered this one"
         );
@@ -469,12 +502,21 @@ mod tests {
     fn an_unrelated_expiry_never_costs_anything() {
         let mut app = resolution_app();
         let beaker = loose_batch(&mut app);
-        let before = app.world().get::<Container>(beaker).unwrap().solution.clone();
+        let before = app
+            .world()
+            .get::<Container>(beaker)
+            .unwrap()
+            .solution
+            .clone();
 
         resolve(&mut app, "Dr. Vance", Outcome::Expired);
 
         assert_eq!(
-            app.world().get::<Container>(beaker).unwrap().solution.total_volume(),
+            app.world()
+                .get::<Container>(beaker)
+                .unwrap()
+                .solution
+                .total_volume(),
             before.total_volume()
         );
         assert_eq!(app.world().resource::<SaboteurProgress>().0, 0);

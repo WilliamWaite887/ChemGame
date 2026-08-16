@@ -14,9 +14,7 @@ use crate::units::{Kelvin, Units};
 /// ask to buy a hint for it. The id is a position in the loaded reaction list,
 /// so both ends must agree on the data files, which replicon's protocol hash
 /// enforces rather than us.
-#[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct ReactionId(pub u32);
 
 impl ReactionId {

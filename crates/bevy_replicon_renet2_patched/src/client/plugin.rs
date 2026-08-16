@@ -20,7 +20,8 @@ impl Plugin for RepliconRenetClientPlugin {
                     set_connected.run_if(
                         // Ensure we transition from "connecting" to "connected,"
                         // even if the transport reports "connected" right away.
-                        in_state(ClientState::Connecting).and_then(bevy_renet2::prelude::client_connected),
+                        in_state(ClientState::Connecting)
+                            .and_then(bevy_renet2::prelude::client_connected),
                     ),
                     set_disconnected.run_if(bevy_renet2::prelude::client_just_disconnected),
                     receive_packets.run_if(bevy_renet2::prelude::client_connected),
@@ -65,7 +66,10 @@ fn receive_packets(
 ) {
     for channel_id in 0..channels.server_channels().len() as u8 {
         while let Some(message) = client.receive_message(channel_id) {
-            trace!("forwarding {} received bytes over channel {channel_id}", message.len());
+            trace!(
+                "forwarding {} received bytes over channel {channel_id}",
+                message.len()
+            );
             messages.insert_received(channel_id, message);
         }
     }
@@ -78,7 +82,10 @@ fn receive_packets(
 
 fn send_packets(mut client: ResMut<RenetClient>, mut messages: ResMut<ClientMessages>) {
     for (channel_id, message) in messages.drain_sent() {
-        trace!("forwarding {} sent bytes over channel {channel_id}", message.len());
+        trace!(
+            "forwarding {} sent bytes over channel {channel_id}",
+            message.len()
+        );
         client.send_message(channel_id as u8, message)
     }
 }
