@@ -360,6 +360,9 @@ pub(crate) struct ArcHeadline {
     /// Counter-track progress, once the track has opened.
     pub(crate) countered: usize,
     pub(crate) total: usize,
+    /// Cult-only case file: discovered anchors and the number neutralised.
+    pub(crate) incidents: usize,
+    pub(crate) treated_incidents: usize,
     resolved: Option<bool>,
 }
 
@@ -368,7 +371,13 @@ pub(crate) struct ArcHeadline {
 /// `None` while the antagonist is still [`Reveal::Hidden`]: the board is a
 /// public notice, and the whole arc depends on it not being one yet.
 pub(crate) fn arc_headline(campaign: &Campaign, script: Option<&ArcScript>) -> Option<ArcHeadline> {
-    if campaign.reveal == Reveal::Hidden && campaign.outcome.is_none() {
+    // A physical ritual anchor is already evidence in the chemist's own lab.
+    // It may not identify the Cult by name yet, but hiding the case file after
+    // the player has seen it would make the new investigation unreadable.
+    if campaign.reveal == Reveal::Hidden
+        && campaign.outcome.is_none()
+        && campaign.cult_incidents.is_empty()
+    {
         return None;
     }
     let named = campaign.reveal == Reveal::Named || campaign.outcome.is_some();
@@ -383,6 +392,8 @@ pub(crate) fn arc_headline(campaign: &Campaign, script: Option<&ArcScript>) -> O
         }),
         countered: campaign.countered.iter().filter(|done| **done).count(),
         total: campaign.countered.len(),
+        incidents: campaign.cult_incidents.len(),
+        treated_incidents: campaign.cult_incidents.iter().filter(|done| **done).count(),
         resolved: campaign.player_won(),
     })
 }
@@ -1054,6 +1065,16 @@ fn draw_arc_notice(panel: &mut ChildSpawnerCommands, arc: &ArcHeadline) {
         None => "Departments are working on it.".to_string(),
     };
     panel.spawn(label(detail, 12.0, TEXT_DIM));
+    if arc.incidents > 0 {
+        panel.spawn(label(
+            format!(
+                "Cult case file: {} of {} manifestations neutralised. Each ward weakens the final breach.",
+                arc.treated_incidents, arc.incidents
+            ),
+            12.0,
+            TEXT_DIM,
+        ));
+    }
 }
 
 fn dispenser_body(

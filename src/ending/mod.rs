@@ -441,6 +441,7 @@ mod tests {
                 reveal: crate::arc::Reveal::Named,
                 outcome: Some(outcome),
                 mode,
+                cult_incidents: Vec::new(),
             }
             .player_won()
             .unwrap(),

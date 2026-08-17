@@ -207,6 +207,11 @@ pub struct Campaign {
     /// this only stops the arc systems and labels the save in the load list.
     pub outcome: Option<ArcOutcome>,
     pub mode: Mode,
+    /// Cult-only investigative incidents already neutralised. Kept here rather
+    /// than in the ephemeral lab entities so closing the game cannot erase a
+    /// ward the chemist earned.
+    #[serde(default)]
+    pub cult_incidents: Vec<bool>,
 }
 
 impl Campaign {
@@ -218,6 +223,7 @@ impl Campaign {
             reveal: Reveal::Hidden,
             outcome: None,
             mode,
+            cult_incidents: Vec::new(),
         }
     }
 

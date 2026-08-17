@@ -14,20 +14,35 @@
 
 use bevy::prelude::*;
 use bevy_common_assets::ron::RonAssetPlugin;
+use bevy_replicon::prelude::*;
+use chem_sim::Units;
 use rand::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
+use crate::containers::{Container, ContainerKind, HeldBy};
 use crate::crew::{spawn_crew_member, CrewDef};
-use crate::interaction::Interactable;
+use crate::interaction::{InteractRequested, Interactable};
+use crate::machines::chemist_entity;
 use crate::net::is_authority;
-use crate::orders::{deliverable_amount, Order, OrderResolved, Shift, StationData};
+use crate::orders::{
+    deliverable_amount, reference_category, Order, OrderResolved, Shift, StationData,
+};
 use crate::player::Chemist;
 use crate::radio::{channel_for, RadioEntry, RadioLog};
 use crate::shift::current_rules;
 use crate::AppState;
 
 const INITIAL_GAP_SECONDS: (f32, f32) = (300.0, 500.0);
+const INCIDENT_SPOTS: [Vec3; 6] = [
+    Vec3::new(-2.8, 1.0, 0.2),
+    Vec3::new(-2.2, 1.0, 2.4),
+    Vec3::new(-3.5, 1.0, 2.0),
+    Vec3::new(-1.7, 1.0, 0.8),
+    Vec3::new(-3.0, 1.0, 3.0),
+    Vec3::new(-1.5, 1.0, 2.9),
+];
+const REWARD_SPOT: Vec3 = Vec3::new(2.4, 1.0, 2.5);
 
 pub struct CultPlugin;
 
@@ -35,11 +50,21 @@ impl Plugin for CultPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(RonAssetPlugin::<CultScript>::new(&["cult.ron"]))
             .init_resource::<CultProgress>()
+            .init_resource::<CultIncidentsRestored>()
             .add_systems(Startup, start_loading)
-            .add_systems(OnEnter(AppState::Playing), arm_spawner)
+            .add_systems(
+                OnEnter(AppState::Playing),
+                (arm_spawner, reset_incident_restore),
+            )
             .add_systems(
                 Update,
-                (promote_script, generate_cult_visit, handle_cult_resolution)
+                (
+                    promote_script,
+                    restore_incidents,
+                    generate_cult_visit,
+                    handle_cult_resolution,
+                    handle_incident_delivery,
+                )
                     .chain()
                     .run_if(is_authority)
                     // Only in a save that actually drew the Cult. This thread
@@ -51,6 +76,7 @@ impl Plugin for CultPlugin {
                     .run_if(crate::arc::is_active(crate::arc::AntagId::Cult))
                     .run_if(in_state(AppState::Playing)),
             );
+        app.add_systems(Update, dress_incidents.run_if(in_state(AppState::Playing)));
     }
 }
 
@@ -82,6 +108,31 @@ pub struct CultStageDef {
     /// Aired the moment the stage is fulfilled — the ritual's own escalating
     /// commentary track.
     pub ritual_line: String,
+    /// A small legitimate stock vial makes helping Corwin tempting without
+    /// making it a free answer to the manifestation he just created.
+    pub reward_reagent: String,
+    pub reward_amount: u32,
+    pub incidents: Vec<CultIncidentDef>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CultIncidentDef {
+    pub name: String,
+    pub clue: String,
+    /// A representative reagent. Its category is the answer; the player is
+    /// never told this name in the incident UI or radio line.
+    pub treatment: String,
+    pub amount: u32,
+}
+
+/// A physical, treatable consequence of an accepted Cult request.
+#[derive(Component, Serialize, Deserialize)]
+pub struct RitualAnchor {
+    pub index: usize,
+    pub name: String,
+    pub clue: String,
+    treatment: String,
+    amount: Units,
 }
 
 #[derive(Resource)]
@@ -93,6 +144,16 @@ struct Script(CultScript);
 #[derive(Resource)]
 struct CultSpawner {
     timer: Timer,
+}
+
+/// Restoration runs once per playing session, after the asynchronous script
+/// asset has been promoted. Active anchors are session entities, while the
+/// campaign only persists their resolved/not-resolved case-file entries.
+#[derive(Resource, Default)]
+struct CultIncidentsRestored(bool);
+
+fn reset_incident_restore(mut restored: ResMut<CultIncidentsRestored>) {
+    restored.0 = false;
 }
 
 fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
@@ -112,6 +173,59 @@ fn promote_script(
     };
     commands.insert_resource(Script(script));
     commands.remove_resource::<PendingCultScript>();
+}
+
+fn restore_incidents(
+    mut commands: Commands,
+    script: Option<Res<Script>>,
+    campaign: Option<Res<crate::arc::Campaign>>,
+    anchors: Query<&RitualAnchor>,
+    mut restored: ResMut<CultIncidentsRestored>,
+    mut radio: ResMut<RadioLog>,
+) {
+    if restored.0 {
+        return;
+    }
+    let (Some(script), Some(campaign)) = (script, campaign) else {
+        return;
+    };
+    if campaign.antag != crate::arc::AntagId::Cult {
+        restored.0 = true;
+        return;
+    }
+    for (stage_index, stage) in script.stages.iter().enumerate() {
+        for (offset, incident) in stage.incidents.iter().enumerate() {
+            let index = stage_index * 2 + offset;
+            if campaign.cult_incidents.get(index) != Some(&false)
+                || anchors.iter().any(|anchor| anchor.index == index)
+            {
+                continue;
+            }
+            commands.spawn((
+                RitualAnchor {
+                    index,
+                    name: incident.name.clone(),
+                    clue: incident.clue.clone(),
+                    treatment: incident.treatment.clone(),
+                    amount: Units::whole(incident.amount as i32),
+                },
+                Transform::from_translation(INCIDENT_SPOTS[index % INCIDENT_SPOTS.len()]),
+                Visibility::default(),
+                Interactable::new(format!("{} — examine and treat", incident.name)),
+                Replicated,
+                crate::until_we_leave_the_lab(),
+            ));
+            radio.push(RadioEntry {
+                channel: "LAB".to_string(),
+                text: format!(
+                    "The {} is still waiting for someone to intervene.",
+                    incident.name
+                ),
+                good: false,
+            });
+        }
+    }
+    restored.0 = true;
 }
 
 /// Arms this thread's visit clock for a fresh session.
@@ -207,6 +321,8 @@ fn generate_cult_visit(
 /// botching a stage falls through to the ordinary reputation penalty and
 /// the ritual simply never moves.
 fn handle_cult_resolution(
+    mut commands: Commands,
+    db: Option<Res<ChemDb>>,
     script: Option<Res<Script>>,
     arc_script: Option<Res<crate::arc::Script>>,
     campaign: Option<ResMut<crate::arc::Campaign>>,
@@ -230,6 +346,16 @@ fn handle_cult_resolution(
                 text: stage.ritual_line.clone(),
                 good: false,
             });
+            if let Some(db) = db.as_deref() {
+                spawn_stage_consequences(
+                    &mut commands,
+                    db,
+                    stage,
+                    stage_index,
+                    &mut campaign,
+                    &mut radio,
+                );
+            }
         }
         progress.0 = (progress.0 + 1).min(script.stages.len().saturating_sub(1));
 
@@ -240,6 +366,168 @@ fn handle_cult_resolution(
         if let (Some(arc_script), Some(campaign)) = (arc_script.as_deref(), campaign.as_mut()) {
             crate::arc::nudge_plot(campaign, arc_script.plot_per_aid);
         }
+    }
+}
+
+fn spawn_stage_consequences(
+    commands: &mut Commands,
+    db: &ChemDb,
+    stage: &CultStageDef,
+    stage_index: usize,
+    campaign: &mut Option<ResMut<crate::arc::Campaign>>,
+    radio: &mut RadioLog,
+) {
+    let base = stage_index * 2;
+    if let Some(campaign) = campaign.as_mut() {
+        if campaign.cult_incidents.len() < base + stage.incidents.len() {
+            campaign
+                .cult_incidents
+                .resize(base + stage.incidents.len(), false);
+        }
+    }
+    for (offset, incident) in stage.incidents.iter().enumerate() {
+        let index = base + offset;
+        if campaign
+            .as_ref()
+            .is_some_and(|c| c.cult_incidents.get(index) == Some(&true))
+        {
+            continue;
+        }
+        commands.spawn((
+            RitualAnchor {
+                index,
+                name: incident.name.clone(),
+                clue: incident.clue.clone(),
+                treatment: incident.treatment.clone(),
+                amount: Units::whole(incident.amount as i32),
+            },
+            Transform::from_translation(INCIDENT_SPOTS[index % INCIDENT_SPOTS.len()]),
+            Visibility::default(),
+            Interactable::new(format!("{} — examine and treat", incident.name)),
+            Replicated,
+            crate::until_we_leave_the_lab(),
+        ));
+        radio.push(RadioEntry {
+            channel: "LAB".to_string(),
+            text: incident.clue.clone(),
+            good: false,
+        });
+    }
+    // The payment is physical stock at the counter, not an invisible bonus.
+    if let Some(reagent) = db.reagents.id_of(&stage.reward_reagent) {
+        let mut vial = Container::new(ContainerKind::Bottle);
+        let _ = vial
+            .solution
+            .add(reagent, Units::whole(stage.reward_amount as i32));
+        commands.spawn((
+            vial,
+            Transform::from_translation(REWARD_SPOT),
+            Visibility::default(),
+            Interactable::new(format!(
+                "Corwin's payment — {}",
+                db.reagents.get(reagent).name
+            )),
+            Replicated,
+            crate::until_we_leave_the_lab(),
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_incident_delivery(
+    mut commands: Commands,
+    db: Res<ChemDb>,
+    mut campaign: Option<ResMut<crate::arc::Campaign>>,
+    mut requests: MessageReader<FromClient<InteractRequested>>,
+    anchors: Query<&RitualAnchor>,
+    containers: Query<(Entity, &Container, &HeldBy)>,
+    chemists: Query<(Entity, &Chemist)>,
+    mut radio: ResMut<RadioLog>,
+) {
+    let Some(campaign) = campaign.as_mut() else {
+        requests.clear();
+        return;
+    };
+    for request in requests.read() {
+        let Ok(anchor) = anchors.get(request.target) else {
+            continue;
+        };
+        let Some(player) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
+        let Some((container_entity, container, _)) =
+            containers.iter().find(|(_, _, held)| held.0 == player)
+        else {
+            continue;
+        };
+        let Some(treatment) = db.reagents.id_of(&anchor.treatment) else {
+            continue;
+        };
+        let landed = incident_units(&db, &container.solution, treatment);
+        if landed < anchor.amount {
+            radio.push(RadioEntry {
+                channel: "LAB".to_string(),
+                text: format!("The {} rejects that mixture.", anchor.name),
+                good: false,
+            });
+            continue;
+        }
+        if campaign.cult_incidents.len() <= anchor.index {
+            campaign.cult_incidents.resize(anchor.index + 1, false);
+        }
+        if campaign.cult_incidents[anchor.index] {
+            continue;
+        }
+        campaign.cult_incidents[anchor.index] = true;
+        commands.entity(container_entity).despawn();
+        commands.entity(request.target).despawn();
+        radio.push(RadioEntry {
+            channel: "LAB".to_string(),
+            text: format!(
+                "The {} gutters out. The ritual has lost some of its hold.",
+                anchor.name
+            ),
+            good: true,
+        });
+    }
+}
+
+fn incident_units(
+    db: &ChemDb,
+    solution: &chem_sim::Solution,
+    treatment: chem_sim::ReagentId,
+) -> Units {
+    let category = reference_category(db, treatment);
+    solution
+        .iter()
+        .filter(|(id, amount)| {
+            amount.is_positive()
+                && match category {
+                    Some(category) => db.reagents.get(*id).categories.contains(&category),
+                    None => *id == treatment,
+                }
+        })
+        .map(|(_, amount)| amount)
+        .sum()
+}
+
+/// A deliberately simple, hostile-looking presentation; the clue and the
+/// chemistry are the puzzle, not hunting for a tiny prop in the room.
+fn dress_incidents(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    new: Query<Entity, Added<RitualAnchor>>,
+) {
+    for entity in &new {
+        commands.entity(entity).insert((
+            Mesh3d(meshes.add(Cylinder::new(0.42, 0.08))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.28, 0.03, 0.07),
+                emissive: LinearRgba::new(0.5, 0.02, 0.08, 1.0),
+                ..default()
+            })),
+        ));
     }
 }
 
@@ -285,6 +573,18 @@ mod tests {
             );
             assert!(!stage.pretext.trim().is_empty());
             assert!(!stage.ritual_line.trim().is_empty());
+            assert_eq!(
+                stage.incidents.len(),
+                2,
+                "each accepted deal must leave two leads"
+            );
+            assert!(data.reagents.id_of(&stage.reward_reagent).is_some());
+            for incident in &stage.incidents {
+                assert!(!incident.name.trim().is_empty());
+                assert!(!incident.clue.trim().is_empty());
+                assert!(data.reagents.id_of(&incident.treatment).is_some());
+                assert!(incident.amount > 0);
+            }
         }
     }
 
@@ -417,6 +717,49 @@ mod tests {
 
         assert_eq!(app.world().resource::<crate::arc::Campaign>().plot, 0);
         assert_eq!(app.world().resource::<CultProgress>().0, 0);
+    }
+
+    #[test]
+    fn an_accepted_stage_creates_two_visible_incidents_and_a_reward() {
+        let mut app = campaign_app();
+        app.insert_resource(ChemDb(data()));
+        let name = app.world().resource::<Script>().0.name.clone();
+        resolve(&mut app, &name, Outcome::Success);
+        app.world_mut().flush();
+        assert_eq!(
+            app.world_mut()
+                .query::<&RitualAnchor>()
+                .iter(app.world())
+                .count(),
+            2
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&Container>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.world()
+                .resource::<crate::arc::Campaign>()
+                .cult_incidents,
+            vec![false, false]
+        );
+    }
+
+    #[test]
+    fn treatment_accepts_a_category_peer_but_rejects_an_unrelated_chemical() {
+        let db = ChemDb(data());
+        let cure = db.reagents.id_of("dylovene").unwrap();
+        let tricordrazine = db.reagents.id_of("tricordrazine").unwrap();
+        let water = db.reagents.id_of("water").unwrap();
+        let mut valid = chem_sim::Solution::unbounded();
+        let mut invalid = chem_sim::Solution::unbounded();
+        let _ = valid.add(tricordrazine, Units::whole(10));
+        let _ = invalid.add(water, Units::whole(10));
+        assert_eq!(incident_units(&db, &valid, cure), Units::whole(10));
+        assert!(!incident_units(&db, &invalid, cure).is_positive());
     }
 
     #[test]

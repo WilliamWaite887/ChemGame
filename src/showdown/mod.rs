@@ -182,11 +182,17 @@ fn arm_showdown(
         }
     }
 
+    let wards = campaign.cult_incidents.iter().filter(|done| **done).count() as f32;
+    let cult_siege = campaign.antag == crate::arc::AntagId::Cult;
     commands.insert_resource(Showdown {
-        deadline: script.showdown.deadline_seconds,
-        next_vent: script.showdown.gas_every_seconds,
+        deadline: script.showdown.deadline_seconds + if cult_siege { wards * 8.0 } else { 0.0 },
+        next_vent: script.showdown.gas_every_seconds + if cult_siege { wards * 1.5 } else { 0.0 },
         treated: Units::whole(0),
-        needed: Units::whole(script.showdown.cure_units_needed as i32),
+        needed: Units::whole(
+            (script.showdown.cure_units_needed as i32
+                - if cult_siege { wards as i32 * 2 } else { 0 })
+            .max(6),
+        ),
     });
     // Immediate, not delayed: this is the one moment in the game where the
     // player needs to know *now*.
@@ -233,14 +239,28 @@ fn run_siege(
     if showdown.next_vent > 0.0 {
         return;
     }
-    showdown.next_vent = script.showdown.gas_every_seconds;
+    let wards = campaign.cult_incidents.iter().filter(|done| **done).count() as f32;
+    showdown.next_vent = script.showdown.gas_every_seconds
+        + if campaign.antag == crate::arc::AntagId::Cult {
+            wards * 1.5
+        } else {
+            0.0
+        };
 
     let Some(gas) = db.reagents.id_of(gas_reagent) else {
         warn!("siege names unknown gas reagent '{gas_reagent}'");
         return;
     };
     let mut payload = Solution::unbounded();
-    let _ = payload.add(gas, Units::whole(script.showdown.gas_units as i32));
+    let wards = campaign.cult_incidents.iter().filter(|done| **done).count() as i32;
+    let units = (script.showdown.gas_units as i32
+        - if campaign.antag == crate::arc::AntagId::Cult {
+            wards
+        } else {
+            0
+        })
+    .max(1);
+    let _ = payload.add(gas, Units::whole(units));
 
     commands.spawn((
         SmokeCloud {
@@ -615,6 +635,20 @@ mod tests {
             1,
             "a siege should put exactly one thing in the room to treat"
         );
+    }
+
+    #[test]
+    fn cult_wards_make_the_siege_more_survivable() {
+        let mut unwarded = showdown_app(SIEGE);
+        let mut warded = showdown_app(SIEGE);
+        warded.world_mut().resource_mut::<Campaign>().cult_incidents = vec![true; 6];
+        advance(&mut unwarded, 0.1);
+        advance(&mut warded, 0.1);
+        let plain = unwarded.world().resource::<Showdown>();
+        let safer = warded.world().resource::<Showdown>();
+        assert!(safer.deadline > plain.deadline);
+        assert!(safer.next_vent > plain.next_vent);
+        assert!(safer.needed < plain.needed);
     }
 
     #[test]

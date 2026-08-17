@@ -16,6 +16,22 @@
             amount: 15,
             pretext: "For the circle. Nothing that isn't already circulating on this station.",
             ritual_line: "Corwin Ashe: The first offering is made. The rest will come easier now.",
+            reward_reagent: "tricordrazine",
+            reward_amount: 10,
+            incidents: [
+                (
+                    name: "Wet chalk sigil",
+                    clue: "LAB: A dark chalk mark has appeared by the sink. It smears into a caustic film; ordinary water only spreads it.",
+                    treatment: "space_cleaner",
+                    amount: 10,
+                ),
+                (
+                    name: "Whispering residue",
+                    clue: "LAB: The cleaned mark is leaving a sweet chemical smell and making the room swim. Someone needs to neutralise it.",
+                    treatment: "dylovene",
+                    amount: 10,
+                ),
+            ],
         ),
         (
             reagent: "mindbreaker_toxin",
@@ -23,12 +39,44 @@
             amount: 12,
             pretext: "We need clearer sight for what comes next. You understand.",
             ritual_line: "Corwin Ashe: The others are seeing it too, now. Soon there won't be any doubt.",
+            reward_reagent: "saline_glucose",
+            reward_amount: 15,
+            incidents: [
+                (
+                    name: "Bleeding offering bowl",
+                    clue: "LAB: A bowl that was not there a moment ago is overflowing with something too dark to be blood. It pulses when anyone gets close.",
+                    treatment: "bicaridine",
+                    amount: 10,
+                ),
+                (
+                    name: "Scorched invocation",
+                    clue: "LAB: The floor around the bowl is blistering hot. The markings are burning outward through the grout.",
+                    treatment: "kelotane",
+                    amount: 10,
+                ),
+            ],
         ),
         (
             reagent: "flash_powder",
             amount: 10,
             pretext: "The final component. Bright enough to open the way. You'll want to make this one carefully.",
             ritual_line: "Corwin Ashe: It is done. Whatever happens in maintenance tonight, it isn't our concern anymore.",
+            reward_reagent: "inaprovaline",
+            reward_amount: 10,
+            incidents: [
+                (
+                    name: "Airless candle",
+                    clue: "LAB: A candle is burning without consuming air. Every breath near it feels thin and shallow.",
+                    treatment: "inaprovaline",
+                    amount: 10,
+                ),
+                (
+                    name: "Rift-seal scar",
+                    clue: "LAB: The wall is sweating pale vapour around a cut in reality. The fumes sting the lungs and won't settle.",
+                    treatment: "dylovene",
+                    amount: 12,
+                ),
+            ],
         ),
     ],
 )

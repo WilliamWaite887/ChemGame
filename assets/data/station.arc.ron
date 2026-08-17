@@ -97,15 +97,15 @@
                     // of 3 — 20 itself can never be made exactly. See the
                     // same note on "station.orders.ron".
                     amount: 18,
-                    plea: "We've got four of them in here and whatever they drank isn't leaving on its own. I need something that flushes it.",
-                    delivered_line: "Medbay's got the acolytes stable. Two of them are talking.",
+                    plea: "That smell from Chemistry has got people seeing things. I need something to flush it before somebody walks into a wall.",
+                    delivered_line: "Medbay's got the exposed crew stable. The hallucinations are breaking.",
                 ),
                 (
                     role: "Service",
                     reagent: "space_cleaner",
                     amount: 25,
-                    plea: "They're painting the walls in the back halls and it doesn't come off with water. Give me something that bites.",
-                    delivered_line: "The markings are off the walls. Whatever they were for, they aren't for it any more.",
+                    plea: "The same wet red marks are turning up outside the lab. Water spreads them; I need something that actually lifts the residue.",
+                    delivered_line: "The residue is off the walls. The marks have stopped spreading.",
                 ),
                 (
                     role: "Security",
@@ -114,15 +114,15 @@
                     // amounts — 15 itself can never be made exactly. See the
                     // same note on "station.orders.ron".
                     amount: 14,
-                    plea: "Whatever they lit down there went up faster than it should have. Two of mine are burned.",
-                    delivered_line: "Security's back on their feet and they know which hatch to kick.",
+                    plea: "Those floor marks flared when we got close. Two officers are burned and we need them back on their feet.",
+                    delivered_line: "Security's back on their feet. They're tracing the scorch pattern now.",
                 ),
                 (
                     role: "Engineering",
                     reagent: "thermite",
                     amount: 20,
-                    plea: "They've sealed the chamber from inside and it's a metre of plating. I'm not cutting that with a torch.",
-                    delivered_line: "Engineering burned the door off. Security went in behind them.",
+                    plea: "The wall behind Chemistry is sweating around something that isn't a seam. We need to open it before it opens itself.",
+                    delivered_line: "Engineering has opened the false wall. Security went in behind them.",
                 ),
             ],
         ),
