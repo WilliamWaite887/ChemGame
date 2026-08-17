@@ -23,6 +23,7 @@ use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, HeldBy};
 use crate::crew::{spawn_crew_member, CrewDef};
 use crate::interaction::{InteractRequested, Interactable};
+use crate::lab::{CrisisSpots, MapReady};
 use crate::machines::chemist_entity;
 use crate::net::is_authority;
 use crate::orders::{
@@ -34,14 +35,6 @@ use crate::shift::current_rules;
 use crate::AppState;
 
 const INITIAL_GAP_SECONDS: (f32, f32) = (300.0, 500.0);
-const INCIDENT_SPOTS: [Vec3; 6] = [
-    Vec3::new(-2.8, 1.0, 0.2),
-    Vec3::new(-2.2, 1.0, 2.4),
-    Vec3::new(-3.5, 1.0, 2.0),
-    Vec3::new(-1.7, 1.0, 0.8),
-    Vec3::new(-3.0, 1.0, 3.0),
-    Vec3::new(-1.5, 1.0, 2.9),
-];
 const REWARD_SPOT: Vec3 = Vec3::new(2.4, 1.0, 2.5);
 
 pub struct CultPlugin;
@@ -74,6 +67,10 @@ impl Plugin for CultPlugin {
                     // acolyte at the counter. Department minors deliberately
                     // carry no equivalent gate — they run in every save.
                     .run_if(crate::arc::is_active(crate::arc::AntagId::Cult))
+                    // Crisis markers are collected from the loaded map. No
+                    // authored consequence may fall back to the old lab-local
+                    // coordinates while that registry is incomplete.
+                    .run_if(resource_exists::<MapReady>)
                     .run_if(in_state(AppState::Playing)),
             );
         app.add_systems(Update, dress_incidents.run_if(in_state(AppState::Playing)));
@@ -119,6 +116,11 @@ pub struct CultStageDef {
 pub struct CultIncidentDef {
     pub name: String,
     pub clue: String,
+    /// Semantic marker authored into the map. Keeping this in content rather
+    /// than deriving it from the incident index makes saves stable when the
+    /// station layout changes and lets each manifestation have a deliberate
+    /// home.
+    pub spot: String,
     /// A representative reagent. Its category is the answer; the player is
     /// never told this name in the incident UI or radio line.
     pub treatment: String,
@@ -179,6 +181,7 @@ fn restore_incidents(
     mut commands: Commands,
     script: Option<Res<Script>>,
     campaign: Option<Res<crate::arc::Campaign>>,
+    spots: Res<CrisisSpots>,
     anchors: Query<&RitualAnchor>,
     mut restored: ResMut<CultIncidentsRestored>,
     mut radio: ResMut<RadioLog>,
@@ -201,6 +204,13 @@ fn restore_incidents(
             {
                 continue;
             }
+            let Some(transform) = spots.get(&incident.spot) else {
+                error!(
+                    "cult incident '{}' names missing crisis spot '{}' during restore; skipping",
+                    incident.name, incident.spot
+                );
+                continue;
+            };
             commands.spawn((
                 RitualAnchor {
                     index,
@@ -209,7 +219,7 @@ fn restore_incidents(
                     treatment: incident.treatment.clone(),
                     amount: Units::whole(incident.amount as i32),
                 },
-                Transform::from_translation(INCIDENT_SPOTS[index % INCIDENT_SPOTS.len()]),
+                transform,
                 Visibility::default(),
                 Interactable::new(format!("{} — examine and treat", incident.name)),
                 Replicated,
@@ -323,6 +333,7 @@ fn generate_cult_visit(
 fn handle_cult_resolution(
     mut commands: Commands,
     db: Option<Res<ChemDb>>,
+    spots: Option<Res<CrisisSpots>>,
     script: Option<Res<Script>>,
     arc_script: Option<Res<crate::arc::Script>>,
     campaign: Option<ResMut<crate::arc::Campaign>>,
@@ -346,10 +357,11 @@ fn handle_cult_resolution(
                 text: stage.ritual_line.clone(),
                 good: false,
             });
-            if let Some(db) = db.as_deref() {
+            if let (Some(db), Some(spots)) = (db.as_deref(), spots.as_deref()) {
                 spawn_stage_consequences(
                     &mut commands,
                     db,
+                    spots,
                     stage,
                     stage_index,
                     &mut campaign,
@@ -372,6 +384,7 @@ fn handle_cult_resolution(
 fn spawn_stage_consequences(
     commands: &mut Commands,
     db: &ChemDb,
+    spots: &CrisisSpots,
     stage: &CultStageDef,
     stage_index: usize,
     campaign: &mut Option<ResMut<crate::arc::Campaign>>,
@@ -393,6 +406,13 @@ fn spawn_stage_consequences(
         {
             continue;
         }
+        let Some(transform) = spots.get(&incident.spot) else {
+            error!(
+                "cult incident '{}' names missing crisis spot '{}'; skipping",
+                incident.name, incident.spot
+            );
+            continue;
+        };
         commands.spawn((
             RitualAnchor {
                 index,
@@ -401,7 +421,7 @@ fn spawn_stage_consequences(
                 treatment: incident.treatment.clone(),
                 amount: Units::whole(incident.amount as i32),
             },
-            Transform::from_translation(INCIDENT_SPOTS[index % INCIDENT_SPOTS.len()]),
+            transform,
             Visibility::default(),
             Interactable::new(format!("{} — examine and treat", incident.name)),
             Replicated,
@@ -535,6 +555,7 @@ fn dress_incidents(
 mod tests {
     use super::*;
     use crate::orders::{Department, Outcome};
+    use std::collections::HashSet;
 
     fn data() -> chem_sim::ChemData {
         chem_sim::ChemData::from_ron(
@@ -565,6 +586,7 @@ mod tests {
         let roster: Vec<crate::crew::CrewDef> =
             ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap();
         assert!(roster.iter().all(|member| member.name != script.name));
+        let mut spots = HashSet::new();
         for stage in &script.stages {
             assert!(
                 data.reagents.id_of(&stage.reagent).is_some(),
@@ -582,6 +604,12 @@ mod tests {
             for incident in &stage.incidents {
                 assert!(!incident.name.trim().is_empty());
                 assert!(!incident.clue.trim().is_empty());
+                assert!(!incident.spot.trim().is_empty());
+                assert!(
+                    spots.insert(incident.spot.as_str()),
+                    "'{}' is reused; each manifestation needs its own authored place",
+                    incident.spot
+                );
                 assert!(data.reagents.id_of(&incident.treatment).is_some());
                 assert!(incident.amount > 0);
             }
@@ -682,13 +710,27 @@ mod tests {
             .counter_steps
             .len();
 
+        let mut spots = CrisisSpots::default();
+        for (index, incident) in script()
+            .stages
+            .iter()
+            .flat_map(|stage| &stage.incidents)
+            .enumerate()
+        {
+            spots.insert(
+                incident.spot.clone(),
+                Transform::from_xyz(index as f32 * 3.0, 1.0, index as f32 * -2.0),
+            );
+        }
+
         let mut app = resolution_app();
         app.insert_resource(crate::arc::Script(arc_script))
             .insert_resource(crate::arc::Campaign::new(
                 crate::arc::AntagId::Cult,
                 crate::arc::Mode::Chemist,
                 steps,
-            ));
+            ))
+            .insert_resource(spots);
         app
     }
 
@@ -726,12 +768,18 @@ mod tests {
         let name = app.world().resource::<Script>().0.name.clone();
         resolve(&mut app, &name, Outcome::Success);
         app.world_mut().flush();
+        let mut anchors = app.world_mut().query::<(&RitualAnchor, &Transform)>();
+        let mut placed: Vec<(usize, Vec3)> = anchors
+            .iter(app.world())
+            .map(|(anchor, transform)| (anchor.index, transform.translation))
+            .collect();
+        placed.sort_by_key(|(index, _)| *index);
         assert_eq!(
-            app.world_mut()
-                .query::<&RitualAnchor>()
-                .iter(app.world())
-                .count(),
-            2
+            placed,
+            vec![
+                (0, Vec3::new(0.0, 1.0, 0.0)),
+                (1, Vec3::new(3.0, 1.0, -2.0))
+            ]
         );
         assert_eq!(
             app.world_mut()
@@ -746,6 +794,105 @@ mod tests {
                 .cult_incidents,
             vec![false, false]
         );
+    }
+
+    #[test]
+    fn a_missing_cult_spot_skips_only_that_manifestation() {
+        let mut app = campaign_app();
+        app.insert_resource(ChemDb(data()));
+        let first = script().stages[0].incidents[0].clone();
+        let mut spots = CrisisSpots::default();
+        spots.insert(
+            first.spot,
+            Transform::from_translation(Vec3::new(9.0, 1.0, 4.0)),
+        );
+        app.insert_resource(spots);
+        let name = app.world().resource::<Script>().0.name.clone();
+
+        resolve(&mut app, &name, Outcome::Success);
+        app.world_mut().flush();
+
+        let mut anchors = app.world_mut().query::<(&RitualAnchor, &Transform)>();
+        let spawned: Vec<(usize, Vec3)> = anchors
+            .iter(app.world())
+            .map(|(anchor, transform)| (anchor.index, transform.translation))
+            .collect();
+        assert_eq!(spawned, vec![(0, Vec3::new(9.0, 1.0, 4.0))]);
+        assert_eq!(
+            app.world()
+                .resource::<crate::arc::Campaign>()
+                .cult_incidents,
+            vec![false, false],
+            "the skipped flag stays unresolved so a later session can restore it"
+        );
+    }
+
+    #[test]
+    fn save_restore_waits_for_the_map_and_never_wraps_incident_spots() {
+        let mut content = script();
+        let template = content.stages[0].incidents[0].clone();
+        for index in 6..8 {
+            let mut extra = template.clone();
+            extra.name = format!("Restored manifestation {index}");
+            extra.spot = format!("cult.restore_{index}");
+            content.stages.last_mut().unwrap().incidents.push(extra);
+        }
+        let incidents: Vec<CultIncidentDef> = content
+            .stages
+            .iter()
+            .flat_map(|stage| stage.incidents.iter().cloned())
+            .collect();
+        assert!(incidents.len() > 6);
+
+        let mut spots = CrisisSpots::default();
+        let expected: Vec<Vec3> = incidents
+            .iter()
+            .enumerate()
+            .map(|(index, incident)| {
+                let position = Vec3::new(index as f32 * 2.0, 1.0, index as f32 * -3.0);
+                spots.insert(incident.spot.clone(), Transform::from_translation(position));
+                position
+            })
+            .collect();
+        let mut campaign =
+            crate::arc::Campaign::new(crate::arc::AntagId::Cult, crate::arc::Mode::Chemist, 0);
+        campaign.cult_incidents = vec![false; incidents.len()];
+
+        let mut app = App::new();
+        app.insert_resource(Script(content))
+            .insert_resource(campaign)
+            .insert_resource(spots)
+            .init_resource::<CultIncidentsRestored>()
+            .init_resource::<RadioLog>()
+            .add_systems(
+                Update,
+                restore_incidents.run_if(resource_exists::<MapReady>),
+            );
+
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&RitualAnchor>()
+                .iter(app.world())
+                .count(),
+            0,
+            "save entities must not restore against an incomplete map"
+        );
+        assert!(!app.world().resource::<CultIncidentsRestored>().0);
+
+        app.insert_resource(MapReady);
+        app.update();
+
+        let mut query = app.world_mut().query::<(&RitualAnchor, &Transform)>();
+        let mut restored: Vec<(usize, Vec3)> = query
+            .iter(app.world())
+            .map(|(anchor, transform)| (anchor.index, transform.translation))
+            .collect();
+        restored.sort_by_key(|(index, _)| *index);
+        assert_eq!(restored.len(), incidents.len());
+        for ((index, actual), expected) in restored.iter().zip(expected) {
+            assert_eq!(*actual, expected, "incident {index} reused another spot");
+        }
     }
 
     #[test]

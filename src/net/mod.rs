@@ -40,7 +40,7 @@ use crate::AppState;
 pub mod steam;
 
 /// Arbitrary; both ends must agree.
-const PROTOCOL_ID: u64 = 0x43_48_45_4d_00_00_00_01;
+const PROTOCOL_ID: u64 = 0x43_48_45_4d_00_00_00_02;
 const DEFAULT_PORT: u16 = 5327;
 
 /// How this process was launched.
@@ -695,6 +695,7 @@ mod tests {
                 app.add_plugins(AssetPlugin::default())
                     .init_asset::<Mesh>()
                     .init_asset::<StandardMaterial>()
+                    .init_asset::<WorldAsset>()
                     .add_systems(
                         Startup,
                         (
@@ -769,11 +770,21 @@ mod tests {
 
         // Each has to be found by what it *is*, because the client's entity
         // ids are its own.
-        let mut machines = client.world_mut().query::<(&Machine, &Mesh3d)>();
+        let mut machines = client.world_mut().query_filtered::<Entity, With<Machine>>();
+        let machines: Vec<Entity> = machines.iter(client.world()).collect();
         assert_eq!(
-            machines.iter(client.world()).count(),
+            machines.len(),
             1,
-            "the dispenser must arrive and be built: {machine} on the server"
+            "the dispenser must arrive: {machine} on the server"
+        );
+        assert!(
+            client
+                .world()
+                .get::<Children>(machines[0])
+                .is_some_and(|children| children
+                    .iter()
+                    .any(|child| client.world().get::<WorldAssetRoot>(child).is_some())),
+            "the replicated dispenser must receive its authored GLB visual",
         );
 
         let mut beakers = client.world_mut().query::<(&Container, &Mesh3d)>();

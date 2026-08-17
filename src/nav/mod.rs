@@ -20,7 +20,8 @@ use std::collections::BinaryHeap;
 
 use bevy::prelude::*;
 
-use crate::lab::{Bounds, WalkableAreas};
+use crate::lab::{Bounds, MapReady, WalkableAreas};
+use crate::AppState;
 
 /// The body radius paths are planned for.
 ///
@@ -111,8 +112,8 @@ impl NavGraph {
     /// Waypoints from `from` to `to`, ending on `to`.
     ///
     /// `None` when the two are in parts of the station with no route between
-    /// them, or when the graph has not been built yet. Callers are expected to
-    /// have a fallback rather than to strand whoever asked.
+    /// them, or when the graph has not been built yet. Callers should wait or
+    /// stop; walking straight to the destination can cross station walls.
     pub fn path(&self, from: Vec3, to: Vec3) -> Option<Vec<Vec3>> {
         let start = self.locate(from)?;
         let goal = self.locate(to)?;
@@ -213,7 +214,9 @@ impl Plugin for NavPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NavGraph>().add_systems(
             Update,
-            rebuild_graph.run_if(resource_exists_and_changed::<WalkableAreas>),
+            rebuild_graph
+                .run_if(resource_exists_and_changed::<WalkableAreas>)
+                .run_if(in_state(AppState::Playing)),
         );
     }
 }
@@ -223,8 +226,15 @@ impl Plugin for NavPlugin {
 /// Runs on both ends. It is derived data, identical either side, and a client
 /// that ever wants to reason about the station's shape should not have to ask
 /// the server for something it can work out from the map it already loaded.
-fn rebuild_graph(areas: Res<WalkableAreas>, mut graph: ResMut<NavGraph>) {
+fn rebuild_graph(mut commands: Commands, areas: Res<WalkableAreas>, mut graph: ResMut<NavGraph>) {
     *graph = NavGraph::build(&areas, NAV_RADIUS);
+    if areas.regions().is_empty() {
+        commands.remove_resource::<MapReady>();
+    } else {
+        // Deferred until after this system completes, so every system gated on
+        // the marker observes the finished graph, never a half-loaded map.
+        commands.insert_resource(MapReady);
+    }
 }
 
 #[cfg(test)]
@@ -307,5 +317,35 @@ mod tests {
         // crew ask for routes on their first update.
         let graph = NavGraph::build(&WalkableAreas::default(), NAV_RADIUS);
         assert!(graph.path(SPAWN_SPOT, ROOMS[0].center()).is_none());
+    }
+
+    #[test]
+    fn readiness_is_published_only_after_a_nonempty_graph_is_built() {
+        let mut app = App::new();
+        app.init_resource::<WalkableAreas>()
+            .init_resource::<NavGraph>()
+            .add_systems(Update, rebuild_graph);
+
+        app.update();
+        assert!(
+            !app.world().contains_resource::<MapReady>(),
+            "an empty loading layout was advertised as ready",
+        );
+
+        let mut areas = WalkableAreas::default();
+        areas.push(
+            Bounds {
+                min_x: -2.0,
+                max_x: 2.0,
+                min_z: -2.0,
+                max_z: 2.0,
+            },
+            Some("Test Room".to_string()),
+        );
+        app.world_mut().insert_resource(areas);
+        app.update();
+
+        assert!(app.world().contains_resource::<MapReady>());
+        assert_eq!(app.world().resource::<NavGraph>().nodes.len(), 1);
     }
 }

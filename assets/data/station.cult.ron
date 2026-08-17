@@ -21,13 +21,15 @@
             incidents: [
                 (
                     name: "Wet chalk sigil",
-                    clue: "LAB: A dark chalk mark has appeared by the sink. It smears into a caustic film; ordinary water only spreads it.",
+                    clue: "MAINT: A dark chalk mark has appeared at the primary maintenance junction. It smears into a caustic film; ordinary water only spreads it.",
+                    spot: "cult.wet_chalk_sigil",
                     treatment: "space_cleaner",
                     amount: 10,
                 ),
                 (
                     name: "Whispering residue",
-                    clue: "LAB: The cleaned mark is leaving a sweet chemical smell and making the room swim. Someone needs to neutralise it.",
+                    clue: "QUARANTINE: A sweet chemical residue is making the sealed room swim. Someone needs to neutralise it.",
+                    spot: "cult.whispering_residue",
                     treatment: "dylovene",
                     amount: 10,
                 ),
@@ -44,13 +46,15 @@
             incidents: [
                 (
                     name: "Bleeding offering bowl",
-                    clue: "LAB: A bowl that was not there a moment ago is overflowing with something too dark to be blood. It pulses when anyone gets close.",
+                    clue: "CHAPEL: A bowl that was not there a moment ago is overflowing at the altar with something too dark to be blood. It pulses when anyone gets close.",
+                    spot: "cult.bleeding_offering_bowl",
                     treatment: "bicaridine",
                     amount: 10,
                 ),
                 (
                     name: "Scorched invocation",
-                    clue: "LAB: The floor around the bowl is blistering hot. The markings are burning outward through the grout.",
+                    clue: "CHAPEL: The rear floor is blistering hot. The markings are burning outward through the grout toward the public nave.",
+                    spot: "cult.scorched_invocation",
                     treatment: "kelotane",
                     amount: 10,
                 ),
@@ -66,13 +70,15 @@
             incidents: [
                 (
                     name: "Airless candle",
-                    clue: "LAB: A candle is burning without consuming air. Every breath near it feels thin and shallow.",
+                    clue: "ATMOS/UTILITY: A candle is burning beside the life-support plant without consuming air. Every breath near it feels thin and shallow.",
+                    spot: "cult.airless_candle",
                     treatment: "inaprovaline",
                     amount: 10,
                 ),
                 (
                     name: "Rift-seal scar",
-                    clue: "LAB: The wall is sweating pale vapour around a cut in reality. The fumes sting the lungs and won't settle.",
+                    clue: "REAR MAINT: The wall is sweating pale vapour around a cut in reality. The fumes sting the lungs and won't settle.",
+                    spot: "cult.rift_seal_scar",
                     treatment: "dylovene",
                     amount: 12,
                 ),

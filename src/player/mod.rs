@@ -797,6 +797,12 @@ fn push_out(position: Vec3, center: Vec3, half_extents: Vec3) -> Vec3 {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use bevy::state::app::StatesPlugin;
+    use bevy::time::TimeUpdateStrategy;
+    use bevy_replicon::test_app::{ServerTestAppExt, TestClientEntity};
+
     use super::*;
 
     /// A chemist as a joining client receives one: replication delivers the
@@ -850,6 +856,95 @@ mod tests {
         assert!(
             world.get::<Focus>(chemist).is_some(),
             "without Focus the crosshair never resolves a target"
+        );
+    }
+
+    #[test]
+    fn a_joining_clients_move_reaches_the_host_and_replicates_back() {
+        // Full headless host/join smoke: the client sends the real unreliable
+        // movement message, the authority integrates it against walkable
+        // floor, and the resulting Transform returns over replication.
+        let mut server = App::new();
+        let mut client = App::new();
+        for app in [&mut server, &mut client] {
+            app.add_plugins((
+                MinimalPlugins,
+                StatesPlugin,
+                RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+            ))
+            .add_client_message::<MoveInput>(Channel::Unreliable)
+            .replicate::<Player>()
+            .replicate::<Transform>()
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+                100,
+            )));
+        }
+        server
+            .insert_resource(lab::WalkableAreas::from_floor_plan())
+            .add_systems(Update, (receive_move_input, apply_move_input).chain());
+        server.finish();
+        client.finish();
+        server.connect_client(&mut client);
+
+        let client_entity = **client.world().resource::<TestClientEntity>();
+        let start = Vec3::new(lab::SPAWN_SPOT.x, EYE_HEIGHT, lab::SPAWN_SPOT.z);
+        server.world_mut().spawn((
+            Replicated,
+            Player,
+            Chemist {
+                client: ClientId::Client(client_entity),
+            },
+            MoveIntent::default(),
+            Look::default(),
+            Body::default(),
+            Bloodstream::default(),
+            Transform::from_translation(start),
+        ));
+
+        server.update();
+        server.exchange_with_client(&mut client);
+        client.update();
+        assert_eq!(
+            client
+                .world_mut()
+                .query::<&Player>()
+                .iter(client.world())
+                .count(),
+            1,
+            "the joined client did not receive its chemist",
+        );
+
+        client.world_mut().write_message(MoveInput {
+            direction: Vec2::X,
+            yaw: 0.0,
+            sprint: false,
+        });
+        client.update();
+        server.exchange_with_client(&mut client);
+        server.update();
+
+        let authoritative = server
+            .world_mut()
+            .query_filtered::<&Transform, With<Player>>()
+            .single(server.world())
+            .expect("one authoritative chemist")
+            .translation;
+        assert!(
+            authoritative.x > start.x + 0.1,
+            "the host never applied the joining client's movement",
+        );
+
+        server.exchange_with_client(&mut client);
+        client.update();
+        let observed = client
+            .world_mut()
+            .query_filtered::<&Transform, With<Player>>()
+            .single(client.world())
+            .expect("one replicated chemist")
+            .translation;
+        assert!(
+            observed.distance(authoritative) < 0.001,
+            "the client did not receive the host's authoritative movement: {observed} vs {authoritative}",
         );
     }
 

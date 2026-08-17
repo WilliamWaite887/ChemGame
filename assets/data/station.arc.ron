@@ -81,6 +81,7 @@
             // The ritual completes in your lab. There is no one to punch —
             // the room is what turns on you.
             showdown: Siege(
+                spot: "showdown.breach",
                 gas_reagent: "chloral_hydrate",
                 cure_reagent: "dylovene",
             ),
@@ -250,6 +251,7 @@
             id: Ai,
             display: "The Station's Own Systems",
             showdown: Siege(
+                spot: "showdown.breach",
                 gas_reagent: "chlorine",
                 cure_reagent: "dylovene",
             ),
@@ -302,6 +304,7 @@
             id: Blob,
             display: "The Growth In Maintenance",
             showdown: Siege(
+                spot: "showdown.breach",
                 gas_reagent: "unstable_mutagen",
                 cure_reagent: "dylovene",
             ),

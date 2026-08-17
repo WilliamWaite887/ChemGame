@@ -25,8 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::crew::CrewMember;
 use crate::lab::{
-    doorways, Solid, WalkableAreas, CREW_DOOR_X, DOOR_HEIGHT, DOOR_WIDTH, LOBBY, ROOMS,
-    WALL_THICKNESS,
+    doorways, Solid, WalkableAreas, CREW_DOOR_X, DOOR_HEIGHT, DOOR_WIDTH, LAB_ENTRANCE_BRIDGE_ID,
+    LOBBY, ROOMS, WALL_THICKNESS,
 };
 use crate::net::is_authority;
 use crate::player::Chemist;
@@ -260,13 +260,14 @@ fn toggle_door_solid(mut commands: Commands, doors: Query<(Entity, &Door), Chang
 }
 
 /// Blocks crew pathing exactly while shut, by collapsing this door's own
-/// `WalkableAreas` bridge — see `WalkableAreas::set_door_blocked`. Runs on
+/// semantic `WalkableAreas` bridge — see
+/// `WalkableAreas::set_bridge_blocked`. Runs on
 /// both ends unguarded, same as `nav::rebuild_graph` it feeds: every peer
 /// keeps its own local copy of "where may a body stand" in step with the one
 /// thing that has to agree everywhere, `Door.open`.
 fn toggle_door_nav(mut walkable: ResMut<WalkableAreas>, doors: Query<&Door, Changed<Door>>) {
     for door in &doors {
-        walkable.set_door_blocked(door.doorway_index, !door.open);
+        walkable.set_bridge_blocked(LAB_ENTRANCE_BRIDGE_ID, !door.open);
     }
 }
 

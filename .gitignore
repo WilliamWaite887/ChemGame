@@ -13,3 +13,4 @@ progress.ron
 # from the client itself.
 /steam_appid.txt
 .cargo/config.toml
+assets/3dassets/station_starter_kit/generate_station_starter_kit.py

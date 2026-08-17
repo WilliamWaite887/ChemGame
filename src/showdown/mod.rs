@@ -40,17 +40,14 @@ use crate::containers::{Container, HeldBy};
 use crate::crew::{spawn_crew_member, CrewDef, CrewPhase, CrewRoute};
 use crate::hazards::{HazardFelt, HazardKind, SmokeCloud, SmokePayload};
 use crate::interaction::{InteractRequested, Interactable};
+use crate::lab::{CrisisSpots, MapReady, WalkableAreas};
 use crate::machines::chemist_entity;
+use crate::nav::{NavGraph, NAV_RADIUS};
 use crate::net::is_authority;
 use crate::orders::reference_category;
 use crate::player::Chemist;
 use crate::radio::{RadioEntry, RadioLog};
 use crate::AppState;
-
-/// Where a breach opens: across the room from the counter, so it is between
-/// the chemist and nothing they need — it has to be walked *to*, not tripped
-/// over.
-const BREACH_SPOT: Vec3 = Vec3::new(-3.2, 1.0, 1.4);
 
 /// How long a smoke cloud a breach vents lasts, relative to a reaction's own.
 const BREACH_SMOKE_RADIUS: f32 = 2.6;
@@ -58,6 +55,7 @@ const BREACH_SMOKE_LIFETIME: f32 = 8.0;
 
 /// How close an assailant has to be to land a hit.
 const ASSAILANT_REACH: f32 = 1.2;
+const ASSAILANT_REPATH_SECONDS: f32 = 0.25;
 
 pub struct ShowdownPlugin;
 
@@ -75,7 +73,8 @@ impl Plugin for ShowdownPlugin {
                     resolve_showdown,
                 )
                     .chain()
-                    .run_if(is_authority),
+                    .run_if(is_authority)
+                    .run_if(resource_exists::<MapReady>),
                 // Presentation, on every peer. The assailant needs nothing
                 // here — it is a `CrewMember`, so `crew::dress_crew` already
                 // draws it — but a breach is not crew and has no mesh
@@ -114,6 +113,11 @@ pub struct Pursuit {
     speed: f32,
     /// Seconds until this one can land another hit.
     cooldown: f32,
+    /// Cached portal route to the target's last sampled position.
+    path: Vec<Vec3>,
+    waypoint: usize,
+    /// Seconds until the moving target is sampled and the route is rebuilt.
+    repath_in: f32,
 }
 
 /// The live showdown. Absent means none is running.
@@ -144,6 +148,8 @@ fn arm_showdown(
     script: Option<Res<Script>>,
     campaign: Option<Res<Campaign>>,
     live: Option<Res<Showdown>>,
+    spots: Res<CrisisSpots>,
+    mut missing_spot_reported: Local<bool>,
     mut radio: ResMut<RadioLog>,
 ) {
     let (Some(script), Some(campaign), None) = (script, campaign, live) else {
@@ -157,10 +163,19 @@ fn arm_showdown(
     };
 
     match &def.showdown {
-        ShowdownForm::Siege { cure_reagent, .. } => {
+        ShowdownForm::Siege {
+            cure_reagent, spot, ..
+        } => {
+            let Some(transform) = spots.get(spot) else {
+                if !*missing_spot_reported {
+                    error!("siege names missing crisis spot '{spot}'; skipping showdown");
+                    *missing_spot_reported = true;
+                }
+                return;
+            };
             commands.spawn((
                 Breach,
-                Transform::from_translation(BREACH_SPOT),
+                transform,
                 Visibility::default(),
                 Interactable::new(format!("Treat it — {cure_reagent} or anything like it")),
                 Replicated,
@@ -406,6 +421,9 @@ fn turn_assailant_hostile(
             .insert(Pursuit {
                 speed: script.showdown.speed,
                 cooldown: script.showdown.hit_every_seconds,
+                path: Vec::new(),
+                waypoint: 0,
+                repath_in: 0.0,
             });
     }
 }
@@ -420,8 +438,10 @@ fn turn_assailant_hostile(
 fn run_assailant(
     time: Res<Time>,
     script: Option<Res<Script>>,
+    nav: Option<Res<NavGraph>>,
+    areas: Option<Res<WalkableAreas>>,
     mut assailants: Query<(&mut Transform, &mut Pursuit), With<Assailant>>,
-    mut chemists: Query<(&Transform, &mut Body, &Chemist), Without<Assailant>>,
+    mut chemists: Query<(Entity, &Transform, &mut Body, &Chemist), Without<Assailant>>,
     mut felt: MessageWriter<ToClients<HazardFelt>>,
 ) {
     let Some(script) = script else {
@@ -431,28 +451,68 @@ fn run_assailant(
 
     for (mut transform, mut pursuit) in &mut assailants {
         pursuit.cooldown -= dt;
+        pursuit.repath_in -= dt;
 
         // Nearest by squared distance — the square root would only be needed
         // to compare against `ASSAILANT_REACH`, which is cheaper to square.
-        let mut nearest: Option<(f32, Vec3)> = None;
-        for (chemist_transform, _, _) in &chemists {
+        let mut nearest: Option<(f32, Entity, Vec3)> = None;
+        for (entity, chemist_transform, _, _) in &chemists {
             let offset = chemist_transform.translation - transform.translation;
             let distance = offset.length_squared();
-            if nearest.is_none_or(|(best, _)| distance < best) {
-                nearest = Some((distance, chemist_transform.translation));
+            if nearest.is_none_or(|(best, _, _)| distance < best) {
+                nearest = Some((distance, entity, chemist_transform.translation));
             }
         }
-        let Some((distance, target)) = nearest else {
+        let Some((distance, target_entity, target)) = nearest else {
             continue;
         };
 
-        if distance > ASSAILANT_REACH * ASSAILANT_REACH {
-            // Walk, on the floor plane only — it has no business changing
-            // height, and normalising the full vector would make it climb.
-            let mut step = target - transform.translation;
-            step.y = 0.0;
-            if step.length_squared() > f32::EPSILON {
-                transform.translation += step.normalize() * pursuit.speed * dt;
+        if pursuit.repath_in <= 0.0 {
+            pursuit.repath_in = ASSAILANT_REPATH_SECONDS;
+            pursuit.waypoint = 0;
+            pursuit.path = nav
+                .as_deref()
+                .and_then(|graph| graph.path(transform.translation, target))
+                .unwrap_or_default();
+        }
+
+        // Euclidean proximity alone is not enough: two people can be less
+        // than arm's reach apart on opposite sides of a wall. The cached route
+        // must both end at this sampled target and be short enough to hit.
+        let route_targets_chemist = pursuit
+            .path
+            .last()
+            .is_some_and(|sampled| sampled.distance_squared(target) <= 0.0001);
+        let route_in_reach = remaining_route_length(transform.translation, &pursuit)
+            .is_some_and(|walk| walk <= ASSAILANT_REACH);
+        if distance > ASSAILANT_REACH * ASSAILANT_REACH || !route_targets_chemist || !route_in_reach
+        {
+            // Follow portal waypoints rather than walking straight through
+            // department walls. No route deliberately means no motion: a
+            // disconnected graph must not revive the old wall-phasing path.
+            let mut remaining = pursuit.speed * dt;
+            while remaining > 0.0 {
+                let Some(waypoint) = pursuit.path.get(pursuit.waypoint).copied() else {
+                    break;
+                };
+                let mut step = waypoint - transform.translation;
+                step.y = 0.0;
+                let waypoint_distance = step.length();
+                if waypoint_distance <= 0.02 {
+                    pursuit.waypoint += 1;
+                    continue;
+                }
+                let walked = remaining.min(waypoint_distance);
+                let candidate = transform.translation + step / waypoint_distance * walked;
+                transform.translation = areas
+                    .as_deref()
+                    .map_or(candidate, |areas| areas.contain(candidate, NAV_RADIUS));
+                remaining -= walked;
+                if walked >= waypoint_distance {
+                    pursuit.waypoint += 1;
+                } else {
+                    break;
+                }
             }
             continue;
         }
@@ -462,7 +522,10 @@ fn run_assailant(
         pursuit.cooldown = script.showdown.hit_every_seconds;
 
         // In reach and off cooldown: hit whoever is in reach, once.
-        for (chemist_transform, mut body, chemist) in &mut chemists {
+        for (entity, chemist_transform, mut body, chemist) in &mut chemists {
+            if entity != target_entity {
+                continue;
+            }
             let offset = chemist_transform.translation - transform.translation;
             if offset.length_squared() > ASSAILANT_REACH * ASSAILANT_REACH {
                 continue;
@@ -481,6 +544,22 @@ fn run_assailant(
             break;
         }
     }
+}
+
+/// Length of the unwalked part of a cached route, measured on the floor plane.
+fn remaining_route_length(from: Vec3, pursuit: &Pursuit) -> Option<f32> {
+    if pursuit.path.is_empty() {
+        return None;
+    }
+    let mut previous = from;
+    let mut total = 0.0;
+    for waypoint in pursuit.path.iter().skip(pursuit.waypoint) {
+        let mut leg = *waypoint - previous;
+        leg.y = 0.0;
+        total += leg.length();
+        previous = *waypoint;
+    }
+    Some(total)
 }
 
 // ---------------------------------------------------------------------------
@@ -570,7 +649,10 @@ fn dress_breach(
 mod tests {
     use super::*;
     use crate::arc::{AntagId, ArcScript, Mode};
+    use crate::lab::Bounds;
     use std::time::Duration;
+
+    const TEST_BREACH_SPOT: Vec3 = Vec3::new(13.0, 1.0, -7.0);
 
     fn script() -> ArcScript {
         ron::from_str(include_str!("../../assets/data/station.arc.ron")).unwrap()
@@ -590,11 +672,17 @@ mod tests {
         let steps = script.antagonist(antag).unwrap().counter_steps.len();
         let mut campaign = Campaign::new(antag, Mode::Chemist, steps);
         campaign.plot = script.showdown_at;
+        let mut spots = CrisisSpots::default();
+        spots.insert(
+            "showdown.breach",
+            Transform::from_translation(TEST_BREACH_SPOT),
+        );
 
         let mut app = App::new();
         app.insert_resource(ChemDb(data()))
             .insert_resource(Script(script))
             .insert_resource(campaign)
+            .insert_resource(spots)
             .init_resource::<RadioLog>()
             .init_resource::<Time>()
             .add_message::<ToClients<HazardFelt>>()
@@ -629,11 +717,37 @@ mod tests {
         let mut app = showdown_app(SIEGE);
         advance(&mut app, 0.1);
 
-        let mut breaches = app.world_mut().query::<(&Breach, &Interactable)>();
+        let mut breaches = app
+            .world_mut()
+            .query::<(&Breach, &Interactable, &Transform)>();
+        let spawned: Vec<Vec3> = breaches
+            .iter(app.world())
+            .map(|(_, _, transform)| transform.translation)
+            .collect();
+        assert_eq!(spawned, vec![TEST_BREACH_SPOT]);
+    }
+
+    #[test]
+    fn a_siege_with_a_missing_spot_skips_until_the_map_supplies_it() {
+        let mut app = showdown_app(SIEGE);
+        app.insert_resource(CrisisSpots::default());
+
+        advance(&mut app, 0.1);
         assert_eq!(
-            breaches.iter(app.world()).count(),
+            app.world_mut().query::<&Breach>().iter(app.world()).count(),
+            0
+        );
+        assert!(app.world().get_resource::<Showdown>().is_none());
+
+        app.world_mut().resource_mut::<CrisisSpots>().insert(
+            "showdown.breach",
+            Transform::from_translation(TEST_BREACH_SPOT),
+        );
+        advance(&mut app, 0.1);
+        assert_eq!(
+            app.world_mut().query::<&Breach>().iter(app.world()).count(),
             1,
-            "a siege should put exactly one thing in the room to treat"
+            "a transiently incomplete map registry must not poison the showdown for the save"
         );
     }
 
@@ -815,9 +929,14 @@ mod tests {
             assert!(!def.showdown_line.trim().is_empty());
             match &def.showdown {
                 ShowdownForm::Siege {
+                    spot,
                     gas_reagent,
                     cure_reagent,
                 } => {
+                    assert!(
+                        !spot.trim().is_empty(),
+                        "a siege needs an authored map spot"
+                    );
                     let gas = data
                         .reagents
                         .id_of(gas_reagent.as_str())
@@ -863,5 +982,182 @@ mod tests {
             "a single hit must not be lethal, and a harmless one is not a threat"
         );
         assert!(showdown.speed > 0.0);
+    }
+
+    fn pursuit_app(areas: WalkableAreas) -> App {
+        let graph = NavGraph::build(&areas, 0.0);
+        let mut app = App::new();
+        app.insert_resource(Script(script()))
+            .insert_resource(graph)
+            .insert_resource(areas)
+            .init_resource::<Time>()
+            .add_message::<ToClients<HazardFelt>>()
+            .add_systems(Update, run_assailant);
+        app
+    }
+
+    fn spawn_pursuit_pair(app: &mut App, hunter: Vec3, target: Vec3) -> (Entity, Entity) {
+        let assailant = app
+            .world_mut()
+            .spawn((
+                Assailant,
+                Transform::from_translation(hunter),
+                Pursuit {
+                    speed: 3.0,
+                    cooldown: 10.0,
+                    path: Vec::new(),
+                    waypoint: 0,
+                    repath_in: 0.0,
+                },
+            ))
+            .id();
+        let chemist = app
+            .world_mut()
+            .spawn((
+                Chemist {
+                    client: ClientId::Server,
+                },
+                Body::default(),
+                Transform::from_translation(target),
+            ))
+            .id();
+        (assailant, chemist)
+    }
+
+    #[test]
+    fn an_assailant_follows_portals_and_repaths_to_a_moving_chemist() {
+        let mut areas = WalkableAreas::default();
+        areas.push(
+            Bounds {
+                min_x: -1.0,
+                max_x: 2.0,
+                min_z: -1.0,
+                max_z: 1.0,
+            },
+            None,
+        );
+        areas.push(
+            Bounds {
+                min_x: 1.0,
+                max_x: 3.0,
+                min_z: -1.0,
+                max_z: 5.0,
+            },
+            None,
+        );
+        areas.push(
+            Bounds {
+                min_x: 1.0,
+                max_x: 7.0,
+                min_z: 4.0,
+                max_z: 6.0,
+            },
+            None,
+        );
+        let mut app = pursuit_app(areas);
+        let original_target = Vec3::new(6.0, 0.0, 5.0);
+        let moved_target = Vec3::new(5.0, 0.0, 5.0);
+        let (assailant, chemist) = spawn_pursuit_pair(&mut app, Vec3::ZERO, original_target);
+
+        advance(&mut app, 0.1);
+        let transform = app.world().get::<Transform>(assailant).unwrap();
+        assert!(transform.translation.x > 0.0);
+        assert_eq!(
+            transform.translation.z, 0.0,
+            "the first leg should aim for the corridor portal, not cut diagonally through the wall"
+        );
+        assert_eq!(
+            app.world().get::<Pursuit>(assailant).unwrap().path.last(),
+            Some(&original_target)
+        );
+
+        app.world_mut()
+            .get_mut::<Transform>(chemist)
+            .unwrap()
+            .translation = moved_target;
+        advance(&mut app, 0.1);
+        assert_eq!(
+            app.world().get::<Pursuit>(assailant).unwrap().path.last(),
+            Some(&original_target),
+            "the route should be cached between quarter-second samples"
+        );
+        advance(&mut app, 0.16);
+        assert_eq!(
+            app.world().get::<Pursuit>(assailant).unwrap().path.last(),
+            Some(&moved_target)
+        );
+    }
+
+    #[test]
+    fn an_assailant_stops_when_the_nav_graph_has_no_route() {
+        let mut areas = WalkableAreas::default();
+        for x in [0.0, 10.0] {
+            areas.push(
+                Bounds {
+                    min_x: x - 1.0,
+                    max_x: x + 1.0,
+                    min_z: -1.0,
+                    max_z: 1.0,
+                },
+                None,
+            );
+        }
+        let mut app = pursuit_app(areas);
+        let (assailant, _) = spawn_pursuit_pair(&mut app, Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0));
+
+        advance(&mut app, 0.5);
+
+        assert_eq!(
+            app.world().get::<Transform>(assailant).unwrap().translation,
+            Vec3::ZERO,
+            "no route must not fall back to walking through station walls"
+        );
+        assert!(app
+            .world()
+            .get::<Pursuit>(assailant)
+            .unwrap()
+            .path
+            .is_empty());
+    }
+
+    #[test]
+    fn an_assailant_cannot_hit_a_chemist_through_a_nearby_wall() {
+        let mut areas = WalkableAreas::default();
+        areas.push(
+            Bounds {
+                min_x: -1.0,
+                max_x: 0.0,
+                min_z: -1.0,
+                max_z: 1.0,
+            },
+            None,
+        );
+        areas.push(
+            Bounds {
+                min_x: 0.5,
+                max_x: 1.5,
+                min_z: -1.0,
+                max_z: 1.0,
+            },
+            None,
+        );
+        let mut app = pursuit_app(areas);
+        let (assailant, chemist) = spawn_pursuit_pair(
+            &mut app,
+            Vec3::new(-0.25, 0.0, 0.0),
+            Vec3::new(0.75, 0.0, 0.0),
+        );
+        app.world_mut()
+            .get_mut::<Pursuit>(assailant)
+            .unwrap()
+            .cooldown = 0.0;
+
+        advance(&mut app, 0.1);
+
+        assert_eq!(
+            app.world().get::<Body>(chemist).unwrap().0.total(),
+            Units::ZERO,
+            "straight-line reach must not punch through a wall when navigation has no route"
+        );
     }
 }

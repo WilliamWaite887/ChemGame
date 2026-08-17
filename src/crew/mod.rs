@@ -1,14 +1,14 @@
 //! Crew who come to the lab to collect what they ordered.
 //!
-//! Movement is a fixed waypoint walk rather than pathfinding. The route from
-//! the door to the counter is a straight, permanently clear corridor, so
-//! anything cleverer would be machinery with nothing to solve.
+//! Movement follows the station's portal graph. Callers provide destinations
+//! such as the counter or a department, and navigation supplies safe doorway
+//! and corridor waypoints.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::body::{Bloodstream, Body, COLLAPSE_PENALTY};
-use crate::lab::{COUNTER_SPOT, DOOR_MAX_X, DOOR_MIN_X};
+use crate::lab::{MapReady, COUNTER_SPOT, DOOR_MAX_X, DOOR_MIN_X};
 use crate::net::is_authority;
 use crate::orders::{Department, Shift};
 use crate::radio::{RadioEntry, RadioLog};
@@ -42,7 +42,8 @@ impl Plugin for CrewPlugin {
                         handle_crew_collapse,
                     )
                         .chain()
-                        .run_if(is_authority),
+                        .run_if(is_authority)
+                        .run_if(resource_exists::<MapReady>),
                     // Runs everywhere: a crew member who arrived by
                     // replication needs a body drawing just as much as one
                     // spawned locally.
@@ -514,22 +515,26 @@ fn walk_route(
 ) {
     for (entity, mut transform, mut route, member) in &mut crew {
         // Turn a new destination into a path, once, the frame it is set.
-        if let Some(goal) = route.pending.take() {
+        if let Some(requested_goal) = route.pending {
             // Someone leaving heads for their own department when the station
             // has one, rather than the generic spot outside the lobby door.
             let goal = match (route.phase, member) {
                 (CrewPhase::Leaving, Some(member)) => {
-                    departments.home(&member.role).unwrap_or(goal)
+                    departments.home(&member.role).unwrap_or(requested_goal)
                 }
-                _ => goal,
+                _ => requested_goal,
             };
-            // Straight there if navigation has nothing to say. The graph is
-            // empty for a frame or two while the map loads, and a crew member
-            // must not stand in the doorway waiting for it — which is also what
-            // kept this working before there was any pathfinding at all.
-            route.waypoints = nav
-                .path(transform.translation, goal)
-                .unwrap_or_else(|| vec![goal]);
+            // If navigation has nothing to say, wait. The graph is empty for
+            // a frame or two while the map loads, and walking directly to the
+            // goal would cut through every intervening station wall.
+            let Some(waypoints) = nav.path(transform.translation, goal) else {
+                // Keep the request pending until a safe route exists. The map
+                // graph is briefly empty while its scene is loading, and a
+                // straight-line fallback would walk through station walls.
+                continue;
+            };
+            route.pending = None;
+            route.waypoints = waypoints;
             route.index = 0;
         }
 
@@ -919,10 +924,9 @@ mod tests {
     }
 
     #[test]
-    fn a_crew_member_still_walks_when_the_station_has_no_nav_graph() {
+    fn a_crew_member_waits_when_the_station_has_no_nav_graph() {
         // Under the map backend the graph is empty for a frame or two while the
-        // scene loads. Crew asking for a route in that window must head for the
-        // door anyway rather than stand still forever.
+        // scene loads. Crew must wait rather than head through a wall.
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<Departments>()
@@ -937,9 +941,14 @@ mod tests {
         }
 
         let at = app.world().get::<Transform>(crew).unwrap().translation;
+        assert!(at.distance(start) < 0.001, "walked without a safe route",);
         assert!(
-            at.distance(start) > 0.5,
-            "stood still with an empty nav graph",
+            app.world()
+                .get::<CrewRoute>(crew)
+                .unwrap()
+                .pending
+                .is_some(),
+            "discarded the destination while waiting for navigation",
         );
     }
 

@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::containers::{Container, ContainerKind, HeldBy};
 use crate::hazards::{HazardVisual, SmokeVisual};
-use crate::lab::MachineScreen;
 use crate::machines::Machine;
 use crate::player::{LocalPlayer, PlayerCamera};
 use crate::AppState;
@@ -329,7 +328,7 @@ fn update_focus(
     cameras: Query<(&GlobalTransform, &PlayerCamera)>,
     mut players: Query<(&mut Focus, &InteractionMode)>,
     interactables: Query<(), With<Interactable>>,
-    screens: Query<(), With<MachineScreen>>,
+    parents: Query<&ChildOf>,
     held: Query<(), With<HeldBy>>,
     smoke: Query<(), With<SmokeVisual>>,
     hazards: Query<(), With<HazardVisual>>,
@@ -347,28 +346,41 @@ fn update_focus(
         }
 
         let ray = Ray3d::new(camera_transform.translation(), camera_transform.forward());
-        // Machine screens sit a hair proud of their casing, so without this
-        // filter every machine would be permanently blocked by its own screen.
-        // A carried beaker rides in front of the camera and would do the same.
+        // A carried beaker rides in front of the camera and would otherwise
+        // block whatever the player is deliberately aiming at behind it.
         // A smoke cloud is a sphere metres wide and would block the entire room
         // for as long as it hung there — and a hazard sphere is bigger still,
         // 4.5m centred on the dispenser for a rad leak, so it would take the
         // dispenser and half the hall with it. Everything else stays in the
         // cast, so walls and benches still occlude properly.
         let filter = |entity: Entity| {
-            !screens.contains(entity)
-                && !held.contains(entity)
-                && !smoke.contains(entity)
-                && !hazards.contains(entity)
+            !held.contains(entity) && !smoke.contains(entity) && !hazards.contains(entity)
         };
         let settings = MeshRayCastSettings::default().with_filter(&filter);
 
         focus.target = ray_cast
             .cast_ray(ray, &settings)
             .first()
-            .filter(|(entity, hit)| hit.distance <= REACH && interactables.contains(*entity))
-            .map(|(entity, _)| *entity);
+            .filter(|(_, hit)| hit.distance <= REACH)
+            .and_then(|(entity, _)| interactable_ancestor(*entity, &interactables, &parents));
     }
+}
+
+/// Detailed GLB meshes are children of their gameplay entity. Preserve normal
+/// occlusion by raycasting the real triangle first, then walk only that hit's
+/// hierarchy until the nearest usable ancestor is found.
+fn interactable_ancestor(
+    mut entity: Entity,
+    interactables: &Query<(), With<Interactable>>,
+    parents: &Query<&ChildOf>,
+) -> Option<Entity> {
+    for _ in 0..64 {
+        if interactables.contains(entity) {
+            return Some(entity);
+        }
+        entity = parents.get(entity).ok()?.parent();
+    }
+    None
 }
 
 fn request_interaction(
@@ -492,6 +504,26 @@ fn update_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::SystemState;
+
+    #[test]
+    fn a_scene_mesh_resolves_to_its_interactable_machine_ancestor() {
+        let mut world = World::new();
+        let machine = world.spawn(Interactable::new("machine")).id();
+        let scene_root = world.spawn(ChildOf(machine)).id();
+        let mesh = world.spawn(ChildOf(scene_root)).id();
+        let wall = world.spawn_empty().id();
+
+        let mut state =
+            SystemState::<(Query<(), With<Interactable>>, Query<&ChildOf>)>::new(&mut world);
+        let (interactables, parents) = state.get(&world).unwrap();
+
+        assert_eq!(
+            interactable_ancestor(mesh, &interactables, &parents),
+            Some(machine)
+        );
+        assert_eq!(interactable_ancestor(wall, &interactables, &parents), None);
+    }
 
     #[test]
     fn the_book_key_returns_a_chemist_to_wherever_they_opened_it() {

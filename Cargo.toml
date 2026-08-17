@@ -35,12 +35,14 @@ bevy-steamworks = "0.17.0"
 bevy_renet2 = { version = "0.16.0", default-features = false, features = [
     "steam",
 ] }
-# Prototype: the TrenchBroom-authored lab. Optional, so the const-table lab in
-# src/lab/mod.rs stays the default build while the two approaches are compared.
+# The station is authored in TrenchBroom. The dependency remains optional so
+# `--no-default-features` can still build the compact const-table fallback.
 bevy_trenchbroom = { version = "0.14.0", optional = true }
 
 [features]
-# Loads the lab from assets/maps/lab.map instead of building it from ROOMS/WALLS.
+# Shipping builds load `assets/maps/lab.map`; the old const-table lab remains a
+# deliberately supported fallback for headless/minimal builds.
+default = ["trenchbroom"]
 trenchbroom = ["dep:bevy_trenchbroom"]
 # Links bevy dynamically, which cuts iteration builds down a lot. Off by
 # default because it needs the shared library alongside the binary, so it is

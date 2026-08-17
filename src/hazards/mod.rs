@@ -22,6 +22,7 @@ use crate::net::is_authority;
 use crate::body::{Bloodstream, Body, MetabolismClock};
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, HeldBy};
+use crate::lab::{CrisisSpots, MapReady};
 use crate::machines::ReactionsFired;
 use crate::radio::{RadioEntry, RadioLog};
 use crate::AppState;
@@ -59,7 +60,8 @@ impl Plugin for HazardPlugin {
                     // hit by an incident before they have found the door.
                     (schedule_incidents, run_incidents)
                         .chain()
-                        .run_if(is_authority),
+                        .run_if(is_authority)
+                        .run_if(resource_exists::<MapReady>),
                     // Both presentation, so neither is authority-gated: a
                     // joining client builds its own from the replicated data.
                     (build_smoke_visuals, build_hazard_visuals),
@@ -88,7 +90,10 @@ pub struct HazardScript {
 #[derive(Clone, Debug, Deserialize)]
 pub struct IncidentDef {
     pub id: String,
-    pub origin: (f32, f32, f32),
+    /// Semantic map marker where this incident manifests. The loaded map owns
+    /// its actual coordinates, so rearranging the station cannot leave a
+    /// hazard behind in the old lab footprint.
+    pub spot: String,
     pub radius: f32,
     pub duration: f32,
     pub warning: String,
@@ -159,6 +164,7 @@ fn schedule_incidents(
     scripts: Res<Assets<HazardScript>>,
     pending: Option<Res<PendingHazardScript>>,
     mut schedule: ResMut<IncidentSchedule>,
+    spots: Res<CrisisSpots>,
     mut radio: ResMut<RadioLog>,
 ) {
     let Some(script) = pending.and_then(|handle| scripts.get(&handle.0)) else {
@@ -189,6 +195,14 @@ fn schedule_incidents(
         let Some(def) = schedule.pending.take() else {
             return;
         };
+        schedule.next_in = Some(rng.random_range(script.gap_seconds.0..=script.gap_seconds.1));
+        let Some(transform) = spots.get(&def.spot) else {
+            error!(
+                "hazard '{}' names missing crisis spot '{}'; skipping",
+                def.id, def.spot
+            );
+            return;
+        };
 
         commands.spawn((
             ActiveHazard {
@@ -197,7 +211,7 @@ fn schedule_incidents(
                 intensity: def.intensity,
                 color: def.color,
             },
-            Transform::from_xyz(def.origin.0, def.origin.1, def.origin.2),
+            transform,
             Visibility::default(),
             Replicated,
             crate::until_we_leave_the_lab(),
@@ -208,7 +222,6 @@ fn schedule_incidents(
             good: false,
         });
         info!("hazard: {} for {}s", def.id, def.duration);
-        schedule.next_in = Some(rng.random_range(script.gap_seconds.0..=script.gap_seconds.1));
         return;
     }
 
@@ -626,6 +639,7 @@ mod tests {
     use crate::containers::ContainerKind;
     use crate::player::Chemist;
     use chem_sim::ChemData;
+    use std::collections::HashSet;
     use std::time::Duration;
 
     fn test_app() -> App {
@@ -716,6 +730,13 @@ mod tests {
             .resource_mut::<MetabolismClock>()
             .0
             .tick(Duration::from_secs_f32(2.0));
+        app.update();
+    }
+
+    fn advance(app: &mut App, seconds: f32) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f32(seconds));
         app.update();
     }
 
@@ -914,7 +935,14 @@ mod tests {
             "a hazard with no warning is a gotcha"
         );
         assert!(script.gap_seconds.0 <= script.gap_seconds.1);
+        let mut spots = HashSet::new();
         for incident in &script.incidents {
+            assert!(!incident.spot.trim().is_empty());
+            assert!(
+                spots.insert(incident.spot.as_str()),
+                "'{}' is reused; incidents need independently authored locations",
+                incident.spot
+            );
             assert!(incident.radius > 0.0, "'{}' reaches nobody", incident.id);
             assert!(incident.duration > 0.0, "'{}' never happens", incident.id);
             assert!(incident.intensity > 0.0, "'{}' does nothing", incident.id);
@@ -924,6 +952,70 @@ mod tests {
                 incident.id
             );
         }
+    }
+
+    fn scheduled_incident_app(spots: CrisisSpots) -> App {
+        let script: HazardScript =
+            ron::from_str(include_str!("../../assets/data/station.hazards.ron")).unwrap();
+        let pending_def = script.incidents[0].clone();
+        let mut app = App::new();
+        app.add_plugins(AssetPlugin::default())
+            .init_asset::<HazardScript>();
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<HazardScript>>()
+            .add(script);
+        app.insert_resource(PendingHazardScript(handle))
+            .insert_resource(IncidentGrace(f32::MAX))
+            .insert_resource(IncidentSchedule {
+                next_in: Some(0.0),
+                warning_in: Some(0.0),
+                pending: Some(pending_def),
+            })
+            .insert_resource(spots)
+            .init_resource::<RadioLog>()
+            .init_resource::<Time>()
+            .add_systems(Update, schedule_incidents);
+        app
+    }
+
+    #[test]
+    fn a_scripted_incident_uses_its_authored_map_transform() {
+        let expected =
+            Transform::from_xyz(17.0, 2.0, -8.0).with_rotation(Quat::from_rotation_y(0.7));
+        let mut spots = CrisisSpots::default();
+        spots.insert("hazard.rad_leak", expected);
+        let mut app = scheduled_incident_app(spots);
+
+        advance(&mut app, 0.1);
+
+        let mut hazards = app.world_mut().query::<(&ActiveHazard, &Transform)>();
+        let (_, actual) = hazards
+            .iter(app.world())
+            .next()
+            .expect("the pending incident should start");
+        assert_eq!(*actual, expected);
+    }
+
+    #[test]
+    fn a_scripted_incident_with_a_missing_spot_is_skipped() {
+        let mut app = scheduled_incident_app(CrisisSpots::default());
+
+        advance(&mut app, 0.1);
+
+        assert_eq!(
+            app.world_mut()
+                .query::<&ActiveHazard>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        let schedule = app.world().resource::<IncidentSchedule>();
+        assert!(schedule.pending.is_none());
+        assert!(
+            schedule.next_in.is_some(),
+            "a skipped event should reschedule"
+        );
     }
 
     #[test]

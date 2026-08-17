@@ -374,12 +374,14 @@ pub struct AntagDef {
 /// that shape needs. See `crate::showdown`.
 ///
 /// Each variant carries its own data rather than the two sharing one flat set
-/// of fields: a siege has a gas and a cure, an assailant has a name and a
-/// colour, and neither has any use for the other's.
+/// of fields: a siege has a map spot, a gas and a cure; an assailant has a
+/// name and a colour, and neither has any use for the other's.
 #[derive(Clone, Debug, Deserialize)]
 pub enum ShowdownForm {
     /// The lab itself turns on you. There is nothing to punch.
     Siege {
+        /// Semantic map marker where the breach opens.
+        spot: String,
         /// Vented into the room on a beat, through the ordinary smoke pipeline.
         gas_reagent: String,
         /// The *reference* reagent for what stops it — any member of its

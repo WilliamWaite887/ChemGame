@@ -19,6 +19,7 @@ use crate::interaction::{
     InteractRequested, InteractionMode, LeaveMachineRequested, MachineOpened,
 };
 use crate::knowledge::Knowledge;
+use crate::lab::Solid;
 use crate::net::is_authority;
 use crate::player::Chemist;
 use crate::produce::{Produce, ProduceCatalog, ProduceId};
@@ -125,19 +126,6 @@ impl MachineKind {
             MachineKind::StandingBoard => "Standing Board",
             MachineKind::ReactionChamber => "Reaction Chamber",
             MachineKind::Locker => "Storage Locker",
-        }
-    }
-
-    pub fn screen_color(self) -> Color {
-        match self {
-            MachineKind::ChemMaster5000 => Color::srgb(0.30, 0.75, 0.95),
-            MachineKind::MixingChamber => Color::srgb(0.45, 0.90, 0.55),
-            MachineKind::Grinder => Color::srgb(0.95, 0.65, 0.25),
-            MachineKind::Analyzer => Color::srgb(0.85, 0.45, 0.95),
-            MachineKind::DeliveryWindow => Color::srgb(0.95, 0.35, 0.35),
-            MachineKind::StandingBoard => Color::srgb(0.95, 0.88, 0.45),
-            MachineKind::ReactionChamber => Color::srgb(0.98, 0.45, 0.18),
-            MachineKind::Locker => Color::srgb(0.40, 0.85, 0.80),
         }
     }
 }
@@ -968,17 +956,17 @@ fn handle_package(
 
 /// Floor level, just clear of a machine's working face.
 ///
-/// Derived from the machine's own box — its transform carries the fit's size as
-/// a scale — so it lands in front of whichever machine this is, at whatever
-/// height that machine stands, rather than at one offset that happened to suit
-/// the hall's north wall.
-fn front_of(machine: &Transform, facing: Option<&Facing>, lift: f32) -> Vec3 {
+/// Derived from the machine's code-owned collision box, so it lands in front of
+/// whichever machine this is, at whatever height that machine stands, rather
+/// than at one offset that happened to suit the hall's north wall. The transform
+/// deliberately stays at identity scale now that the authored GLB is a child.
+fn front_of(machine: &Transform, solid: &Solid, facing: Option<&Facing>, lift: f32) -> Vec3 {
     // `Vec3::Z` only for a machine that has not been dressed yet, which in
     // practice means a test that spawned one by hand.
     let facing = facing.map_or(Vec3::Z, |facing| facing.0);
-    let depth = machine.scale.dot(facing.abs());
-    let floor = machine.translation.y - machine.scale.y * 0.5;
-    let spot = machine.translation + facing * (depth * 0.5 + 0.35);
+    let front = solid.half_extents.dot(facing.abs());
+    let floor = machine.translation.y - solid.half_extents.y;
+    let spot = machine.translation + facing * (front + 0.35);
     Vec3::new(spot.x, floor + lift, spot.z)
 }
 
@@ -995,12 +983,15 @@ fn give_back(
     player: Entity,
     hands_full: bool,
     machine: &Transform,
+    solid: &Solid,
     facing: Option<&Facing>,
     lift: f32,
 ) {
     let mut item = commands.entity(item);
     if hands_full {
-        item.insert(Transform::from_translation(front_of(machine, facing, lift)));
+        item.insert(Transform::from_translation(front_of(
+            machine, solid, facing, lift,
+        )));
     } else {
         item.insert(HeldBy(player));
     }
@@ -1084,7 +1075,7 @@ pub fn stored_in(locker: Entity, stored: &Query<(Entity, &Stored)>) -> Vec<Entit
 fn handle_take(
     mut commands: Commands,
     mut requests: MessageReader<FromClient<TakeRequested>>,
-    machines: Query<(&Machine, &Transform, Option<&Facing>)>,
+    machines: Query<(&Machine, &Transform, &Solid, Option<&Facing>)>,
     chemists: Query<(Entity, &Chemist)>,
     stored: Query<&Stored>,
     containers: Query<&Container>,
@@ -1107,7 +1098,7 @@ fn handle_take(
         if shut_in.0 != request.machine {
             continue;
         }
-        let Ok((machine, transform, facing)) = machines.get(request.machine) else {
+        let Ok((machine, transform, solid, facing)) = machines.get(request.machine) else {
             continue;
         };
         // Whoever has the locker open. Same reasoning as ejecting: this hands
@@ -1124,6 +1115,7 @@ fn handle_take(
             player,
             held.iter().any(|holder| holder.0 == player),
             transform,
+            solid,
             facing,
             set_down_lift(containers.get(request.item).ok()),
         );
@@ -2222,8 +2214,30 @@ mod tests {
     /// A locker, and a chemist standing at it holding `item`.
     fn locker(app: &mut App) -> Entity {
         app.world_mut()
-            .spawn((Machine::new(MachineKind::Locker), Transform::default()))
+            .spawn((
+                Machine::new(MachineKind::Locker),
+                Transform::default(),
+                Solid {
+                    half_extents: Vec3::splat(0.5),
+                },
+            ))
             .id()
+    }
+
+    #[test]
+    fn front_of_uses_collision_geometry_with_an_identity_scale_root() {
+        let machine = Transform::from_translation(Vec3::new(4.0, 0.575, 4.6));
+        let solid = Solid {
+            half_extents: Vec3::new(1.7, 0.575, 0.35),
+        };
+
+        let spot = front_of(&machine, &solid, Some(&Facing(Vec3::NEG_Z)), 0.08);
+
+        assert_eq!(machine.scale, Vec3::ONE);
+        assert!(
+            spot.distance(Vec3::new(4.0, 0.08, 3.9)) < 0.000_01,
+            "set-down spot {spot} did not use the delivery counter's collider"
+        );
     }
 
     fn press_e(app: &mut App, client: ClientId, target: Entity) {
