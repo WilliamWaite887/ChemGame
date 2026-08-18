@@ -11,6 +11,7 @@ use chem_sim::thermal::approach;
 use chem_sim::{Kelvin, ReactionActivation, ReagentId, Solution, Units};
 use serde::{Deserialize, Serialize};
 
+use crate::audio::{EmitWorldSfx, Sfx};
 use crate::chem_data::ChemDb;
 use crate::containers::{
     set_down_lift, spawn_container, Container, ContainerKind, HeldBy, InSlot, InSlotB, Stored,
@@ -26,6 +27,12 @@ use crate::produce::{Produce, ProduceCatalog, ProduceId};
 use crate::AppState;
 
 pub struct MachinePlugin;
+
+fn emit_world_sfx(sounds: &mut Option<ResMut<Messages<EmitWorldSfx>>>, sound: Sfx, position: Vec3) {
+    if let Some(sounds) = sounds {
+        sounds.write(EmitWorldSfx::new(sound, position));
+    }
+}
 
 impl Plugin for MachinePlugin {
     fn build(&self, app: &mut App) {
@@ -44,6 +51,7 @@ impl Plugin for MachinePlugin {
             .add_mapped_client_message::<SetTargetTemperature>(Channel::Ordered)
             .add_mapped_client_message::<SetHeaterPower>(Channel::Ordered)
             .add_message::<ReactionsFired>()
+            .add_message::<EmitWorldSfx>()
             .add_systems(
                 Update,
                 (
@@ -1055,8 +1063,10 @@ fn handle_dispense(
     mut requests: MessageReader<FromClient<DispenseRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
     machines: Query<&DispenseAmount>,
+    transforms: Query<&Transform>,
     slotted: Query<(Entity, &InSlot)>,
     mut containers: Query<&mut Container>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for request in requests.read() {
         // The panel only ever offers unlocked reagents as live buttons, but
@@ -1075,9 +1085,15 @@ fn handle_dispense(
         let Ok(mut container) = containers.get_mut(target) else {
             continue;
         };
-        let (_, report) = container.mutate(&db, |solution| solution.add(request.reagent, amount.0));
+        let (overflow, report) =
+            container.mutate(&db, |solution| solution.add(request.reagent, amount.0));
         if let Some(message) = ReactionsFired::from_report(target, &report) {
             fired.write(message);
+        }
+        if overflow != amount.0 {
+            if let Ok(transform) = transforms.get(request.machine) {
+                emit_world_sfx(&mut sounds, Sfx::DispensePour, transform.translation);
+            }
         }
     }
 }
@@ -1222,10 +1238,12 @@ fn handle_buffer_transfer(
     mut requests: MessageReader<FromClient<BufferTransferRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
     mut buffers: Query<&mut Buffer>,
+    transforms: Query<&Transform>,
     active: Query<(), With<AgitationRun>>,
     slotted: Query<(Entity, &InSlot)>,
     slotted_b: Query<(Entity, &InSlotB)>,
     mut containers: Query<&mut Container>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for request in requests.read() {
         if active.contains(request.machine) {
@@ -1245,7 +1263,7 @@ fn handle_buffer_transfer(
             continue;
         };
 
-        match request.direction {
+        let moved_any = match request.direction {
             BufferDirection::ToBuffer => {
                 // Pulling a single named reagent out of a mixture is the whole
                 // point of the Mixing Chamber: it is how a contaminated batch
@@ -1255,6 +1273,7 @@ fn handle_buffer_transfer(
                 if overflow.is_positive() {
                     let _ = container.solution.add(request.reagent, overflow);
                 }
+                moved != overflow
             }
             BufferDirection::ToContainer => {
                 let moved = buffer.0.remove(request.reagent, request.amount);
@@ -1266,6 +1285,12 @@ fn handle_buffer_transfer(
                 if let Some(message) = ReactionsFired::from_report(target, &report) {
                     fired.write(message);
                 }
+                moved != overflow
+            }
+        };
+        if moved_any {
+            if let Ok(transform) = transforms.get(request.machine) {
+                emit_world_sfx(&mut sounds, Sfx::BufferTransfer, transform.translation);
             }
         }
     }
@@ -1275,6 +1300,7 @@ fn handle_package(
     mut commands: Commands,
     mut requests: MessageReader<FromClient<PackageRequested>>,
     mut machines: Query<(&mut Buffer, &Transform)>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for request in requests.read() {
         let Ok((mut buffer, transform)) = machines.get_mut(request.machine) else {
@@ -1293,6 +1319,15 @@ fn handle_package(
 
         let drop_at = transform.translation + Vec3::new(0.0, 0.95, 0.45);
         let package = spawn_container(&mut commands, request.kind, drop_at);
+        emit_world_sfx(
+            &mut sounds,
+            if matches!(request.kind, ContainerKind::Pill | ContainerKind::Syringe) {
+                Sfx::PackagePop
+            } else {
+                Sfx::GlassClunk
+            },
+            drop_at,
+        );
 
         // The container was only just queued for spawn, so its `Container`
         // component is not readable yet; fill it in on the command queue.
@@ -1369,12 +1404,13 @@ fn give_back(
 fn handle_eject(
     mut commands: Commands,
     mut requests: MessageReader<FromClient<EjectRequested>>,
-    machines: Query<&Machine>,
+    machines: Query<(&Machine, &Transform)>,
     active: Query<(), With<AgitationRun>>,
     chemists: Query<(Entity, &Chemist)>,
     slotted: Query<(Entity, &InSlot)>,
     slotted_b: Query<(Entity, &InSlotB)>,
     held: Query<&HeldBy>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for request in requests.read() {
         if active.contains(request.machine) {
@@ -1393,7 +1429,7 @@ fn handle_eject(
         let Some(container) = container else {
             continue;
         };
-        let Ok(machine) = machines.get(request.machine) else {
+        let Ok((machine, transform)) = machines.get(request.machine) else {
             continue;
         };
         // Only the chemist working the machine. This never mattered while the
@@ -1409,6 +1445,7 @@ fn handle_eject(
             MachineSlot::B => commands.entity(container).remove::<InSlotB>(),
         };
         commands.entity(container).insert(HeldBy(player));
+        emit_world_sfx(&mut sounds, Sfx::Eject, transform.translation);
     }
 }
 
@@ -1518,8 +1555,10 @@ fn handle_analyze(
     db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<AnalyzeRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
+    transforms: Query<&Transform>,
     slotted: Query<(Entity, &InSlot)>,
     containers: Query<&Container>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for request in requests.read() {
         let Some(target) = slotted_container(request.machine, &slotted) else {
@@ -1543,6 +1582,9 @@ fn handle_analyze(
             .collect();
 
         if !identified.is_empty() {
+            if let Ok(transform) = transforms.get(request.machine) {
+                emit_world_sfx(&mut sounds, Sfx::AnalyzerFinish, transform.translation);
+            }
             // No effects: the analyzer identifies a sample, it does not react
             // one. Nothing here can smoke or detonate. `distinct_reagents: 0`
             // deliberately exempts this from the crowd-threshold check in
@@ -1570,8 +1612,10 @@ fn handle_grind(
     mut requests: MessageReader<FromClient<GrindRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
     mut hoppers: Query<&mut Hopper>,
+    transforms: Query<&Transform>,
     slotted: Query<(Entity, &InSlot)>,
     mut containers: Query<&mut Container>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     let Some(catalog) = catalog else {
         return;
@@ -1601,6 +1645,7 @@ fn handle_grind(
         // ground, and each pass's own count already reflects everything
         // still sitting there from the passes before it.
         let mut distinct_reagents = 0;
+        let mut ground = 0usize;
         for _ in 0..passes {
             let Some(&next) = hopper.0.first() else {
                 break;
@@ -1615,6 +1660,7 @@ fn handle_grind(
             }
 
             hopper.0.remove(0);
+            ground += 1;
             let (_, report) = container.mutate(&db, |solution| {
                 for (reagent, amount) in &kind.yields {
                     let _ = solution.add(*reagent, *amount);
@@ -1623,6 +1669,12 @@ fn handle_grind(
             reactions.extend(report.fired_reactions());
             effects.extend(report.effects);
             distinct_reagents = distinct_reagents.max(report.distinct_reagents);
+        }
+
+        if ground > 0 {
+            if let Ok(transform) = transforms.get(request.machine) {
+                emit_world_sfx(&mut sounds, Sfx::Grinder, transform.translation);
+            }
         }
 
         if !reactions.is_empty() || !effects.is_empty() {
@@ -1671,6 +1723,7 @@ mod tests {
             .insert_resource(knowledge)
             .insert_resource(catalog)
             .add_message::<FromClient<DispenseRequested>>()
+            .add_message::<EmitWorldSfx>()
             .add_message::<ReactionsFired>()
             .add_message::<FromClient<BufferTransferRequested>>()
             .add_message::<FromClient<AgitateRequested>>()
@@ -1806,6 +1859,58 @@ mod tests {
             "reactions must run as part of dispensing, not only on demand"
         );
         assert_eq!(container.solution.len(), 1, "reagents should be consumed");
+    }
+
+    #[test]
+    fn dispensing_sounds_once_only_after_an_accepted_transfer() {
+        let mut app = test_app();
+        let origin = Vec3::new(4.0, 0.5, -2.0);
+        let dispenser = app
+            .world_mut()
+            .spawn((
+                DispenseAmount(Units::whole(15)),
+                Transform::from_translation(origin),
+            ))
+            .id();
+        app.world_mut().spawn((
+            Container::new(ContainerKind::LargeBeaker),
+            InSlot(dispenser),
+        ));
+        let oxygen = reagent(&app, "oxygen");
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: DispenseRequested {
+                machine: dispenser,
+                reagent: oxygen,
+            },
+        });
+        app.update();
+        let accepted: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<EmitWorldSfx>>()
+            .drain()
+            .collect();
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0], EmitWorldSfx::new(Sfx::DispensePour, origin));
+
+        let invalid_machine = app.world_mut().spawn_empty().id();
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: DispenseRequested {
+                machine: invalid_machine,
+                reagent: oxygen,
+            },
+        });
+        app.update();
+        assert!(
+            app.world_mut()
+                .resource_mut::<Messages<EmitWorldSfx>>()
+                .drain()
+                .next()
+                .is_none(),
+            "a rejected request must not predict a physical sound"
+        );
     }
 
     #[test]

@@ -34,6 +34,7 @@ use chem_sim::{Damage, DamageKind, Solution, Units};
 use serde::{Deserialize, Serialize};
 
 use crate::arc::{ArcOutcome, Campaign, Script, ShowdownForm};
+use crate::audio::{EmitWorldSfx, Sfx};
 use crate::body::Body;
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, HeldBy};
@@ -61,7 +62,7 @@ pub struct ShowdownPlugin;
 
 impl Plugin for ShowdownPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.add_message::<EmitWorldSfx>().add_systems(
             Update,
             (
                 (
@@ -443,6 +444,7 @@ fn run_assailant(
     mut assailants: Query<(&mut Transform, &mut Pursuit), With<Assailant>>,
     mut chemists: Query<(Entity, &Transform, &mut Body, &Chemist), Without<Assailant>>,
     mut felt: MessageWriter<ToClients<HazardFelt>>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     let Some(script) = script else {
         return;
@@ -541,6 +543,9 @@ fn run_assailant(
                     strength: 0.9,
                 },
             });
+            if let Some(sounds) = &mut sounds {
+                sounds.write(EmitWorldSfx::new(Sfx::AssaultImpact, transform.translation));
+            }
             break;
         }
     }

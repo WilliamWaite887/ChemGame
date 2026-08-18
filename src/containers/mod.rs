@@ -10,6 +10,7 @@ use bevy_replicon::prelude::*;
 use chem_sim::{resolve_step, ResolveReport, Solution, Units};
 use serde::{Deserialize, Serialize};
 
+use crate::audio::{EmitWorldSfx, Sfx};
 use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::interaction::{InteractRequested, Interactable};
@@ -24,11 +25,18 @@ use crate::AppState;
 /// crosshair so it never blocks what you are aiming at.
 const HOLD_OFFSET: Vec3 = Vec3::new(0.26, -0.20, -0.5);
 
+fn emit_world_sfx(sounds: &mut Option<ResMut<Messages<EmitWorldSfx>>>, sound: Sfx, position: Vec3) {
+    if let Some(sounds) = sounds {
+        sounds.write(EmitWorldSfx::new(sound, position));
+    }
+}
+
 pub struct ContainerPlugin;
 
 impl Plugin for ContainerPlugin {
     fn build(&self, app: &mut App) {
         app.add_client_message::<DropRequested>(Channel::Ordered)
+            .add_message::<EmitWorldSfx>()
             .add_systems(
                 OnEnter(AppState::Playing),
                 (
@@ -413,6 +421,7 @@ fn handle_drop(
     chemists: Query<(Entity, &Chemist)>,
     transforms: Query<&Transform>,
     solids: Query<(&Transform, &Solid)>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     let mut surfaces = None;
 
@@ -442,12 +451,19 @@ fn handle_drop(
             // reach the crosshair picks it back up at.
             let ahead = transform.translation + transform.forward() * 0.65;
             let resting = lab::resting_place(ahead, transform.translation, surfaces);
+            let position = resting + Vec3::Y * set_down_lift(contents);
             commands
                 .entity(container)
                 .remove::<HeldBy>()
-                .insert(Transform::from_translation(
-                    resting + Vec3::Y * set_down_lift(contents),
-                ));
+                .insert(Transform::from_translation(position));
+            if contents.is_some_and(|contents| {
+                matches!(
+                    contents.kind,
+                    ContainerKind::Beaker | ContainerKind::LargeBeaker | ContainerKind::Bottle
+                )
+            }) {
+                emit_world_sfx(&mut sounds, Sfx::GlassClunk, position);
+            }
         }
     }
 }

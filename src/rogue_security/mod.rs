@@ -30,6 +30,7 @@ use chem_sim::{Damage, DamageKind, ReagentId, Units};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::audio::{EmitWorldSfx, Sfx};
 use crate::body::{ApplyHeldRequested, Body};
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, HeldBy};
@@ -73,6 +74,7 @@ impl Plugin for RogueSecurityPlugin {
             "rogue_security.ron",
         ]))
         .init_resource::<RogueRedeemed>()
+        .add_message::<EmitWorldSfx>()
         .add_systems(Startup, start_loading)
         .add_systems(OnEnter(AppState::Playing), arm_spawner)
         .add_systems(
@@ -387,7 +389,13 @@ fn expire_rogue_encounters(
     mut shift: ResMut<Shift>,
     mut radio: ResMut<RadioLog>,
     mut felt: MessageWriter<ToClients<HazardFelt>>,
-    mut officers: Query<(Entity, &mut RogueOfficer, &mut CrewRoute)>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
+    mut officers: Query<(
+        Entity,
+        Option<&Transform>,
+        &mut RogueOfficer,
+        &mut CrewRoute,
+    )>,
     chemists: Query<(Entity, &Chemist)>,
     mut bodies: Query<&mut Body>,
 ) {
@@ -396,7 +404,7 @@ fn expire_rogue_encounters(
     };
     let dt = time.delta_secs();
 
-    for (entity, mut officer, mut route) in &mut officers {
+    for (entity, transform, mut officer, mut route) in &mut officers {
         if route.phase != CrewPhase::Waiting {
             continue;
         }
@@ -436,6 +444,9 @@ fn expire_rogue_encounters(
                             strength: 0.8,
                         },
                     });
+                    if let (Some(sounds), Some(transform)) = (&mut sounds, transform) {
+                        sounds.write(EmitWorldSfx::new(Sfx::AssaultImpact, transform.translation));
+                    }
                 }
             }
         }

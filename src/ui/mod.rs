@@ -3741,7 +3741,6 @@ fn handle_panel_clicks(
                     machine,
                     reagent: *reagent,
                 });
-                out.play.write(PlaySfx(Sfx::DispensePour));
             }
             PanelAction::Eject(slot) => {
                 let occupied = match slot {
@@ -3753,7 +3752,6 @@ fn handle_panel_clicks(
                         machine,
                         slot: *slot,
                     });
-                    out.play.write(PlaySfx(Sfx::Eject));
                 }
             }
             PanelAction::Take(item) => {
@@ -3776,7 +3774,6 @@ fn handle_panel_clicks(
                     direction: BufferDirection::ToBuffer,
                     slot: *slot,
                 });
-                out.play.write(PlaySfx(Sfx::BufferTransfer));
             }
             PanelAction::ToContainer(reagent, amount, slot) => {
                 out.transfer.write(BufferTransferRequested {
@@ -3786,14 +3783,12 @@ fn handle_panel_clicks(
                     direction: BufferDirection::ToContainer,
                     slot: *slot,
                 });
-                out.play.write(PlaySfx(Sfx::BufferTransfer));
             }
             PanelAction::Agitate(direction) => {
                 out.agitate.write(AgitateRequested {
                     machine,
                     direction: *direction,
                 });
-                out.play.write(PlaySfx(Sfx::BufferTransfer));
             }
             PanelAction::Package(kind) => {
                 out.package.write(PackageRequested {
@@ -3806,7 +3801,6 @@ fn handle_panel_clicks(
             }
             PanelAction::Grind { all } => {
                 out.grind.write(GrindRequested { machine, all: *all });
-                out.play.write(PlaySfx(Sfx::Grinder));
             }
             PanelAction::TogglePower => {
                 let on = thermostats

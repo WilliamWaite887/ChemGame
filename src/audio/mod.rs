@@ -1,31 +1,30 @@
-//! Sound. Every `.ogg` in `assets/sounds/` (sourced from tgstation — see
+//! Sound. Every `.ogg` in `assets/sounds/` (sourced from tgstation or Space
+//! Station 14 — see
 //! `CREDITS.md`), and the one place that actually calls
 //! [`AudioPlayer`]/[`PlaybackSettings`].
 //!
 //! Presentation only, the same layering [`crate::fx`] already draws between
 //! state and how it looks: this module reads other modules' state and
-//! messages, and none of them know it exists. [`PlaySfx`] is the one thing
-//! other modules write to reach it — a plain local [`Message`], deliberately
-//! not networked, because "make a sound on my own machine" needs no wire at
-//! all. `handle_panel_clicks` (`crate::ui`) is the one place that writes it
-//! directly, for the handful of actions with a specific cue; everything else
-//! here derives a sound from a signal that already exists.
-//!
-//! One real limitation: [`play_reaction_sfx`]'s underlying signal
-//! (`ReactionsFired`) is deliberately not networked, so it only ever fires
-//! on whichever peer is authority — giving it a proper co-op-wide cue would
-//! need a new synced message the same shape as `HazardFelt`.
+//! messages, and none of them know how playback works. [`PlaySfx`] is the
+//! local channel for UI/radio cues. Physical actions instead write
+//! [`EmitWorldSfx`] after authority validation; [`fanout_world_sfx`] resolves
+//! pooled variants once, plays them for the host, and sends the exact same
+//! positioned [`WorldSfx`] to remote clients.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bevy::audio::Volume;
 use bevy::prelude::*;
+use bevy_replicon::prelude::*;
+use chem_sim::StatusKind;
 use rand::prelude::*;
+use serde::{Deserialize, Serialize};
 
-use crate::body::Body;
+use crate::body::{Bloodstream, Body};
+use crate::containers::{HeldBy, InSlot, InSlotB};
 use crate::door::Door;
-use crate::hazards::{HazardFelt, HazardKind};
-use crate::machines::ReactionsFired;
+use crate::machines::{AgitationRun, Machine, MachineKind, ReactionsFired, Thermostat};
+use crate::net::is_authority;
 use crate::orders::{CrisisOrder, Shift};
 use crate::radio::RadioLog;
 use crate::settings::Settings;
@@ -63,8 +62,11 @@ pub struct SfxPlugin;
 impl Plugin for SfxPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<PlaySfx>()
+            .add_message::<EmitWorldSfx>()
+            .add_server_message::<WorldSfx>(Channel::Ordered)
             .init_resource::<RadioCursor>()
             .init_resource::<AmbienceCooldown>()
+            .init_resource::<VariantCursor>()
             .add_systems(Startup, load_sfx)
             // Baselines against whatever radio history is already there
             // rather than replaying an old save's chatter as fresh blips.
@@ -81,14 +83,16 @@ impl Plugin for SfxPlugin {
                 Update,
                 (
                     play_sfx,
+                    (fanout_world_sfx.run_if(is_authority), play_world_sfx).chain(),
                     sync_master_volume,
-                    play_hazard_sfx,
-                    play_reaction_sfx,
-                    play_collapse_sfx,
+                    play_reaction_sfx.run_if(is_authority),
+                    play_collapse_sfx.run_if(is_authority),
+                    play_status_sfx.run_if(is_authority),
+                    sync_machine_loops,
                     play_crisis_alarm_sfx,
                     play_radio_sfx,
                     play_ui_click_sfx,
-                    play_door_sfx,
+                    play_door_sfx.run_if(is_authority),
                     cycle_ambience,
                 )
                     .run_if(in_state(AppState::Playing)),
@@ -97,7 +101,7 @@ impl Plugin for SfxPlugin {
 }
 
 /// Every sourced one-shot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Sfx {
     DispensePour,
     Eject,
@@ -115,6 +119,20 @@ pub enum Sfx {
     RequisitionConfirm,
     UiClick,
     UiRefused,
+    DirectPour,
+    Splash,
+    Drink,
+    Inject,
+    AnalyzerFinish,
+    PackagePop,
+    GlassClunk,
+    Corrosion,
+    Ignite,
+    Flash,
+    Slip,
+    RadiationPulse,
+    Cough,
+    AssaultImpact,
 }
 
 impl Sfx {
@@ -124,7 +142,37 @@ impl Sfx {
     fn volume(self) -> f32 {
         match self {
             Sfx::DoorOpen | Sfx::DoorClosed => 0.5,
+            Sfx::DispensePour
+            | Sfx::Eject
+            | Sfx::BufferTransfer
+            | Sfx::ReactionOccurred
+            | Sfx::Fall
+            | Sfx::Grinder
+            | Sfx::DirectPour
+            | Sfx::Splash
+            | Sfx::Drink
+            | Sfx::Inject
+            | Sfx::GlassClunk
+            | Sfx::Cough => 0.55,
+            Sfx::AnalyzerFinish | Sfx::PackagePop => 0.65,
+            Sfx::Corrosion
+            | Sfx::Ignite
+            | Sfx::Flash
+            | Sfx::HazardSmoke
+            | Sfx::HazardExplosion
+            | Sfx::RadiationPulse
+            | Sfx::AssaultImpact => 0.8,
+            Sfx::Slip => 0.7,
             _ => 1.0,
+        }
+    }
+
+    fn variants(self) -> u8 {
+        match self {
+            Sfx::RadiationPulse => 12,
+            Sfx::Cough => 4,
+            Sfx::GlassClunk => 2,
+            _ => 1,
         }
     }
 }
@@ -134,6 +182,49 @@ impl Sfx {
 /// way `ShowToast` (`crate::ui`) is a local-only UI message.
 #[derive(Message, Clone, Copy)]
 pub struct PlaySfx(pub Sfx);
+
+/// An authority-confirmed physical sound before it is fanned out to peers.
+/// Gameplay systems write this only after their mutation succeeds.
+#[derive(Message, Clone, Copy, Debug, PartialEq)]
+pub struct EmitWorldSfx {
+    pub sound: Sfx,
+    pub position: Vec3,
+}
+
+impl EmitWorldSfx {
+    pub const fn new(sound: Sfx, position: Vec3) -> Self {
+        Self { sound, position }
+    }
+}
+
+/// The exact positional cue sent by the authority. `variant` is resolved
+/// before transmission so every listener hears the same member of a pool.
+#[derive(Message, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorldSfx {
+    pub sound: Sfx,
+    pub variant: u8,
+    pub position: Vec3,
+}
+
+#[derive(Resource, Default)]
+struct VariantCursor(HashMap<Sfx, u8>);
+
+impl VariantCursor {
+    fn next(&mut self, sound: Sfx) -> u8 {
+        let count = sound.variants();
+        if count <= 1 {
+            return 0;
+        }
+        let cursor = self.0.entry(sound).or_insert_with(|| {
+            // Start each pool somewhere other than zero without sacrificing
+            // the no-immediate-repeat guarantee of the round-robin advance.
+            rand::rng().random_range(0..count)
+        });
+        let selected = *cursor;
+        *cursor = (*cursor + 1) % count;
+        selected
+    }
+}
 
 #[derive(Resource)]
 struct SfxAssets {
@@ -153,12 +244,28 @@ struct SfxAssets {
     requisition_confirm: Handle<AudioSource>,
     ui_click: Handle<AudioSource>,
     ui_refused: Handle<AudioSource>,
+    direct_pour: Handle<AudioSource>,
+    splash: Handle<AudioSource>,
+    drink: Handle<AudioSource>,
+    inject: Handle<AudioSource>,
+    analyzer_finish: Handle<AudioSource>,
+    package_pop: Handle<AudioSource>,
+    glass_clunks: [Handle<AudioSource>; 2],
+    corrosion: Handle<AudioSource>,
+    ignite: Handle<AudioSource>,
+    flash: Handle<AudioSource>,
+    slip: Handle<AudioSource>,
+    radiation_pulses: [Handle<AudioSource>; 12],
+    coughs: [Handle<AudioSource>; 4],
+    assault_impact: Handle<AudioSource>,
+    agitation_loop: Handle<AudioSource>,
+    heater_loop: Handle<AudioSource>,
     calm_ambience: Vec<Handle<AudioSource>>,
     tense_ambience: Vec<Handle<AudioSource>>,
 }
 
 impl SfxAssets {
-    fn handle(&self, sfx: Sfx) -> Handle<AudioSource> {
+    fn handle(&self, sfx: Sfx, variant: u8) -> Handle<AudioSource> {
         match sfx {
             Sfx::DispensePour => &self.dispense_pour,
             Sfx::Eject => &self.eject,
@@ -176,6 +283,22 @@ impl SfxAssets {
             Sfx::RequisitionConfirm => &self.requisition_confirm,
             Sfx::UiClick => &self.ui_click,
             Sfx::UiRefused => &self.ui_refused,
+            Sfx::DirectPour => &self.direct_pour,
+            Sfx::Splash => &self.splash,
+            Sfx::Drink => &self.drink,
+            Sfx::Inject => &self.inject,
+            Sfx::AnalyzerFinish => &self.analyzer_finish,
+            Sfx::PackagePop => &self.package_pop,
+            Sfx::GlassClunk => &self.glass_clunks[usize::from(variant) % self.glass_clunks.len()],
+            Sfx::Corrosion => &self.corrosion,
+            Sfx::Ignite => &self.ignite,
+            Sfx::Flash => &self.flash,
+            Sfx::Slip => &self.slip,
+            Sfx::RadiationPulse => {
+                &self.radiation_pulses[usize::from(variant) % self.radiation_pulses.len()]
+            }
+            Sfx::Cough => &self.coughs[usize::from(variant) % self.coughs.len()],
+            Sfx::AssaultImpact => &self.assault_impact,
         }
         .clone()
     }
@@ -202,6 +325,43 @@ fn load_sfx(mut commands: Commands, assets: Res<AssetServer>) {
         requisition_confirm: assets.load("sounds/requisition_confirm.ogg"),
         ui_click: assets.load("sounds/ui_click.ogg"),
         ui_refused: assets.load("sounds/ui_refused.ogg"),
+        direct_pour: assets.load("sounds/ss14/glug.ogg"),
+        splash: assets.load("sounds/ss14/splash.ogg"),
+        drink: assets.load("sounds/ss14/drink.ogg"),
+        inject: assets.load("sounds/ss14/hypospray.ogg"),
+        analyzer_finish: assets.load("sounds/ss14/scan_finish.ogg"),
+        package_pop: assets.load("sounds/ss14/pop.ogg"),
+        glass_clunks: [
+            assets.load("sounds/ss14/bottle_clunk.ogg"),
+            assets.load("sounds/ss14/bottle_clunk_2.ogg"),
+        ],
+        corrosion: assets.load("sounds/ss14/sizzle.ogg"),
+        ignite: assets.load("sounds/ss14/fire.ogg"),
+        flash: assets.load("sounds/ss14/flash_bang.ogg"),
+        slip: assets.load("sounds/ss14/slip.ogg"),
+        radiation_pulses: [
+            assets.load("sounds/ss14/radpulse1.ogg"),
+            assets.load("sounds/ss14/radpulse2.ogg"),
+            assets.load("sounds/ss14/radpulse3.ogg"),
+            assets.load("sounds/ss14/radpulse4.ogg"),
+            assets.load("sounds/ss14/radpulse5.ogg"),
+            assets.load("sounds/ss14/radpulse6.ogg"),
+            assets.load("sounds/ss14/radpulse7.ogg"),
+            assets.load("sounds/ss14/radpulse8.ogg"),
+            assets.load("sounds/ss14/radpulse9.ogg"),
+            assets.load("sounds/ss14/radpulse10.ogg"),
+            assets.load("sounds/ss14/radpulse11.ogg"),
+            assets.load("sounds/ss14/radpulse12.ogg"),
+        ],
+        coughs: [
+            assets.load("sounds/ss14/female_cough_1.ogg"),
+            assets.load("sounds/ss14/female_cough_2.ogg"),
+            assets.load("sounds/ss14/male_cough_1.ogg"),
+            assets.load("sounds/ss14/male_cough_2.ogg"),
+        ],
+        assault_impact: assets.load("sounds/ss14/soft_thump.ogg"),
+        agitation_loop: assets.load("sounds/ss14/bubbles.ogg"),
+        heater_loop: assets.load("sounds/ss14/buzz_loop.ogg"),
         calm_ambience: CALM_AMBIENCE
             .iter()
             .map(|path| assets.load(*path))
@@ -217,8 +377,54 @@ fn load_sfx(mut commands: Commands, assets: Res<AssetServer>) {
 fn play_sfx(mut commands: Commands, assets: Res<SfxAssets>, mut requests: MessageReader<PlaySfx>) {
     for PlaySfx(sfx) in requests.read() {
         commands.spawn((
-            AudioPlayer::new(assets.handle(*sfx)),
+            AudioPlayer::new(assets.handle(*sfx, 0)),
             PlaybackSettings::DESPAWN.with_volume(Volume::Linear(sfx.volume())),
+            crate::until_we_leave_the_lab(),
+        ));
+    }
+}
+
+/// Plays the authority's cue locally and forwards the exact same variant to
+/// remote clients. `CLIENTS_ONLY` is essential: echoing to the listen host
+/// would make every physical action play twice there.
+fn fanout_world_sfx(
+    mut requests: MessageReader<EmitWorldSfx>,
+    mut variants: ResMut<VariantCursor>,
+    mut local: MessageWriter<WorldSfx>,
+    mut outgoing: MessageWriter<ToClients<WorldSfx>>,
+) {
+    for request in requests.read() {
+        if !request.position.is_finite() {
+            continue;
+        }
+        let message = WorldSfx {
+            sound: request.sound,
+            variant: variants.next(request.sound),
+            position: request.position,
+        };
+        local.write(message);
+        outgoing.write(ToClients {
+            targets: SendTargets::CLIENTS_ONLY,
+            message,
+        });
+    }
+}
+
+fn play_world_sfx(
+    mut commands: Commands,
+    assets: Res<SfxAssets>,
+    mut requests: MessageReader<WorldSfx>,
+) {
+    for request in requests.read() {
+        if !request.position.is_finite() {
+            continue;
+        }
+        commands.spawn((
+            AudioPlayer::new(assets.handle(request.sound, request.variant)),
+            PlaybackSettings::DESPAWN
+                .with_volume(Volume::Linear(request.sound.volume()))
+                .with_spatial(true),
+            Transform::from_translation(request.position),
             crate::until_we_leave_the_lab(),
         ));
     }
@@ -233,50 +439,183 @@ fn sync_master_volume(settings: Res<Settings>, mut global_volume: ResMut<GlobalV
     global_volume.volume = Volume::Linear(settings.master_volume);
 }
 
-/// Same message `fx::apply_hazard_felt` reads for the camera kick — already
-/// networked per-affected-chemist, so this needs no gate of its own.
-fn play_hazard_sfx(mut felt: MessageReader<HazardFelt>, mut play: MessageWriter<PlaySfx>) {
-    for message in felt.read() {
-        let sfx = match message.kind {
-            HazardKind::Blast => Sfx::HazardExplosion,
-            HazardKind::Smoke => Sfx::HazardSmoke,
-            // Radiation, and a rogue officer turning physical, still get the
-            // camera kick from `fx` — just no sourced cue of their own yet.
-            HazardKind::Radiation | HazardKind::Assault => continue,
-        };
-        play.write(PlaySfx(sfx));
-    }
-}
-
-/// `ReactionsFired` is deliberately not networked (see its own doc comment
-/// in `crate::machines`) — a server-side consequence, not a request — so
-/// this only ever fires on whichever peer is authority (the host, or the
-/// only peer in singleplayer). Giving a joining guest their own beaker-fizz
-/// cue would need a new synced message shaped like `HazardFelt`; wiring in
-/// the sourced files is what this pass is for, not that.
-fn play_reaction_sfx(mut fired: MessageReader<ReactionsFired>, mut play: MessageWriter<PlaySfx>) {
-    for _ in fired.read() {
-        play.write(PlaySfx(Sfx::ReactionOccurred));
-    }
-}
-
-/// `Body` replicates normally, so this reads the same on every peer with no
-/// authority gate — same reasoning as `body::close_panel_on_collapse`.
-/// `Local` tracking rather than `Added<Collapsed>`-style marker: collapse is
-/// a field flip on an existing component, not a spawn.
-fn play_collapse_sfx(
-    bodies: Query<(Entity, &Body), Changed<Body>>,
-    mut known_down: Local<HashSet<Entity>>,
-    mut play: MessageWriter<PlaySfx>,
+/// `ReactionsFired` is authority-only. It becomes an [`EmitWorldSfx`] here,
+/// then [`fanout_world_sfx`] selects one variant and forwards it to every
+/// remote listener through the shared positional-audio path.
+fn play_reaction_sfx(
+    mut fired: MessageReader<ReactionsFired>,
+    transforms: Query<&Transform>,
+    held: Query<&HeldBy>,
+    slots: Query<&InSlot>,
+    slots_b: Query<&InSlotB>,
+    mut play: MessageWriter<EmitWorldSfx>,
 ) {
-    for (entity, body) in &bodies {
+    for report in fired.read() {
+        let source = held
+            .get(report.container)
+            .ok()
+            .map(|holder| holder.0)
+            .or_else(|| slots.get(report.container).ok().map(|slot| slot.0))
+            .or_else(|| slots_b.get(report.container).ok().map(|slot| slot.0))
+            .unwrap_or(report.container);
+        if let Ok(transform) = transforms.get(source) {
+            play.write(EmitWorldSfx::new(
+                Sfx::ReactionOccurred,
+                transform.translation,
+            ));
+        }
+    }
+}
+
+/// `Local` tracking rather than `Added<Collapsed>`-style marker: collapse is
+/// a field flip on an existing component, not a spawn. This runs only on the
+/// authority so a joining client cannot replay a historical collapse.
+fn play_collapse_sfx(
+    bodies: Query<(Entity, &Body, &Transform), Changed<Body>>,
+    mut known_down: Local<HashSet<Entity>>,
+    mut play: MessageWriter<EmitWorldSfx>,
+) {
+    for (entity, body, transform) in &bodies {
         if body.0.collapsed {
             if known_down.insert(entity) {
-                play.write(PlaySfx(Sfx::Fall));
+                play.write(EmitWorldSfx::new(Sfx::Fall, transform.translation));
             }
         } else {
             known_down.remove(&entity);
         }
+    }
+}
+
+#[derive(Default)]
+struct BodyAudioState {
+    choking: bool,
+    burning: bool,
+    unsteady: bool,
+    next_cough_at: f32,
+    cough_serial: u8,
+}
+
+fn cough_interval(entity: Entity, serial: u8) -> f32 {
+    10.0 + ((entity.to_bits().wrapping_add(u64::from(serial))) % 5) as f32
+}
+
+/// Audible body presentation follows authority bloodstream state and enters
+/// the shared positional path. Only choking repeats, on a long deterministic
+/// cadence.
+fn play_status_sfx(
+    time: Res<Time>,
+    bodies: Query<(Entity, &Transform, &Bloodstream)>,
+    mut states: Local<HashMap<Entity, BodyAudioState>>,
+    mut play: MessageWriter<EmitWorldSfx>,
+) {
+    let now = time.elapsed_secs();
+    let mut seen = HashSet::new();
+    for (entity, transform, blood) in &bodies {
+        seen.insert(entity);
+        let choking = blood.0.status(StatusKind::Choking).intensity > 0.0;
+        let burning = blood.0.status(StatusKind::Burning).intensity > 0.0;
+        let unsteady = blood.0.status(StatusKind::Unsteady).intensity > 0.0;
+        let state = states.entry(entity).or_default();
+
+        if choking && (!state.choking || now >= state.next_cough_at) {
+            play.write(EmitWorldSfx::new(Sfx::Cough, transform.translation));
+            state.cough_serial = state.cough_serial.wrapping_add(1);
+            state.next_cough_at = now + cough_interval(entity, state.cough_serial);
+        }
+        if burning && !state.burning {
+            play.write(EmitWorldSfx::new(Sfx::Ignite, transform.translation));
+        }
+        if unsteady && !state.unsteady {
+            play.write(EmitWorldSfx::new(Sfx::Slip, transform.translation));
+        }
+
+        state.choking = choking;
+        state.burning = burning;
+        state.unsteady = unsteady;
+        if !choking {
+            state.next_cough_at = 0.0;
+        }
+    }
+    states.retain(|entity, _| seen.contains(entity));
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum MachineLoopKind {
+    Agitation,
+    Heater,
+}
+
+#[derive(Component)]
+struct MachineLoop {
+    owner: Entity,
+    kind: MachineLoopKind,
+}
+
+fn desired_machine_loops(kind: MachineKind, agitating: bool, heater_powered: bool) -> (bool, bool) {
+    (
+        agitating,
+        kind == MachineKind::ReactionChamber && heater_powered,
+    )
+}
+
+fn sync_machine_loops(
+    mut commands: Commands,
+    assets: Res<SfxAssets>,
+    machines: Query<
+        (
+            Entity,
+            &Transform,
+            &Machine,
+            Option<&AgitationRun>,
+            Option<&Thermostat>,
+        ),
+        Without<MachineLoop>,
+    >,
+    mut playing: Query<(Entity, &MachineLoop, &mut Transform)>,
+) {
+    let mut desired = HashMap::new();
+    for (entity, transform, machine, agitation, thermostat) in &machines {
+        let (agitation_loop, heater_loop) = desired_machine_loops(
+            machine.kind,
+            agitation.is_some(),
+            thermostat.is_some_and(|thermostat| thermostat.powered),
+        );
+        if agitation_loop {
+            desired.insert((entity, MachineLoopKind::Agitation), transform.translation);
+        }
+        if heater_loop {
+            desired.insert((entity, MachineLoopKind::Heater), transform.translation);
+        }
+    }
+
+    let mut existing = HashSet::new();
+    for (entity, looped, mut transform) in &mut playing {
+        let key = (looped.owner, looped.kind);
+        if let Some(position) = desired.get(&key) {
+            transform.translation = *position;
+            existing.insert(key);
+        } else {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    for ((owner, kind), position) in desired {
+        if existing.contains(&(owner, kind)) {
+            continue;
+        }
+        let (handle, volume) = match kind {
+            MachineLoopKind::Agitation => (assets.agitation_loop.clone(), 0.28),
+            MachineLoopKind::Heater => (assets.heater_loop.clone(), 0.20),
+        };
+        commands.spawn((
+            MachineLoop { owner, kind },
+            AudioPlayer::new(handle),
+            PlaybackSettings::LOOP
+                .with_volume(Volume::Linear(volume))
+                .with_spatial(true),
+            Transform::from_translation(position),
+            crate::until_we_leave_the_lab(),
+        ));
     }
 }
 
@@ -338,16 +677,21 @@ fn play_radio_sfx(
     cursor.0 = Some(len);
 }
 
-/// `Door` replicates normally (see `door`'s module doc), so this reads the
-/// same on every peer with no authority gate — same reasoning as
-/// `play_collapse_sfx`.
-fn play_door_sfx(doors: Query<&Door, Changed<Door>>, mut play: MessageWriter<PlaySfx>) {
-    for door in &doors {
-        play.write(PlaySfx(if door.open {
-            Sfx::DoorOpen
-        } else {
-            Sfx::DoorClosed
-        }));
+/// Door transitions become authority-confirmed positional cues; clients do
+/// not replay the initial replicated closed state as a fresh sound.
+fn play_door_sfx(
+    doors: Query<(&Door, &Transform), Changed<Door>>,
+    mut play: MessageWriter<EmitWorldSfx>,
+) {
+    for (door, transform) in &doors {
+        play.write(EmitWorldSfx::new(
+            if door.open {
+                Sfx::DoorOpen
+            } else {
+                Sfx::DoorClosed
+            },
+            transform.translation,
+        ));
     }
 }
 
@@ -435,4 +779,253 @@ fn cycle_ambience(
         AmbiencePlayer,
         crate::until_we_leave_the_lab(),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::time::Duration;
+
+    use super::*;
+
+    const SS14_FILES: [&str; 31] = [
+        "bottle_clunk.ogg",
+        "bottle_clunk_2.ogg",
+        "bubbles.ogg",
+        "buzz_loop.ogg",
+        "drink.ogg",
+        "female_cough_1.ogg",
+        "female_cough_2.ogg",
+        "fire.ogg",
+        "flash_bang.ogg",
+        "glug.ogg",
+        "hypospray.ogg",
+        "male_cough_1.ogg",
+        "male_cough_2.ogg",
+        "pop.ogg",
+        "radpulse1.ogg",
+        "radpulse2.ogg",
+        "radpulse3.ogg",
+        "radpulse4.ogg",
+        "radpulse5.ogg",
+        "radpulse6.ogg",
+        "radpulse7.ogg",
+        "radpulse8.ogg",
+        "radpulse9.ogg",
+        "radpulse10.ogg",
+        "radpulse11.ogg",
+        "radpulse12.ogg",
+        "scan_finish.ogg",
+        "sizzle.ogg",
+        "slip.ogg",
+        "soft_thump.ogg",
+        "splash.ogg",
+    ];
+
+    const ORIGINAL_ONE_SHOTS: [&str; 16] = [
+        "sounds/dispense_pour.ogg",
+        "sounds/eject.ogg",
+        "sounds/buffer_transfer.ogg",
+        "sounds/reaction_occurred.ogg",
+        "sounds/hazard_smoke.ogg",
+        "sounds/hazard_explosion.ogg",
+        "sounds/major_alarm.ogg",
+        "sounds/fall.ogg",
+        "sounds/grinder.ogg",
+        "sounds/door_open.ogg",
+        "sounds/door_closed.ogg",
+        "sounds/order_success.ogg",
+        "sounds/radio_blip.ogg",
+        "sounds/requisition_confirm.ogg",
+        "sounds/ui_click.ogg",
+        "sounds/ui_refused.ogg",
+    ];
+
+    #[test]
+    fn every_registered_sound_path_exists() {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        for path in ORIGINAL_ONE_SHOTS
+            .into_iter()
+            .chain(CALM_AMBIENCE)
+            .chain(TENSE_AMBIENCE)
+        {
+            assert!(
+                assets.join(path).is_file(),
+                "missing registered sound {path}"
+            );
+        }
+        for file in SS14_FILES {
+            assert!(
+                assets.join("sounds/ss14").join(file).is_file(),
+                "missing registered sound sounds/ss14/{file}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_imported_ss14_sound_exists_and_has_a_commercial_safe_credit_row() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let sound_dir = root.join("assets/sounds/ss14");
+        let credits = fs::read_to_string(root.join("CREDITS.md")).expect("CREDITS.md");
+
+        let imported: HashSet<String> = fs::read_dir(&sound_dir)
+            .expect("SS14 sound directory")
+            .map(|entry| {
+                entry
+                    .expect("sound entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(imported.len(), SS14_FILES.len());
+
+        for file in SS14_FILES {
+            assert!(sound_dir.join(file).is_file(), "missing {file}");
+            assert!(
+                credits.contains(&format!("`ss14/{file}`")),
+                "{file} has no credit row"
+            );
+        }
+        for row in credits.lines().filter(|line| line.starts_with("| `ss14/")) {
+            assert!(!row.contains("CC-BY-NC"), "noncommercial row: {row}");
+            assert!(!row.contains("| Custom |"), "custom-license row: {row}");
+        }
+        for excluded in [
+            "alien_spitacid.ogg",
+            "pill_insert.ogg",
+            "pill_remove.ogg",
+            "ice_crit.ogg",
+            "jet_injector.ogg",
+        ] {
+            assert!(!sound_dir.join(excluded).exists());
+        }
+    }
+
+    #[test]
+    fn pooled_variants_do_not_repeat_immediately() {
+        let mut cursor = VariantCursor::default();
+        for sound in [Sfx::RadiationPulse, Sfx::Cough, Sfx::GlassClunk] {
+            let first = cursor.next(sound);
+            let second = cursor.next(sound);
+            assert_ne!(first, second, "{sound:?} repeated immediately");
+            assert!(first < sound.variants());
+            assert!(second < sound.variants());
+        }
+    }
+
+    #[test]
+    fn authority_plays_once_locally_and_sends_the_same_cue_to_clients_only() {
+        let mut app = App::new();
+        app.add_message::<EmitWorldSfx>()
+            .add_message::<WorldSfx>()
+            .add_message::<ToClients<WorldSfx>>()
+            .init_resource::<VariantCursor>()
+            .add_systems(Update, fanout_world_sfx);
+        let request = EmitWorldSfx::new(Sfx::RadiationPulse, Vec3::new(1.0, 2.0, 3.0));
+        app.world_mut().write_message(request);
+
+        app.update();
+
+        let local: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<WorldSfx>>()
+            .drain()
+            .collect();
+        let remote: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ToClients<WorldSfx>>>()
+            .drain()
+            .collect();
+        assert_eq!(local.len(), 1);
+        assert_eq!(remote.len(), 1);
+        assert!(matches!(
+            remote[0].targets,
+            SendTargets::AllExcept(ClientId::Server)
+        ));
+        assert_eq!(remote[0].message, local[0]);
+    }
+
+    #[test]
+    fn machine_loops_follow_only_their_own_live_state() {
+        assert_eq!(
+            desired_machine_loops(MachineKind::MixingChamber, true, false),
+            (true, false)
+        );
+        assert_eq!(
+            desired_machine_loops(MachineKind::ReactionChamber, false, true),
+            (false, true)
+        );
+        assert_eq!(
+            desired_machine_loops(MachineKind::ReactionChamber, false, false),
+            (false, false)
+        );
+        assert_eq!(
+            desired_machine_loops(MachineKind::Analyzer, false, true),
+            (false, false),
+            "a stray thermostat must not make another machine hum"
+        );
+    }
+
+    #[test]
+    fn machine_loop_queries_are_disjoint_at_runtime() {
+        let mut world = World::new();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(sync_machine_loops);
+
+        // Bevy validates query aliasing while a system is initialized. This
+        // caught the runtime B0001 where the machine query read `Transform`
+        // while the loop-player query could mutate the same component.
+        schedule.initialize(&mut world).unwrap();
+    }
+
+    #[test]
+    fn choking_repeats_on_a_long_cooldown_instead_of_every_frame() {
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .add_message::<EmitWorldSfx>()
+            .add_systems(Update, play_status_sfx);
+
+        let mut blood = Bloodstream::default();
+        blood.0.add_status(StatusKind::Choking, 60.0, 1.0);
+        app.world_mut()
+            .spawn((Transform::from_xyz(2.0, 0.0, 3.0), blood));
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs(1));
+        app.update();
+        let first: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<EmitWorldSfx>>()
+            .drain()
+            .collect();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].sound, Sfx::Cough);
+        assert_eq!(first[0].position, Vec3::new(2.0, 0.0, 3.0));
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs(1));
+        app.update();
+        assert!(app
+            .world_mut()
+            .resource_mut::<Messages<EmitWorldSfx>>()
+            .drain()
+            .next()
+            .is_none());
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs(15));
+        app.update();
+        let repeated: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<EmitWorldSfx>>()
+            .drain()
+            .collect();
+        assert_eq!(repeated.len(), 1);
+        assert_eq!(repeated[0].sound, Sfx::Cough);
+    }
 }

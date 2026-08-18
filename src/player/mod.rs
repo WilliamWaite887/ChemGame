@@ -300,6 +300,9 @@ fn adopt_my_chemist(mut commands: Commands, mut assigned: MessageReader<YouAreCh
             ));
         commands.spawn((
             Camera3d::default(),
+            // Physical station sounds use the camera as the listener so
+            // panning follows the chemist's head, not the replicated body.
+            SpatialListener::new(0.18),
             PlayerCamera {
                 chemist: message.chemist,
             },

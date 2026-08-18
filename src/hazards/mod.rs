@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::net::is_authority;
 
+use crate::audio::{EmitWorldSfx, Sfx};
 use crate::body::{Bloodstream, Body, MetabolismClock};
 use crate::chem_data::ChemDb;
 use crate::chem_world::{assess_exposure, order_authorizes_dose, ChemicalExposure, ExposureSource};
@@ -46,6 +47,7 @@ impl Plugin for HazardPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(RonAssetPlugin::<HazardScript>::new(&["hazards.ron"]))
             .add_message::<ChemicalExposure>()
+            .add_message::<EmitWorldSfx>()
             .add_server_message::<HazardFelt>(Channel::Ordered)
             .init_resource::<IncidentSchedule>()
             .init_resource::<IncidentGrace>()
@@ -251,6 +253,7 @@ fn run_incidents(
     time: Res<Time>,
     clock: Res<MetabolismClock>,
     mut felt: MessageWriter<ToClients<HazardFelt>>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
     mut hazards: Query<(Entity, &mut ActiveHazard, &Transform)>,
     mut bodies: Query<
         (&Transform, &mut Bloodstream, &crate::player::Chemist),
@@ -268,6 +271,13 @@ fn run_incidents(
         // reason about rather than one per rendered frame.
         if !clock.0.just_finished() {
             continue;
+        }
+
+        if let Some(sounds) = &mut sounds {
+            sounds.write(EmitWorldSfx::new(
+                Sfx::RadiationPulse,
+                hazard_transform.translation,
+            ));
         }
 
         for (body_transform, mut blood, chemist) in &mut bodies {
@@ -394,6 +404,7 @@ fn spawn_hazards(
     db: Res<ChemDb>,
     mut reports: MessageReader<ReactionsFired>,
     mut felt: MessageWriter<ToClients<HazardFelt>>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
     mut radio: ResMut<RadioLog>,
     transforms: Query<&Transform>,
     held: Query<&HeldBy>,
@@ -461,9 +472,15 @@ fn spawn_hazards(
                 text: "Something in the chem lab just started venting.".to_string(),
                 good: false,
             });
+            if let Some(sounds) = &mut sounds {
+                sounds.write(EmitWorldSfx::new(Sfx::HazardSmoke, origin));
+            }
         }
 
         if power > 0.0 {
+            if let Some(sounds) = &mut sounds {
+                sounds.write(EmitWorldSfx::new(Sfx::HazardExplosion, origin));
+            }
             // The glass and everything in it are gone.
             if let Ok(mut entity) = commands.get_entity(report.container) {
                 entity.despawn();

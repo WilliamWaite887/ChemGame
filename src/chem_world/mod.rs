@@ -14,6 +14,7 @@ use bevy_replicon::prelude::*;
 use chem_sim::{Category, ReagentEffect, Route, Solution, StatusKind, Units, WorldEffect};
 use serde::{Deserialize, Serialize};
 
+use crate::audio::{EmitWorldSfx, Sfx};
 use crate::body::{Bloodstream, Body, MetabolismClock};
 use crate::chem_data::ChemDb;
 use crate::crew::{CrewMember, CrewRoute};
@@ -32,35 +33,43 @@ const MAX_RADIUS: f32 = 1.35;
 const MERGE_PADDING: f32 = 0.10;
 const PROP_DISSOLVE_STRENGTH: f32 = 3.0;
 
+fn emit_world_sfx(sounds: &mut Option<ResMut<Messages<EmitWorldSfx>>>, sound: Sfx, position: Vec3) {
+    if let Some(sounds) = sounds {
+        sounds.write(EmitWorldSfx::new(sound, position));
+    }
+}
+
 pub struct ChemWorldPlugin;
 
 impl Plugin for ChemWorldPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<ChemicalExposure>().add_systems(
-            Update,
-            (
+        app.add_message::<ChemicalExposure>()
+            .add_message::<EmitWorldSfx>()
+            .add_systems(
+                Update,
                 (
-                    initialize_puddle_profile,
-                    clean_with_new_puddles,
-                    affect_world_with_new_puddles,
-                    spread_puddle_ignition,
-                    merge_puddles,
-                    expose_bodies_to_puddles,
-                    age_puddles,
-                    respond_to_unwanted_exposure,
+                    (
+                        initialize_puddle_profile,
+                        clean_with_new_puddles,
+                        affect_world_with_new_puddles,
+                        spread_puddle_ignition,
+                        merge_puddles,
+                        expose_bodies_to_puddles,
+                        age_puddles,
+                        respond_to_unwanted_exposure,
+                    )
+                        .chain()
+                        .run_if(is_authority),
+                    (
+                        mark_reactive_station_props.before(affect_world_with_new_puddles),
+                        present_corroded_props.after(affect_world_with_new_puddles),
+                    )
+                        .chain(),
+                    build_puddle_visuals,
+                    update_puddle_visuals,
                 )
-                    .chain()
-                    .run_if(is_authority),
-                (
-                    mark_reactive_station_props.before(affect_world_with_new_puddles),
-                    present_corroded_props.after(affect_world_with_new_puddles),
-                )
-                    .chain(),
-                build_puddle_visuals,
-                update_puddle_visuals,
-            )
-                .run_if(in_state(AppState::Playing)),
-        );
+                    .run_if(in_state(AppState::Playing)),
+            );
     }
 }
 
@@ -339,18 +348,21 @@ fn initialize_puddle_profile(
     mut commands: Commands,
     db: Res<ChemDb>,
     mut puddles: Query<(Entity, &Transform, &mut ChemicalPuddle), Added<ChemicalPuddle>>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for (entity, transform, mut puddle) in &mut puddles {
         let contents: Vec<_> = puddle.solution.iter().collect();
         let mut smoke_radius: f32 = 0.0;
         let mut smoke_seconds: f32 = 0.0;
         let mut is_cleaner = false;
+        let mut ignited_here = false;
 
         for (reagent, amount) in contents {
             for effect in &db.reagents.get(reagent).world_effects {
                 match *effect {
                     WorldEffect::Clean { .. } => is_cleaner = true,
                     WorldEffect::Ignite { intensity, seconds } => {
+                        ignited_here |= !puddle.ignited;
                         puddle.ignited = true;
                         puddle.ignition_intensity = puddle.ignition_intensity.max(intensity);
                         puddle.remaining = puddle.remaining.max(seconds);
@@ -397,11 +409,15 @@ fn initialize_puddle_profile(
             // it does not also leave a duplicate dose on the floor.
             puddle.solution.clear();
             puddle.remaining = 0.0;
+            emit_world_sfx(&mut sounds, Sfx::HazardSmoke, transform.translation);
         } else if is_cleaner {
             // A cleaner spill acts, then evaporates instead of becoming the
             // next residue somebody has to clean.
             puddle.remaining = puddle.remaining.min(3.0);
             puddle.cleaner = true;
+        }
+        if ignited_here {
+            emit_world_sfx(&mut sounds, Sfx::Ignite, transform.translation);
         }
 
         // Ensure Changed<ChemicalPuddle> readers see the initialized profile
@@ -474,12 +490,16 @@ fn affect_world_with_new_puddles(
         (With<ChemicallyReactive>, Without<crate::door::Door>),
     >,
     mut bodies: Query<(&Transform, &mut Bloodstream)>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for (transform, puddle) in &puddles {
+        let mut corrosion_heard = false;
+        let mut flash_heard = false;
         for (reagent, _) in puddle.solution.iter() {
             for effect in &db.reagents.get(reagent).world_effects {
                 match *effect {
                     WorldEffect::Corrode { strength } => {
+                        corrosion_heard = true;
                         let radius = 0.65 + strength * 0.45;
                         for (entity, door_transform, corroded) in &mut doors {
                             if horizontal_distance(
@@ -515,6 +535,7 @@ fn affect_world_with_new_puddles(
                         }
                     }
                     WorldEffect::Flash { radius, seconds } => {
+                        flash_heard = true;
                         for (body_transform, mut blood) in &mut bodies {
                             if horizontal_distance(
                                 transform.translation,
@@ -529,12 +550,21 @@ fn affect_world_with_new_puddles(
                 }
             }
         }
+        if corrosion_heard {
+            emit_world_sfx(&mut sounds, Sfx::Corrosion, transform.translation);
+        }
+        if flash_heard {
+            emit_world_sfx(&mut sounds, Sfx::Flash, transform.translation);
+        }
     }
 }
 
 /// Fire propagates deterministically to overlapping fuel. No random ignition
 /// roll means the same spill layout behaves identically for every host.
-fn spread_puddle_ignition(mut puddles: Query<(&Transform, &mut ChemicalPuddle)>) {
+fn spread_puddle_ignition(
+    mut puddles: Query<(&Transform, &mut ChemicalPuddle)>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
+) {
     let flames: Vec<(Vec3, f32)> = puddles
         .iter()
         .filter(|(_, puddle)| puddle.ignited)
@@ -553,6 +583,7 @@ fn spread_puddle_ignition(mut puddles: Query<(&Transform, &mut ChemicalPuddle)>)
         }) {
             puddle.ignited = true;
             puddle.ignition_intensity = puddle.ignition_intensity.max(puddle.flammable_intensity);
+            emit_world_sfx(&mut sounds, Sfx::Ignite, transform.translation);
         }
     }
 }

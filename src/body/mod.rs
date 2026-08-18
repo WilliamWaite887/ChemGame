@@ -16,6 +16,7 @@ use chem_sim::body::{Health, TICK_SECONDS};
 use chem_sim::{metabolise, DamageKind, Route, Units};
 use serde::{Deserialize, Serialize};
 
+use crate::audio::{EmitWorldSfx, Sfx};
 use crate::chem_data::ChemDb;
 use crate::chem_world::{
     assess_exposure, order_authorizes_dose, spawn_puddle, ChemicalExposure, ExposureSource,
@@ -43,6 +44,12 @@ const HAND_TRANSFER: Units = Units::whole(10);
 /// reasoned about and tested.
 const MAX_CATCHUP_TICKS: u32 = 3;
 
+fn emit_world_sfx(sounds: &mut Option<ResMut<Messages<EmitWorldSfx>>>, sound: Sfx, position: Vec3) {
+    if let Some(sounds) = sounds {
+        sounds.write(EmitWorldSfx::new(sound, position));
+    }
+}
+
 /// Seconds before medical comes and drags a collapsed chemist out.
 ///
 /// This is the anti-softlock, and singleplayer needs it: a chemist who goes
@@ -69,6 +76,7 @@ impl Plugin for BodyPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MetabolismClock>()
             .add_message::<ChemicalExposure>()
+            .add_message::<EmitWorldSfx>()
             .add_client_message::<ConsumeRequested>(Channel::Ordered)
             .add_mapped_client_message::<ApplyHeldRequested>(Channel::Ordered)
             .add_systems(
@@ -226,6 +234,7 @@ fn handle_apply_held(
     crisis_targets: Query<(), With<crate::crisis::CrisisResponse>>,
     mut fired: MessageWriter<ReactionsFired>,
     mut exposures: MessageWriter<ChemicalExposure>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for request in requests.read() {
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
@@ -330,6 +339,9 @@ fn handle_apply_held(
                         if let Some(message) = ReactionsFired::from_report(target, &report) {
                             fired.write(message);
                         }
+                        if let Ok(transform) = transforms.get(target) {
+                            emit_world_sfx(&mut sounds, Sfx::DirectPour, transform.translation);
+                        }
                     }
                     continue;
                 }
@@ -383,6 +395,9 @@ fn handle_apply_held(
                         illicit: assessment.illicit,
                         overdose: assessment.overdose,
                     });
+                    if let Ok(transform) = transforms.get(target) {
+                        emit_world_sfx(&mut sounds, Sfx::Splash, transform.translation);
+                    }
                     continue;
                 }
 
@@ -399,7 +414,9 @@ fn handle_apply_held(
                             .0
                     })
                     .unwrap_or_else(|_| chem_sim::Solution::unbounded());
-                let _ = spawn_puddle(&mut commands, spilled, point, Some(player));
+                if spawn_puddle(&mut commands, spilled, point, Some(player)).is_some() {
+                    emit_world_sfx(&mut sounds, Sfx::Splash, point);
+                }
             }
             continue;
         }
@@ -492,6 +509,9 @@ fn handle_apply_held(
             illicit: assessment.illicit,
             overdose: assessment.overdose,
         });
+        if let Ok(transform) = transforms.get(patient) {
+            emit_world_sfx(&mut sounds, Sfx::Inject, transform.translation);
+        }
     }
 }
 
@@ -500,10 +520,12 @@ fn handle_consume(
     db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<ConsumeRequested>>,
     chemists: Query<(Entity, &Chemist)>,
+    transforms: Query<&Transform>,
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
     held: Query<(Entity, &HeldBy)>,
     mut containers: Query<&mut Container>,
     mut exposures: MessageWriter<ChemicalExposure>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for request in requests.read() {
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
@@ -551,6 +573,9 @@ fn handle_consume(
             illicit: assessment.illicit,
             overdose: assessment.overdose,
         });
+        if let Ok(transform) = transforms.get(player) {
+            emit_world_sfx(&mut sounds, Sfx::Drink, transform.translation);
+        }
 
         // An empty pill is a wrapper. Nothing else despawns on use, because a
         // beaker you have drained is still a beaker.
@@ -822,6 +847,7 @@ mod tests {
             .add_message::<FromClient<ConsumeRequested>>()
             .add_message::<FromClient<ApplyHeldRequested>>()
             .add_message::<ChemicalExposure>()
+            .add_message::<EmitWorldSfx>()
             .add_message::<ReactionsFired>()
             .add_systems(
                 Update,
@@ -1183,6 +1209,16 @@ mod tests {
         );
         assert_eq!(contents_of(&app, source).total_volume(), Units::whole(30));
         assert_eq!(contents_of(&app, beaker).total_volume(), Units::whole(30));
+        let sounds: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<EmitWorldSfx>>()
+            .drain()
+            .collect();
+        assert_eq!(sounds.len(), 1);
+        assert_eq!(
+            sounds[0],
+            EmitWorldSfx::new(Sfx::DirectPour, Vec3::new(1.0, 1.0, 0.0))
+        );
     }
 
     #[test]
@@ -1323,6 +1359,14 @@ mod tests {
         app.update();
 
         assert_eq!(contents_of(&app, source).total_volume(), Units::whole(40));
+        assert!(
+            app.world_mut()
+                .resource_mut::<Messages<EmitWorldSfx>>()
+                .drain()
+                .next()
+                .is_none(),
+            "a rejected remote splash must remain silent"
+        );
         assert!(blood_of(&app, target).is_empty());
         let records: Vec<_> = app
             .world_mut()
