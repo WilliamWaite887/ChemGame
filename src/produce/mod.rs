@@ -420,15 +420,17 @@ fn unload_produce(
             );
         }
 
-        radio.push(RadioEntry {
-            channel: channel_for(&member.role),
-            text: format!(
-                "{}: dropped {} off at the window. Grinder's all yours.",
-                member.name,
-                describe(&catalog, &delivery.items)
-            ),
-            good: true,
-        });
+        radio.push(
+            RadioEntry::new(
+                channel_for(&member.role),
+                format!(
+                    "Dropped {} off at the window. Grinder's all yours.",
+                    describe(&catalog, &delivery.items)
+                ),
+            )
+            .speaker(&member.name)
+            .positive(),
+        );
         info!("{} delivered {} produce", member.name, delivery.items.len());
 
         commands.entity(entity).remove::<ProduceDelivery>();

@@ -14,8 +14,10 @@ use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
+use crate::hazards::ActiveHazard;
 use crate::net::is_authority;
-use crate::orders::{OrderResolved, Outcome};
+use crate::orders::{CrisisOrder, Order, OrderResolved, Outcome, Shift};
+use crate::showdown::Showdown;
 use crate::AppState;
 
 /// Lines kept in the log before the oldest scrolls off.
@@ -34,8 +36,10 @@ impl Plugin for RadioPlugin {
         app.add_plugins(RonAssetPlugin::<RadioScript>::new(&["radio.ron"]))
             .init_resource::<RadioLog>()
             .init_resource::<PendingBroadcasts>()
+            .init_resource::<AmbientRadio>()
             .add_server_message::<RadioSync>(Channel::Ordered)
             .add_systems(Startup, start_loading)
+            .add_systems(OnEnter(AppState::Playing), reset_ambient_radio)
             .add_systems(
                 Update,
                 (
@@ -44,6 +48,7 @@ impl Plugin for RadioPlugin {
                     (
                         promote_script,
                         queue_reports,
+                        tick_ambient_radio,
                         deliver_broadcasts,
                         broadcast_radio,
                     )
@@ -67,6 +72,14 @@ pub struct RadioScript {
     /// player was never told to look for. See `OrderResolved::reagent`.
     #[serde(default)]
     pub category_lines: Vec<RadioLineDef>,
+    /// Quiet-period station colour. These are server-authored exactly like
+    /// order reports, so every chemist hears the same joke in the same order.
+    #[serde(default)]
+    pub ambient_gap_seconds: Option<(f32, f32)>,
+    #[serde(default)]
+    pub ambient_lines: Vec<AmbientLineDef>,
+    #[serde(default)]
+    pub exchanges: Vec<RadioExchangeDef>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -79,31 +92,180 @@ pub struct RadioLineDef {
     pub text: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct AmbientLineDef {
+    pub channel: RadioChannel,
+    pub speaker: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RadioExchangeDef {
+    pub lines: Vec<AmbientLineDef>,
+}
+
 #[derive(Resource)]
 struct PendingScript(Handle<RadioScript>);
 
 #[derive(Resource, Deref)]
 struct Script(RadioScript);
 
-/// One line on the feed.
+/// A semantic station radio channel. Keeping this typed prevents presentation
+/// code from having to infer that `BRG` deserves a stronger treatment than an
+/// ordinary department line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RadioChannel {
+    Bridge,
+    Medical,
+    Security,
+    Engineering,
+    Cargo,
+    Service,
+    Lab,
+    #[default]
+    Common,
+}
+
+impl RadioChannel {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Bridge => "BRG",
+            Self::Medical => "MED",
+            Self::Security => "SEC",
+            Self::Engineering => "ENG",
+            Self::Cargo => "CGO",
+            Self::Service => "SRV",
+            Self::Lab => "LAB",
+            Self::Common => "COM",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bridge => "Bridge",
+            Self::Medical => "Medical",
+            Self::Security => "Security",
+            Self::Engineering => "Engineering",
+            Self::Cargo => "Cargo",
+            Self::Service => "Service",
+            Self::Lab => "Chemistry Lab",
+            Self::Common => "Station Common",
+        }
+    }
+
+    pub fn default_speaker(self) -> &'static str {
+        match self {
+            Self::Bridge => "Duty Officer",
+            Self::Medical => "Medbay Dispatch",
+            Self::Security => "Security Dispatch",
+            Self::Engineering => "Engineering Control",
+            Self::Cargo => "Cargo Desk",
+            Self::Service => "Service Desk",
+            Self::Lab => "Lab Annunciator",
+            Self::Common => "Station Relay",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RadioTone {
+    Positive,
+    Negative,
+    #[default]
+    Neutral,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RadioPriority {
+    Ambient,
+    #[default]
+    Routine,
+    Urgent,
+    StationWide,
+}
+
+/// One delivered transmission. `sequence` is assigned only by `RadioLog`,
+/// never by callers, which makes rollover and network snapshots reliable.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RadioEntry {
-    pub channel: String,
+    pub sequence: u64,
+    pub channel: RadioChannel,
+    pub speaker: Option<String>,
     pub text: String,
-    pub good: bool,
+    pub tone: RadioTone,
+    pub priority: RadioPriority,
+}
+
+impl RadioEntry {
+    pub fn new(channel: RadioChannel, text: impl Into<String>) -> Self {
+        Self {
+            sequence: 0,
+            channel,
+            speaker: Some(channel.default_speaker().to_string()),
+            text: text.into(),
+            tone: RadioTone::Neutral,
+            priority: RadioPriority::Routine,
+        }
+    }
+
+    pub fn speaker(mut self, speaker: impl Into<String>) -> Self {
+        self.speaker = Some(speaker.into());
+        self
+    }
+
+    pub fn tone(mut self, tone: RadioTone) -> Self {
+        self.tone = tone;
+        self
+    }
+
+    pub fn positive(self) -> Self {
+        self.tone(RadioTone::Positive)
+    }
+
+    pub fn negative(self) -> Self {
+        self.tone(RadioTone::Negative)
+    }
+
+    pub fn priority(mut self, priority: RadioPriority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn urgent(self) -> Self {
+        self.priority(RadioPriority::Urgent)
+    }
+
+    pub fn station_wide(self) -> Self {
+        self.priority(RadioPriority::StationWide)
+    }
+
+    pub fn ambient(self) -> Self {
+        self.priority(RadioPriority::Ambient)
+    }
 }
 
 #[derive(Resource, Default)]
 pub struct RadioLog {
     pub entries: VecDeque<RadioEntry>,
+    next_sequence: u64,
 }
 
 impl RadioLog {
-    pub fn push(&mut self, entry: RadioEntry) {
+    pub fn push(&mut self, mut entry: RadioEntry) {
+        entry.sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
         self.entries.push_back(entry);
         while self.entries.len() > LOG_CAPACITY {
             self.entries.pop_front();
         }
+    }
+
+    fn replace_snapshot(&mut self, entries: impl IntoIterator<Item = RadioEntry>) {
+        self.entries = entries.into_iter().collect();
+        self.next_sequence = self
+            .entries
+            .back()
+            .map_or(0, |entry| entry.sequence.saturating_add(1));
     }
 }
 
@@ -130,17 +292,42 @@ impl PendingBroadcasts {
     }
 }
 
-/// Short department tag shown against each line.
-pub fn channel_for(role: &str) -> String {
-    match role {
-        "Medical" => "MED",
-        "Security" => "SEC",
-        "Engineering" => "ENG",
-        "Cargo" => "CGO",
-        "Service" => "SRV",
-        _ => "COM",
+/// Server-side quiet-period scheduler. `bag` addresses the combined ambient
+/// line/exchange pool and is exhausted before it is refilled, preventing the
+/// same gag from immediately repeating.
+#[derive(Resource)]
+struct AmbientRadio {
+    timer: Timer,
+    bag: Vec<usize>,
+    last_log_sequence: Option<u64>,
+    urgent_quiet_seconds: f32,
+}
+
+impl Default for AmbientRadio {
+    fn default() -> Self {
+        Self {
+            timer: Timer::from_seconds(90.0, TimerMode::Once),
+            bag: Vec::new(),
+            last_log_sequence: None,
+            urgent_quiet_seconds: 0.0,
+        }
     }
-    .to_string()
+}
+
+fn reset_ambient_radio(mut ambient: ResMut<AmbientRadio>) {
+    *ambient = AmbientRadio::default();
+}
+
+/// Short department tag shown against each line.
+pub fn channel_for(role: &str) -> RadioChannel {
+    match role {
+        "Medical" => RadioChannel::Medical,
+        "Security" => RadioChannel::Security,
+        "Engineering" => RadioChannel::Engineering,
+        "Cargo" => RadioChannel::Cargo,
+        "Service" => RadioChannel::Service,
+        _ => RadioChannel::Common,
+    }
 }
 
 fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
@@ -249,15 +436,89 @@ fn queue_reports(
         };
 
         let delay = rng.random_range(script.delay_seconds.0..=script.delay_seconds.1);
+        let tone = if report.outcome == Outcome::Success {
+            RadioTone::Positive
+        } else {
+            RadioTone::Negative
+        };
         pending.push_delayed(
             delay,
-            RadioEntry {
-                channel: channel_for(&report.role),
-                text,
-                good: report.outcome == Outcome::Success,
-            },
+            RadioEntry::new(channel_for(&report.role), text)
+                .speaker(&report.name)
+                .tone(tone),
         );
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tick_ambient_radio(
+    time: Res<Time>,
+    script: Option<Res<Script>>,
+    shift: Res<Shift>,
+    orders: Query<&Order>,
+    crises: Query<(), With<CrisisOrder>>,
+    hazards: Query<(), With<ActiveHazard>>,
+    showdown: Option<Res<Showdown>>,
+    mut ambient: ResMut<AmbientRadio>,
+    mut pending: ResMut<PendingBroadcasts>,
+    mut log: ResMut<RadioLog>,
+) {
+    let Some(script) = script else {
+        return;
+    };
+    let newest = log.entries.back();
+    if newest.map(|entry| entry.sequence) != ambient.last_log_sequence {
+        ambient.last_log_sequence = newest.map(|entry| entry.sequence);
+        if newest.is_some_and(|entry| entry.priority >= RadioPriority::Urgent) {
+            ambient.urgent_quiet_seconds = 20.0;
+        }
+    }
+    ambient.urgent_quiet_seconds = (ambient.urgent_quiet_seconds - time.delta_secs()).max(0.0);
+
+    let near_expiry = orders.iter().any(|order| order.remaining() < 30.0);
+    let suppressed = !shift.accepting_orders
+        || near_expiry
+        || !crises.is_empty()
+        || !hazards.is_empty()
+        || showdown.is_some()
+        || ambient.urgent_quiet_seconds > 0.0;
+    if suppressed || !ambient.timer.tick(time.delta()).just_finished() {
+        return;
+    }
+
+    let choices = script.ambient_lines.len() + script.exchanges.len();
+    if choices == 0 {
+        return;
+    }
+    let mut rng = rand::rng();
+    if ambient.bag.is_empty() {
+        ambient.bag.extend(0..choices);
+        ambient.bag.shuffle(&mut rng);
+    }
+    let choice = ambient.bag.pop().unwrap_or_default();
+    if let Some(line) = script.ambient_lines.get(choice) {
+        log.push(
+            RadioEntry::new(line.channel, line.text.clone())
+                .speaker(&line.speaker)
+                .ambient(),
+        );
+    } else if let Some(exchange) = script.exchanges.get(choice - script.ambient_lines.len()) {
+        let mut delay = 0.0;
+        for line in &exchange.lines {
+            let entry = RadioEntry::new(line.channel, line.text.clone())
+                .speaker(&line.speaker)
+                .ambient();
+            if delay == 0.0 {
+                log.push(entry);
+            } else {
+                pending.push_delayed(delay, entry);
+            }
+            delay += rng.random_range(1.5..=3.0);
+        }
+    }
+
+    let gap = script.ambient_gap_seconds.unwrap_or((75.0, 120.0));
+    ambient.timer = Timer::from_seconds(rng.random_range(gap.0..=gap.1), TimerMode::Once);
 }
 
 fn deliver_broadcasts(
@@ -275,7 +536,7 @@ fn deliver_broadcasts(
         }
     });
     for entry in due {
-        info!("[{}] {}", entry.channel, entry.text);
+        info!("[{}] {}", entry.channel.tag(), entry.text);
         log.push(entry);
     }
 }
@@ -296,18 +557,14 @@ fn broadcast_radio(log: Res<RadioLog>, mut outgoing: MessageWriter<ToClients<Rad
 
 fn apply_radio(mut log: ResMut<RadioLog>, mut incoming: MessageReader<RadioSync>) {
     for sync in incoming.read() {
-        log.entries = sync.0.iter().cloned().collect();
+        log.replace_snapshot(sync.0.iter().cloned());
     }
 }
 
 /// Puts an incoming request on the feed. Called when an order is created, so
 /// the radio carries both halves of the conversation.
 pub fn announce_request(log: &mut RadioLog, name: &str, role: &str, plea: &str) {
-    log.push(RadioEntry {
-        channel: channel_for(role),
-        text: format!("{name}: {plea}"),
-        good: false,
-    });
+    log.push(RadioEntry::new(channel_for(role), plea).speaker(name));
 }
 
 #[cfg(test)]
@@ -318,11 +575,10 @@ mod tests {
     fn the_log_keeps_only_the_most_recent_lines() {
         let mut log = RadioLog::default();
         for index in 0..LOG_CAPACITY + 4 {
-            log.push(RadioEntry {
-                channel: "MED".into(),
-                text: format!("line {index}"),
-                good: true,
-            });
+            log.push(
+                RadioEntry::new(RadioChannel::Medical, format!("line {index}"))
+                    .tone(RadioTone::Positive),
+            );
         }
         assert_eq!(log.entries.len(), LOG_CAPACITY);
         assert_eq!(log.entries.front().unwrap().text, "line 4");
@@ -330,6 +586,8 @@ mod tests {
             log.entries.back().unwrap().text,
             format!("line {}", LOG_CAPACITY + 3)
         );
+        assert_eq!(log.entries.front().unwrap().sequence, 4);
+        assert_eq!(log.entries.back().unwrap().sequence, 43);
     }
 
     #[test]
@@ -353,8 +611,8 @@ mod tests {
                 .filter(|line| line.outcome == outcome && line.role.is_none())
                 .count();
             assert!(
-                general > 0,
-                "{outcome:?} has no role-agnostic line, so an unmatched department would go silent"
+                general >= 2,
+                "{outcome:?} needs two role-agnostic fallbacks so an unmatched department stays varied"
             );
         }
     }
@@ -374,10 +632,92 @@ mod tests {
                 .filter(|line| line.outcome == outcome && line.role.is_none())
                 .count();
             assert!(
-                general > 0,
-                "{outcome:?} has no role-agnostic category line, so an unmatched \
-                 legitimate order would go silent"
+                general >= 2,
+                "{outcome:?} needs two role-agnostic category fallbacks"
             );
         }
+    }
+
+    #[test]
+    fn every_department_has_three_lines_for_every_report_path() {
+        let script: RadioScript =
+            ron::from_str(include_str!("../../assets/data/station.radio.ron")).unwrap();
+        for role in ["Medical", "Security", "Engineering", "Cargo", "Service"] {
+            for outcome in [
+                Outcome::Success,
+                Outcome::Short,
+                Outcome::Impure,
+                Outcome::Overdose,
+                Outcome::Wrong,
+                Outcome::Expired,
+            ] {
+                assert!(
+                    script
+                        .lines
+                        .iter()
+                        .filter(|line| {
+                            line.outcome == outcome && line.role.as_deref() == Some(role)
+                        })
+                        .count()
+                        >= 3,
+                    "{role} needs three {outcome:?} lines"
+                );
+            }
+            for outcome in [Outcome::Wrong, Outcome::Expired] {
+                assert!(
+                    script
+                        .category_lines
+                        .iter()
+                        .filter(|line| {
+                            line.outcome == outcome && line.role.as_deref() == Some(role)
+                        })
+                        .count()
+                        >= 3,
+                    "{role} needs three category {outcome:?} lines"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ambient_pool_has_the_promised_cast_and_exchange_depth() {
+        let script: RadioScript =
+            ron::from_str(include_str!("../../assets/data/station.radio.ron")).unwrap();
+        for channel in [
+            RadioChannel::Medical,
+            RadioChannel::Security,
+            RadioChannel::Engineering,
+            RadioChannel::Cargo,
+            RadioChannel::Service,
+        ] {
+            assert!(
+                script
+                    .ambient_lines
+                    .iter()
+                    .filter(|line| line.channel == channel)
+                    .count()
+                    >= 6,
+                "{} needs six standalone ambient lines",
+                channel.label()
+            );
+        }
+        assert!(
+            script
+                .ambient_lines
+                .iter()
+                .filter(|line| line.channel == RadioChannel::Bridge)
+                .count()
+                >= 12
+        );
+        assert!(script.exchanges.len() >= 10);
+        assert!(script
+            .exchanges
+            .iter()
+            .all(|exchange| exchange.lines.len() >= 2));
+        assert!(script
+            .ambient_lines
+            .iter()
+            .chain(script.exchanges.iter().flat_map(|exchange| &exchange.lines))
+            .all(|line| !line.speaker.trim().is_empty() && !line.text.trim().is_empty()));
     }
 }

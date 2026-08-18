@@ -36,6 +36,8 @@ Freesound page that had since been deleted) were excluded rather than guessed at
 | `ui_refused.ogg` | `sound/machines/buzz/buzz-sigh.ogg` | CC BY-SA 3.0 (tgstation project default) | tgstation contributors | https://github.com/tgstation/tgstation/blob/master/sound/machines/buzz/buzz-sigh.ogg |
 | `ambience/ambigen1.ogg` – `ambigen4.ogg`, `ambigen9.ogg`, `ambigen10.ogg`–`ambigen13.ogg`, `shipambience.ogg` | `sound/ambience/general/` (same filenames) | CC BY-SA 3.0 (tgstation project default — no attribution file in that folder) | tgstation contributors | https://github.com/tgstation/tgstation/tree/master/sound/ambience/general |
 
+The radio channel-ident palette reuses the credited one-shots above: Medical uses the scanner finish, Security the refused buzz, Engineering the buffer bubbles, Cargo the requisition coin, Service the package pop, Bridge the UI click, and station-wide priority traffic the major alarm. No additional uncredited audio asset is introduced by that palette.
+
 **Compliance notes:**
 - CC0 files need no credit and carry no restriction — this table lists them anyway for traceability.
 - CC BY-SA 3.0 files require attribution (this table serves as that) and, if redistributed as a standalone asset (not just baked into the compiled game), must remain under CC BY-SA 3.0 themselves. It does not affect ChemGame's own code license.

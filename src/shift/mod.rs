@@ -260,11 +260,14 @@ fn redraw_forecast(
         return;
     };
 
-    radio.push(RadioEntry {
-        channel: "COM".to_string(),
-        text: format!("Station briefing: {}", picked.briefing),
-        good: true,
-    });
+    radio.push(
+        RadioEntry::new(
+            crate::radio::RadioChannel::Bridge,
+            format!("Station briefing: {}", picked.briefing),
+        )
+        .speaker("Duty Officer")
+        .positive(),
+    );
     forecast.0 = Some(ForecastPick {
         id: picked.id.clone(),
         themes: picked.themes.clone(),
@@ -663,11 +666,13 @@ fn handle_requisition(
         }
         // Was hardcoded to "CGO" while every kind was Cargo/Engineering
         // flavoured; wrong the moment a Medical/Security/Service item exists.
-        radio.push(RadioEntry {
-            channel: channel_for(request.kind.department().label()),
-            text: format!("Requisition logged: {}.", request.kind.label()),
-            good: true,
-        });
+        radio.push(
+            RadioEntry::new(
+                channel_for(request.kind.department().label()),
+                format!("Requisition logged: {}.", request.kind.label()),
+            )
+            .positive(),
+        );
     }
 }
 
@@ -682,14 +687,19 @@ fn handle_toggle_accepting(
             continue;
         }
         shift.accepting_orders = !shift.accepting_orders;
-        radio.push(RadioEntry {
-            channel: "COM".to_string(),
-            text: if shift.accepting_orders {
+        let entry = RadioEntry::new(
+            crate::radio::RadioChannel::Bridge,
+            if shift.accepting_orders {
                 "Chemistry: back open.".to_string()
             } else {
                 "Chemistry: not accepting requests for a while.".to_string()
             },
-            good: shift.accepting_orders,
+        )
+        .speaker("Duty Officer");
+        radio.push(if shift.accepting_orders {
+            entry.positive()
+        } else {
+            entry
         });
     }
 }
@@ -842,11 +852,14 @@ fn handle_call_it_a_shift(
             continue;
         }
         shift.called = true;
-        radio.push(RadioEntry {
-            channel: "COM".to_string(),
-            text: format!("Chemistry: that's shift {} closed out.", shift.shift_number),
-            good: true,
-        });
+        radio.push(
+            RadioEntry::new(
+                crate::radio::RadioChannel::Bridge,
+                format!("Chemistry: that's shift {} closed out.", shift.shift_number),
+            )
+            .speaker("Duty Officer")
+            .positive(),
+        );
     }
 }
 
@@ -869,14 +882,17 @@ fn handle_open_up_again(
         shift.shift_number += 1;
         shift.called = false;
         shift.accepting_orders = true;
-        radio.push(RadioEntry {
-            channel: "COM".to_string(),
-            text: format!(
-                "Chemistry: shift {}, open for business.",
-                shift.shift_number
-            ),
-            good: true,
-        });
+        radio.push(
+            RadioEntry::new(
+                crate::radio::RadioChannel::Bridge,
+                format!(
+                    "Chemistry: shift {}, open for business.",
+                    shift.shift_number
+                ),
+            )
+            .speaker("Duty Officer")
+            .positive(),
+        );
     }
 }
 

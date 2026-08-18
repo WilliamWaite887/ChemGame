@@ -646,11 +646,13 @@ fn learn_from_experiments(
                 .iter()
                 .any(|reaction| !knowledge.is_known(*reaction))
             {
-                radio.push(RadioEntry {
-                    channel: "LAB".to_string(),
-                    text: "Too much going on in that beaker to tell what did what.".to_string(),
-                    good: false,
-                });
+                radio.push(
+                    RadioEntry::new(
+                        crate::radio::RadioChannel::Lab,
+                        "Too much going on in that beaker to tell what did what.",
+                    )
+                    .negative(),
+                );
             }
             continue;
         }
@@ -660,22 +662,24 @@ fn learn_from_experiments(
             };
             let name = product_name(&db, *reaction);
             info!("recipe discovered: {name} (+{payback} research)");
-            radio.push(RadioEntry {
-                channel: "LAB".to_string(),
-                // The points are said out loud. A payback the player never
-                // sees arrive is indistinguishable from no payback at all,
-                // and this is the reward for the part of the job the game is
-                // actually about.
-                text: if payback > 0 {
-                    format!(
-                        "Method for {name} written up in the reference book. \
+            radio.push(
+                RadioEntry::new(
+                    crate::radio::RadioChannel::Lab,
+                    // The points are said out loud. A payback the player never
+                    // sees arrive is indistinguishable from no payback at all,
+                    // and this is the reward for the part of the job the game is
+                    // actually about.
+                    if payback > 0 {
+                        format!(
+                            "Method for {name} written up in the reference book. \
                          Research credits it at {payback} points."
-                    )
-                } else {
-                    format!("Method for {name} written up in the reference book.")
-                },
-                good: true,
-            });
+                        )
+                    } else {
+                        format!("Method for {name} written up in the reference book.")
+                    },
+                )
+                .positive(),
+            );
             discovered.write(RecipeDiscovered { name });
         }
     }

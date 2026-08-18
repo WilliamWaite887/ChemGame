@@ -26,7 +26,7 @@ use crate::door::Door;
 use crate::machines::{AgitationRun, Machine, MachineKind, ReactionsFired, Thermostat};
 use crate::net::is_authority;
 use crate::orders::{CrisisOrder, Shift};
-use crate::radio::RadioLog;
+use crate::radio::{RadioChannel, RadioLog, RadioPriority, RadioTone};
 use crate::settings::Settings;
 use crate::AppState;
 
@@ -116,6 +116,14 @@ pub enum Sfx {
     DoorClosed,
     OrderSuccess,
     RadioBlip,
+    RadioMedical,
+    RadioSecurity,
+    RadioEngineering,
+    RadioCargo,
+    RadioService,
+    RadioBridge,
+    RadioUrgent,
+    BridgePriority,
     RequisitionConfirm,
     UiClick,
     UiRefused,
@@ -154,7 +162,15 @@ impl Sfx {
             | Sfx::Inject
             | Sfx::GlassClunk
             | Sfx::Cough => 0.55,
-            Sfx::AnalyzerFinish | Sfx::PackagePop => 0.65,
+            Sfx::AnalyzerFinish
+            | Sfx::PackagePop
+            | Sfx::RadioMedical
+            | Sfx::RadioSecurity
+            | Sfx::RadioEngineering
+            | Sfx::RadioCargo
+            | Sfx::RadioService
+            | Sfx::RadioBridge
+            | Sfx::RadioUrgent => 0.65,
             Sfx::Corrosion
             | Sfx::Ignite
             | Sfx::Flash
@@ -280,6 +296,14 @@ impl SfxAssets {
             Sfx::DoorClosed => &self.door_closed,
             Sfx::OrderSuccess => &self.order_success,
             Sfx::RadioBlip => &self.radio_blip,
+            Sfx::RadioMedical => &self.analyzer_finish,
+            Sfx::RadioSecurity => &self.ui_refused,
+            Sfx::RadioEngineering => &self.buffer_transfer,
+            Sfx::RadioCargo => &self.requisition_confirm,
+            Sfx::RadioService => &self.package_pop,
+            Sfx::RadioBridge => &self.ui_click,
+            Sfx::RadioUrgent => &self.ui_refused,
+            Sfx::BridgePriority => &self.major_alarm,
             Sfx::RequisitionConfirm => &self.requisition_confirm,
             Sfx::UiClick => &self.ui_click,
             Sfx::UiRefused => &self.ui_refused,
@@ -637,10 +661,13 @@ fn play_crisis_alarm_sfx(
 /// entering the lab yet", which is what tells that system to baseline
 /// silently instead of replaying old history as fresh blips.
 #[derive(Resource, Default)]
-struct RadioCursor(Option<usize>);
+struct RadioCursor {
+    baselined: bool,
+    sequence: Option<u64>,
+}
 
 fn reset_radio_cursor(mut cursor: ResMut<RadioCursor>) {
-    cursor.0 = None;
+    *cursor = RadioCursor::default();
 }
 
 /// `RadioLog` is correct on every peer already — a client only ever writes
@@ -660,21 +687,45 @@ fn play_radio_sfx(
     mut cursor: ResMut<RadioCursor>,
     mut play: MessageWriter<PlaySfx>,
 ) {
-    let len = log.entries.len();
-    let Some(last) = cursor.0 else {
-        cursor.0 = Some(len);
+    let newest = log.entries.back().map(|entry| entry.sequence);
+    if !cursor.baselined {
+        cursor.baselined = true;
+        cursor.sequence = newest;
         return;
-    };
-    if len > last {
-        for entry in log.entries.iter().skip(last).take(len - last) {
-            play.write(PlaySfx(if entry.good {
-                Sfx::OrderSuccess
-            } else {
-                Sfx::RadioBlip
-            }));
+    }
+    let last = cursor.sequence;
+    for entry in log
+        .entries
+        .iter()
+        .filter(|entry| last.is_none_or(|last| entry.sequence > last))
+    {
+        play.write(PlaySfx(radio_channel_sfx(entry.channel)));
+        if entry.tone == RadioTone::Positive {
+            play.write(PlaySfx(Sfx::OrderSuccess));
+        }
+        match entry.priority {
+            RadioPriority::StationWide => {
+                play.write(PlaySfx(Sfx::BridgePriority));
+            }
+            RadioPriority::Urgent => {
+                play.write(PlaySfx(Sfx::RadioUrgent));
+            }
+            RadioPriority::Ambient | RadioPriority::Routine => {}
         }
     }
-    cursor.0 = Some(len);
+    cursor.sequence = newest.or(last);
+}
+
+fn radio_channel_sfx(channel: RadioChannel) -> Sfx {
+    match channel {
+        RadioChannel::Bridge => Sfx::RadioBridge,
+        RadioChannel::Medical => Sfx::RadioMedical,
+        RadioChannel::Security => Sfx::RadioSecurity,
+        RadioChannel::Engineering => Sfx::RadioEngineering,
+        RadioChannel::Cargo => Sfx::RadioCargo,
+        RadioChannel::Service => Sfx::RadioService,
+        RadioChannel::Lab | RadioChannel::Common => Sfx::RadioBlip,
+    }
 }
 
 /// Door transitions become authority-confirmed positional cues; clients do
@@ -788,6 +839,32 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[derive(Resource, Default)]
+    struct HeardRadio(Vec<Sfx>);
+
+    fn collect_radio_sfx(mut messages: MessageReader<PlaySfx>, mut heard: ResMut<HeardRadio>) {
+        heard.0.extend(messages.read().map(|message| message.0));
+    }
+
+    #[test]
+    fn first_arrival_after_an_empty_baseline_plays_once() {
+        let mut app = App::new();
+        app.init_resource::<RadioLog>()
+            .init_resource::<RadioCursor>()
+            .init_resource::<HeardRadio>()
+            .add_message::<PlaySfx>()
+            .add_systems(Update, (play_radio_sfx, collect_radio_sfx).chain());
+        app.update();
+        app.world_mut()
+            .resource_mut::<RadioLog>()
+            .push(crate::radio::RadioEntry::new(
+                RadioChannel::Cargo,
+                "first arrival",
+            ));
+        app.update();
+        assert_eq!(app.world().resource::<HeardRadio>().0, [Sfx::RadioCargo]);
+    }
 
     const SS14_FILES: [&str; 31] = [
         "bottle_clunk.ogg",

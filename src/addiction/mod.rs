@@ -592,11 +592,13 @@ fn handle_withdrawal(
             .choose(&mut rng)
             .cloned()
             .unwrap_or_else(|| "{name} has not been fit to work all shift.".to_string());
-        radio.push(RadioEntry {
-            channel: crate::radio::channel_for(&role),
-            text: line.replace("{name}", &name),
-            good: false,
-        });
+        radio.push(
+            RadioEntry::new(
+                crate::radio::channel_for(&role),
+                line.replace("{name}", &name),
+            )
+            .negative(),
+        );
         info!("addiction: {name} is in withdrawal");
     }
 }

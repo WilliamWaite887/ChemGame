@@ -222,14 +222,17 @@ fn restore_incidents(
                 Replicated,
                 crate::until_we_leave_the_lab(),
             ));
-            radio.push(RadioEntry {
-                channel: "LAB".to_string(),
-                text: format!(
-                    "The {} is still waiting for someone to intervene.",
-                    incident.name
-                ),
-                good: false,
-            });
+            radio.push(
+                RadioEntry::new(
+                    crate::radio::RadioChannel::Lab,
+                    format!(
+                        "The {} is still waiting for someone to intervene.",
+                        incident.name
+                    ),
+                )
+                .negative()
+                .urgent(),
+            );
         }
     }
     restored.0 = true;
@@ -314,11 +317,11 @@ fn generate_cult_visit(
         )),
     ));
 
-    radio.push(RadioEntry {
-        channel: channel_for(&script.role),
-        text: format!("{}: {}", script.name, stage.pretext),
-        good: false,
-    });
+    radio.push(
+        RadioEntry::new(channel_for(&script.role), stage.pretext.clone())
+            .speaker(&script.name)
+            .negative(),
+    );
 
     info!("cult: {} stage {}", script.name, progress.0);
 }
@@ -349,11 +352,11 @@ fn handle_cult_resolution(
         }
         let stage_index = progress.0.min(script.stages.len().saturating_sub(1));
         if let Some(stage) = script.stages.get(stage_index) {
-            radio.push(RadioEntry {
-                channel: channel_for(&script.role),
-                text: stage.ritual_line.clone(),
-                good: false,
-            });
+            radio.push(
+                RadioEntry::new(channel_for(&script.role), stage.ritual_line.clone())
+                    .speaker(&script.name)
+                    .negative(),
+            );
             if let (Some(db), Some(spots)) = (db.as_deref(), spots.as_deref()) {
                 spawn_stage_consequences(
                     &mut commands,
@@ -424,11 +427,11 @@ fn spawn_stage_consequences(
             Replicated,
             crate::until_we_leave_the_lab(),
         ));
-        radio.push(RadioEntry {
-            channel: "LAB".to_string(),
-            text: incident.clue.clone(),
-            good: false,
-        });
+        radio.push(
+            RadioEntry::new(crate::radio::RadioChannel::Lab, incident.clue.clone())
+                .negative()
+                .urgent(),
+        );
     }
     // The payment is physical stock at the counter, not an invisible bonus.
     if let Some(reagent) = db.reagents.id_of(&stage.reward_reagent) {
@@ -482,11 +485,13 @@ fn handle_incident_delivery(
         };
         let landed = incident_units(&db, &container.solution, treatment);
         if landed < anchor.amount {
-            radio.push(RadioEntry {
-                channel: "LAB".to_string(),
-                text: format!("The {} rejects that mixture.", anchor.name),
-                good: false,
-            });
+            radio.push(
+                RadioEntry::new(
+                    crate::radio::RadioChannel::Lab,
+                    format!("The {} rejects that mixture.", anchor.name),
+                )
+                .negative(),
+            );
             continue;
         }
         if campaign.cult_incidents.len() <= anchor.index {
@@ -498,14 +503,17 @@ fn handle_incident_delivery(
         campaign.cult_incidents[anchor.index] = true;
         commands.entity(container_entity).despawn();
         commands.entity(request.target).despawn();
-        radio.push(RadioEntry {
-            channel: "LAB".to_string(),
-            text: format!(
-                "The {} gutters out. The ritual has lost some of its hold.",
-                anchor.name
-            ),
-            good: true,
-        });
+        radio.push(
+            RadioEntry::new(
+                crate::radio::RadioChannel::Lab,
+                format!(
+                    "The {} gutters out. The ritual has lost some of its hold.",
+                    anchor.name
+                ),
+            )
+            .positive()
+            .urgent(),
+        );
     }
 }
 

@@ -139,11 +139,9 @@ mod tests {
             .resource_mut::<Shift>()
             .adjust(Department::Medical, -6);
         world.insert_resource(RadioLog::default());
-        world.resource_mut::<RadioLog>().push(RadioEntry {
-            channel: "COM".to_string(),
-            text: "from the last career".to_string(),
-            good: true,
-        });
+        world.resource_mut::<RadioLog>().push(
+            RadioEntry::new(crate::radio::RadioChannel::Common, "from the last career").positive(),
+        );
         world.insert_resource(crate::antagonist::UnderworldStanding(9));
         world.insert_resource(crate::arc::ThwartedAntags(vec![AntagId::Cult]));
         world.insert_resource(Campaign::new(AntagId::Blob, Mode::Chemist, 3));

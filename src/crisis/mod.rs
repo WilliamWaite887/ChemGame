@@ -47,7 +47,7 @@ use crate::net::is_authority;
 use crate::orders::{
     deliverable_amount, CrisisOrder, Department, Order, OrderResolved, Shift, StationData,
 };
-use crate::radio::{RadioEntry, RadioLog};
+use crate::radio::{PendingBroadcasts, RadioEntry, RadioLog};
 use crate::AppState;
 
 /// How fast the alert lighting lerps toward red and back, per second. Fast
@@ -187,6 +187,7 @@ fn schedule_crisis(
     underworld: Res<UnderworldStanding>,
     shift: Res<Shift>,
     mut radio: ResMut<RadioLog>,
+    mut broadcasts: ResMut<PendingBroadcasts>,
     active: Query<(), With<CrisisOrder>>,
 ) {
     let (Some(station), Some(script)) = (station, script) else {
@@ -225,11 +226,25 @@ fn schedule_crisis(
         let Some(case) = script.cases.get(schedule.case) else {
             return;
         };
-        radio.push(RadioEntry {
-            channel: "MED".to_string(),
-            text: case.alarm_line.clone(),
-            good: false,
-        });
+        radio.push(
+            RadioEntry::new(
+                crate::radio::RadioChannel::Bridge,
+                format!(
+                    "Priority notice: {}. Medical response is in progress; Chemistry stand by.",
+                    case.name
+                ),
+            )
+            .speaker("Duty Officer")
+            .negative()
+            .station_wide(),
+        );
+        broadcasts.push_delayed(
+            rng.random_range(1.5..=3.0),
+            RadioEntry::new(crate::radio::RadioChannel::Medical, case.alarm_line.clone())
+                .speaker("Medbay Dispatch")
+                .negative()
+                .urgent(),
+        );
     }
 }
 
@@ -318,11 +333,15 @@ fn afflict_victim(
         Interactable::new(format!("{} — {}", crew_def.name, case.name)),
     ));
 
-    radio.push(RadioEntry {
-        channel: "MED".to_string(),
-        text: format!("{} is down in the chem lab waiting area.", crew_def.name),
-        good: false,
-    });
+    radio.push(
+        RadioEntry::new(
+            crate::radio::RadioChannel::Medical,
+            format!("{} is down in the chem lab waiting area.", crew_def.name),
+        )
+        .speaker("Nurse Okonkwo")
+        .negative()
+        .urgent(),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -364,11 +383,21 @@ fn handle_crisis_resolutions(
                 .find(|case| case.afflicted_role == report.role)
                 .map(|case| case.resolved_line.clone())
             {
-                radio.push(RadioEntry {
-                    channel: "MED".to_string(),
-                    text: line,
-                    good: true,
-                });
+                radio.push(
+                    RadioEntry::new(crate::radio::RadioChannel::Medical, line)
+                        .speaker("Dr. Vance")
+                        .positive()
+                        .urgent(),
+                );
+                radio.push(
+                    RadioEntry::new(
+                        crate::radio::RadioChannel::Bridge,
+                        "Medical emergency contained. Normal operations may resume, subject to the usual definition of normal.",
+                    )
+                    .speaker("Duty Officer")
+                    .positive()
+                    .station_wide(),
+                );
             }
         } else {
             // The ordinary department penalty already landed in
@@ -383,11 +412,21 @@ fn handle_crisis_resolutions(
                 .find(|case| case.afflicted_role == report.role)
                 .map(|case| case.unresolved_line.clone())
             {
-                radio.push(RadioEntry {
-                    channel: "MED".to_string(),
-                    text: line,
-                    good: false,
-                });
+                radio.push(
+                    RadioEntry::new(crate::radio::RadioChannel::Medical, line)
+                        .speaker("Dr. Vance")
+                        .negative()
+                        .urgent(),
+                );
+                radio.push(
+                    RadioEntry::new(
+                        crate::radio::RadioChannel::Bridge,
+                        "Medical emergency remains unresolved. Personnel are advised not to become the follow-up case.",
+                    )
+                    .speaker("Duty Officer")
+                    .negative()
+                    .station_wide(),
+                );
             }
         }
     }
@@ -511,6 +550,7 @@ mod tests {
             })
             .init_resource::<Time>()
             .init_resource::<RadioLog>()
+            .init_resource::<PendingBroadcasts>()
             .add_message::<OrderResolved>()
             .add_systems(Update, (schedule_crisis, handle_crisis_resolutions).chain());
         app
@@ -628,9 +668,12 @@ mod tests {
         );
         assert_eq!(
             app.world().resource::<RadioLog>().entries.len(),
-            1,
-            "the resolved line should air"
+            2,
+            "Medical's resolution and Bridge's all-clear should both air"
         );
+        let radio = &app.world().resource::<RadioLog>().entries;
+        assert_eq!(radio[0].channel, crate::radio::RadioChannel::Medical);
+        assert_eq!(radio[1].channel, crate::radio::RadioChannel::Bridge);
     }
 
     #[test]

@@ -292,11 +292,14 @@ fn schedule_rogue_encounter(
         Interactable::new(format!("{} — {}", script.officer_name, encounter.pretext)),
     ));
 
-    radio.push(RadioEntry {
-        channel: "SEC".to_string(),
-        text: encounter.pretext.clone(),
-        good: false,
-    });
+    radio.push(
+        RadioEntry::new(
+            crate::radio::RadioChannel::Security,
+            encounter.pretext.clone(),
+        )
+        .speaker(&script.officer_name)
+        .negative(),
+    );
 
     info!(
         "rogue security: {} demands {}u {}",
@@ -354,11 +357,14 @@ fn handle_rogue_delivery(
         shift.adjust(Department::Security, ROGUE_COMPLY_PENALTY);
         if let Some(script) = &script {
             if let Some(encounter) = encounter_for(script, &db, officer.reagent) {
-                radio.push(RadioEntry {
-                    channel: "SEC".to_string(),
-                    text: encounter.compliance_line.clone(),
-                    good: false,
-                });
+                radio.push(
+                    RadioEntry::new(
+                        crate::radio::RadioChannel::Security,
+                        encounter.compliance_line.clone(),
+                    )
+                    .speaker(&script.officer_name)
+                    .negative(),
+                );
             }
         }
 
@@ -415,11 +421,14 @@ fn expire_rogue_encounters(
 
         shift.adjust(Department::Security, ROGUE_REFUSE_PENALTY);
         if let Some(encounter) = encounter_for(&script, &db, officer.reagent) {
-            radio.push(RadioEntry {
-                channel: "SEC".to_string(),
-                text: encounter.refusal_line.clone(),
-                good: false,
-            });
+            radio.push(
+                RadioEntry::new(
+                    crate::radio::RadioChannel::Security,
+                    encounter.refusal_line.clone(),
+                )
+                .speaker(&script.officer_name)
+                .negative(),
+            );
         }
 
         if officer.physical
@@ -489,16 +498,22 @@ fn check_redemption(
         return;
     }
     redeemed.0 = true;
-    radio.push(RadioEntry {
-        channel: "SEC".to_string(),
-        text: script.redemption_line.clone(),
-        good: true,
-    });
-    radio.push(RadioEntry {
-        channel: "SEC".to_string(),
-        text: script.reward_line.clone(),
-        good: true,
-    });
+    radio.push(
+        RadioEntry::new(
+            crate::radio::RadioChannel::Security,
+            script.redemption_line.clone(),
+        )
+        .speaker(&script.officer_name)
+        .positive(),
+    );
+    radio.push(
+        RadioEntry::new(
+            crate::radio::RadioChannel::Security,
+            script.reward_line.clone(),
+        )
+        .speaker(&script.officer_name)
+        .positive(),
+    );
 
     commands.spawn((
         Deterrent {

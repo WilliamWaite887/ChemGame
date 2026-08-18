@@ -201,11 +201,11 @@ fn generate_saboteur_visit(
         )),
     ));
 
-    radio.push(RadioEntry {
-        channel: channel_for(&script.role),
-        text: format!("{}: {}", script.name, visit.plea),
-        good: false,
-    });
+    radio.push(
+        RadioEntry::new(channel_for(&script.role), visit.plea.clone())
+            .speaker(&script.name)
+            .negative(),
+    );
 }
 
 /// Glassware they can get at, exactly as `smuggler` defines it: anything held,
@@ -250,11 +250,13 @@ fn handle_saboteur_resolution(
         // it happens.
         if shift.requisition.saboteur_wards > 0 {
             shift.requisition.saboteur_wards -= 1;
-            radio.push(RadioEntry {
-                channel: channel_for(&script.role),
-                text: "Engineering signed off without touching the glassware.".to_string(),
-                good: true,
-            });
+            radio.push(
+                RadioEntry::new(
+                    channel_for(&script.role),
+                    "Engineering signed off without touching the glassware.",
+                )
+                .positive(),
+            );
             continue;
         }
 
@@ -281,11 +283,7 @@ fn handle_saboteur_resolution(
                     .choose(&mut rng)
                     .cloned()
                     .unwrap_or_else(|| "Something in the lab looks different.".to_string());
-                radio.push(RadioEntry {
-                    channel: channel_for(&script.role),
-                    text: line,
-                    good: false,
-                });
+                radio.push(RadioEntry::new(channel_for(&script.role), line).negative());
                 info!("saboteur: {} had a fiddle with the glassware", script.name);
             }
         }

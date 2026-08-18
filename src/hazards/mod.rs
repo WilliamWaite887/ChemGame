@@ -220,11 +220,11 @@ fn schedule_incidents(
             Replicated,
             crate::until_we_leave_the_lab(),
         ));
-        radio.push(RadioEntry {
-            channel: "LAB".to_string(),
-            text: def.onset.clone(),
-            good: false,
-        });
+        radio.push(
+            RadioEntry::new(crate::radio::RadioChannel::Lab, def.onset.clone())
+                .negative()
+                .urgent(),
+        );
         info!("hazard: {} for {}s", def.id, def.duration);
         return;
     }
@@ -238,11 +238,12 @@ fn schedule_incidents(
     let Some(def) = script.incidents.choose(&mut rng) else {
         return;
     };
-    radio.push(RadioEntry {
-        channel: "ENG".to_string(),
-        text: def.warning.clone(),
-        good: false,
-    });
+    radio.push(
+        RadioEntry::new(crate::radio::RadioChannel::Engineering, def.warning.clone())
+            .speaker("Tech Lindqvist")
+            .negative()
+            .urgent(),
+    );
     schedule.warning_in = Some(script.warning_seconds);
     schedule.pending = Some(def.clone());
 }
@@ -467,11 +468,14 @@ fn spawn_hazards(
                 Replicated,
                 crate::until_we_leave_the_lab(),
             ));
-            radio.push(RadioEntry {
-                channel: "LAB".to_string(),
-                text: "Something in the chem lab just started venting.".to_string(),
-                good: false,
-            });
+            radio.push(
+                RadioEntry::new(
+                    crate::radio::RadioChannel::Lab,
+                    "Something in the chem lab just started venting.",
+                )
+                .negative()
+                .urgent(),
+            );
             if let Some(sounds) = &mut sounds {
                 sounds.write(EmitWorldSfx::new(Sfx::HazardSmoke, origin));
             }
@@ -511,11 +515,14 @@ fn spawn_hazards(
                     },
                 });
             }
-            radio.push(RadioEntry {
-                channel: "LAB".to_string(),
-                text: "Was that a bang? Chemistry, report.".to_string(),
-                good: false,
-            });
+            radio.push(
+                RadioEntry::new(
+                    crate::radio::RadioChannel::Lab,
+                    "Was that a bang? Chemistry, report.",
+                )
+                .negative()
+                .urgent(),
+            );
         }
     }
 }

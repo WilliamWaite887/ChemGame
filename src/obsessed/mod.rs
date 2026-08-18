@@ -219,16 +219,16 @@ fn generate_obsessed_visit(
     ));
 
     let channel = channel_for(&script.role);
-    radio.push(RadioEntry {
-        channel: channel.clone(),
-        text: format!("{}: {}", script.name, visit.plea),
-        good: false,
-    });
-    radio.push(RadioEntry {
-        channel,
-        text: visit.unsettling_line.clone(),
-        good: false,
-    });
+    radio.push(
+        RadioEntry::new(channel, visit.plea.clone())
+            .speaker(&script.name)
+            .negative(),
+    );
+    radio.push(
+        RadioEntry::new(channel, visit.unsettling_line.clone())
+            .speaker(&script.name)
+            .negative(),
+    );
 
     if visit.leaves_token {
         let (_, height) = ContainerKind::Bottle.dimensions();

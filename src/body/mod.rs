@@ -750,13 +750,15 @@ fn handle_collapse(
             .entity(player)
             .insert(MedbayRetrieval(MEDBAY_SECONDS));
         shift.adjust(crate::orders::Department::Medical, COLLAPSE_PENALTY);
-        radio.push(crate::radio::RadioEntry {
-            channel: "MED".to_string(),
-            text: "Chemistry, we're reading a crew member down in your lab. \
-                   Someone is on the way."
-                .to_string(),
-            good: false,
-        });
+        radio.push(
+            crate::radio::RadioEntry::new(
+                crate::radio::RadioChannel::Medical,
+                "Chemistry, we're reading a crew member down in your lab. Someone is on the way.",
+            )
+            .speaker("Nurse Okonkwo")
+            .negative()
+            .urgent(),
+        );
     }
 }
 
@@ -811,11 +813,13 @@ fn run_medbay_retrieval(
         // Left by the door, which is where medical would have dragged them.
         transform.translation = crate::lab::MEDBAY_DROP.with_y(crate::player::EYE_HEIGHT);
         commands.entity(player).remove::<MedbayRetrieval>();
-        radio.push(crate::radio::RadioEntry {
-            channel: "MED".to_string(),
-            text: "Got them back on their feet. Try not to make a habit of it.".to_string(),
-            good: false,
-        });
+        radio.push(
+            crate::radio::RadioEntry::new(
+                crate::radio::RadioChannel::Medical,
+                "Got them back on their feet. Try not to make a habit of it.",
+            )
+            .speaker("Nurse Okonkwo"),
+        );
     }
 }
 

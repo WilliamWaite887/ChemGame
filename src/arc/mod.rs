@@ -362,6 +362,10 @@ pub struct AntagDef {
     /// Aired on reaching [`Reveal::Suspected`] — narrows it to a kind of
     /// threat without naming one.
     pub suspected_line: String,
+    /// The local department that noticed the clue, before Bridge is willing
+    /// to make an official station-wide declaration.
+    pub suspected_role: String,
+    pub suspected_speaker: String,
     /// Aired on reaching [`Reveal::Named`].
     pub named_line: String,
     /// Aired when the plot reaches [`PLOT_MAX`].
@@ -597,11 +601,7 @@ fn advance_plot(
     }
 
     for line in delivered_lines {
-        radio.push(RadioEntry {
-            channel: "COM".to_string(),
-            text: line,
-            good: true,
-        });
+        radio.push(RadioEntry::new(crate::radio::RadioChannel::Common, line).positive());
     }
 
     if delta != 0 {
@@ -841,11 +841,17 @@ fn update_reveal(
     // Immediate rather than `PendingBroadcasts::push_delayed`: ordinary
     // chatter is delayed to feel like news arriving, but this is the station
     // realising something, and it should land when it happens.
-    radio.push(RadioEntry {
-        channel: "COM".to_string(),
-        text: line,
-        good: false,
-    });
+    let entry = match next {
+        Reveal::Named => RadioEntry::new(crate::radio::RadioChannel::Bridge, line)
+            .speaker("Duty Officer")
+            .negative()
+            .station_wide(),
+        Reveal::Suspected => RadioEntry::new(crate::radio::channel_for(&def.suspected_role), line)
+            .speaker(&def.suspected_speaker)
+            .negative(),
+        Reveal::Hidden => unreachable!(),
+    };
+    radio.push(entry);
 }
 
 // ---------------------------------------------------------------------------
@@ -908,10 +914,13 @@ pub fn finish(
     } else {
         def.thwarted_line.clone()
     };
-    radio.push(RadioEntry {
-        channel: "COM".to_string(),
-        text,
-        good: won,
+    let entry = RadioEntry::new(crate::radio::RadioChannel::Bridge, text)
+        .speaker("Duty Officer")
+        .station_wide();
+    radio.push(if won {
+        entry.positive()
+    } else {
+        entry.negative()
     });
     info!(
         "campaign resolved: {outcome:?} ({})",
@@ -1579,6 +1588,8 @@ mod tests {
         for def in &script.antagonists {
             assert!(!def.display.trim().is_empty());
             assert!(!def.suspected_line.trim().is_empty());
+            assert!(crate::orders::Department::from_role(&def.suspected_role).is_some());
+            assert!(!def.suspected_speaker.trim().is_empty());
             assert!(!def.named_line.trim().is_empty());
             assert!(!def.victory_line.trim().is_empty());
             assert!(!def.thwarted_line.trim().is_empty());

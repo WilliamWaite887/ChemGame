@@ -351,11 +351,11 @@ fn generate_antagonist_orders(
     let priming_delay = rng.random_range(PRIMING_DELAY_SECONDS.0..=PRIMING_DELAY_SECONDS.1);
     broadcasts.push_delayed(
         priming_delay,
-        RadioEntry {
-            channel: "COM".to_string(),
-            text: request.incident_line.clone(),
-            good: false,
-        },
+        RadioEntry::new(
+            crate::radio::RadioChannel::Common,
+            request.incident_line.clone(),
+        )
+        .negative(),
     );
 
     info!(
@@ -434,22 +434,26 @@ fn handle_illicit_resolutions(
                     schedule.warning_in = Some(STING_WARNING_SECONDS);
                 }
             }
-            radio.push(RadioEntry {
-                channel: "SEC".to_string(),
-                text: "Something about that last delivery didn't sit right. Security's already moving.".to_string(),
-                good: false,
-            });
+            radio.push(
+                RadioEntry::new(
+                    crate::radio::RadioChannel::Security,
+                    "Something about that last delivery didn't sit right. Security's already moving.",
+                )
+                .speaker("Warden Bex")
+                .negative()
+                .urgent(),
+            );
             continue;
         }
 
         let delay = rng.random_range(CHAOS_DELAY_SECONDS.0..=CHAOS_DELAY_SECONDS.1);
         broadcasts.push_delayed(
             delay,
-            RadioEntry {
-                channel: "COM".to_string(),
-                text: request.chaos_line.clone(),
-                good: false,
-            },
+            RadioEntry::new(
+                crate::radio::RadioChannel::Common,
+                request.chaos_line.clone(),
+            )
+            .negative(),
         );
     }
 }

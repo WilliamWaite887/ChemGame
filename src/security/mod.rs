@@ -172,21 +172,27 @@ fn schedule_raid(
         if shift.requisition.raid_wards > 0 {
             shift.requisition.raid_wards -= 1;
             suspicion.0 = 0;
-            radio.push(RadioEntry {
-                channel: "SEC".to_string(),
-                text: "Security had questions about recent deliveries, then let it drop."
-                    .to_string(),
-                good: true,
-            });
+            radio.push(
+                RadioEntry::new(
+                    crate::radio::RadioChannel::Security,
+                    "Security had questions about recent deliveries, then let it drop.",
+                )
+                .speaker("Warden Bex")
+                .positive(),
+            );
             return;
         }
 
         schedule.warning_in = Some(script.warning_seconds);
-        radio.push(RadioEntry {
-            channel: "SEC".to_string(),
-            text: script.warning_line.clone(),
-            good: false,
-        });
+        radio.push(
+            RadioEntry::new(
+                crate::radio::RadioChannel::Security,
+                script.warning_line.clone(),
+            )
+            .speaker("Warden Bex")
+            .negative()
+            .urgent(),
+        );
         // The warning is the resolution of "how much suspicion has built" —
         // resetting here rather than after the sweep means a second illicit
         // delivery during the warning window starts building fresh rather
@@ -240,18 +246,24 @@ fn run_sweep(
 
         if found {
             shift.adjust(Department::Security, RAID_PENALTY);
-            radio.push(RadioEntry {
-                channel: "SEC".to_string(),
-                text: script.confiscation_line.clone(),
-                good: false,
-            });
+            radio.push(
+                RadioEntry::new(
+                    crate::radio::RadioChannel::Security,
+                    script.confiscation_line.clone(),
+                )
+                .speaker("Officer Reyes")
+                .negative(),
+            );
             info!("security raid: contraband confiscated, {RAID_PENALTY} standing");
         } else {
-            radio.push(RadioEntry {
-                channel: "SEC".to_string(),
-                text: script.clean_line.clone(),
-                good: true,
-            });
+            radio.push(
+                RadioEntry::new(
+                    crate::radio::RadioChannel::Security,
+                    script.clean_line.clone(),
+                )
+                .speaker("Officer Reyes")
+                .positive(),
+            );
             info!("security raid: clean");
         }
 

@@ -202,11 +202,11 @@ fn generate_quack_visit(
         )),
     ));
 
-    radio.push(RadioEntry {
-        channel: channel_for(&script.role),
-        text: format!("{}: {}", script.name, visit.plea),
-        good: false,
-    });
+    radio.push(
+        RadioEntry::new(channel_for(&script.role), visit.plea.clone())
+            .speaker(&script.name)
+            .negative(),
+    );
 }
 
 /// Advances the chain — and, on an expired visit, treats someone anyway.
@@ -253,11 +253,13 @@ fn handle_quack_resolution(
         // told this one went unanswered.
         if shift.requisition.quack_wards > 0 {
             shift.requisition.quack_wards -= 1;
-            radio.push(RadioEntry {
-                channel: channel_for(&script.role),
-                text: format!("{}'s last patient turned out fine after all.", script.name),
-                good: true,
-            });
+            radio.push(
+                RadioEntry::new(
+                    channel_for(&script.role),
+                    format!("{}'s last patient turned out fine after all.", script.name),
+                )
+                .positive(),
+            );
             continue;
         }
 
@@ -302,11 +304,7 @@ fn handle_quack_resolution(
             .choose(&mut rng)
             .cloned()
             .unwrap_or_else(|| "{name} was treated by someone who should not have.".to_string());
-        radio.push(RadioEntry {
-            channel: channel_for(&role),
-            text: line.replace("{name}", &name),
-            good: false,
-        });
+        radio.push(RadioEntry::new(channel_for(&role), line.replace("{name}", &name)).negative());
         info!("quack: {} treated {name} without asking", script.name);
 
         if let (Some(arc_script), Some(campaign)) = (arc_script.as_deref(), campaign.as_mut()) {

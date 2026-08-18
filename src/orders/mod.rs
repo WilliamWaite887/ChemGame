@@ -1932,14 +1932,14 @@ fn leave_sample_vials(
         });
 
         let name = db.reagents.get(product).name.clone();
-        radio.push(RadioEntry {
-            channel: channel_for(&report.role),
-            text: format!(
-                "{}: left you a sample of {} on the counter. Might be useful.",
-                report.name, name
-            ),
-            good: true,
-        });
+        radio.push(
+            RadioEntry::new(
+                channel_for(&report.role),
+                format!("Left you a sample of {name} on the counter. Might be useful."),
+            )
+            .speaker(&report.name)
+            .positive(),
+        );
         info!("{} left a sample of {}", report.name, name);
     }
 }

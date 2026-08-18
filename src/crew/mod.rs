@@ -386,14 +386,18 @@ fn handle_crew_collapse(
         }
         route.leave();
         shift.adjust(Department::Medical, COLLAPSE_PENALTY);
-        radio.push(RadioEntry {
-            channel: "MED".to_string(),
-            text: format!(
-                "{} just went down in the chem lab. Get them out of there.",
-                member.name
-            ),
-            good: false,
-        });
+        radio.push(
+            RadioEntry::new(
+                crate::radio::RadioChannel::Medical,
+                format!(
+                    "{} just went down in the chem lab. Get them out of there.",
+                    member.name
+                ),
+            )
+            .speaker("Nurse Okonkwo")
+            .negative()
+            .urgent(),
+        );
     }
 }
 
@@ -701,14 +705,17 @@ fn handle_medical_evacuation(
         }
 
         evacuated.insert(request.target);
-        radio.push(RadioEntry {
-            channel: "MED".to_string(),
-            text: format!(
-                "{} was evacuated from Chemistry to Medical by lab staff.",
-                member.name
-            ),
-            good: true,
-        });
+        radio.push(
+            RadioEntry::new(
+                crate::radio::RadioChannel::Medical,
+                format!(
+                    "{} was evacuated from Chemistry to Medical by lab staff.",
+                    member.name
+                ),
+            )
+            .speaker("Nurse Okonkwo")
+            .positive(),
+        );
         commands.entity(request.target).despawn();
     }
 }
@@ -1211,7 +1218,7 @@ mod tests {
             "a nearby valid chemist should complete the evacuation",
         );
         let report = app.world().resource::<RadioLog>().entries.back().unwrap();
-        assert_eq!(report.channel, "MED");
+        assert_eq!(report.channel, crate::radio::RadioChannel::Medical);
         assert!(report.text.contains("Down Patient was evacuated"));
     }
 

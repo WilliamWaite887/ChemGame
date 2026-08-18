@@ -195,11 +195,11 @@ fn generate_smuggler_visit(
         )),
     ));
 
-    radio.push(RadioEntry {
-        channel: channel_for(&script.role),
-        text: format!("{}: {}", script.name, visit.plea),
-        good: false,
-    });
+    radio.push(
+        RadioEntry::new(channel_for(&script.role), visit.plea.clone())
+            .speaker(&script.name)
+            .negative(),
+    );
 }
 
 /// Containers nobody is holding and nothing is holding.
@@ -255,11 +255,13 @@ fn handle_smuggler_resolution(
         // A `ChainOfCustody` requisition absorbs one theft before it happens.
         if shift.requisition.smuggler_wards > 0 {
             shift.requisition.smuggler_wards -= 1;
-            radio.push(RadioEntry {
-                channel: channel_for(&script.role),
-                text: "Cargo's paperwork actually matched, for once.".to_string(),
-                good: true,
-            });
+            radio.push(
+                RadioEntry::new(
+                    channel_for(&script.role),
+                    "Cargo's paperwork actually matched, for once.",
+                )
+                .positive(),
+            );
             continue;
         }
 
@@ -271,11 +273,7 @@ fn handle_smuggler_resolution(
                 .choose(&mut rng)
                 .cloned()
                 .unwrap_or_else(|| "Something has gone missing off the counter.".to_string());
-            radio.push(RadioEntry {
-                channel: channel_for(&script.role),
-                text: line,
-                good: false,
-            });
+            radio.push(RadioEntry::new(channel_for(&script.role), line).negative());
             info!("smuggler: {} lifted a container", script.name);
         }
 

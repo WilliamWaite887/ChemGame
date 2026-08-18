@@ -217,15 +217,17 @@ fn unload_glassware(
             );
         }
 
-        radio.push(RadioEntry {
-            channel: channel_for(&member.role),
-            text: format!(
-                "{}: dropped {} off at the window. Try to hang on to them this time.",
-                member.name,
-                describe(delivery)
-            ),
-            good: true,
-        });
+        radio.push(
+            RadioEntry::new(
+                channel_for(&member.role),
+                format!(
+                    "Dropped {} off at the window. Try to hang on to them this time.",
+                    describe(delivery)
+                ),
+            )
+            .speaker(&member.name)
+            .positive(),
+        );
         info!("{} delivered {}", member.name, describe(delivery));
 
         commands.entity(entity).remove::<GlasswareDelivery>();

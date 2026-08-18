@@ -212,11 +212,15 @@ fn arm_showdown(
     });
     // Immediate, not delayed: this is the one moment in the game where the
     // player needs to know *now*.
-    radio.push(RadioEntry {
-        channel: "LAB".to_string(),
-        text: def.showdown_line.clone(),
-        good: false,
-    });
+    radio.push(
+        RadioEntry::new(
+            crate::radio::RadioChannel::Bridge,
+            def.showdown_line.clone(),
+        )
+        .speaker("Duty Officer")
+        .negative()
+        .station_wide(),
+    );
     info!("showdown armed: {:?}", campaign.antag);
 }
 
@@ -349,26 +353,29 @@ fn handle_breach_delivery(
 
         let landed = cure_units(&db, &container.solution, cure);
         if !landed.is_positive() {
-            radio.push(RadioEntry {
-                channel: "LAB".to_string(),
-                text: "That did nothing to it.".to_string(),
-                good: false,
-            });
+            radio.push(
+                RadioEntry::new(crate::radio::RadioChannel::Lab, "That did nothing to it.")
+                    .negative()
+                    .urgent(),
+            );
             continue;
         }
 
         showdown.treated += landed;
         // The glassware goes with it, same as a delivery to a crew member.
         commands.entity(container_entity).despawn();
-        radio.push(RadioEntry {
-            channel: "LAB".to_string(),
-            text: if showdown.treated >= showdown.needed {
-                "It's stopped moving.".to_string()
-            } else {
-                "It recoiled from that. Keep going.".to_string()
-            },
-            good: true,
-        });
+        radio.push(
+            RadioEntry::new(
+                crate::radio::RadioChannel::Lab,
+                if showdown.treated >= showdown.needed {
+                    "It's stopped moving.".to_string()
+                } else {
+                    "It recoiled from that. Keep going.".to_string()
+                },
+            )
+            .positive()
+            .urgent(),
+        );
     }
 }
 

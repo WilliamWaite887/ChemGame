@@ -857,18 +857,21 @@ fn respond_to_unwanted_exposure(
                 ExposureSource::Smoke => "exposed to chemical smoke",
                 ExposureSource::Puddle => "exposed through a chemical spill",
             };
-            radio.push(RadioEntry {
-                channel: "SEC".to_string(),
-                text: format!(
-                    "{} reports being {} with {} in the lab{}.{}",
-                    victim.name,
-                    action,
-                    composition,
-                    if witnessed { " with witnesses" } else { "" },
-                    attribution
-                ),
-                good: false,
-            });
+            radio.push(
+                RadioEntry::new(
+                    crate::radio::RadioChannel::Security,
+                    format!(
+                        "{} reports being {} with {} in the lab{}.{}",
+                        victim.name,
+                        action,
+                        composition,
+                        if witnessed { " with witnesses" } else { "" },
+                        attribution
+                    ),
+                )
+                .speaker("Officer Reyes")
+                .negative(),
+            );
         }
     }
 }

@@ -7,7 +7,7 @@
 //! patching individual nodes. At this size that is far simpler to keep correct,
 //! and it only happens on user action.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -35,7 +35,7 @@ use crate::machines::{
 use crate::orders::{reference_category, Department, DevelopmentOrder, Order, Shift};
 use crate::player::LocalPlayer;
 use crate::produce::{ProduceCatalog, ProduceId};
-use crate::radio::RadioLog;
+use crate::radio::{RadioChannel, RadioEntry, RadioLog, RadioPriority, RadioTone};
 use crate::shift::{
     can_afford, can_call_it, shift_report, CallItAShift, OpenUpAgain, RequisitionKind,
     RequisitionRequested, ShiftReport, ToggleAcceptingOrders,
@@ -49,8 +49,7 @@ use crate::AppState;
 /// the order that is about to expire, which is the one the player most needs.
 /// `the_order_queue_has_a_slot_for_every_concurrent_order` holds the two together.
 pub(crate) const ORDER_SLOTS: usize = 5;
-/// Radio lines on screen. Matches the log's own capacity.
-const RADIO_SLOTS: usize = 6;
+const RADIO_PENDING_CAPACITY: usize = 6;
 
 // Shared with the main menu, so the first screen the player sees and every
 // panel afterwards are visibly the same game.
@@ -79,7 +78,7 @@ impl Plugin for UiPlugin {
             OnEnter(AppState::Playing),
             (
                 spawn_order_queue,
-                spawn_radio_feed,
+                reset_radio_dispatch,
                 spawn_vitals_panel,
                 spawn_room_label,
             ),
@@ -91,6 +90,7 @@ impl Plugin for UiPlugin {
                 drag_thermostat_slider,
                 button_feedback,
                 sync_panel,
+                finish_radio_auto_scroll,
                 // After the rebuild, so a track drawn this frame has its fill
                 // patched in this frame rather than sitting one frame stale —
                 // the same ordering `settings::sync_sliders` uses and for the
@@ -100,7 +100,8 @@ impl Plugin for UiPlugin {
                 update_order_queue,
                 update_vitals_panel,
                 update_room_label,
-                update_radio_feed,
+                update_radio_dispatch,
+                animate_radio_dispatch,
                 scroll_active_pane,
                 announce_discoveries,
                 announce_accepting_toggle,
@@ -115,6 +116,7 @@ impl Plugin for UiPlugin {
         .init_resource::<LastPanel>()
         .init_resource::<LastSignState>()
         .init_resource::<ThermostatDrag>()
+        .init_resource::<RadioDispatchQueue>()
         .add_message::<ShowToast>();
     }
 }
@@ -259,6 +261,9 @@ struct PanelSignature {
     /// `book_category`: switching tab changes what the panel shows, so it
     /// rebuilds the panel.
     board_tab: BoardTab,
+    /// Latest delivered transmission. Unlike the old snapshot-only radio tab,
+    /// this makes an open board update as traffic arrives.
+    radio_sequence: Option<u64>,
     /// Which of the board's three stages is drawn: open, wrapping up, or
     /// debriefing. Carries the whole report rather than just the flag, because
     /// the numbers on a debrief keep moving — the other chemist can still be
@@ -320,6 +325,7 @@ impl Default for PanelSignature {
             // Same reasoning again: the vector above is what guarantees a
             // difference on the first comparison, so this only needs a value.
             board_tab: BoardTab::Standing,
+            radio_sequence: None,
             board: BoardStage::Open,
             research_points: u32::MAX,
             arc: None,
@@ -462,12 +468,34 @@ struct BoardView<'w, 's> {
     /// Which of the board's two tabs is open — same reason `radio` is here
     /// rather than a bare `sync_panel` parameter.
     tab: Res<'w, BoardTab>,
+    radio_scroll:
+        Query<'w, 's, (&'static ScrollPosition, &'static ComputedNode), With<RadioHistoryPane>>,
 }
 
 impl BoardView<'_, '_> {
     fn stage(&self, knowledge: &Knowledge) -> BoardStage {
         board_stage(&self.shift, knowledge, self.waiting.iter().count())
     }
+
+    fn radio_scroll_state(&self) -> RadioScrollState {
+        let Some((position, computed)) = self.radio_scroll.iter().next() else {
+            return RadioScrollState {
+                offset: 0.0,
+                at_bottom: true,
+            };
+        };
+        let limit = (computed.content_size().y - computed.size().y).max(0.0);
+        RadioScrollState {
+            offset: position.y,
+            at_bottom: position.y >= limit - 4.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RadioScrollState {
+    offset: f32,
+    at_bottom: bool,
 }
 
 /// Which stage the board is at right now.
@@ -643,6 +671,7 @@ fn sync_panel(
             .collect(),
         accepting_orders: shift.accepting_orders,
         board_tab: *board.tab,
+        radio_sequence: board.radio.entries.back().map(|entry| entry.sequence),
         board: stage.clone(),
         research_points: knowledge.research_points,
         arc: arc.clone(),
@@ -736,6 +765,7 @@ fn sync_panel(
                             delivery_window_body(panel, &db, loaded, reacting);
                         }
                         MachineKind::StandingBoard => {
+                            let radio_scroll = board.radio_scroll_state();
                             standing_board_body(
                                 panel,
                                 shift,
@@ -743,6 +773,7 @@ fn sync_panel(
                                 arc.as_ref(),
                                 &board.radio,
                                 *board.tab,
+                                radio_scroll,
                             );
                         }
                         MachineKind::ReactionChamber => {
@@ -773,6 +804,7 @@ fn standing_board_body(
     arc: Option<&ArcHeadline>,
     radio: &RadioLog,
     tab: BoardTab,
+    radio_scroll: RadioScrollState,
 ) {
     // The campaign notice goes above everything else, on both tabs, because
     // once there is one it is the most important thing on the board — and
@@ -830,21 +862,24 @@ fn standing_board_body(
             // The log is the whole tab — nothing else is pinned above it but
             // the tab row itself, so it gets the same generous height the
             // book's own top-level list does.
-            panel
-                .spawn((
-                    Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: px(6),
-                        max_height: vh(66),
-                        overflow: Overflow::scroll_y(),
-                        ..default()
-                    },
-                    ScrollPosition::default(),
-                    ScrollPane,
-                ))
-                .with_children(|scroll| {
-                    draw_radio_history(scroll, radio);
-                });
+            let mut pane = panel.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(6),
+                    max_height: vh(66),
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                },
+                ScrollPosition(Vec2::new(0.0, radio_scroll.offset)),
+                ScrollPane,
+                RadioHistoryPane,
+            ));
+            if radio_scroll.at_bottom {
+                pane.insert(ScrollToRadioBottom);
+            }
+            pane.with_children(|scroll| {
+                draw_radio_history(scroll, radio);
+            });
         }
     }
 }
@@ -861,6 +896,27 @@ fn standing_board_body(
 /// the lab. `PanelSignature.department_standing` already forces a rebuild on
 /// essentially every delivery anyway, so this is current whenever the board
 /// legitimately redraws for any other reason.
+#[derive(Component)]
+struct RadioHistoryPane;
+
+#[derive(Component)]
+struct ScrollToRadioBottom;
+
+fn finish_radio_auto_scroll(
+    mut commands: Commands,
+    mut panes: Query<(Entity, &mut ScrollPosition, &ComputedNode), With<ScrollToRadioBottom>>,
+) {
+    for (entity, mut position, computed) in &mut panes {
+        let limit = (computed.content_size().y - computed.size().y).max(0.0);
+        position.y = limit;
+        // A zero limit may simply mean layout has not run for this new pane
+        // yet. Leave the marker for one more frame in that case.
+        if limit > 0.0 || computed.size().y > 0.0 {
+            commands.entity(entity).remove::<ScrollToRadioBottom>();
+        }
+    }
+}
+
 fn draw_radio_history(panel: &mut ChildSpawnerCommands, radio: &RadioLog) {
     panel.spawn(label("Radio log", 15.0, TEXT));
     if radio.entries.is_empty() {
@@ -868,11 +924,44 @@ fn draw_radio_history(panel: &mut ChildSpawnerCommands, radio: &RadioLog) {
         return;
     }
     for entry in &radio.entries {
-        panel.spawn(label(
-            format!("[{}] {}", entry.channel, entry.text),
-            13.0,
-            if entry.good { TEXT } else { TEXT_DIM },
-        ));
+        let accent = radio_channel_color(entry.channel);
+        let message = match entry.tone {
+            RadioTone::Positive => Color::srgb(0.70, 0.90, 0.72),
+            RadioTone::Negative => Color::srgb(0.92, 0.76, 0.72),
+            RadioTone::Neutral => TEXT,
+        };
+        let marker = match entry.priority {
+            RadioPriority::StationWide => "  ·  STATION-WIDE",
+            RadioPriority::Urgent => "  ·  URGENT",
+            _ => "",
+        };
+        let speaker = entry.speaker.as_deref().unwrap_or("Open carrier");
+        panel
+            .spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::axes(px(10), px(7)),
+                    row_gap: px(3),
+                    border: UiRect::left(px(3)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.09, 0.10, 0.12, 0.86)),
+                BorderColor::all(accent),
+            ))
+            .with_children(|row| {
+                row.spawn(label(
+                    format!(
+                        "{}  ·  {}  ·  {}{}",
+                        entry.channel.tag(),
+                        entry.channel.label(),
+                        speaker,
+                        marker
+                    ),
+                    12.0,
+                    accent,
+                ));
+                row.spawn(label(entry.text.clone(), 13.0, message));
+            });
     }
 }
 
@@ -3420,80 +3509,281 @@ fn update_room_label(
     }
 }
 
-#[derive(Component)]
-struct RadioSlot(usize);
-
-fn spawn_radio_feed(mut commands: Commands) {
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: px(16),
-                left: px(16),
-                width: px(520),
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(12)),
-                row_gap: px(4),
-                border_radius: BorderRadius::all(px(6)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.05, 0.06, 0.08, 0.78)),
-            crate::until_we_leave_the_lab(),
-        ))
-        .with_children(|feed| {
-            feed.spawn(label("STATION RADIO", 12.0, TEXT_DIM));
-            for index in 0..RADIO_SLOTS {
-                feed.spawn((
-                    Text::new(""),
-                    TextFont::from_font_size(13.0),
-                    TextColor(TEXT_DIM),
-                    RadioSlot(index),
-                ));
-            }
-        });
-}
-
 /// Slot 0 shows the oldest of the `slots` most recent lines.
 ///
 /// The HUD only ever shows a fixed-size trailing window onto a log that can
 /// now hold far more than that window — `log.entries.get(slot.0)` alone
 /// only read as "the most recent lines" back when the log's own capacity
 /// happened to equal the window size.
-fn radio_window_start(total: usize, slots: usize) -> usize {
-    total.saturating_sub(slots)
+#[derive(Clone)]
+struct DispatchItem {
+    entry: RadioEntry,
+    remaining: f32,
 }
 
-fn update_radio_feed(
+impl DispatchItem {
+    fn new(entry: RadioEntry) -> Self {
+        Self {
+            remaining: dispatch_seconds(entry.priority),
+            entry,
+        }
+    }
+}
+
+#[derive(Resource, Default)]
+struct RadioDispatchQueue {
+    baselined: bool,
+    cursor: Option<u64>,
+    pending: VecDeque<DispatchItem>,
+    current: Option<DispatchItem>,
+}
+
+impl RadioDispatchQueue {
+    fn ingest(&mut self, log: &RadioLog) {
+        if !self.baselined {
+            self.baselined = true;
+            self.cursor = log.entries.back().map(|entry| entry.sequence);
+            return;
+        }
+        let cursor = self.cursor;
+        let arrivals: Vec<RadioEntry> = log
+            .entries
+            .iter()
+            .filter(|entry| cursor.is_none_or(|cursor| entry.sequence > cursor))
+            .cloned()
+            .collect();
+        for entry in arrivals {
+            self.cursor = Some(entry.sequence);
+            self.enqueue(entry);
+        }
+    }
+
+    fn enqueue(&mut self, entry: RadioEntry) {
+        let incoming = DispatchItem::new(entry);
+        let preempts = incoming.entry.priority >= RadioPriority::Urgent
+            && self
+                .current
+                .as_ref()
+                .is_some_and(|current| incoming.entry.priority > current.entry.priority);
+        if preempts {
+            if let Some(interrupted) = self.current.take() {
+                self.pending.push_front(interrupted);
+            }
+            self.current = Some(incoming);
+        } else {
+            self.pending.push_back(incoming);
+        }
+        self.trim_pending();
+    }
+
+    fn trim_pending(&mut self) {
+        while self.pending.len() > RADIO_PENDING_CAPACITY {
+            let discard = self
+                .pending
+                .iter()
+                .position(|item| item.entry.priority == RadioPriority::Ambient)
+                .or_else(|| {
+                    self.pending
+                        .iter()
+                        .position(|item| item.entry.priority == RadioPriority::Routine)
+                })
+                .unwrap_or(0);
+            self.pending.remove(discard);
+        }
+    }
+
+    fn start_next(&mut self) {
+        if self.current.is_some() || self.pending.is_empty() {
+            return;
+        }
+        let highest = self
+            .pending
+            .iter()
+            .map(|item| item.entry.priority)
+            .max()
+            .unwrap_or_default();
+        let index = self
+            .pending
+            .iter()
+            .position(|item| item.entry.priority == highest)
+            .unwrap_or(0);
+        self.current = self.pending.remove(index);
+    }
+}
+
+fn dispatch_seconds(priority: RadioPriority) -> f32 {
+    match priority {
+        RadioPriority::Ambient => 5.0,
+        RadioPriority::Routine => 7.0,
+        RadioPriority::Urgent => 9.0,
+        RadioPriority::StationWide => 10.0,
+    }
+}
+
+#[derive(Component)]
+struct RadioDispatchCard(u64);
+
+#[derive(Component)]
+struct RadioCardBackground(Color);
+
+#[derive(Component)]
+struct RadioCardText(Color);
+
+fn reset_radio_dispatch(mut queue: ResMut<RadioDispatchQueue>) {
+    *queue = RadioDispatchQueue::default();
+}
+
+fn update_radio_dispatch(
+    mut commands: Commands,
+    time: Res<Time>,
     log: Res<RadioLog>,
-    mut slots: Query<(&RadioSlot, &mut Text, &mut TextColor)>,
+    mut queue: ResMut<RadioDispatchQueue>,
+    cards: Query<(Entity, &RadioDispatchCard)>,
 ) {
-    if !log.is_changed() {
+    queue.ingest(&log);
+
+    if let Some(current) = queue.current.as_mut() {
+        current.remaining -= time.delta_secs();
+        if current.remaining <= 0.0 {
+            queue.current = None;
+        }
+    }
+    queue.start_next();
+
+    let wanted = queue.current.as_ref().map(|item| item.entry.sequence);
+    let visible = cards.iter().next().map(|(_, card)| card.0);
+    if visible == wanted {
         return;
     }
-    let start = radio_window_start(log.entries.len(), RADIO_SLOTS);
-    for (slot, mut text, mut color) in &mut slots {
-        let index = start + slot.0;
-        let entry = log.entries.get(index);
-        let line = entry
-            .map(|entry| format!("[{}] {}", entry.channel, entry.text))
-            .unwrap_or_default();
+    for (entity, _) in &cards {
+        commands.entity(entity).despawn();
+    }
+    if let Some(current) = queue.current.as_ref() {
+        spawn_radio_dispatch_card(&mut commands, &current.entry);
+    }
+}
 
-        // Older lines fade, so the newest report is the one that catches the
-        // eye without needing an alert.
-        let age = log.entries.len().saturating_sub(1).saturating_sub(index);
-        let fade = 1.0 - (age as f32 * 0.13).min(0.55);
-        let base = match entry {
-            Some(entry) if entry.good => Color::srgb(0.62, 0.86, 0.62),
-            Some(_) => Color::srgb(0.86, 0.88, 0.92),
-            None => TEXT_DIM,
-        };
-        let wanted = base.with_alpha(fade);
-        if color.0 != wanted {
-            color.0 = wanted;
-        }
-        if text.0 != line {
-            text.0 = line;
-        }
+fn spawn_radio_dispatch_card(commands: &mut Commands, entry: &RadioEntry) {
+    let elevated = entry.priority >= RadioPriority::Urgent;
+    let channel = radio_channel_color(entry.channel);
+    let body = match entry.tone {
+        RadioTone::Positive => Color::srgb(0.70, 0.93, 0.72),
+        RadioTone::Negative => Color::srgb(0.96, 0.78, 0.70),
+        RadioTone::Neutral => TEXT,
+    };
+    let heading = if entry.priority == RadioPriority::StationWide {
+        "BRIDGE PRIORITY".to_string()
+    } else {
+        format!("{}  ·  {}", entry.channel.tag(), entry.channel.label())
+    };
+    let speaker = entry.speaker.as_deref().unwrap_or("Open carrier");
+    let background = if entry.priority == RadioPriority::StationWide {
+        Color::srgba(0.20, 0.07, 0.06, 0.96)
+    } else if entry.priority == RadioPriority::Urgent {
+        Color::srgba(0.18, 0.10, 0.07, 0.95)
+    } else {
+        Color::srgba(0.05, 0.06, 0.08, 0.92)
+    };
+
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: if elevated { px(64) } else { Val::Auto },
+                bottom: if elevated { Val::Auto } else { px(16) },
+                left: if elevated { px(0) } else { px(16) },
+                width: if elevated { percent(100) } else { px(560) },
+                justify_content: if elevated {
+                    JustifyContent::Center
+                } else {
+                    JustifyContent::FlexStart
+                },
+                ..default()
+            },
+            GlobalZIndex(40),
+            RadioDispatchCard(entry.sequence),
+            crate::until_we_leave_the_lab(),
+        ))
+        .with_children(|outer| {
+            outer
+                .spawn((
+                    Node {
+                        width: if elevated { px(680) } else { percent(100) },
+                        flex_direction: FlexDirection::Column,
+                        padding: UiRect::all(px(14)),
+                        row_gap: px(4),
+                        border: UiRect::left(px(if elevated { 6 } else { 4 })),
+                        border_radius: BorderRadius::all(px(7)),
+                        ..default()
+                    },
+                    BackgroundColor(background),
+                    BorderColor::all(channel),
+                    RadioCardBackground(background),
+                ))
+                .with_children(|card| {
+                    card.spawn((
+                        Text::new(heading),
+                        TextFont::from_font_size(if elevated { 14.0 } else { 12.0 }),
+                        TextColor(channel),
+                        RadioCardText(channel),
+                    ));
+                    card.spawn((
+                        Text::new(speaker.to_string()),
+                        TextFont::from_font_size(15.0),
+                        TextColor(TEXT),
+                        RadioCardText(TEXT),
+                    ));
+                    card.spawn((
+                        Text::new(entry.text.clone()),
+                        TextFont::from_font_size(if elevated { 17.0 } else { 15.0 }),
+                        TextColor(body),
+                        RadioCardText(body),
+                    ));
+                });
+        });
+}
+
+fn animate_radio_dispatch(
+    queue: Res<RadioDispatchQueue>,
+    mut cards: Query<(&RadioDispatchCard, &mut Node)>,
+    mut backgrounds: Query<(&RadioCardBackground, &mut BackgroundColor)>,
+    mut texts: Query<(&RadioCardText, &mut TextColor)>,
+) {
+    let Some(current) = queue.current.as_ref() else {
+        return;
+    };
+    let Some((_, mut node)) = cards
+        .iter_mut()
+        .find(|(card, _)| card.0 == current.entry.sequence)
+    else {
+        return;
+    };
+    let duration = dispatch_seconds(current.entry.priority);
+    let elapsed = duration - current.remaining;
+    let alpha = (elapsed / 0.2).clamp(0.0, 1.0) * (current.remaining / 0.5).clamp(0.0, 1.0);
+    if current.entry.priority >= RadioPriority::Urgent {
+        node.top = px(64.0 - (1.0 - alpha) * 18.0);
+    } else {
+        node.left = px(16.0 - (1.0 - alpha) * 24.0);
+    }
+    for (base, mut color) in &mut backgrounds {
+        color.0 = base.0.with_alpha(base.0.alpha() * alpha);
+    }
+    for (base, mut color) in &mut texts {
+        color.0 = base.0.with_alpha(base.0.alpha() * alpha);
+    }
+}
+
+fn radio_channel_color(channel: RadioChannel) -> Color {
+    match channel {
+        RadioChannel::Bridge => Color::srgb(0.96, 0.74, 0.25),
+        RadioChannel::Medical => Color::srgb(0.45, 0.76, 0.96),
+        RadioChannel::Security => Color::srgb(0.92, 0.34, 0.30),
+        RadioChannel::Engineering => Color::srgb(0.94, 0.72, 0.24),
+        RadioChannel::Cargo => Color::srgb(0.72, 0.52, 0.29),
+        RadioChannel::Service => Color::srgb(0.48, 0.82, 0.43),
+        RadioChannel::Lab => Color::srgb(0.65, 0.50, 0.90),
+        RadioChannel::Common => Color::srgb(0.70, 0.73, 0.80),
     }
 }
 
@@ -3855,21 +4145,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_radio_hud_windows_onto_the_most_recent_lines() {
-        // Slot 0 must show the oldest of the trailing window, not the log's
-        // absolute index 0 — that only coincided back when the log's own
-        // capacity happened to equal the HUD's slot count.
-        assert_eq!(radio_window_start(3, 6), 0, "a short log needs no offset");
-        assert_eq!(
-            radio_window_start(6, 6),
-            0,
-            "exactly full still starts at 0"
+    fn urgent_dispatch_preempts_and_resumes_routine_traffic() {
+        let mut queue = RadioDispatchQueue {
+            current: Some(DispatchItem::new(RadioEntry::new(
+                RadioChannel::Cargo,
+                "routine",
+            ))),
+            ..default()
+        };
+        queue.enqueue(
+            RadioEntry::new(RadioChannel::Medical, "urgent")
+                .negative()
+                .urgent(),
         );
         assert_eq!(
-            radio_window_start(40, 6),
-            34,
-            "a log past the window shows only its tail"
+            queue.current.as_ref().unwrap().entry.priority,
+            RadioPriority::Urgent
         );
+        assert_eq!(queue.pending.front().unwrap().entry.text, "routine");
+    }
+
+    #[test]
+    fn first_arrival_after_an_empty_baseline_is_presented() {
+        let mut queue = RadioDispatchQueue::default();
+        let mut log = RadioLog::default();
+        queue.ingest(&log);
+        assert!(queue.pending.is_empty());
+        log.push(RadioEntry::new(RadioChannel::Cargo, "first arrival"));
+        queue.ingest(&log);
+        assert_eq!(queue.pending.front().unwrap().entry.text, "first arrival");
+    }
+
+    #[test]
+    fn dispatch_congestion_discards_ambient_before_routine() {
+        let mut queue = RadioDispatchQueue::default();
+        queue.pending.push_back(DispatchItem::new(
+            RadioEntry::new(RadioChannel::Bridge, "ambient").ambient(),
+        ));
+        for index in 0..RADIO_PENDING_CAPACITY {
+            queue.pending.push_back(DispatchItem::new(RadioEntry::new(
+                RadioChannel::Common,
+                format!("routine {index}"),
+            )));
+        }
+        queue.trim_pending();
+        assert_eq!(queue.pending.len(), RADIO_PENDING_CAPACITY);
+        assert!(queue
+            .pending
+            .iter()
+            .all(|item| item.entry.text != "ambient"));
     }
 
     #[test]
