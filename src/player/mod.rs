@@ -11,7 +11,6 @@ use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use bevy_replicon::prelude::*;
-use chem_sim::StatusKind;
 use serde::{Deserialize, Serialize};
 
 use crate::body::{Bloodstream, Body};
@@ -231,7 +230,7 @@ fn spawn_joining_chemists(
             targets: SendTargets::Single(id),
             message: YouAreChemist { chemist },
         });
-        info!("a second chemist joined the lab");
+        info!("another chemist joined the lab");
     }
 }
 
@@ -551,14 +550,14 @@ fn send_move_input(
 /// the client scaled its own speed the two would disagree and the player would
 /// rubber-band every time they took a stimulant.
 fn walk_speed(blood: &Bloodstream, body: &Body, sprinting: bool) -> f32 {
-    if body.0.collapsed {
+    if body.0.collapsed || blood.0.incapacitated() {
         return 0.0;
     }
-    let hastened = blood.0.status(StatusKind::Hastened).intensity;
-    let sluggish = blood.0.status(StatusKind::Sluggish).intensity;
-    // Hastened and sluggish cancel rather than compete, so taking both is
-    // simply a waste of two chemicals.
-    let factor = (1.0 + 0.6 * hastened - 0.4 * sluggish).clamp(0.25, 2.0);
+    // The simulation owns how every status contributes: chill, choking,
+    // sedation and focus now matter here alongside the original haste/sluggish
+    // pair, and combinations stay deterministic and identical for players and
+    // ordinary crew.
+    let factor = blood.0.movement_multiplier();
     // Multiplied on top of the chemical factor rather than folded into it, so
     // a sprinting chemist who is also sluggish is still slower than a walking
     // one who is not — the drug is a state you are in, the sprint is a thing
@@ -1011,6 +1010,41 @@ mod tests {
             sluggish_sprint < clear_walk * SPRINT_MULTIPLIER,
             "the impairment has to still be felt while sprinting"
         );
+    }
+
+    #[test]
+    fn player_speed_uses_the_shared_status_aggregate() {
+        let mut chilled = Bloodstream::default();
+        chilled
+            .0
+            .add_status(chem_sim::StatusKind::Chilled, 30.0, 1.0);
+        let upright = Body::default();
+
+        assert_eq!(
+            walk_speed(&chilled, &upright, false),
+            WALK_SPEED * chilled.0.movement_multiplier(),
+        );
+        assert!(
+            walk_speed(&chilled, &upright, false)
+                < walk_speed(&Bloodstream::default(), &upright, false),
+            "chill must be mechanically felt, not only drawn",
+        );
+    }
+
+    #[test]
+    fn chemical_incapacitation_stops_an_upright_player() {
+        let mut sedated = Bloodstream::default();
+        sedated
+            .0
+            .add_status(chem_sim::StatusKind::Sedated, 30.0, 2.0);
+        let upright = Body::default();
+
+        assert!(
+            !upright.0.collapsed,
+            "this is chemical, not damage collapse"
+        );
+        assert!(sedated.0.incapacitated());
+        assert_eq!(walk_speed(&sedated, &upright, true), 0.0);
     }
 
     #[test]

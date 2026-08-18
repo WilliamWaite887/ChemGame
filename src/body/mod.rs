@@ -17,8 +17,11 @@ use chem_sim::{metabolise, DamageKind, Route, Units};
 use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
+use crate::chem_world::{
+    assess_exposure, order_authorizes_dose, spawn_puddle, ChemicalExposure, ExposureSource,
+};
 use crate::containers::{Container, ContainerKind, HeldBy};
-use crate::machines::chemist_entity;
+use crate::machines::{chemist_entity, ReactionsFired};
 use crate::net::is_authority;
 use crate::player::Chemist;
 use crate::AppState;
@@ -28,6 +31,9 @@ use crate::AppState;
 /// A mouthful rather than the lot: drinking 50u of something in one keypress
 /// would make the syringe pointless and the mistake unrecoverable.
 const SIP: Units = Units::whole(5);
+
+/// A hand pour is large enough to matter and small enough to correct.
+const HAND_TRANSFER: Units = Units::whole(10);
 
 /// Ticks to run at most in one frame.
 ///
@@ -62,6 +68,7 @@ pub struct BodyPlugin;
 impl Plugin for BodyPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MetabolismClock>()
+            .add_message::<ChemicalExposure>()
             .add_client_message::<ConsumeRequested>(Channel::Ordered)
             .add_mapped_client_message::<ApplyHeldRequested>(Channel::Ordered)
             .add_systems(
@@ -71,6 +78,7 @@ impl Plugin for BodyPlugin {
                         handle_apply_held,
                         handle_consume,
                         run_metabolism,
+                        handle_chemical_incapacitation,
                         handle_collapse,
                         run_medbay_retrieval,
                     )
@@ -138,6 +146,8 @@ pub struct ConsumeRequested;
 pub struct ApplyHeldRequested {
     #[entities]
     pub target: Option<Entity>,
+    /// World-space camera hit, used when the application is a floor pour.
+    pub point: Option<Vec3>,
 }
 
 /// **R** — take a mouthful.
@@ -185,6 +195,7 @@ fn request_apply_held(
         if mode.is_roaming() {
             requests.write(ApplyHeldRequested {
                 target: focus.target,
+                point: focus.point,
             });
         }
     }
@@ -196,40 +207,213 @@ fn request_apply_held(
 /// and what is being pointed at. Anything else in hand is ignored — the beaker
 /// you are carrying is not a weapon.
 fn handle_apply_held(
+    mut commands: Commands,
     db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<ApplyHeldRequested>>,
     chemists: Query<(Entity, &Chemist)>,
+    transforms: Query<&Transform>,
+    solids: Query<(&Transform, &crate::lab::Solid)>,
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
     held: Query<(Entity, &HeldBy)>,
     mut containers: Query<&mut Container>,
+    chemist_bodies: Query<(), With<Chemist>>,
+    orders: Query<(
+        &crate::orders::Order,
+        Has<crate::orders::IllicitOrder>,
+        Has<crate::orders::CrisisOrder>,
+        Has<crate::orders::CounterOrder>,
+    )>,
+    crisis_targets: Query<(), With<crate::crisis::CrisisResponse>>,
+    mut fired: MessageWriter<ReactionsFired>,
+    mut exposures: MessageWriter<ChemicalExposure>,
 ) {
     for request in requests.read() {
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
-        if bodies.get(player).is_ok_and(|(body, _)| body.0.collapsed) {
-            continue;
-        }
-        let Some((syringe_entity, _)) = held.iter().find(|(_, holder)| holder.0 == player) else {
+        let Ok(actor_transform) = transforms.get(player) else {
             continue;
         };
-        if !containers
-            .get(syringe_entity)
-            .is_ok_and(|container| container.kind == ContainerKind::Syringe)
+        let actor_position = actor_transform.translation;
+        if !actor_position.is_finite() || request.point.is_some_and(|point| !point.is_finite()) {
+            continue;
+        }
+
+        // Focus and its mesh raycast live on the client. Re-establish their
+        // reach/occlusion guarantees on the authority before splitting even a
+        // hundredth of a unit from the held solution. Entity roots get a small
+        // collider-centre allowance; floor points are exact ray hits.
+        let endpoint = if let Some(target) = request.target {
+            let Ok(target_transform) = transforms.get(target) else {
+                continue;
+            };
+            let endpoint = target_transform.translation;
+            if !crate::interaction::authority_target_in_reach(actor_position, endpoint) {
+                continue;
+            }
+            Some(endpoint)
+        } else if let Some(point) = request.point {
+            if !crate::interaction::authority_point_in_reach(actor_position, point) {
+                continue;
+            }
+            Some(point)
+        } else {
+            // A syringe deliberately injects its holder when no target or
+            // floor hit was supplied.
+            None
+        };
+        if endpoint.is_some_and(|endpoint| {
+            solids.iter().any(|(transform, solid)| {
+                crate::interaction::authority_segment_blocked(
+                    actor_position,
+                    endpoint,
+                    transform.translation,
+                    solid.half_extents,
+                )
+            })
+        }) {
+            continue;
+        }
+        if bodies
+            .get(player)
+            .is_ok_and(|(body, blood)| body.0.collapsed || blood.0.incapacitated())
         {
+            continue;
+        }
+        let Some((held_entity, _)) = held.iter().find(|(_, holder)| holder.0 == player) else {
+            continue;
+        };
+        let Ok(container) = containers.get(held_entity) else {
+            continue;
+        };
+        let kind = container.kind;
+
+        if kind != ContainerKind::Syringe {
+            // A pill has no open liquid surface; R remains its only deliberate
+            // use. Beakers and bottles share the hand-pour interaction.
+            if kind == ContainerKind::Pill {
+                continue;
+            }
+
+            if let Some(target) = request.target.filter(|target| *target != held_entity) {
+                if containers.contains(target) {
+                    let space = containers
+                        .get(target)
+                        .map(|container| container.solution.available_volume())
+                        .unwrap_or(Units::ZERO);
+                    let amount = HAND_TRANSFER.min(space);
+                    if !amount.is_positive() {
+                        continue;
+                    }
+                    let moved = containers
+                        .get_mut(held_entity)
+                        .map(|mut source| source.mutate(&db, |solution| solution.split(amount)).0)
+                        .unwrap_or_else(|_| chem_sim::Solution::unbounded());
+                    if moved.is_empty() {
+                        continue;
+                    }
+                    if let Ok(mut destination) = containers.get_mut(target) {
+                        let (_, report) = destination.mutate(&db, |solution| {
+                            let destination_volume = solution.total_volume().as_f32();
+                            let moved_volume = moved.total_volume().as_f32();
+                            let combined = destination_volume + moved_volume;
+                            if combined > 0.0 {
+                                solution.temperature.0 = (solution.temperature.0
+                                    * destination_volume
+                                    + moved.temperature.0 * moved_volume)
+                                    / combined;
+                            }
+                            for (reagent, amount) in moved.iter() {
+                                let _ = solution.add(reagent, amount);
+                            }
+                        });
+                        if let Some(message) = ReactionsFired::from_report(target, &report) {
+                            fired.write(message);
+                        }
+                    }
+                    continue;
+                }
+
+                if bodies.contains(target) {
+                    let mut dose = containers
+                        .get_mut(held_entity)
+                        .map(|mut source| {
+                            source
+                                .mutate(&db, |solution| solution.split(HAND_TRANSFER))
+                                .0
+                        })
+                        .unwrap_or_else(|_| chem_sim::Solution::unbounded());
+                    if dose.is_empty() {
+                        continue;
+                    }
+                    let snapshot = dose.clone();
+                    let Ok((mut body, mut blood)) = bodies.get_mut(target) else {
+                        continue;
+                    };
+                    let assessment = assess_exposure(&snapshot, Route::Touched, &body, &blood, &db);
+                    let requested =
+                        orders
+                            .get(target)
+                            .is_ok_and(|(order, illicit, crisis, counter)| {
+                                !assessment.overdose
+                                    && order_authorizes_dose(
+                                        &snapshot,
+                                        order,
+                                        crate::orders::OrderKind::of(illicit, crisis, counter),
+                                        &db,
+                                    )
+                            });
+                    let crisis_care = crisis_targets.contains(target)
+                        && assessment.helpful
+                        && !assessment.illicit
+                        && !assessment.overdose;
+                    blood.0.receive(&mut dose, Route::Touched, &mut body.0, &db);
+                    exposures.write(ChemicalExposure {
+                        actor: Some(player),
+                        target,
+                        route: Route::Touched,
+                        source: ExposureSource::Direct,
+                        solution: snapshot,
+                        authorized: target == player
+                            || chemist_bodies.contains(target)
+                            || requested
+                            || crisis_care,
+                        helpful: assessment.helpful,
+                        harmful: assessment.harmful,
+                        illicit: assessment.illicit,
+                        overdose: assessment.overdose,
+                    });
+                    continue;
+                }
+
+                // Looking at a machine or prop is not a floor pour.
+                continue;
+            }
+
+            if let Some(point) = request.point {
+                let spilled = containers
+                    .get_mut(held_entity)
+                    .map(|mut source| {
+                        source
+                            .mutate(&db, |solution| solution.split(HAND_TRANSFER))
+                            .0
+                    })
+                    .unwrap_or_else(|_| chem_sim::Solution::unbounded());
+                let _ = spawn_puddle(&mut commands, spilled, point, Some(player));
+            }
             continue;
         }
 
         // Pointing at a container means draw; anything else means inject.
         let drawing = request
             .target
-            .is_some_and(|target| target != syringe_entity && containers.contains(target));
+            .is_some_and(|target| target != held_entity && containers.contains(target));
 
         if drawing {
             let source_entity = request.target.expect("a draw target was just checked");
             let space = {
                 let syringe = containers
-                    .get(syringe_entity)
+                    .get(held_entity)
                     .expect("the syringe was just checked");
                 syringe.solution.available_volume()
             };
@@ -245,7 +429,7 @@ fn handle_apply_held(
                 };
                 source.mutate(&db, |solution| solution.split(space)).0
             };
-            if let Ok(mut syringe) = containers.get_mut(syringe_entity) {
+            if let Ok(mut syringe) = containers.get_mut(held_entity) {
                 syringe.mutate(&db, |solution| {
                     for (reagent, amount) in drawn.iter() {
                         let _ = solution.add(reagent, amount);
@@ -261,7 +445,7 @@ fn handle_apply_held(
             Some(target) if bodies.contains(target) => target,
             _ => player,
         };
-        let Ok(mut syringe) = containers.get_mut(syringe_entity) else {
+        let Ok(mut syringe) = containers.get_mut(held_entity) else {
             continue;
         };
         let mut dose = syringe
@@ -270,12 +454,44 @@ fn handle_apply_held(
         if dose.total_volume().is_zero() {
             continue;
         }
+        let snapshot = dose.clone();
         let Ok((mut body, mut blood)) = bodies.get_mut(patient) else {
             continue;
         };
+        let assessment = assess_exposure(&snapshot, Route::Injected, &body, &blood, &db);
+        let requested = orders
+            .get(patient)
+            .is_ok_and(|(order, illicit, crisis, counter)| {
+                !assessment.overdose
+                    && order_authorizes_dose(
+                        &snapshot,
+                        order,
+                        crate::orders::OrderKind::of(illicit, crisis, counter),
+                        &db,
+                    )
+            });
+        let crisis_care = crisis_targets.contains(patient)
+            && assessment.helpful
+            && !assessment.illicit
+            && !assessment.overdose;
         blood
             .0
             .receive(&mut dose, Route::Injected, &mut body.0, &db);
+        exposures.write(ChemicalExposure {
+            actor: Some(player),
+            target: patient,
+            route: Route::Injected,
+            source: ExposureSource::Direct,
+            solution: snapshot,
+            authorized: patient == player
+                || chemist_bodies.contains(patient)
+                || requested
+                || crisis_care,
+            helpful: assessment.helpful,
+            harmful: assessment.harmful,
+            illicit: assessment.illicit,
+            overdose: assessment.overdose,
+        });
     }
 }
 
@@ -287,6 +503,7 @@ fn handle_consume(
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
     held: Query<(Entity, &HeldBy)>,
     mut containers: Query<&mut Container>,
+    mut exposures: MessageWriter<ChemicalExposure>,
 ) {
     for request in requests.read() {
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
@@ -295,7 +512,7 @@ fn handle_consume(
         let Ok((mut body, mut blood)) = bodies.get_mut(player) else {
             continue;
         };
-        if body.0.collapsed {
+        if body.0.collapsed || blood.0.incapacitated() {
             continue;
         }
         let Some((entity, _)) = held.iter().find(|(_, holder)| holder.0 == player) else {
@@ -317,9 +534,23 @@ fn handle_consume(
             continue;
         }
 
+        let snapshot = dose.clone();
+        let assessment = assess_exposure(&snapshot, Route::Ingested, &body, &blood, &db);
         blood
             .0
             .receive(&mut dose, Route::Ingested, &mut body.0, &db);
+        exposures.write(ChemicalExposure {
+            actor: Some(player),
+            target: player,
+            route: Route::Ingested,
+            source: ExposureSource::Direct,
+            solution: snapshot,
+            authorized: true,
+            helpful: assessment.helpful,
+            harmful: assessment.harmful,
+            illicit: assessment.illicit,
+            overdose: assessment.overdose,
+        });
 
         // An empty pill is a wrapper. Nothing else despawns on use, because a
         // beaker you have drained is still a beaker.
@@ -365,6 +596,61 @@ fn run_metabolism(
 #[derive(Component)]
 pub struct MedbayRetrieval(pub f32);
 
+/// Edge marker for status-driven incapacity. Unlike damage collapse this does
+/// not summon Medical or penalize the shift; it exists so the server performs
+/// the one-time drop/claim release when sedation crosses its threshold.
+#[derive(Component)]
+pub struct ChemicallyIncapacitated;
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn handle_chemical_incapacitation(
+    mut commands: Commands,
+    chemists: Query<
+        (
+            Entity,
+            &Body,
+            &Bloodstream,
+            &Transform,
+            Has<ChemicallyIncapacitated>,
+        ),
+        (With<Chemist>, Changed<Bloodstream>),
+    >,
+    mut modes: Query<&mut crate::interaction::InteractionMode>,
+    mut machines: Query<&mut crate::machines::Machine>,
+    held: Query<(Entity, &HeldBy)>,
+) {
+    for (player, body, blood, transform, was_incapacitated) in &chemists {
+        let incapacitated = blood.0.incapacitated();
+        if incapacitated == was_incapacitated {
+            continue;
+        }
+        if !incapacitated {
+            commands.entity(player).remove::<ChemicallyIncapacitated>();
+            continue;
+        }
+
+        commands.entity(player).insert(ChemicallyIncapacitated);
+        // Damage collapse owns the identical cleanup on its own edge. Avoid
+        // giving two deferred command paths responsibility for the same hand.
+        if body.0.collapsed {
+            continue;
+        }
+        for (container, holder) in &held {
+            if holder.0 != player {
+                continue;
+            }
+            let ahead = transform.translation + transform.forward() * 0.4;
+            commands
+                .entity(container)
+                .remove::<HeldBy>()
+                .insert(Transform::from_xyz(ahead.x, 0.08, ahead.z));
+        }
+        if let Ok(mut mode) = modes.get_mut(player) {
+            crate::interaction::release_claim(player, &mut mode, &mut machines);
+        }
+    }
+}
+
 /// Everything that happens the moment a chemist goes down.
 ///
 /// Takes the panel off the screen of a chemist who has just gone down.
@@ -375,12 +661,16 @@ pub struct MedbayRetrieval(pub f32);
 /// dispenser from the floor.
 fn close_panel_on_collapse(
     mut players: Query<
-        (&Body, &mut crate::interaction::InteractionMode),
+        (
+            &Body,
+            &Bloodstream,
+            &mut crate::interaction::InteractionMode,
+        ),
         With<crate::player::LocalPlayer>,
     >,
 ) {
-    for (body, mut mode) in &mut players {
-        if body.0.collapsed && !mode.is_roaming() {
+    for (body, blood, mut mode) in &mut players {
+        if (body.0.collapsed || blood.0.incapacitated()) && !mode.is_roaming() {
             *mode = crate::interaction::InteractionMode::Roaming;
         }
     }
@@ -531,6 +821,8 @@ mod tests {
             .init_resource::<Time>()
             .add_message::<FromClient<ConsumeRequested>>()
             .add_message::<FromClient<ApplyHeldRequested>>()
+            .add_message::<ChemicalExposure>()
+            .add_message::<ReactionsFired>()
             .add_systems(
                 Update,
                 (handle_apply_held, handle_consume, run_metabolism).chain(),
@@ -554,6 +846,7 @@ mod tests {
                 },
                 Body::default(),
                 Bloodstream::default(),
+                Transform::from_xyz(0.0, crate::player::EYE_HEIGHT, 0.0),
             ))
             .id();
 
@@ -714,9 +1007,23 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn apply(app: &mut App, target: Option<Entity>) {
+        // Gameplay entities always have transforms. Most body fixtures do not
+        // care where their patient is, so place an otherwise positionless one
+        // within hand reach here; forged-distance tests send their request
+        // directly and retain the position they are exercising.
+        if let Some(target) = target {
+            if app.world().get::<Transform>(target).is_none() {
+                app.world_mut()
+                    .entity_mut(target)
+                    .insert(Transform::default());
+            }
+        }
         app.world_mut().write_message(FromClient {
             client_id: ClientId::Server,
-            message: ApplyHeldRequested { target },
+            message: ApplyHeldRequested {
+                target,
+                point: None,
+            },
         });
         app.update();
     }
@@ -734,7 +1041,9 @@ mod tests {
                 .add(db.reagent(key), Units::whole(*amount));
             assert!(overflow.is_zero(), "{key} overflowed the test beaker");
         }
-        app.world_mut().spawn(container).id()
+        app.world_mut()
+            .spawn((container, Transform::from_xyz(1.0, 1.0, 0.0)))
+            .id()
     }
 
     fn contents_of(app: &App, container: Entity) -> Solution {
@@ -861,18 +1170,286 @@ mod tests {
     }
 
     #[test]
-    fn a_beaker_in_hand_is_not_a_syringe() {
+    fn a_beaker_pours_ten_units_into_another_container() {
         let mut app = test_app();
-        let (player, _) = chemist_holding(&mut app, ContainerKind::Beaker, "dylovene", 40);
+        let (player, source) = chemist_holding(&mut app, ContainerKind::Beaker, "dylovene", 40);
         let beaker = bench_beaker(&mut app, &[("plasma", 20)]);
 
         apply(&mut app, Some(beaker));
 
         assert!(
             blood_of(&app, player).is_empty(),
-            "F with a beaker in hand does nothing at all"
+            "container-to-container pouring does not dose the holder"
         );
-        assert_eq!(contents_of(&app, beaker).total_volume(), Units::whole(20));
+        assert_eq!(contents_of(&app, source).total_volume(), Units::whole(30));
+        assert_eq!(contents_of(&app, beaker).total_volume(), Units::whole(30));
+    }
+
+    #[test]
+    fn a_beaker_splashes_ten_units_through_the_touch_route() {
+        let mut app = test_app();
+        let (actor, source) = chemist_holding(&mut app, ContainerKind::Beaker, "dylovene", 40);
+        let target = app
+            .world_mut()
+            .spawn((Body::default(), Bloodstream::default()))
+            .id();
+
+        apply(&mut app, Some(target));
+
+        let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
+        assert_eq!(contents_of(&app, source).total_volume(), Units::whole(30));
+        assert_eq!(
+            blood_of(&app, target).blood.volume_of(dylovene),
+            Units::from_f64(1.5),
+            "touch absorbs fifteen percent of the ten-unit splash",
+        );
+        let records: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ChemicalExposure>>()
+            .drain()
+            .collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].actor, Some(actor));
+        assert_eq!(records[0].target, target);
+        assert_eq!(records[0].route, Route::Touched);
+        assert_eq!(records[0].source, ExposureSource::Direct);
+    }
+
+    #[test]
+    fn a_clean_matching_active_order_is_authorized_even_when_the_drug_is_harsh() {
+        let mut app = test_app();
+        let (_, _) = chemist_holding(&mut app, ContainerKind::Beaker, "arithrazine", 10);
+        let arithrazine = app.world().resource::<ChemDb>().reagent("arithrazine");
+        let target = app
+            .world_mut()
+            .spawn((
+                Body::default(),
+                Bloodstream::default(),
+                crate::orders::Order {
+                    reagent: arithrazine,
+                    specific: true,
+                    amount: Units::whole(10),
+                    plea: String::new(),
+                    patience: 30.0,
+                    waited: 0.0,
+                },
+            ))
+            .id();
+
+        apply(&mut app, Some(target));
+
+        let records: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ChemicalExposure>>()
+            .drain()
+            .collect();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].harmful, "arithrazine carries a brute cost");
+        assert!(records[0].authorized, "the patient explicitly requested it");
+    }
+
+    #[test]
+    fn helpful_crisis_care_is_authorized_without_matching_the_exact_order() {
+        let mut app = test_app();
+        let (_, _) = chemist_holding(&mut app, ContainerKind::Beaker, "bicaridine", 10);
+        let mut injured = Body::default();
+        injured.0.damage.brute = Units::whole(12);
+        let target = app
+            .world_mut()
+            .spawn((
+                injured,
+                Bloodstream::default(),
+                crate::crisis::CrisisResponse {
+                    responders: vec!["Medical".to_string()],
+                },
+            ))
+            .id();
+
+        apply(&mut app, Some(target));
+
+        let records: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ChemicalExposure>>()
+            .drain()
+            .collect();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].helpful);
+        assert!(records[0].authorized);
+    }
+
+    #[test]
+    fn pouring_without_an_entity_target_makes_a_puddle() {
+        let mut app = test_app();
+        let (_, source) = chemist_holding(&mut app, ContainerKind::Beaker, "water", 25);
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: ApplyHeldRequested {
+                target: None,
+                point: Some(Vec3::new(1.0, 0.0, 0.0)),
+            },
+        });
+
+        app.update();
+
+        assert_eq!(contents_of(&app, source).total_volume(), Units::whole(15));
+        let puddles = app
+            .world_mut()
+            .query::<(&crate::chem_world::ChemicalPuddle, &Transform)>()
+            .iter(app.world())
+            .count();
+        assert_eq!(puddles, 1);
+    }
+
+    #[test]
+    fn a_forged_distant_splash_is_rejected_before_liquid_or_body_mutation() {
+        let mut app = test_app();
+        let (_, source) = chemist_holding(&mut app, ContainerKind::Beaker, "dylovene", 40);
+        let target = app
+            .world_mut()
+            .spawn((
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_xyz(20.0, crate::player::EYE_HEIGHT, 0.0),
+            ))
+            .id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: ApplyHeldRequested {
+                target: Some(target),
+                point: Some(Vec3::new(20.0, crate::player::EYE_HEIGHT, 0.0)),
+            },
+        });
+        app.update();
+
+        assert_eq!(contents_of(&app, source).total_volume(), Units::whole(40));
+        assert!(blood_of(&app, target).is_empty());
+        let records: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ChemicalExposure>>()
+            .drain()
+            .collect();
+        assert!(
+            records.is_empty(),
+            "a refused splash has no exposure record"
+        );
+    }
+
+    #[test]
+    fn forged_distant_and_non_finite_floor_pours_do_not_spill_or_consume() {
+        for point in [
+            Vec3::new(20.0, 0.0, 0.0),
+            Vec3::new(f32::NAN, 0.0, 0.0),
+            Vec3::new(0.0, f32::INFINITY, 0.0),
+        ] {
+            let mut app = test_app();
+            let (_, source) = chemist_holding(&mut app, ContainerKind::Beaker, "water", 25);
+            app.world_mut().write_message(FromClient {
+                client_id: ClientId::Server,
+                message: ApplyHeldRequested {
+                    target: None,
+                    point: Some(point),
+                },
+            });
+
+            app.update();
+
+            assert_eq!(
+                contents_of(&app, source).total_volume(),
+                Units::whole(25),
+                "invalid point {point:?} consumed liquid"
+            );
+            let puddles = app
+                .world_mut()
+                .query::<&crate::chem_world::ChemicalPuddle>()
+                .iter(app.world())
+                .count();
+            assert_eq!(puddles, 0, "invalid point {point:?} spawned a puddle");
+        }
+    }
+
+    #[test]
+    fn a_solid_wall_blocks_a_forged_splash_inside_the_distance_limit() {
+        let mut app = test_app();
+        let (_, source) = chemist_holding(&mut app, ContainerKind::Beaker, "dylovene", 40);
+        let target = app
+            .world_mut()
+            .spawn((
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_xyz(2.5, crate::player::EYE_HEIGHT, 0.0),
+            ))
+            .id();
+        app.world_mut().spawn((
+            Transform::from_xyz(1.25, crate::player::EYE_HEIGHT, 0.0),
+            crate::lab::Solid {
+                half_extents: Vec3::new(0.1, 1.0, 1.0),
+            },
+        ));
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: ApplyHeldRequested {
+                target: Some(target),
+                point: None,
+            },
+        });
+        app.update();
+
+        assert_eq!(contents_of(&app, source).total_volume(), Units::whole(40));
+        assert!(blood_of(&app, target).is_empty());
+    }
+
+    #[test]
+    fn chemical_incapacitation_drops_the_hand_and_releases_the_panel() {
+        let mut app = test_app();
+        app.add_systems(Update, handle_chemical_incapacitation);
+        let (player, beaker) = chemist_holding(&mut app, ContainerKind::Beaker, "water", 10);
+        let machine = app
+            .world_mut()
+            .spawn(crate::machines::Machine::new(
+                crate::machines::MachineKind::MixingChamber,
+            ))
+            .id();
+        app.world_mut().entity_mut(player).insert((
+            Transform::default(),
+            crate::interaction::InteractionMode::UsingMachine(machine),
+        ));
+        app.world_mut()
+            .get_mut::<crate::machines::Machine>(machine)
+            .unwrap()
+            .in_use_by = Some(player);
+        app.world_mut()
+            .get_mut::<Bloodstream>(player)
+            .unwrap()
+            .0
+            .add_status(chem_sim::StatusKind::Sedated, 20.0, 2.0);
+
+        app.update();
+
+        assert!(app.world().get::<ChemicallyIncapacitated>(player).is_some());
+        assert!(app.world().get::<HeldBy>(beaker).is_none());
+        assert_eq!(
+            app.world()
+                .get::<crate::machines::Machine>(machine)
+                .unwrap()
+                .in_use_by,
+            None
+        );
+        assert_eq!(
+            *app.world()
+                .get::<crate::interaction::InteractionMode>(player)
+                .unwrap(),
+            crate::interaction::InteractionMode::Roaming
+        );
+
+        app.world_mut()
+            .get_mut::<Bloodstream>(player)
+            .unwrap()
+            .0
+            .counter_status(chem_sim::StatusKind::Sedated, 100.0, 100.0);
+        app.update();
+        assert!(app.world().get::<ChemicallyIncapacitated>(player).is_none());
     }
 
     // -----------------------------------------------------------------------

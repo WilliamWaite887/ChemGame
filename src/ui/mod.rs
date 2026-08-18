@@ -22,16 +22,17 @@ use crate::crew::{AtCounter, CrewMember};
 use crate::interaction::{leave_machine, Interactable, InteractionMode, LeaveMachineRequested};
 use crate::knowledge::{
     product_name, reaction_categories, BuyHintRequested, Knowledge, RecipeDiscovered,
-    UpgradeDispenserRequested, HINT_COST,
+    UnlockAllRequested, UpgradeDispenserRequested, HINT_COST,
 };
 use crate::machines::{
-    slotted_container, slotted_container_b, stored_in, AnalyzeRequested, Buffer, BufferDirection,
-    BufferTransferRequested, DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested,
-    GrindRequested, Hopper, Machine, MachineKind, MachineSlot, PackageRequested, SetHeaterPower,
-    SetTargetTemperature, TakeRequested, Thermostat, LOCKER_CAPACITY, TEMPERATURE_MARKS,
-    TEMPERATURE_MAX, TEMPERATURE_MIN,
+    slotted_container, slotted_container_b, stored_in, AgitateDirection, AgitateRequested,
+    AgitationRun, AnalyzeRequested, Buffer, BufferDirection, BufferTransferRequested,
+    DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested, GrindRequested, Hopper,
+    Machine, MachineKind, MachineSlot, PackageRequested, SetHeaterPower, SetTargetTemperature,
+    TakeRequested, Thermostat, LOCKER_CAPACITY, TEMPERATURE_MARKS, TEMPERATURE_MAX,
+    TEMPERATURE_MIN,
 };
-use crate::orders::{reference_category, Department, Order, Shift};
+use crate::orders::{reference_category, Department, DevelopmentOrder, Order, Shift};
 use crate::player::LocalPlayer;
 use crate::produce::{ProduceCatalog, ProduceId};
 use crate::radio::RadioLog;
@@ -135,6 +136,7 @@ enum PanelAction {
     SetAmount(Units),
     Dispense(ReagentId),
     UpgradeDispenser,
+    UnlockAll,
     /// Which slot to act on. Every machine but the Mixing Chamber only ever
     /// has slot `A`; the panel bodies for those simply never build a `B`
     /// button.
@@ -145,6 +147,7 @@ enum PanelAction {
     Empty(MachineSlot),
     ToBuffer(ReagentId, Units, MachineSlot),
     ToContainer(ReagentId, Units, MachineSlot),
+    Agitate(AgitateDirection),
     Package(ContainerKind),
     Analyze,
     Grind {
@@ -236,6 +239,9 @@ struct PanelSignature {
     /// runs are already covered by `contents` above, which is what actually
     /// shows the batch progressing.
     reacting: bool,
+    /// Replicated Mixing Chamber run, rounded to tenths so its visible timer
+    /// updates smoothly without rebuilding the entire panel every frame.
+    agitation: Option<(Entity, MachineSlot, i32, i32)>,
     amount: Option<Units>,
     known_recipes: usize,
     /// The book's open heading. Here rather than tracked separately because
@@ -300,6 +306,7 @@ impl Default for PanelSignature {
             hopper: Vec::new(),
             stored: Vec::new(),
             reacting: false,
+            agitation: None,
             amount: None,
             known_recipes: usize::MAX,
             book_category: None,
@@ -415,6 +422,7 @@ type MachineParts<'w, 's> = Query<
         Option<&'static Buffer>,
         Option<&'static Hopper>,
         Option<&'static Thermostat>,
+        Option<&'static AgitationRun>,
     ),
 >;
 
@@ -604,17 +612,27 @@ fn sync_panel(
             .map(|container| container.solution.iter().collect())
             .unwrap_or_default(),
         buffer: machine_parts
-            .and_then(|(_, _, buffer, _, _)| buffer)
+            .and_then(|(_, _, buffer, _, _, _)| buffer)
             .map(|buffer| buffer.0.iter().collect())
             .unwrap_or_default(),
         hopper: machine_parts
-            .and_then(|(_, _, _, hopper, _)| hopper)
+            .and_then(|(_, _, _, hopper, _, _)| hopper)
             .map(|hopper| hopper.0.clone())
             .unwrap_or_default(),
         stored: stored.clone(),
         reacting,
+        agitation: machine_parts
+            .and_then(|(_, _, _, _, _, run)| run)
+            .map(|run| {
+                (
+                    run.destination,
+                    run.direction.destination(),
+                    (run.elapsed_secs * 10.0).floor() as i32,
+                    (run.expected_secs * 10.0).round() as i32,
+                )
+            }),
         amount: machine_parts
-            .and_then(|(_, amount, _, _, _)| amount)
+            .and_then(|(_, amount, _, _, _, _)| amount)
             .map(|a| a.0),
         known_recipes: knowledge.known_count(),
         book_category: book.category,
@@ -635,7 +653,7 @@ fn sync_panel(
             .and(loaded)
             .map(|container| panel_temperature(container.solution.temperature)),
         powered: machine_parts
-            .and_then(|(_, _, _, _, thermostat)| thermostat)
+            .and_then(|(_, _, _, _, thermostat, _)| thermostat)
             .is_some_and(|thermostat| thermostat.powered),
     };
 
@@ -665,7 +683,7 @@ fn sync_panel(
     if open_machine.is_none() {
         return;
     }
-    let Some((machine, amount, buffer, hopper, thermostat)) = machine_parts else {
+    let Some((machine, amount, buffer, hopper, thermostat, agitation)) = machine_parts else {
         return;
     };
 
@@ -706,7 +724,7 @@ fn sync_panel(
                             dispenser_body(panel, &db, &knowledge, amount, loaded, reacting);
                         }
                         MachineKind::MixingChamber => {
-                            mixing_chamber_body(panel, &db, buffer, loaded, loaded_b);
+                            mixing_chamber_body(panel, &db, buffer, loaded, loaded_b, agitation);
                         }
                         MachineKind::Analyzer => {
                             analyzer_body(panel, &db, &knowledge, loaded);
@@ -1127,6 +1145,13 @@ fn dispenser_body(
         }
     }
 
+    if knowledge.next_upgrade_cost().is_some() || knowledge.known_count() < db.reactions.len() {
+        panel.spawn(button(
+            "PLAYTEST: unlock all chemistry",
+            PanelAction::UnlockAll,
+        ));
+    }
+
     // Grouped by tier rather than the old flat, unsorted list — locked and
     // unlocked reagents no longer interleave, and each tier reads as one
     // step of the dispenser's own progression rather than 17 separate
@@ -1442,9 +1467,84 @@ fn mixing_chamber_body(
     buffer: Option<&Buffer>,
     loaded_a: Option<&Container>,
     loaded_b: Option<&Container>,
+    agitation: Option<&AgitationRun>,
 ) {
-    mixing_chamber_beaker(panel, db, "Beaker A", loaded_a, MachineSlot::A);
-    mixing_chamber_beaker(panel, db, "Beaker B", loaded_b, MachineSlot::B);
+    let locked = agitation.is_some();
+    if let Some(run) = agitation {
+        panel.spawn(label(
+            format!(
+                "AGITATING {}   {:>3.0}%   {:.1}s remaining",
+                run.direction.label(),
+                run.progress() * 100.0,
+                run.remaining_secs(),
+            ),
+            15.0,
+            Color::srgb(0.48, 0.82, 0.96),
+        ));
+        panel.spawn(label(
+            format!(
+                "Batch locked in Beaker {}. Separation and ejection resume when it settles.",
+                match run.direction.destination() {
+                    MachineSlot::A => "A",
+                    MachineSlot::B => "B",
+                }
+            ),
+            13.0,
+            TEXT_DIM,
+        ));
+    } else {
+        let eligible = |source: Option<&Container>, destination: Option<&Container>| {
+            let (Some(source), Some(destination)) = (source, destination) else {
+                return false;
+            };
+            matches!(
+                source.kind,
+                ContainerKind::Beaker | ContainerKind::LargeBeaker
+            ) && matches!(
+                destination.kind,
+                ContainerKind::Beaker | ContainerKind::LargeBeaker
+            ) && source.solution.total_volume().is_positive()
+                && destination.solution.available_volume() >= source.solution.total_volume()
+                && !chem_sim::is_reacting(&source.solution, &db.reactions)
+                && !chem_sim::is_reacting(&destination.solution, &db.reactions)
+                && !db
+                    .reactions
+                    .activate_agitation(&source.solution, &destination.solution)
+                    .is_empty()
+        };
+        let a_to_b = eligible(loaded_a, loaded_b);
+        let b_to_a = eligible(loaded_b, loaded_a);
+        panel.spawn(label(
+            "Prepare recipe sides separately, then transfer one complete beaker under agitation.",
+            13.0,
+            TEXT_DIM,
+        ));
+        if a_to_b || b_to_a {
+            panel.spawn(row()).with_children(|row| {
+                if a_to_b {
+                    row.spawn(button(
+                        "Agitate A -> B",
+                        PanelAction::Agitate(AgitateDirection::AToB),
+                    ));
+                }
+                if b_to_a {
+                    row.spawn(button(
+                        "Agitate B -> A",
+                        PanelAction::Agitate(AgitateDirection::BToA),
+                    ));
+                }
+            });
+        } else {
+            panel.spawn(label(
+                "No staged recipe matches these two beakers, or the destination lacks space.",
+                13.0,
+                Color::srgb(0.82, 0.62, 0.42),
+            ));
+        }
+    }
+
+    mixing_chamber_beaker(panel, db, "Beaker A", loaded_a, MachineSlot::A, locked);
+    mixing_chamber_beaker(panel, db, "Beaker B", loaded_b, MachineSlot::B, locked);
 
     panel.spawn(label("Buffer", 13.0, TEXT_DIM));
     panel
@@ -1460,14 +1560,16 @@ fn mixing_chamber_body(
             for (reagent, quantity) in buffer.0.iter() {
                 section.spawn(row()).with_children(|row| {
                     row.spawn(reagent_name(db, reagent, quantity));
-                    row.spawn(button(
-                        "◂A",
-                        PanelAction::ToContainer(reagent, quantity, MachineSlot::A),
-                    ));
-                    row.spawn(button(
-                        "◂B",
-                        PanelAction::ToContainer(reagent, quantity, MachineSlot::B),
-                    ));
+                    if !locked {
+                        row.spawn(button(
+                            "◂A",
+                            PanelAction::ToContainer(reagent, quantity, MachineSlot::A),
+                        ));
+                        row.spawn(button(
+                            "◂B",
+                            PanelAction::ToContainer(reagent, quantity, MachineSlot::B),
+                        ));
+                    }
                 });
             }
         });
@@ -1500,11 +1602,24 @@ fn mixing_chamber_beaker(
     heading_text: &str,
     loaded: Option<&Container>,
     slot: MachineSlot,
+    locked: bool,
 ) {
     panel.spawn(label(heading_text, 13.0, TEXT_DIM));
     panel
         .spawn((section(), BackgroundColor(SECTION_BG)))
         .with_children(|section| {
+            if let Some(container) = loaded {
+                section.spawn(label(
+                    format!(
+                        "{} / {}   •   {:.0}K",
+                        container.solution.total_volume(),
+                        container.solution.max_volume(),
+                        container.solution.temperature.0,
+                    ),
+                    12.0,
+                    Color::srgb(0.60, 0.72, 0.82),
+                ));
+            }
             match loaded {
                 None => {
                     section.spawn(label(
@@ -1520,24 +1635,28 @@ fn mixing_chamber_beaker(
                     for (reagent, quantity) in container.solution.iter() {
                         section.spawn(row()).with_children(|row| {
                             row.spawn(reagent_name(db, reagent, quantity));
-                            for step in [5, 10] {
-                                let units = Units::whole(step);
+                            if !locked {
+                                for step in [5, 10] {
+                                    let units = Units::whole(step);
+                                    row.spawn(button(
+                                        format!("▸{step}"),
+                                        PanelAction::ToBuffer(reagent, units, slot),
+                                    ));
+                                }
                                 row.spawn(button(
-                                    format!("▸{step}"),
-                                    PanelAction::ToBuffer(reagent, units, slot),
+                                    "▸All",
+                                    PanelAction::ToBuffer(reagent, quantity, slot),
                                 ));
                             }
-                            row.spawn(button(
-                                "▸All",
-                                PanelAction::ToBuffer(reagent, quantity, slot),
-                            ));
                         });
                     }
                 }
             }
-            section.spawn(row()).with_children(|row| {
-                row.spawn(button("Eject", PanelAction::Eject(slot)));
-            });
+            if !locked {
+                section.spawn(row()).with_children(|row| {
+                    row.spawn(button("Eject", PanelAction::Eject(slot)));
+                });
+            }
         });
 }
 
@@ -2173,12 +2292,25 @@ fn render_recipe_node(
 
         if known {
             entry.spawn(label(recipe_line(db, reaction), 14.0, TEXT));
+            entry.spawn(label(
+                preparation_line(db, reaction),
+                13.0,
+                Color::srgb(0.66, 0.78, 0.92),
+            ));
+            entry.spawn(label(condition_line(reaction), 12.0, TEXT_DIM));
             if let Some(overdose) = product.and_then(|p| p.overdose) {
                 entry.spawn(label(
                     format!("Overdoses above {overdose} in a single dose."),
                     13.0,
                     Color::srgb(0.90, 0.62, 0.45),
                 ));
+            }
+            if depth == 0 {
+                if let Some(product) = product {
+                    for line in reagent_profile_lines(product) {
+                        entry.spawn(label(line, 12.0, TEXT_DIM));
+                    }
+                }
             }
             return;
         }
@@ -2382,6 +2514,184 @@ fn scroll_active_pane(
 }
 
 /// Renders a recipe as `1 Oxygen + 1 Carbon + 1 Sugar  →  3 Inaprovaline`.
+/// Workstation and provenance instructions for a known recipe.
+fn preparation_line(db: &ChemDb, reaction: &chem_sim::Reaction) -> String {
+    let ingredients = |side: &[(ReagentId, Units)]| {
+        side.iter()
+            .map(|(id, amount)| format!("{amount} {}", db.reagents.get(*id).name))
+            .collect::<Vec<_>>()
+            .join(" + ")
+    };
+    match &reaction.process {
+        chem_sim::ReactionProcess::Ambient => {
+            if reaction.min_temp.is_some() || reaction.max_temp.is_some() {
+                "Workstation: Reaction Chamber; ordinary container mixing is allowed once the temperature is valid."
+                    .to_string()
+            } else {
+                "Workstation: ordinary container or ChemMaster; combines on contact.".to_string()
+            }
+        }
+        chem_sim::ReactionProcess::Agitated { side_a, side_b } => format!(
+            "Workstation: Mixing Chamber. Prepare separately: [{}]  /  [{}], then agitate either direction.",
+            ingredients(side_a),
+            ingredients(side_b)
+        ),
+    }
+}
+
+/// Temperature envelope and player-facing duration for a known recipe.
+fn condition_line(reaction: &chem_sim::Reaction) -> String {
+    let temperature = match (reaction.min_temp, reaction.max_temp) {
+        (Some(min), Some(max)) => format!("Temperature: {min} to {max}"),
+        (Some(min), None) => format!("Temperature: at least {min}"),
+        (None, Some(max)) => format!("Temperature: no more than {max}"),
+        (None, None) => "Temperature: ambient is fine".to_string(),
+    };
+    let processing = match (&reaction.process, reaction.rate) {
+        (chem_sim::ReactionProcess::Agitated { .. }, Some(rate)) => {
+            format!("Agitation: typically 4–8s for an order batch ({rate} reaction-u/s)")
+        }
+        (_, Some(rate)) => format!("Processing: timed at {rate} reaction-u/s"),
+        (_, None) => "Processing: instant".to_string(),
+    };
+    let overheat = reaction
+        .overheat_temp
+        .map(|threshold| match reaction.overheat {
+            chem_sim::Overheat::ReducedYield { .. } => {
+                format!("; yield degrades above {threshold}")
+            }
+            chem_sim::Overheat::Detonate { power } => {
+                format!("; detonates above {threshold} (power {power:.1})")
+            }
+            chem_sim::Overheat::Ruin => format!("; batch is ruined above {threshold}"),
+        })
+        .unwrap_or_default();
+    format!("{temperature}{overheat}.  {processing}.")
+}
+
+/// Body, crash, route and station behavior for the product of a known recipe.
+fn reagent_profile_lines(reagent: &chem_sim::Reagent) -> Vec<String> {
+    let body = effect_list(&reagent.effects);
+    let overdose = effect_list(&reagent.overdose_effects);
+    let critical = effect_list(&reagent.critical_effects);
+    let after = effect_list(&reagent.after_effects);
+    let world = reagent
+        .world_effects
+        .iter()
+        .map(world_effect_text)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Bodily effects: {}",
+        if body.is_empty() {
+            if reagent.intentionally_inert {
+                "intentionally inert".to_string()
+            } else {
+                "no direct bloodstream effect".to_string()
+            }
+        } else {
+            body
+        }
+    ));
+    lines.push(format!(
+        "Overdose effects: {}",
+        if overdose.is_empty() {
+            "none"
+        } else {
+            &overdose
+        }
+    ));
+    if !critical.is_empty() {
+        lines.push(format!("Critical overdose: {critical}"));
+    }
+    lines.push(format!(
+        "Aftereffects when cleared: {}",
+        if after.is_empty() { "none" } else { &after }
+    ));
+    lines.push(if reagent.effects.is_empty() && reagent.overdose_effects.is_empty() {
+        "Application routes: environmental release; no therapeutic body route."
+            .to_string()
+    } else {
+        "Application routes: inject (full/fast), ingest (slow/60%), splash, smoke or puddle contact (15%)."
+            .to_string()
+    });
+    lines.push(format!(
+        "World behavior: {}",
+        if world.is_empty() {
+            "none".to_string()
+        } else {
+            world
+        }
+    ));
+    lines
+}
+
+fn effect_list(effects: &[chem_sim::ReagentEffect]) -> String {
+    effects
+        .iter()
+        .map(|effect| match effect {
+            chem_sim::ReagentEffect::Heal(kind, amount) => {
+                format!("heal {} {amount}/tick", kind.label().to_lowercase())
+            }
+            chem_sim::ReagentEffect::Harm(kind, amount) => {
+                format!("deal {} {amount}/tick", kind.label().to_lowercase())
+            }
+            chem_sim::ReagentEffect::Contact(kind, amount) => format!(
+                "{} contact damage {amount}/10u",
+                kind.label().to_lowercase()
+            ),
+            chem_sim::ReagentEffect::Status {
+                kind,
+                seconds,
+                intensity,
+            } => format!("{} ({seconds:.0}s, x{intensity:.1})", kind.label()),
+            chem_sim::ReagentEffect::Counter {
+                kind,
+                seconds,
+                intensity,
+            } => format!(
+                "clear {} ({seconds:.0}s, x{intensity:.1})",
+                kind.label().to_lowercase()
+            ),
+            chem_sim::ReagentEffect::Purge(amount) => {
+                format!("purge {amount}u harmful reagents/tick")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn world_effect_text(effect: &chem_sim::WorldEffect) -> String {
+    match effect {
+        chem_sim::WorldEffect::Clean { strength } => {
+            format!("cleans residue/puddles x{strength:.1}")
+        }
+        chem_sim::WorldEffect::Corrode { strength } => {
+            format!("corrodes reactive structures x{strength:.1}")
+        }
+        chem_sim::WorldEffect::Ignite { intensity, seconds } => {
+            format!("ignites x{intensity:.1} for {seconds:.0}s")
+        }
+        chem_sim::WorldEffect::ReleaseSmoke { radius, seconds } => {
+            format!("vents smoke {radius:.1}m for {seconds:.0}s")
+        }
+        chem_sim::WorldEffect::Slippery { seconds } => {
+            format!("slippery surface for {seconds:.0}s")
+        }
+        chem_sim::WorldEffect::Flammable { intensity, seconds } => {
+            format!("flammable fuel x{intensity:.1} for {seconds:.0}s")
+        }
+        chem_sim::WorldEffect::Chill { kelvin_per_unit } => {
+            format!("chills surface {kelvin_per_unit:.1}K/u")
+        }
+        chem_sim::WorldEffect::Flash { radius, seconds } => {
+            format!("blinding flash {radius:.1}m for {seconds:.0}s")
+        }
+    }
+}
+
 fn recipe_line(db: &ChemDb, reaction: &chem_sim::Reaction) -> String {
     let part = |pairs: &[(ReagentId, Units)]| {
         pairs
@@ -2543,57 +2853,67 @@ fn update_phase_banner(shift: Res<Shift>, banner: BannerText) {
 fn update_order_queue(
     db: Res<ChemDb>,
     shift: Res<Shift>,
-    orders: Query<(&CrewMember, &Order, Has<AtCounter>)>,
+    orders: Query<(&CrewMember, &Order, Has<AtCounter>, Has<DevelopmentOrder>)>,
     mut slots: Query<(&OrderSlot, &mut Text, &mut TextColor), Without<ShiftReadout>>,
     readout: ShiftText,
     plea_line: PleaText,
 ) {
     // Most urgent first, so the one about to expire is always at the top.
-    let mut pending: Vec<(&CrewMember, &Order, bool)> = orders.iter().collect();
+    let mut pending: Vec<(&CrewMember, &Order, bool, bool)> = orders.iter().collect();
     pending.sort_by(|a, b| a.1.remaining().total_cmp(&b.1.remaining()));
 
     for (slot, mut text, mut color) in &mut slots {
-        let line = pending.get(slot.0).map(|(member, order, at_counter)| {
-            // `order.specific` is freely queryable (nothing secret about it —
-            // see its own doc comment) and always wins when set. Otherwise
-            // this never queries `Has<IllicitOrder>` — see that marker's own
-            // doc comment — and instead reads purely from the reagent's own
-            // category: a lenient legitimate order's category is always one
-            // of the six orderable ones, so it shows a want-phrase; anything
-            // else (every antagonist reagent is `Illicit`) falls back to the
-            // real name, which is no more a tell than the pretext already is.
-            let want = if order.specific {
-                db.reagents.get(order.reagent).name.clone()
-            } else {
-                reference_category(&db, order.reagent)
-                    .filter(|cat| cat.is_legitimately_orderable())
-                    .map(|cat| cat.want_phrase().to_string())
-                    .unwrap_or_else(|| db.reagents.get(order.reagent).name.clone())
-            };
-            let reagent = &want;
-            if *at_counter {
-                let remaining = order.remaining() as u32;
-                format!(
-                    "{}\n  {} {}  ·  {}:{:02}",
-                    member.name,
-                    order.amount,
-                    reagent,
-                    remaining / 60,
-                    remaining % 60
-                )
-            } else {
-                format!(
-                    "{}\n  {} {}  ·  on the way",
-                    member.name, order.amount, reagent
-                )
-            }
-        });
+        let line = pending
+            .get(slot.0)
+            .map(|(member, order, at_counter, development)| {
+                // `order.specific` is freely queryable (nothing secret about it —
+                // see its own doc comment) and always wins when set. Otherwise
+                // this never queries `Has<IllicitOrder>` — see that marker's own
+                // doc comment — and instead reads purely from the reagent's own
+                // category: a lenient legitimate order's category is always one
+                // of the six orderable ones, so it shows a want-phrase; anything
+                // else (every antagonist reagent is `Illicit`) falls back to the
+                // real name, which is no more a tell than the pretext already is.
+                let want = if order.specific {
+                    db.reagents.get(order.reagent).name.clone()
+                } else {
+                    reference_category(&db, order.reagent)
+                        .filter(|cat| cat.is_legitimately_orderable())
+                        .map(|cat| cat.want_phrase().to_string())
+                        .unwrap_or_else(|| db.reagents.get(order.reagent).name.clone())
+                };
+                let reagent = &want;
+                let heading = if *development {
+                    format!("OPTIONAL R&D \u{2014} {}", member.name)
+                } else {
+                    member.name.clone()
+                };
+                if *at_counter {
+                    let remaining = order.remaining() as u32;
+                    format!(
+                        "{}\n  {} {}  ·  {}:{:02}",
+                        heading,
+                        order.amount,
+                        reagent,
+                        remaining / 60,
+                        remaining % 60
+                    )
+                } else {
+                    format!("{}\n  {} {}  ·  on the way", heading, order.amount, reagent)
+                }
+            });
 
         let urgent = pending
             .get(slot.0)
-            .map(|(_, order, _)| order.remaining() < 30.0)
+            .map(|(_, order, _, development)| !development && order.remaining() < 30.0)
             .unwrap_or(false);
-        let wanted = if urgent {
+        let development = pending
+            .get(slot.0)
+            .map(|(_, _, _, development)| *development)
+            .unwrap_or(false);
+        let wanted = if development {
+            Color::srgb(0.50, 0.82, 0.92)
+        } else if urgent {
             Color::srgb(0.95, 0.55, 0.45)
         } else {
             TEXT
@@ -2612,7 +2932,16 @@ fn update_order_queue(
     // wall of text nobody reads mid-shift.
     let plea = pending
         .first()
-        .map(|(_, order, _)| format!("\u{201c}{}\u{201d}", order.plea))
+        .map(|(_, order, _, development)| {
+            if *development {
+                format!(
+                    "Optional development request \u{2014} \u{201c}{}\u{201d}",
+                    order.plea
+                )
+            } else {
+                format!("\u{201c}{}\u{201d}", order.plea)
+            }
+        })
         .unwrap_or_default();
     let mut plea_line = plea_line.into_inner();
     if plea_line.0 != plea {
@@ -3302,6 +3631,7 @@ pub(crate) fn button_feedback(mut buttons: ChangedButtons) {
 #[derive(SystemParam)]
 struct PanelMessages<'w> {
     dispense: MessageWriter<'w, DispenseRequested>,
+    agitate: MessageWriter<'w, AgitateRequested>,
     eject: MessageWriter<'w, EjectRequested>,
     take: MessageWriter<'w, TakeRequested>,
     empty: MessageWriter<'w, EmptyRequested>,
@@ -3316,6 +3646,7 @@ struct PanelMessages<'w> {
     requisition: MessageWriter<'w, RequisitionRequested>,
     leave_machine: MessageWriter<'w, LeaveMachineRequested>,
     upgrade_dispenser: MessageWriter<'w, UpgradeDispenserRequested>,
+    unlock_all: MessageWriter<'w, UnlockAllRequested>,
     buy_hint: MessageWriter<'w, BuyHintRequested>,
     play: MessageWriter<'w, PlaySfx>,
 }
@@ -3367,6 +3698,10 @@ fn handle_panel_clicks(
             }
             PanelAction::UpgradeDispenser => {
                 out.upgrade_dispenser.write(UpgradeDispenserRequested);
+                continue;
+            }
+            PanelAction::UnlockAll => {
+                out.unlock_all.write(UnlockAllRequested);
                 continue;
             }
             PanelAction::ShowCategory(category) => {
@@ -3453,6 +3788,13 @@ fn handle_panel_clicks(
                 });
                 out.play.write(PlaySfx(Sfx::BufferTransfer));
             }
+            PanelAction::Agitate(direction) => {
+                out.agitate.write(AgitateRequested {
+                    machine,
+                    direction: *direction,
+                });
+                out.play.write(PlaySfx(Sfx::BufferTransfer));
+            }
             PanelAction::Package(kind) => {
                 out.package.write(PackageRequested {
                     machine,
@@ -3504,6 +3846,7 @@ fn handle_panel_clicks(
             // Handled above, before the machine guard.
             PanelAction::BuyHint(_)
             | PanelAction::UpgradeDispenser
+            | PanelAction::UnlockAll
             | PanelAction::ShowCategory(_)
             | PanelAction::OpenRecipe(_)
             | PanelAction::CloseRecipe
@@ -3717,6 +4060,66 @@ mod tests {
 
         assert_eq!(total, db.reactions.len());
         assert_eq!(known, knowledge.known_count());
+    }
+
+    #[test]
+    fn the_known_method_names_agitation_sides_station_and_time() {
+        let (db, _) = book_fixture();
+        let bicaridine = db.reactions.find("bicaridine").unwrap();
+        let preparation = preparation_line(&db, bicaridine);
+        let conditions = condition_line(bicaridine);
+
+        assert!(preparation.contains("Mixing Chamber"));
+        assert!(preparation.contains("Inaprovaline"));
+        assert!(preparation.contains("Carbon"));
+        assert!(conditions.contains("4–8s"));
+
+        let starter = db.reactions.find("inaprovaline").unwrap();
+        assert!(preparation_line(&db, starter).contains("ChemMaster"));
+        assert!(condition_line(starter).contains("instant"));
+
+        let phlogiston = db.reactions.find("phlogiston").unwrap();
+        assert!(condition_line(phlogiston).contains("detonates above 420.0K"));
+    }
+
+    #[test]
+    fn the_known_profile_lists_body_crash_routes_and_world_behavior() {
+        let (db, _) = book_fixture();
+        let meth = db.reagents.get(db.reagent("methamphetamine"));
+        let meth_lines = reagent_profile_lines(meth).join("\n");
+        assert!(meth_lines.contains("Bodily effects"));
+        assert!(meth_lines.contains("Aftereffects"));
+        assert!(meth_lines.contains("Application routes"));
+
+        let napalm = db.reagents.get(db.reagent("napalm"));
+        let napalm_lines = reagent_profile_lines(napalm).join("\n");
+        assert!(napalm_lines.contains("World behavior"));
+        assert!(napalm_lines.contains("flammable"));
+        assert!(napalm_lines.contains("slippery"));
+    }
+
+    #[test]
+    fn every_crafted_profile_explicitly_covers_the_reference_book_audit_fields() {
+        let (db, _) = book_fixture();
+        for reaction in db.reactions.iter() {
+            for product in reaction.product_ids() {
+                let reagent = db.reagents.get(product);
+                let lines = reagent_profile_lines(reagent).join("\n");
+                for heading in [
+                    "Bodily effects:",
+                    "Overdose effects:",
+                    "Aftereffects when cleared:",
+                    "Application routes:",
+                    "World behavior:",
+                ] {
+                    assert!(
+                        lines.contains(heading),
+                        "{} has no {heading} reference-book line",
+                        reagent.key
+                    );
+                }
+            }
+        }
     }
 
     // -- the standing board's campaign notice ------------------------------

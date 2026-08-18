@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::effect::ReagentEffect;
+use crate::effect::{ReagentEffect, WorldEffect};
 use crate::units::{Kelvin, Units};
 
 /// Units a body works through per metabolism tick when a reagent does not say
@@ -239,6 +239,19 @@ pub struct ReagentDef {
     pub critical_overdose: Option<Units>,
     #[serde(default)]
     pub critical_effects: Vec<ReagentEffect>,
+    /// Effects applied once, when the last active or digesting amount of this
+    /// reagent leaves the body. Used for stimulant crashes and comedowns.
+    #[serde(default)]
+    pub after_effects: Vec<ReagentEffect>,
+    /// Declarative effects produced when this reagent is released into the
+    /// station. The engine layer owns spatial queries and puddle entities;
+    /// `chem_sim` owns the portable, hot-reloadable profile.
+    #[serde(default)]
+    pub world_effects: Vec<WorldEffect>,
+    /// Explicitly records that an otherwise effect-free crafted reagent is
+    /// inert on purpose rather than unfinished content.
+    #[serde(default)]
+    pub intentionally_inert: bool,
     /// Above this it leaves the solution as gas. Plasma at 323.15K.
     ///
     /// Note for data files: RON will not coerce an integer into this `f32`.
@@ -274,6 +287,9 @@ pub struct Reagent {
     pub overdose_effects: Vec<ReagentEffect>,
     pub critical_overdose: Option<Units>,
     pub critical_effects: Vec<ReagentEffect>,
+    pub after_effects: Vec<ReagentEffect>,
+    pub world_effects: Vec<WorldEffect>,
+    pub intentionally_inert: bool,
     pub boils_at: Option<Kelvin>,
     /// See [`ReagentDef::addictive`].
     pub addictive: f64,
@@ -296,7 +312,26 @@ impl Reagent {
                 .iter()
                 .chain(&self.overdose_effects)
                 .chain(&self.critical_effects)
+                .chain(&self.after_effects)
                 .any(|effect| effect.is_harmful())
+            || self.world_effects.iter().any(|effect| effect.is_harmful())
+    }
+
+    /// Whether this reagent's body effects are harmful at the supplied active
+    /// volume. Unlike [`Self::is_harmful`], a medicine's mere ability to
+    /// overdose does not make a therapeutic dose a purge target.
+    pub fn is_harmful_at(&self, volume: Units) -> bool {
+        self.effects.iter().any(|effect| effect.is_harmful())
+            || matches!(self.overdose, Some(threshold) if volume > threshold)
+                && self
+                    .overdose_effects
+                    .iter()
+                    .any(|effect| effect.is_harmful())
+            || matches!(self.critical_overdose, Some(threshold) if volume > threshold)
+                && self
+                    .critical_effects
+                    .iter()
+                    .any(|effect| effect.is_harmful())
     }
 }
 
@@ -337,6 +372,9 @@ impl ReagentRegistry {
             overdose_effects: def.overdose_effects,
             critical_overdose: def.critical_overdose,
             critical_effects: def.critical_effects,
+            after_effects: def.after_effects,
+            world_effects: def.world_effects,
+            intentionally_inert: def.intentionally_inert,
             boils_at: def.boils_at,
             addictive: def.addictive,
         });

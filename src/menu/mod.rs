@@ -217,7 +217,7 @@ fn show_mode_screen(mut commands: Commands, error: Res<ConnectError>) {
             ));
             panel.spawn(choice(
                 "Host",
-                "Play your save and open the lab to a second chemist, over Steam.",
+                "Play your save and open the lab to as many as three other chemists, over Steam.",
                 MenuAction::ChooseHost,
             ));
             panel.spawn(choice(

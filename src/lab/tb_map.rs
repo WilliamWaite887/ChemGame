@@ -92,6 +92,38 @@ fn parse() -> Vec<Entity> {
         .entities
 }
 
+/// The exact walkable registry the authored map contributes at runtime.
+///
+/// Exposed only to crate tests so cross-system regressions can exercise the
+/// station topology without duplicating a second, subtly different parser.
+pub(crate) fn authored_walkable_areas() -> WalkableAreas {
+    let mut areas = WalkableAreas::default();
+    for entity in parse()
+        .into_iter()
+        .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
+    {
+        let room = property(&entity, "room").filter(|room| !room.trim().is_empty());
+        let bridge_id = property(&entity, "bridge_id").filter(|bridge| !bridge.trim().is_empty());
+        for brush in &entity.brushes {
+            areas.push_with_bridge(footprint(brush), room.clone(), bridge_id.clone());
+        }
+    }
+    areas
+}
+
+/// Position of one authored department marker, in Bevy world coordinates.
+pub(crate) fn authored_department_home(role: &str) -> Vec3 {
+    let entity = parse()
+        .into_iter()
+        .find(|entity| {
+            classname(entity).as_deref() == Some("department_spot")
+                && property(entity, "department").as_deref() == Some(role)
+        })
+        .unwrap_or_else(|| panic!("the authored map has no {role} department_spot"));
+    let (x, z) = origin_xz(&entity).expect("department_spot has a valid origin");
+    Vec3::new(x, 0.0, z)
+}
+
 #[test]
 fn every_brush_encloses_a_volume() {
     // Reproduces `bevy_trenchbroom`'s plane maths exactly: a face's three points
@@ -939,25 +971,252 @@ fn room_signs_have_visible_text_and_the_lab_entrance_has_one_bridge() {
 
 #[test]
 fn the_map_still_places_every_machine() {
-    // The drift this whole approach risks: delete a machine spot in TrenchBroom
-    // and nothing notices until a shift starts without a Mixing Chamber.
-    // Positions are deliberately unchecked — moving one is the point of using
-    // an editor.
-    let map = std::fs::read_to_string(MAP).unwrap_or_else(|err| panic!("reading {MAP}: {err}"));
+    const EXPECTED: &[(&str, MachineKind, Vec3)] = &[
+        (
+            "dispenser.a",
+            MachineKind::ChemMaster5000,
+            Vec3::new(-5.4, 0.0, -5.05),
+        ),
+        (
+            "mixer.a",
+            MachineKind::MixingChamber,
+            Vec3::new(-2.2, 0.0, -5.05),
+        ),
+        (
+            "dispenser.b",
+            MachineKind::ChemMaster5000,
+            Vec3::new(1.4, 0.0, -5.05),
+        ),
+        (
+            "mixer.b",
+            MachineKind::MixingChamber,
+            Vec3::new(5.4, 0.0, -5.05),
+        ),
+        (
+            "grinder.main",
+            MachineKind::Grinder,
+            Vec3::new(-4.0, 0.0, 5.55),
+        ),
+        (
+            "analyzer.main",
+            MachineKind::Analyzer,
+            Vec3::new(10.5, 0.0, -5.05),
+        ),
+        (
+            "delivery.main",
+            MachineKind::DeliveryWindow,
+            Vec3::new(4.0, 0.0, 4.6),
+        ),
+        (
+            "board.main",
+            MachineKind::StandingBoard,
+            Vec3::new(7.1, 0.0, 0.5),
+        ),
+        (
+            "reactor.main",
+            MachineKind::ReactionChamber,
+            Vec3::new(-12.95, 0.0, -3.5),
+        ),
+        (
+            "locker.main",
+            MachineKind::Locker,
+            Vec3::new(-1.5, 0.0, 2.45),
+        ),
+    ];
 
-    for kind in MachineKind::ALL {
+    let fallback = super::legacy_machine_spots();
+    assert_eq!(fallback.len(), EXPECTED.len());
+    for (id, kind, expected) in EXPECTED {
+        let placement = fallback
+            .get(id)
+            .unwrap_or_else(|| panic!("fallback has no machine spot `{id}`"));
+        assert_eq!(placement.kind, *kind, "fallback `{id}` changed kind");
         assert!(
-            map.contains(&format!("\"kind\" \"{kind:?}\"")),
-            "{kind:?} has no machine_spot in {MAP}",
+            placement.transform.translation.distance(*expected) < 0.001,
+            "fallback `{id}` and authored map placement disagree",
+        );
+        let expected_facing = match *id {
+            "grinder.main" | "delivery.main" => Vec3::NEG_Z,
+            "board.main" => Vec3::NEG_X,
+            "reactor.main" => Vec3::X,
+            _ => Vec3::Z,
+        };
+        assert!(
+            (placement.transform.rotation * Vec3::Z).distance(expected_facing) < 0.000_01,
+            "fallback `{id}` and authored map orientation disagree",
         );
     }
 
+    let map = parse();
+    let markers: Vec<&Entity> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("machine_spot"))
+        .collect();
+    assert_eq!(markers.len(), EXPECTED.len());
+
+    let mut ids = std::collections::HashSet::new();
+    for marker in &markers {
+        let id = property(marker, "id").unwrap_or_default();
+        assert!(!id.trim().is_empty(), "a machine_spot in {MAP} has no id");
+        assert!(ids.insert(id.clone()), "duplicate machine_spot id `{id}`");
+    }
+
+    for (id, kind, expected) in EXPECTED {
+        let matches: Vec<_> = markers
+            .iter()
+            .copied()
+            .filter(|marker| property(marker, "id").as_deref() == Some(*id))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected exactly one machine_spot id `{id}`"
+        );
+        let expected_kind = format!("{kind:?}");
+        assert_eq!(
+            property(matches[0], "kind").as_deref(),
+            Some(expected_kind.as_str()),
+            "machine_spot `{id}` changed kind",
+        );
+        let expected_angles = match *id {
+            "grinder.main" | "delivery.main" => "0 180 0",
+            "board.main" => "0 -90 0",
+            "reactor.main" => "0 90 0",
+            _ => "0 0 0",
+        };
+        assert_eq!(
+            property(matches[0], "angles").as_deref(),
+            Some(expected_angles),
+            "machine_spot `{id}` changed orientation",
+        );
+        let (x, z) = origin_xz(matches[0]).expect("machine spot with a valid origin");
+        let actual = Vec3::new(x, 0.0, z);
+        assert!(
+            actual.distance(*expected) < 0.001,
+            "machine_spot `{id}` moved to {actual}; expected {expected}",
+        );
+    }
+
+    for kind in MachineKind::ALL {
+        let expected = if matches!(
+            kind,
+            MachineKind::ChemMaster5000 | MachineKind::MixingChamber
+        ) {
+            2
+        } else {
+            1
+        };
+        let kind_name = format!("{kind:?}");
+        let actual = markers
+            .iter()
+            .filter(|marker| property(marker, "kind").as_deref() == Some(kind_name.as_str()))
+            .count();
+        assert_eq!(actual, expected, "wrong number of {kind:?} machine spots");
+    }
+
     assert!(
-        map.contains("\"classname\" \"chemist_start\""),
+        map.iter()
+            .any(|entity| classname(entity).as_deref() == Some("chemist_start")),
         "{MAP} has nowhere for a chemist to start",
     );
     assert!(
-        map.contains("\"classname\" \"worldspawn\""),
+        map.iter()
+            .any(|entity| classname(entity).as_deref() == Some("worldspawn")),
         "{MAP} has no worldspawn, so it has no world",
     );
+}
+
+#[test]
+fn core_lanes_clear_the_authored_chemistry_furniture() {
+    // Bounds measured from department_chemistry_dressing.glb. The export is
+    // render-only for navigation, but its fume hood and island are real visible
+    // furniture: placing a machine through either still makes the workstation
+    // unusable even though collision cannot catch the mistake.
+    const FURNITURE_LOCAL: &[Bounds] = &[
+        Bounds {
+            min_x: -1.975,
+            max_x: -0.525,
+            min_z: -1.605,
+            max_z: -0.9225,
+        },
+        Bounds {
+            min_x: -0.7601,
+            max_x: 1.9552,
+            min_z: -0.1601,
+            max_z: 0.7711,
+        },
+    ];
+    const CORE_IDS: &[&str] = &["dispenser.a", "mixer.a", "dispenser.b", "mixer.b"];
+
+    let overlaps = |a: Bounds, b: Bounds| {
+        a.min_x < b.max_x && a.max_x > b.min_x && a.min_z < b.max_z && a.max_z > b.min_z
+    };
+    let map = parse();
+    let dressing = map
+        .iter()
+        .find(|entity| {
+            classname(entity).as_deref() == Some("department_dressing")
+                && property(entity, "department").as_deref() == Some("Chemistry")
+        })
+        .expect("Chemistry dressing marker");
+    assert_eq!(property(dressing, "angles").as_deref(), Some("0 0 0"));
+    let (dress_x, dress_z) = origin_xz(dressing).expect("valid Chemistry dressing origin");
+    let furniture: Vec<Bounds> = FURNITURE_LOCAL
+        .iter()
+        .map(|bounds| Bounds {
+            min_x: bounds.min_x + dress_x,
+            max_x: bounds.max_x + dress_x,
+            min_z: bounds.min_z + dress_z,
+            max_z: bounds.max_z + dress_z,
+        })
+        .collect();
+
+    let hall = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
+        .filter(|entity| property(entity, "room").as_deref() == Some("Mixing Hall"))
+        .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
+        .next()
+        .expect("Mixing Hall floor");
+
+    for id in CORE_IDS {
+        let marker = map
+            .iter()
+            .find(|entity| {
+                classname(entity).as_deref() == Some("machine_spot")
+                    && property(entity, "id").as_deref() == Some(*id)
+            })
+            .unwrap_or_else(|| panic!("machine spot `{id}`"));
+        let (x, z) = origin_xz(marker).expect("valid machine origin");
+        // Both core models are 1.5 m wide and 0.8 m deep. Their local +Z
+        // working point matches machines::front_of: casing depth + 0.35 m.
+        let casing = Bounds {
+            min_x: x - 0.75,
+            max_x: x + 0.75,
+            min_z: z - 0.40,
+            max_z: z + 0.40,
+        };
+        let standing = Bounds {
+            min_x: x - NAV_RADIUS,
+            max_x: x + NAV_RADIUS,
+            min_z: z + 0.75 - NAV_RADIUS,
+            max_z: z + 0.75 + NAV_RADIUS,
+        };
+
+        for (what, bounds) in [("casing", casing), ("standing footprint", standing)] {
+            assert!(
+                bounds.min_x >= hall.min_x
+                    && bounds.max_x <= hall.max_x
+                    && bounds.min_z >= hall.min_z
+                    && bounds.max_z <= hall.max_z,
+                "{id} {what} leaves the Mixing Hall: {bounds:?}",
+            );
+            for occupied in &furniture {
+                assert!(
+                    !overlaps(bounds, *occupied),
+                    "{id} {what} overlaps visible Chemistry furniture: {bounds:?} vs {occupied:?}",
+                );
+            }
+        }
+    }
 }

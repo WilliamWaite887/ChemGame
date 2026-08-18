@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
+use crate::chem_world::{assess_exposure, ChemicalExposure, ExposureSource};
 use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlot, Stored};
 use crate::crew::{spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{InteractRequested, Interactable};
@@ -44,6 +45,7 @@ impl Plugin for OrderPlugin {
             RonAssetPlugin::<OrderConfig>::new(&["orders.ron"]),
         ))
         .add_message::<OrderResolved>()
+        .add_message::<ChemicalExposure>()
         .add_server_message::<ShiftSync>(Channel::Ordered)
         .init_resource::<Shift>()
         .add_systems(Startup, start_loading)
@@ -174,6 +176,15 @@ pub struct RampDef {
     pub stretch_base: f64,
     pub stretch_step: f64,
     pub stretch_cap: f64,
+    /// Clean deliveries before optional development requests may appear.
+    #[serde(default = "default_stretch_after_successes")]
+    pub stretch_after_successes: u32,
+    /// Extra time granted to an optional development request.
+    #[serde(default = "default_stretch_patience_scale")]
+    pub stretch_patience_scale: f32,
+    /// Standing lost when an optional development request is ignored.
+    #[serde(default = "default_stretch_expiry_standing")]
+    pub stretch_expiry_standing: i32,
     /// How much harder a forecast leans on the requests it names. `2.0` makes a
     /// themed request three times as likely as an untagged one.
     pub forecast_boost: f64,
@@ -199,7 +210,7 @@ pub struct RampDef {
 /// Matches `station.orders.ron`'s own default — see
 /// `RampDef::chemist_gap_scale`.
 fn default_chemist_gap_scale() -> f32 {
-    0.85
+    0.60
 }
 
 /// Matches `station.orders.ron`'s own default — see
@@ -214,6 +225,18 @@ fn default_max_active_chemist_cap() -> usize {
     3
 }
 
+fn default_stretch_after_successes() -> u32 {
+    5
+}
+
+fn default_stretch_patience_scale() -> f32 {
+    1.5
+}
+
+fn default_stretch_expiry_standing() -> i32 {
+    -1
+}
+
 impl Default for RampDef {
     fn default() -> Self {
         RampDef {
@@ -224,9 +247,12 @@ impl Default for RampDef {
             patience_floor: 80.0,
             max_active_every: 2,
             max_active_cap: 5,
-            stretch_base: 0.25,
-            stretch_step: 0.02,
-            stretch_cap: 0.4,
+            stretch_base: 0.12,
+            stretch_step: 0.01,
+            stretch_cap: 0.22,
+            stretch_after_successes: default_stretch_after_successes(),
+            stretch_patience_scale: default_stretch_patience_scale(),
+            stretch_expiry_standing: default_stretch_expiry_standing(),
             forecast_boost: 2.0,
             chemist_gap_scale: default_chemist_gap_scale(),
             max_active_per_chemist: default_max_active_per_chemist(),
@@ -436,6 +462,17 @@ impl Order {
     pub fn remaining(&self) -> f32 {
         (self.patience - self.waited).max(0.0)
     }
+}
+
+/// An optional request deliberately just beyond the lab's current capability.
+///
+/// It previews at most one dispenser tier and one unknown reaction ahead,
+/// receives extra patience, never stacks with another development request,
+/// and does not count as a botched order when ignored. The small authored
+/// standing loss preserves some urgency without making it a normal expiry.
+#[derive(Component, Clone, Copy, Serialize, Deserialize)]
+pub struct DevelopmentOrder {
+    pub expiry_standing: i32,
 }
 
 /// Marks a crew visit as secretly an antagonist's — someone after an illicit
@@ -1017,6 +1054,7 @@ fn generate_orders(
     forecast: Option<Res<CurrentForecast>>,
     mut radio: ResMut<RadioLog>,
     active: Query<&CrewMember, crate::crew::NotResident>,
+    development_orders: Query<(), With<DevelopmentOrder>>,
     chemists: Query<(), With<Chemist>>,
 ) {
     let Some(knowledge) = knowledge else {
@@ -1056,48 +1094,43 @@ fn generate_orders(
         return;
     };
 
-    // Only ask for things the chemist could plausibly produce. Without this
-    // the very first order can be a three-step chain the player has no way of
-    // knowing, which reads as the game being broken rather than hard.
+    // Required work is authored around something the lab can produce now.
+    // Development work is the bounded look ahead below, never an accidental
+    // side effect of two medicines sharing a broad treatment category.
     let makeable = knowledge.available_reagents(&db);
-    let stretch: HashSet<ReagentId> = knowledge
-        .frontier(&db)
-        .into_iter()
-        .flat_map(|id| db.reactions.get(id).product_ids())
-        .collect();
+    let development = knowledge.development_reagents(&db);
 
-    // A request is reachable the moment *any* member of its category is
-    // makeable — not only its specific reference reagent — since lenient
-    // grading means the player could satisfy it right now with a different
-    // chemical they already know.
-    let request_category = |request: &RequestDef| {
-        db.reagents
-            .id_of(&request.reagent)
-            .and_then(|id| reference_category(&db, id))
-    };
+    // Keep pool membership tied to the authored reference reagent. Grading is
+    // still lenient, but a late "best treatment" plea should not appear merely
+    // because the player knows a weaker medicine in the same category.
+    let request_reagent = |request: &RequestDef| db.reagents.id_of(&request.reagent);
+    let request_category =
+        |request: &RequestDef| request_reagent(request).and_then(|id| reference_category(&db, id));
     let in_reach: Vec<&RequestDef> = station
         .config
         .requests
         .iter()
-        .filter(|request| {
-            request_category(request).is_some_and(|cat| category_has_member_in(&db, cat, &makeable))
-        })
+        .filter(|request| request_reagent(request).is_some_and(|id| makeable.contains(&id)))
         .collect();
     let just_beyond: Vec<&RequestDef> = station
         .config
         .requests
         .iter()
         .filter(|request| {
-            request_category(request).is_some_and(|cat| category_has_member_in(&db, cat, &stretch))
+            request_reagent(request).is_some_and(|id| development.contains(&id))
+                && request_category(request)
+                    .is_some_and(|cat| !category_has_member_in(&db, cat, &makeable))
         })
         .collect();
 
-    let pool = if !just_beyond.is_empty() && rng.random_bool(rules.stretch_chance) {
-        &just_beyond
-    } else if !in_reach.is_empty() {
-        &in_reach
+    let offer_development = shift.succeeded >= station.config.ramp.stretch_after_successes
+        && development_orders.is_empty()
+        && !just_beyond.is_empty()
+        && rng.random_bool(rules.stretch_chance);
+    let (pool, is_development) = if offer_development {
+        (&just_beyond, true)
     } else {
-        &just_beyond
+        (&in_reach, false)
     };
 
     // The forecast leans on whichever pool was chosen; it never chooses for it,
@@ -1121,11 +1154,14 @@ fn generate_orders(
     let amount = deliverable_amount(&db, reagent, Units::whole(asked as i32));
 
     let mut patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
+    if is_development {
+        patience *= station.config.ramp.stretch_patience_scale.max(1.0);
+    }
     // A `CompedRound` requisition buys exactly the next order some extra
     // patience — only this ordinary stream, never `generate_specific_orders`
     // or any minor-thread visit, each of which has its own authored identity
     // that "comped by the kitchen" doesn't fit.
-    if shift.requisition.patience_bonus_orders > 0 {
+    if !is_development && shift.requisition.patience_bonus_orders > 0 {
         shift.requisition.patience_bonus_orders -= 1;
         patience += crate::shift::COMPED_PATIENCE_BONUS_SECONDS;
     }
@@ -1153,10 +1189,20 @@ fn generate_orders(
             crew_def.name, amount, want_label
         )),
     ));
+    if is_development {
+        commands.entity(crew).insert(DevelopmentOrder {
+            expiry_standing: station.config.ramp.stretch_expiry_standing.min(0),
+        });
+    }
 
     // The request goes out over the radio too, so the feed carries both halves
     // of the conversation rather than only the verdict.
-    announce_request(&mut radio, &crew_def.name, &crew_def.role, &request.plea);
+    let announced_plea = if is_development {
+        format!("Optional R&D request \u{2014} {}", request.plea)
+    } else {
+        request.plea.clone()
+    };
+    announce_request(&mut radio, &crew_def.name, &crew_def.role, &announced_plea);
 
     info!(
         "{} ({}) wants {} {}",
@@ -1171,10 +1217,8 @@ fn generate_orders(
 ///
 /// Two deliberate differences from the lenient path:
 /// - Only drawn from `in_reach` (the reference reagent itself already
-///   makeable), never `just_beyond`. A lenient stretch order can fall back to
-///   a sibling category member if the reference reagent turns out to be the
-///   unreached one; naming one exact reagent outright has no such fallback,
-///   so offering one the chemist cannot yet make at all would be a
+///   makeable), never the optional development pool. Naming one exact reagent
+///   has no fallback, so offering one the chemist cannot yet make would be a
 ///   guaranteed, unfair failure.
 /// - Uses [`RequestDef::specific_plea`] and shows the reagent's real name in
 ///   both the plea and the prompt, exactly as an antagonist's pretext does.
@@ -1308,6 +1352,7 @@ fn expire_orders(
         Has<IllicitOrder>,
         Has<CrisisOrder>,
         Has<CounterOrder>,
+        Option<&DevelopmentOrder>,
     )>,
 ) {
     // Deliberately *not* gated on `accepting_orders`. The sign stops new
@@ -1316,7 +1361,7 @@ fn expire_orders(
     // were still up.
     let dt = time.delta_secs();
 
-    for (entity, mut order, crew, mut route, illicit, crisis, counter) in &mut orders {
+    for (entity, mut order, crew, mut route, illicit, crisis, counter, development) in &mut orders {
         let kind = OrderKind::of(illicit, crisis, counter);
         // Patience only runs down once they have actually arrived, so a slow
         // walk in never counts against the player.
@@ -1345,7 +1390,9 @@ fn expire_orders(
             outcome: Outcome::Expired,
             kind,
         });
-        shift.botched += 1;
+        if development.is_none() {
+            shift.botched += 1;
+        }
         // An abandoned illicit order is not a chaos-causing success, so it
         // always falls through to the ordinary department penalty — the same
         // shape "declining isn't specially punished" takes on the delivery
@@ -1353,16 +1400,27 @@ fn expire_orders(
         // Nothing was ever delivered, so there is nothing to grade for
         // quality — `0` is inert anyway, since `reputation_delta` only ever
         // applies a potency bonus on `Success`.
-        adjust_for_role(
-            &mut shift,
-            &crew.role,
-            Outcome::Expired,
-            order.waited,
-            order.patience,
-            0,
-        );
+        if let Some(development) = development {
+            // Optional work costs a token amount of goodwill when ignored,
+            // but never receives the ordinary four-point expiry penalty.
+            if let Some(department) = Department::from_role(&crew.role) {
+                shift.adjust(department, development.expiry_standing);
+            }
+        } else {
+            adjust_for_role(
+                &mut shift,
+                &crew.role,
+                Outcome::Expired,
+                order.waited,
+                order.patience,
+                0,
+            );
+        }
 
-        commands.entity(entity).remove::<Order>();
+        commands
+            .entity(entity)
+            .remove::<Order>()
+            .remove::<DevelopmentOrder>();
         route.leave();
     }
 }
@@ -1395,6 +1453,7 @@ fn handle_delivery(
     mut requests: MessageReader<FromClient<InteractRequested>>,
     mut shift: ResMut<Shift>,
     mut resolved: MessageWriter<OrderResolved>,
+    mut exposures: MessageWriter<ChemicalExposure>,
     mut crew: Query<(
         &CrewMember,
         &Order,
@@ -1431,9 +1490,11 @@ fn handle_delivery(
             &db,
             &mut shift,
             &mut resolved,
+            &mut exposures,
             &mut knowledge,
             Handover {
                 crew: request.target,
+                actor: Some(player),
                 member,
                 order,
                 route: &mut route,
@@ -1449,6 +1510,7 @@ fn handle_delivery(
 /// One crew member, one order, one container being handed across.
 struct Handover<'a> {
     crew: Entity,
+    actor: Option<Entity>,
     member: &'a CrewMember,
     order: &'a Order,
     route: &'a mut CrewRoute,
@@ -1474,11 +1536,13 @@ fn complete_delivery(
     db: &ChemDb,
     shift: &mut Shift,
     resolved: &mut MessageWriter<OrderResolved>,
+    exposures: &mut MessageWriter<ChemicalExposure>,
     knowledge: &mut Knowledge,
     handover: Handover,
 ) -> Outcome {
     let Handover {
         crew,
+        actor,
         member,
         order,
         route,
@@ -1562,9 +1626,32 @@ fn complete_delivery(
     if let Some((recipient_body, recipient_blood)) = body {
         let mut dose = container.solution.clone();
         if dose.total_volume().is_positive() {
+            let snapshot = dose.clone();
+            let assessment = assess_exposure(
+                &snapshot,
+                Route::Ingested,
+                recipient_body,
+                recipient_blood,
+                db,
+            );
             recipient_blood
                 .0
                 .receive(&mut dose, Route::Ingested, &mut recipient_body.0, db);
+            exposures.write(ChemicalExposure {
+                actor,
+                target: crew,
+                route: Route::Ingested,
+                source: ExposureSource::Direct,
+                solution: snapshot,
+                // The crew member explicitly requested this handover. Wrong
+                // and overdosed deliveries are already graded and reported by
+                // the order system rather than counted as a second incident.
+                authorized: true,
+                helpful: assessment.helpful,
+                harmful: assessment.harmful,
+                illicit: assessment.illicit,
+                overdose: assessment.overdose,
+            });
         }
     }
 
@@ -1574,6 +1661,7 @@ fn complete_delivery(
     commands
         .entity(crew)
         .remove::<Order>()
+        .remove::<DevelopmentOrder>()
         .remove::<Interactable>()
         // Comes off with the order it marks. Both `crisis::schedule_crisis`
         // and `crisis::pulse_alert_lighting` read `Has<CrisisOrder>` as "is a
@@ -1639,6 +1727,7 @@ fn handle_window_delivery(
     db: Res<ChemDb>,
     mut shift: ResMut<Shift>,
     mut resolved: MessageWriter<OrderResolved>,
+    mut exposures: MessageWriter<ChemicalExposure>,
     mut knowledge: ResMut<Knowledge>,
     windows: Query<(Entity, &Machine)>,
     slotted: Query<(Entity, &InSlot)>,
@@ -1706,9 +1795,11 @@ fn handle_window_delivery(
             &db,
             &mut shift,
             &mut resolved,
+            &mut exposures,
             &mut knowledge,
             Handover {
                 crew: crew_entity,
+                actor: None,
                 member,
                 order,
                 route: &mut route,
@@ -1884,6 +1975,7 @@ mod tests {
             .insert_resource(ChemDb(data))
             .init_resource::<Shift>()
             .add_message::<OrderResolved>()
+            .add_message::<ChemicalExposure>()
             .add_systems(Update, handle_window_delivery);
         app
     }
@@ -2032,6 +2124,22 @@ mod tests {
 
         assert!(app.world().get::<Order>(crew).is_none());
         assert_eq!(app.world().resource::<Shift>().botched, 1);
+    }
+
+    #[test]
+    fn ignoring_optional_development_is_a_small_cost_not_a_botch() {
+        let mut app = expiry_app();
+        let crew = waiting_crew(&mut app, "Dr. Vance", "bicaridine", 10, 1.0, true);
+        app.world_mut().entity_mut(crew).insert(DevelopmentOrder {
+            expiry_standing: -1,
+        });
+
+        advance(&mut app, 1.5);
+
+        let shift = app.world().resource::<Shift>();
+        assert_eq!(shift.botched, 0);
+        assert_eq!(shift.standing(Department::Medical), -1);
+        assert!(app.world().get::<DevelopmentOrder>(crew).is_none());
     }
 
     #[test]
@@ -2707,6 +2815,79 @@ mod tests {
         let orders: Vec<&Order> = query.iter(app.world()).collect();
         assert_eq!(orders.len(), 1);
         assert_eq!(orders[0].patience, PINNED_PATIENCE);
+    }
+
+    #[test]
+    fn the_opening_run_only_asks_for_chemistry_the_lab_can_make_now() {
+        let mut app = generate_orders_app();
+        {
+            let mut station = app.world_mut().resource_mut::<StationData>();
+            station.config.ramp.stretch_base = 1.0;
+            station.config.ramp.stretch_cap = 1.0;
+        }
+
+        advance(&mut app, 1.0);
+
+        let mut orders = app.world_mut().query::<(Entity, &Order)>();
+        let (entity, reagent) = orders
+            .single(app.world())
+            .map(|(entity, order)| (entity, order.reagent))
+            .unwrap();
+        let world = app.world();
+        assert!(world
+            .resource::<Knowledge>()
+            .available_reagents(world.resource::<ChemDb>())
+            .contains(&reagent));
+        assert!(world.get::<DevelopmentOrder>(entity).is_none());
+    }
+
+    #[test]
+    fn later_development_requests_are_optional_longer_and_cannot_stack() {
+        let mut app = generate_orders_app();
+        {
+            let mut station = app.world_mut().resource_mut::<StationData>();
+            station.config.ramp.orders_per_tier = 100;
+            station.config.ramp.stretch_base = 1.0;
+            station.config.ramp.stretch_cap = 1.0;
+            station.config.ramp.stretch_after_successes = 5;
+            station.config.ramp.stretch_patience_scale = 1.5;
+        }
+        {
+            let mut shift = app.world_mut().resource_mut::<Shift>();
+            shift.succeeded = 5;
+            shift.requisition.patience_bonus_orders = 1;
+        }
+
+        advance(&mut app, 1.0);
+
+        let mut orders = app.world_mut().query::<(Entity, &Order)>();
+        let (development, order) = orders.single(app.world()).unwrap();
+        assert!(app.world().get::<DevelopmentOrder>(development).is_some());
+        assert_eq!(order.patience, PINNED_PATIENCE * 1.5);
+        assert_eq!(
+            app.world()
+                .resource::<Shift>()
+                .requisition
+                .patience_bonus_orders,
+            1,
+            "optional work must not consume a bonus bought for required work"
+        );
+
+        // Make the normal clock due again while the first opportunity is live.
+        app.world_mut().resource_mut::<OrderSpawner>().timer =
+            Timer::from_seconds(0.0, TimerMode::Once);
+        advance(&mut app, 1.0);
+
+        let mut query = app.world_mut().query::<&DevelopmentOrder>();
+        assert_eq!(query.iter(app.world()).count(), 1);
+        assert_eq!(
+            app.world()
+                .resource::<Shift>()
+                .requisition
+                .patience_bonus_orders,
+            0,
+            "the required order behind it should consume the saved bonus"
+        );
     }
 
     // -- content guardrails ----------------------------------------------

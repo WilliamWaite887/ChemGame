@@ -72,9 +72,13 @@ use crate::AppState;
 /// against, so both routes agree on the same number.
 pub const STEAM_APP_ID: u32 = 5_103_230;
 
-/// How many chemists a lab can hold — matches `ServerConfig::max_clients`
-/// on the direct/LAN transport in `net/mod.rs`.
-const MAX_CLIENTS: usize = 4;
+/// Four chemists total: one host and at most three remote clients.
+///
+/// Steam's lobby count includes its owner; the transport's client count does
+/// not. Keeping both names prevents an off-by-one fifth chemist.
+pub(super) const LOBBY_CAPACITY: usize = 4;
+pub(super) const MAX_REMOTE_CLIENTS: usize = super::MAX_REMOTE_CLIENTS;
+const _: () = assert!(MAX_REMOTE_CLIENTS + 1 == LOBBY_CAPACITY);
 
 /// The lobby currently being hosted, once Steam has actually created it.
 ///
@@ -370,13 +374,15 @@ fn prewarm_relay_network(client: Res<Client>) {
 
 fn start_hosting_steam(client: Res<Client>, mut commands: Commands) {
     let (tx, rx) = std::sync::mpsc::channel();
-    client
-        .matchmaking()
-        .create_lobby(LobbyType::FriendsOnly, MAX_CLIENTS as u32, move |result| {
+    client.matchmaking().create_lobby(
+        LobbyType::FriendsOnly,
+        LOBBY_CAPACITY as u32,
+        move |result| {
             // The receiver may already be gone if the app is shutting down;
             // nothing to do about that but drop the result.
             let _ = tx.send(result);
-        });
+        },
+    );
     commands.insert_resource(PendingLobbyCreation(Mutex::new(rx)));
     info!("opening a Steam lobby...");
 }
@@ -405,7 +411,7 @@ fn poll_lobby_creation(
         channels.client_configs(),
     ));
     let config = SteamServerConfig {
-        max_clients: MAX_CLIENTS,
+        max_clients: MAX_REMOTE_CLIENTS,
         // Only players who are in the lobby can open a connection, so an
         // invite (or a future in-app lobby list) is what actually gates who
         // can join — nobody can dial in from outside it.

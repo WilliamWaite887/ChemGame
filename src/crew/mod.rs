@@ -4,13 +4,21 @@
 //! such as the counter or a department, and navigation supplies safe doorway
 //! and corridor waypoints.
 
+use std::collections::HashSet;
+
+use bevy::ecs::entity::MapEntities;
 use bevy::prelude::*;
+use bevy_replicon::prelude::*;
+use chem_sim::StatusKind;
 use serde::{Deserialize, Serialize};
 
 use crate::body::{Bloodstream, Body, COLLAPSE_PENALTY};
+use crate::interaction::{Interactable, InteractionMode};
 use crate::lab::{MapReady, COUNTER_SPOT, DOOR_MAX_X, DOOR_MIN_X};
+use crate::machines::chemist_entity;
 use crate::net::is_authority;
 use crate::orders::{Department, Shift};
+use crate::player::Chemist;
 use crate::radio::{RadioEntry, RadioLog};
 use crate::AppState;
 
@@ -37,6 +45,9 @@ impl Plugin for CrewPlugin {
                         start_crew_at_their_department,
                         // Ambient crew decide where to be, then everyone walks.
                         populate_departments.run_if(resource_exists_and_changed::<Departments>),
+                        react_to_chemical_statuses,
+                        sync_medical_evacuation_prompt,
+                        handle_medical_evacuation,
                         ambient_behaviour,
                         walk_route,
                         handle_crew_collapse,
@@ -172,6 +183,33 @@ impl CrewRoute {
 /// which is what actually drops a crew member out of the queue, on both ends.
 #[derive(Component, Serialize, Deserialize)]
 pub struct AtCounter;
+
+/// Authority-owned indication that pressing Use on this resident requests a
+/// medical evacuation rather than delivering whatever happens to be held.
+/// Replicated so a remote chemist routes the input to the dedicated request
+/// and sees the same interaction prompt as the host.
+#[derive(Component, Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct NeedsMedicalEvacuation;
+
+/// A chemist asks Medical to remove an incapacitated resident.
+///
+/// The sender is deliberately absent. [`FromClient`] supplies the connection
+/// identity, and [`handle_medical_evacuation`] resolves that to the authority's
+/// chemist entity before validating consciousness and reach.
+#[derive(Message, Clone, Debug, Serialize, Deserialize, MapEntities)]
+pub struct EvacuateCrewRequested {
+    #[entities]
+    pub target: Entity,
+}
+
+/// Server-local copy of the prompt displaced by the temporary evacuation
+/// action. If the sedative clears first, an order or incident interaction is
+/// restored exactly; a successful evacuation despawns the complete entity and
+/// therefore cleanly terminates that prior state.
+#[derive(Component)]
+struct EvacuationPromptState {
+    previous: Option<String>,
+}
 
 fn door_x() -> f32 {
     (DOOR_MIN_X + DOOR_MAX_X) * 0.5
@@ -506,14 +544,223 @@ fn start_crew_at_their_department(
     }
 }
 
+/// Crew respond to mind/body chemistry instead of merely carrying a hidden
+/// bloodstream. Drowsy people abandon their visit, paranoid people flee, and
+/// a chemically incapacitated person remains down until the sedative clears;
+/// their already-marked leaving route then resumes toward help.
+fn react_to_chemical_statuses(
+    mut crew: Query<(&Bloodstream, &mut CrewRoute, Option<&mut Ambient>)>,
+) {
+    for (blood, mut route, ambient) in &mut crew {
+        let sedated = blood.0.status(StatusKind::Sedated).intensity > 0.0;
+        let paranoid = blood.0.status(StatusKind::Paranoid).intensity > 0.0;
+        if route.phase != CrewPhase::Leaving && (sedated || paranoid || blood.0.incapacitated()) {
+            route.leave();
+        }
+
+        // Euphoric residents linger instead of immediately resuming their
+        // station circuit: benign and social, distinct from drunken
+        // staggering or paranoia's flight response.
+        if blood.0.status(StatusKind::Euphoric).intensity > 0.0
+            && route.pending.is_none()
+            && route.index >= route.waypoints.len()
+        {
+            if let Some(mut ambient) = ambient {
+                ambient.dwell = ambient.dwell.max(2.5);
+            }
+        }
+    }
+}
+
+fn evacuation_prompt(member: &CrewMember) -> String {
+    format!("Evacuate {} to Medical", member.name)
+}
+
+/// Temporarily replaces a resident's ordinary interaction with evacuation.
+///
+/// This is authority-owned rather than inferred only in the HUD: the marker
+/// and [`Interactable`] both replicate, so a guest can focus the resident and
+/// sends the same dedicated request as the host. The displaced prompt is
+/// retained locally and restored if treatment wakes the resident first.
+fn sync_medical_evacuation_prompt(
+    mut commands: Commands,
+    mut crew: Query<(
+        Entity,
+        &CrewMember,
+        &Bloodstream,
+        Option<&mut Interactable>,
+        Option<&mut EvacuationPromptState>,
+        Has<NeedsMedicalEvacuation>,
+    )>,
+) {
+    for (entity, member, blood, interactable, state, marked) in &mut crew {
+        let needs_evacuation = blood.0.incapacitated();
+        let label = evacuation_prompt(member);
+        let mut interactable = interactable;
+
+        match (needs_evacuation, state) {
+            (true, None) => {
+                let previous = interactable.as_deref().map(|prompt| prompt.label.clone());
+                if let Some(prompt) = interactable.as_deref_mut() {
+                    prompt.label.clone_from(&label);
+                } else {
+                    commands.entity(entity).insert(Interactable::new(&label));
+                }
+                commands
+                    .entity(entity)
+                    .insert((NeedsMedicalEvacuation, EvacuationPromptState { previous }));
+            }
+            (true, Some(mut state)) => {
+                // If another system changed or removed the displaced action
+                // while the resident was down, preserve that newest truth
+                // rather than resurrecting a stale order on recovery.
+                if let Some(prompt) = interactable.as_deref_mut() {
+                    if prompt.label != label {
+                        state.previous = Some(prompt.label.clone());
+                        prompt.label.clone_from(&label);
+                    }
+                } else {
+                    state.previous = None;
+                    commands.entity(entity).insert(Interactable::new(&label));
+                }
+                if !marked {
+                    commands.entity(entity).insert(NeedsMedicalEvacuation);
+                }
+            }
+            (false, Some(state)) => {
+                if let Some(previous) = &state.previous {
+                    if let Some(prompt) = interactable.as_deref_mut() {
+                        prompt.label.clone_from(previous);
+                    } else {
+                        commands.entity(entity).insert(Interactable::new(previous));
+                    }
+                } else if interactable.is_some() {
+                    commands.entity(entity).remove::<Interactable>();
+                }
+                commands
+                    .entity(entity)
+                    .remove::<NeedsMedicalEvacuation>()
+                    .remove::<EvacuationPromptState>();
+            }
+            (false, None) if marked => {
+                // Defensive repair for a partial snapshot: without the saved
+                // prompt there is nothing safe to restore, but the action must
+                // no longer route to evacuation once the resident is awake.
+                if interactable
+                    .as_deref()
+                    .is_some_and(|prompt| prompt.label == label)
+                {
+                    commands.entity(entity).remove::<Interactable>();
+                }
+                commands.entity(entity).remove::<NeedsMedicalEvacuation>();
+            }
+            (false, None) => {}
+        }
+    }
+}
+
+/// Validates and completes a no-carry medical evacuation.
+///
+/// A client can forge the target field, so actual incapacity, sender identity,
+/// player state and physical reach are all checked again on the authority.
+/// Despawning the resident also removes any unresolved order/incident markers,
+/// which cleanly closes the displaced interaction instead of leaving a ghost
+/// queue entry behind.
+fn handle_medical_evacuation(
+    mut commands: Commands,
+    mut requests: MessageReader<FromClient<EvacuateCrewRequested>>,
+    chemists: Query<(Entity, &Chemist)>,
+    actors: Query<(&Transform, &InteractionMode, &Body, &Bloodstream), With<Chemist>>,
+    residents: Query<(&CrewMember, &Transform, &Bloodstream), With<NeedsMedicalEvacuation>>,
+    mut radio: ResMut<RadioLog>,
+) {
+    let mut evacuated = HashSet::new();
+    for request in requests.read() {
+        if evacuated.contains(&request.target) {
+            continue;
+        }
+        let Some(actor) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
+        let Ok((actor_transform, mode, body, actor_blood)) = actors.get(actor) else {
+            continue;
+        };
+        if !mode.is_roaming() || body.0.collapsed || actor_blood.0.incapacitated() {
+            continue;
+        }
+        let Ok((member, resident_transform, resident_blood)) = residents.get(request.target) else {
+            continue;
+        };
+        if !resident_blood.0.incapacitated()
+            || !crate::interaction::authority_target_in_reach(
+                actor_transform.translation,
+                resident_transform.translation,
+            )
+        {
+            continue;
+        }
+
+        evacuated.insert(request.target);
+        radio.push(RadioEntry {
+            channel: "MED".to_string(),
+            text: format!(
+                "{} was evacuated from Chemistry to Medical by lab staff.",
+                member.name
+            ),
+            good: true,
+        });
+        commands.entity(request.target).despawn();
+    }
+}
+
+/// A deterministic hesitation at the peak of motor impairment. Entity phase
+/// offsets keep a room of intoxicated residents from stepping in lockstep.
+/// The route and destination never change, so this cannot become random input
+/// loss or control inversion.
+fn crew_stride_multiplier(entity: Entity, t: f32, blood: Option<&Bloodstream>) -> f32 {
+    let Some(blood) = blood else {
+        return 1.0;
+    };
+    let instability = blood.0.motor_instability();
+    if instability <= 0.0 {
+        return 1.0;
+    }
+
+    let period = (3.8 - instability.min(4.0) * 0.5).max(1.4);
+    let offset = (entity.index().index() as f32 * 0.173).fract();
+    let phase = ((t / period) + offset).fract();
+    if (0.86..0.96).contains(&phase) {
+        (1.0 - instability * 0.28).clamp(0.25, 0.9)
+    } else {
+        1.0
+    }
+}
+
 fn walk_route(
     mut commands: Commands,
     time: Res<Time>,
     nav: Res<crate::nav::NavGraph>,
     departments: Res<Departments>,
-    mut crew: Query<(Entity, &mut Transform, &mut CrewRoute, Option<&CrewMember>)>,
+    mut crew: Query<(
+        Entity,
+        &mut Transform,
+        &mut CrewRoute,
+        Option<&CrewMember>,
+        Option<&Bloodstream>,
+    )>,
 ) {
-    for (entity, mut transform, mut route, member) in &mut crew {
+    for (entity, mut transform, mut route, member, blood) in &mut crew {
+        // Any chemical sedation stops a resident in place. Mild sedation is
+        // still drowsiness rather than incapacity, but letting that resident
+        // briskly walk home immediately after deciding to leave contradicts
+        // both the status presentation and the treatment response. Their
+        // already-marked Leaving route can resume once the sedative clears.
+        if blood.is_some_and(|blood| {
+            blood.0.status(StatusKind::Sedated).intensity > 0.0 || blood.0.incapacitated()
+        }) {
+            continue;
+        }
+
         // Turn a new destination into a path, once, the frame it is set.
         if let Some(requested_goal) = route.pending {
             // Someone leaving heads for their own department when the station
@@ -556,7 +803,9 @@ fn walk_route(
             continue;
         }
 
-        let step = to_target.normalize() * WALK_SPEED * time.delta_secs();
+        let chemistry = blood.map_or(1.0, |blood| blood.0.movement_multiplier());
+        let stumble = crew_stride_multiplier(entity, time.elapsed_secs(), blood);
+        let step = to_target.normalize() * WALK_SPEED * chemistry * stumble * time.delta_secs();
         transform.translation += step;
         // Face the direction of travel so they read as people rather than
         // sliding props.
@@ -588,7 +837,16 @@ mod tests {
                 &crate::lab::WalkableAreas::from_floor_plan(),
                 crate::nav::NAV_RADIUS,
             ))
-            .add_systems(Update, (start_crew_at_their_department, walk_route).chain());
+            .add_systems(
+                Update,
+                (
+                    start_crew_at_their_department,
+                    react_to_chemical_statuses,
+                    sync_medical_evacuation_prompt,
+                    walk_route,
+                )
+                    .chain(),
+            );
         app
     }
 
@@ -644,6 +902,408 @@ mod tests {
             at.distance(counter) < 0.5,
             "stopped {:.2}m short of the counter, at {at:?}",
             at.distance(counter),
+        );
+    }
+
+    #[test]
+    fn a_department_visitor_opens_the_shut_entrance_and_reaches_the_counter() {
+        // Regression: the automatic entrance used to disappear from the nav
+        // graph while shut. A newly scheduled visitor began at their department
+        // and could not plan close enough to trip the door sensor, so the order
+        // waited forever unless a chemist happened to approach the door first.
+        let authored = crate::lab::tb_map::authored_walkable_areas();
+        let home = crate::lab::tb_map::authored_department_home("Medical");
+
+        // Run the actual door and nav plugins. On the buggy implementation the
+        // newly spawned, closed Door collapsed `lab_entrance` during these
+        // updates and the graph rebuilt with Medical disconnected from the
+        // counter. Building an already-open graph directly would let that bug
+        // escape the test.
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_state::<AppState>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Departments>()
+            .insert_resource(authored)
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(0.05),
+            ))
+            .add_plugins((crate::nav::NavPlugin, crate::door::DoorPlugin))
+            .add_systems(
+                Update,
+                (
+                    start_crew_at_their_department,
+                    react_to_chemical_statuses,
+                    sync_medical_evacuation_prompt,
+                    walk_route,
+                )
+                    .chain()
+                    .run_if(in_state(AppState::Playing)),
+            );
+        app.finish();
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Playing);
+        // First update enters Playing and creates the Door; the following two
+        // settle Changed<Door> and any resulting navigation rebuild.
+        app.update();
+        app.update();
+        app.update();
+
+        assert!(
+            app.world()
+                .resource::<crate::nav::NavGraph>()
+                .path(home, COUNTER_SPOT)
+                .is_some(),
+            "a shut powered entrance disconnected Medical from the counter",
+        );
+        let door = {
+            let world = app.world_mut();
+            let mut doors = world.query_filtered::<Entity, With<crate::door::Door>>();
+            doors.single(world).expect("the powered lab entrance")
+        };
+        assert!(!app.world().get::<crate::door::Door>(door).unwrap().open);
+        assert!(
+            app.world().get::<crate::lab::Solid>(door).is_some(),
+            "route planning must not make the closed door non-solid to players",
+        );
+        {
+            let world = app.world_mut();
+            let mut chemists = world.query_filtered::<Entity, With<Chemist>>();
+            assert_eq!(chemists.iter(world).count(), 0, "the visitor must open it");
+        }
+
+        app.world_mut()
+            .resource_mut::<Departments>()
+            .set("Medical".into(), home);
+        let visitor = walker(
+            &mut app,
+            Vec3::new(door_x(), 0.93, spawn_z()),
+            CrewRoute::arrival(0.0),
+        );
+        app.world_mut().entity_mut(visitor).insert((
+            Body::default(),
+            Bloodstream::default(),
+            crate::orders::Order {
+                reagent: chem_sim::ReagentId(0),
+                specific: false,
+                amount: Units::whole(5),
+                plea: "Regression test order".to_string(),
+                patience: 60.0,
+                waited: 0.0,
+            },
+            Interactable::new("Tester — hand over 5u medicine"),
+        ));
+
+        app.update();
+        let planned = &app.world().get::<CrewRoute>(visitor).unwrap().waypoints;
+        let door_at = app.world().get::<Transform>(door).unwrap().translation;
+        let enters_sensor = |waypoint: &&Vec3| {
+            (waypoint.x - door_at.x).abs() < crate::lab::DOOR_WIDTH * 0.5
+                && (waypoint.z - door_at.z).abs() < 0.75
+        };
+        assert!(
+            planned
+                .iter()
+                .filter(enters_sensor)
+                .any(|at| at.z < door_at.z)
+                && planned
+                    .iter()
+                    .filter(enters_sensor)
+                    .any(|at| at.z > door_at.z),
+            "authored route did not cross both sides of the real entrance sensor: {planned:?}",
+        );
+
+        let mut opened_for_visitor = false;
+        for _ in 0..1_200 {
+            app.update();
+            opened_for_visitor |= app.world().get::<crate::door::Door>(door).unwrap().open;
+            if app.world().get::<CrewRoute>(visitor).unwrap().phase == CrewPhase::Waiting {
+                break;
+            }
+        }
+
+        let transform = app.world().get::<Transform>(visitor).unwrap();
+        assert!(
+            opened_for_visitor,
+            "the closed entrance never opened for its approaching visitor",
+        );
+        assert_eq!(
+            app.world().get::<CrewRoute>(visitor).unwrap().phase,
+            CrewPhase::Waiting,
+            "visitor remained stranded despite the powered automatic entrance",
+        );
+        assert!(
+            transform.translation.distance(Vec3::new(
+                COUNTER_SPOT.x,
+                transform.translation.y,
+                COUNTER_SPOT.z,
+            )) < 0.2,
+            "visitor stopped at {:?} instead of the delivery counter",
+            transform.translation,
+        );
+    }
+
+    #[test]
+    fn crew_walk_speed_uses_the_shared_bloodstream_modifier() {
+        let mut app = walking_app();
+        let start = Vec3::new(door_x(), 0.93, spawn_z());
+        let clear = walker(&mut app, start, CrewRoute::arrival(-0.2));
+        let slow = walker(&mut app, start, CrewRoute::arrival(0.2));
+        app.world_mut()
+            .entity_mut(clear)
+            .insert(Bloodstream::default());
+        let mut sluggish = Bloodstream::default();
+        sluggish.0.add_status(StatusKind::Sluggish, 10.0, 1.0);
+        app.world_mut().entity_mut(slow).insert(sluggish);
+
+        tick(&mut app, 0.1);
+
+        let clear_distance = app
+            .world()
+            .get::<Transform>(clear)
+            .unwrap()
+            .translation
+            .distance(start);
+        let slow_distance = app
+            .world()
+            .get::<Transform>(slow)
+            .unwrap()
+            .translation
+            .distance(start);
+        assert!(
+            clear_distance > slow_distance,
+            "the sluggish resident walked {slow_distance}m while the clear resident walked {clear_distance}m",
+        );
+    }
+
+    #[test]
+    fn sedation_marks_crew_for_removal_and_incapacitation_stops_them() {
+        let mut app = walking_app();
+        let room = crate::lab::ROOMS[crate::lab::HALL].center();
+        let start = Vec3::new(room.x, 0.93, room.z);
+        let crew = walker(&mut app, start, CrewRoute::arrival(0.0));
+        let mut blood = Bloodstream::default();
+        blood.0.add_status(StatusKind::Sedated, 10.0, 2.0);
+        app.world_mut().entity_mut(crew).insert(blood);
+
+        tick(&mut app, 0.1);
+
+        assert!(app.world().get_entity(crew).is_ok());
+        assert_eq!(
+            app.world().get::<CrewRoute>(crew).unwrap().phase,
+            CrewPhase::Leaving,
+        );
+        assert_eq!(
+            app.world().get::<Transform>(crew).unwrap().translation,
+            start,
+            "an incapacitated person must wait for removal or recovery, not walk out",
+        );
+        assert!(app.world().get::<NeedsMedicalEvacuation>(crew).is_some());
+        assert_eq!(
+            app.world().get::<Interactable>(crew).unwrap().label,
+            "Evacuate Tester to Medical",
+        );
+    }
+
+    #[test]
+    fn even_mild_sedation_stops_a_resident_in_place() {
+        let mut app = walking_app();
+        let room = crate::lab::ROOMS[crate::lab::HALL].center();
+        let start = Vec3::new(room.x, 0.93, room.z);
+        let crew = walker(&mut app, start, CrewRoute::arrival(0.0));
+        let mut blood = Bloodstream::default();
+        blood.0.add_status(StatusKind::Sedated, 10.0, 0.5);
+        app.world_mut().entity_mut(crew).insert(blood);
+
+        tick(&mut app, 0.1);
+
+        assert_eq!(
+            app.world().get::<CrewRoute>(crew).unwrap().phase,
+            CrewPhase::Leaving,
+        );
+        assert_eq!(
+            app.world().get::<Transform>(crew).unwrap().translation,
+            start,
+            "a sedated resident should stop rather than walk themselves out",
+        );
+    }
+
+    fn evacuation_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<RadioLog>()
+            .add_message::<FromClient<EvacuateCrewRequested>>()
+            .add_systems(
+                Update,
+                (sync_medical_evacuation_prompt, handle_medical_evacuation).chain(),
+            );
+        app
+    }
+
+    fn incapacitated_resident(app: &mut App, at: Vec3) -> Entity {
+        let mut blood = Bloodstream::default();
+        blood.0.add_status(StatusKind::Sedated, 10.0, 2.0);
+        app.world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Down Patient".into(),
+                    role: "Engineering".into(),
+                },
+                Transform::from_translation(at),
+                blood,
+                Interactable::new("Down Patient — hand over 5u medicine"),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn evacuation_requires_a_real_conscious_nearby_sender() {
+        let mut app = evacuation_app();
+        let client_entity = app.world_mut().spawn_empty().id();
+        let client = ClientId::Client(client_entity);
+        let chemist = app
+            .world_mut()
+            .spawn((
+                Chemist { client },
+                Transform::from_xyz(10.0, 0.93, 0.0),
+                InteractionMode::Roaming,
+                Body::default(),
+                Bloodstream::default(),
+            ))
+            .id();
+        let patient = incapacitated_resident(&mut app, Vec3::new(0.0, 0.93, 0.0));
+        app.update();
+
+        let forged = ClientId::Client(app.world_mut().spawn_empty().id());
+        app.world_mut().write_message(FromClient {
+            client_id: forged,
+            message: EvacuateCrewRequested { target: patient },
+        });
+        app.update();
+        assert!(
+            app.world().get_entity(patient).is_ok(),
+            "a request without an authority-owned chemist must do nothing",
+        );
+
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: EvacuateCrewRequested { target: patient },
+        });
+        app.update();
+        assert!(
+            app.world().get_entity(patient).is_ok(),
+            "a real chemist cannot evacuate someone from across the station",
+        );
+
+        app.world_mut()
+            .get_mut::<Transform>(chemist)
+            .unwrap()
+            .translation = Vec3::new(1.0, 0.93, 0.0);
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: EvacuateCrewRequested { target: patient },
+        });
+        app.update();
+
+        assert!(
+            app.world().get_entity(patient).is_err(),
+            "a nearby valid chemist should complete the evacuation",
+        );
+        let report = app.world().resource::<RadioLog>().entries.back().unwrap();
+        assert_eq!(report.channel, "MED");
+        assert!(report.text.contains("Down Patient was evacuated"));
+    }
+
+    #[test]
+    fn recovery_restores_the_prompt_displaced_by_evacuation() {
+        let mut app = App::new();
+        app.add_systems(Update, sync_medical_evacuation_prompt);
+        let original = "Down Patient — hand over 5u medicine";
+        let patient = incapacitated_resident(&mut app, Vec3::ZERO);
+
+        app.update();
+        assert_eq!(
+            app.world().get::<Interactable>(patient).unwrap().label,
+            "Evacuate Down Patient to Medical",
+        );
+
+        app.world_mut()
+            .get_mut::<Bloodstream>(patient)
+            .unwrap()
+            .0
+            .counter_status(StatusKind::Sedated, 100.0, 100.0);
+        app.update();
+
+        assert!(app.world().get::<NeedsMedicalEvacuation>(patient).is_none());
+        assert_eq!(
+            app.world().get::<Interactable>(patient).unwrap().label,
+            original,
+        );
+    }
+
+    #[test]
+    fn paranoia_makes_crew_flee() {
+        let mut app = walking_app();
+        let room = crate::lab::ROOMS[crate::lab::HALL].center();
+        let crew = walker(
+            &mut app,
+            Vec3::new(room.x, 0.93, room.z),
+            CrewRoute::arrival(0.0),
+        );
+        let mut blood = Bloodstream::default();
+        blood.0.add_status(StatusKind::Paranoid, 10.0, 1.0);
+        app.world_mut().entity_mut(crew).insert(blood);
+
+        tick(&mut app, 0.05);
+
+        assert_eq!(
+            app.world().get::<CrewRoute>(crew).unwrap().phase,
+            CrewPhase::Leaving,
+        );
+    }
+
+    #[test]
+    fn euphoria_makes_an_idle_resident_linger() {
+        let mut app = App::new();
+        app.add_systems(Update, react_to_chemical_statuses);
+        let mut blood = Bloodstream::default();
+        blood.0.add_status(StatusKind::Euphoric, 10.0, 1.0);
+        let resident = app
+            .world_mut()
+            .spawn((
+                blood,
+                CrewRoute {
+                    waypoints: Vec::new(),
+                    index: 0,
+                    phase: CrewPhase::Waiting,
+                    pending: None,
+                },
+                Ambient { dwell: 0.1 },
+            ))
+            .id();
+
+        app.update();
+
+        assert_eq!(app.world().get::<Ambient>(resident).unwrap().dwell, 2.5);
+    }
+
+    #[test]
+    fn motor_stumbles_use_a_repeatable_cadence() {
+        let mut app = App::new();
+        let entity = app.world_mut().spawn_empty().id();
+        let mut blood = Bloodstream::default();
+        blood.0.add_status(StatusKind::Unsteady, 10.0, 2.0);
+
+        let sample = (0..200)
+            .map(|frame| frame as f32 * 0.05)
+            .find(|t| crew_stride_multiplier(entity, *t, Some(&blood)) < 1.0)
+            .expect("the deterministic cadence should contain a stumble");
+        let first = crew_stride_multiplier(entity, sample, Some(&blood));
+        assert_eq!(first, crew_stride_multiplier(entity, sample, Some(&blood)));
+        assert!(
+            first >= 0.25,
+            "a stumble must slow, not freeze, the crew member"
         );
     }
 

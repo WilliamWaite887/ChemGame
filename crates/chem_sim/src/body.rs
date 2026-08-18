@@ -48,6 +48,13 @@ pub const COLLAPSE: Health = Units::whole(100);
 /// threshold would stand up and fall over on alternating ticks.
 pub const RECOVER: Health = Units::whole(80);
 
+/// Extra collapse headroom per point of `Stabilized` intensity.
+pub const STABILIZED_COLLAPSE_BONUS: Health = Units::whole(25);
+
+/// Extra collapse headroom per point of `Analgesic` intensity. Analgesia masks
+/// more injury than medical stabilization, but heals none of it.
+pub const ANALGESIC_COLLAPSE_BONUS: Health = Units::whole(30);
+
 /// Oxygen debt a body clears on its own each tick.
 ///
 /// Only oxygen. Brute, burn and toxin never heal without chemistry, which is
@@ -156,9 +163,90 @@ impl Bloodstream {
         self.statuses.iter().copied()
     }
 
+    /// Combined deterministic movement modifier for gameplay and crew AI.
+    pub fn movement_multiplier(&self) -> f32 {
+        self.statuses
+            .iter()
+            .fold(1.0, |speed, (kind, state)| {
+                speed * kind.movement_multiplier(state.intensity)
+            })
+            .clamp(0.0, 1.8)
+    }
+
+    /// Combined sensory distortion. The focused status offsets, but cannot
+    /// invert, other presentation effects.
+    pub fn perception_distortion(&self) -> f32 {
+        self.statuses
+            .iter()
+            .map(|(kind, state)| kind.perception_distortion(state.intensity))
+            .sum::<f32>()
+            .clamp(0.0, 5.0)
+    }
+
+    /// Scalar for deterministic stumble/drop cadence. A game layer should
+    /// warn before acting on it and must not turn it into random input loss.
+    pub fn motor_instability(&self) -> f32 {
+        self.statuses
+            .iter()
+            .map(|(kind, state)| kind.motor_instability(state.intensity))
+            .sum::<f32>()
+            .clamp(0.0, 5.0)
+    }
+
+    /// Chemical incapacitation is separate from damage collapse: when the
+    /// sedative clears the body can stand immediately if otherwise healthy.
+    pub fn incapacitated(&self) -> bool {
+        self.status(StatusKind::Sedated).intensity >= 2.0
+    }
+
+    /// The strongest sedative tier presents as apparent death while preserving
+    /// actual vitals. Zombie powder uses this; chloral hydrate does not.
+    pub fn appears_dead(&self) -> bool {
+        self.status(StatusKind::Sedated).intensity >= 3.5
+    }
+
+    /// Current damage threshold for collapse after stabilization/analgesia.
+    pub fn collapse_threshold(&self) -> Health {
+        let stabilized = self.status(StatusKind::Stabilized).intensity.max(0.0);
+        let analgesic = self.status(StatusKind::Analgesic).intensity.max(0.0);
+        COLLAPSE
+            + STABILIZED_COLLAPSE_BONUS.scaled(Units::from_f64(stabilized as f64), Units::ONE)
+            + ANALGESIC_COLLAPSE_BONUS.scaled(Units::from_f64(analgesic as f64), Units::ONE)
+    }
+
+    /// Reconciles damage collapse with status-adjusted thresholds while
+    /// retaining the same 20-point hysteresis as ordinary vitals.
+    pub fn reconcile_collapse(&self, vitals: &mut Vitals, previously_collapsed: bool) {
+        let collapse = self.collapse_threshold();
+        let recover = (collapse - (COLLAPSE - RECOVER)).clamp_non_negative();
+        vitals.collapsed = if previously_collapsed {
+            vitals.total() >= recover
+        } else {
+            vitals.total() >= collapse
+        };
+    }
+
+    /// Fraction of new radiation status blocked by potassium iodide-style
+    /// protection. Capped so overwhelming exposure still has an effect.
+    pub fn radiation_resistance(&self) -> f32 {
+        (self.status(StatusKind::RadiationShield).intensity.max(0.0) * 0.75).min(0.95)
+    }
+
+    /// Fraction of oxygen harm softened by stabilization. Dexalin applies a
+    /// stronger stabilizing status than inaprovaline.
+    pub fn oxygen_resistance(&self) -> f32 {
+        (self.status(StatusKind::Stabilized).intensity.max(0.0) * 0.25).min(0.75)
+    }
+
     /// Tops a status up. Duration accumulates; intensity takes the stronger of
     /// the two, so a second dose lasts longer without hitting harder.
     pub fn add_status(&mut self, kind: StatusKind, seconds: f32, intensity: f32) {
+        let (seconds, intensity) = if kind == StatusKind::Irradiated {
+            let landing = 1.0 - self.radiation_resistance();
+            (seconds * landing, intensity * landing)
+        } else {
+            (seconds, intensity)
+        };
         if seconds <= 0.0 && intensity <= 0.0 {
             return;
         }
@@ -246,6 +334,7 @@ impl Bloodstream {
                 }
             }
         }
+        let was_collapsed = vitals.collapsed;
         vitals.apply(contact);
 
         let destination = if route.digested() {
@@ -259,6 +348,8 @@ impl Bloodstream {
         // Only blood reacts. The stomach is a holding pen, and a reaction in
         // there would fire before the dose had a chance to be a mistake.
         let reactions = resolve(&mut self.blood, &data.reactions);
+
+        self.reconcile_collapse(vitals, was_collapsed);
 
         ExposureReport {
             absorbed,
@@ -287,7 +378,55 @@ pub struct TickReport {
     /// game layer can fire a one-off response without tracking the previous
     /// state itself.
     pub collapsed: bool,
+    /// Reagents removed early by an antitoxin this tick.
+    pub purged: Vec<(ReagentId, Units)>,
+    /// Reagents whose one-shot `after_effects` fired this tick.
+    pub after_effects: Vec<ReagentId>,
     pub reactions: ResolveReport,
+}
+
+/// Applies one data effect and returns any requested per-target purge amount.
+fn apply_effect(effect: ReagentEffect, blood: &mut Bloodstream, report: &mut TickReport) -> Units {
+    match effect {
+        ReagentEffect::Heal(kind, amount) => report.healed += Damage::of(kind, amount),
+        ReagentEffect::Harm(kind, amount) => report.harmed += Damage::of(kind, amount),
+        // Charged once on arrival, in `receive`. Nothing to do per tick.
+        ReagentEffect::Contact(..) => {}
+        ReagentEffect::Status {
+            kind,
+            seconds,
+            intensity,
+        } => blood.add_status(kind, seconds, intensity),
+        ReagentEffect::Counter {
+            kind,
+            seconds,
+            intensity,
+        } => blood.counter_status(kind, seconds, intensity),
+        ReagentEffect::Purge(amount) => return amount,
+    }
+    Units::ZERO
+}
+
+fn purge_harmful(
+    blood: &mut Bloodstream,
+    data: &ChemData,
+    amount_per_reagent: Units,
+    report: &mut TickReport,
+) {
+    if !amount_per_reagent.is_positive() {
+        return;
+    }
+    let targets: Vec<ReagentId> = blood
+        .blood
+        .iter()
+        .filter_map(|(id, volume)| data.reagents.get(id).is_harmful_at(volume).then_some(id))
+        .collect();
+    for id in targets {
+        let removed = blood.blood.remove(id, amount_per_reagent);
+        if removed.is_positive() {
+            report.purged.push((id, removed));
+        }
+    }
 }
 
 /// Runs one 2-second tick.
@@ -297,12 +436,13 @@ pub struct TickReport {
 /// 1. stomach into blood, proportionally, up to [`DIGESTION_RATE`]
 /// 2. resolve the blood — reagents react inside you
 /// 3. per reagent in id order: `effects`, plus `overdose_effects` past the
-///    threshold, plus `critical_effects` past the critical threshold
+///    threshold, plus `critical_effects` past the critical threshold; purge
+///    effects remove active harmful chemicals
 /// 4. status damage, then decay every status
-/// 5. oxygen debt recovers
-/// 6. work off each reagent's metabolism rate
+/// 5. work off metabolism, firing `after_effects` when a whole dose clears
+/// 6. apply damage/healing, oxygen recovery and status-adjusted collapse
 ///
-/// Step 6 comes last on purpose: a reagent with less left than its rate gets
+/// Step 5 follows the active effects on purpose: a reagent with less left than its rate gets
 /// one final full tick of effect before it disappears, which is what SS13 does
 /// and what stops a 0.1u remainder being silently worthless.
 pub fn metabolise(vitals: &mut Vitals, blood: &mut Bloodstream, data: &ChemData) -> TickReport {
@@ -338,24 +478,11 @@ pub fn metabolise(vitals: &mut Vitals, blood: &mut Bloodstream, data: &ChemData)
             tiers.extend(&reagent.critical_effects);
         }
 
+        let mut purge = Units::ZERO;
         for effect in tiers {
-            match *effect {
-                ReagentEffect::Heal(kind, amount) => report.healed += Damage::of(kind, amount),
-                ReagentEffect::Harm(kind, amount) => report.harmed += Damage::of(kind, amount),
-                // Charged once on arrival, in `receive`. Nothing to do per tick.
-                ReagentEffect::Contact(..) => {}
-                ReagentEffect::Status {
-                    kind,
-                    seconds,
-                    intensity,
-                } => blood.add_status(kind, seconds, intensity),
-                ReagentEffect::Counter {
-                    kind,
-                    seconds,
-                    intensity,
-                } => blood.counter_status(kind, seconds, intensity),
-            }
+            purge += apply_effect(*effect, blood, &mut report);
         }
+        purge_harmful(blood, data, purge, &mut report);
     }
 
     // 4. Status damage, then decay. Damage first, so a status that expires this
@@ -368,20 +495,40 @@ pub fn metabolise(vitals: &mut Vitals, blood: &mut Bloodstream, data: &ChemData)
     }
     blood.statuses.retain(|(_, state)| state.remaining > 0.0);
 
+    // 5. Work off the doses, then fire a reagent's comedown exactly once when
+    // neither blood nor stomach contains any of it.
+    for (id, _) in present {
+        let rate = data.reagents.get(id).rate();
+        let _ = blood.blood.remove(id, rate);
+        if blood.blood.volume_of(id).is_zero() && blood.stomach.volume_of(id).is_zero() {
+            let reagent = data.reagents.get(id);
+            if !reagent.after_effects.is_empty() {
+                report.after_effects.push(id);
+                let mut purge = Units::ZERO;
+                for effect in &reagent.after_effects {
+                    purge += apply_effect(*effect, blood, &mut report);
+                }
+                purge_harmful(blood, data, purge, &mut report);
+            }
+        }
+    }
+
+    // Stabilization softens new oxygen damage without erasing existing debt.
+    let oxygen_landing = 1.0 - blood.oxygen_resistance();
+    report.harmed.oxygen = report
+        .harmed
+        .oxygen
+        .scaled(Units::from_f64(oxygen_landing as f64), Units::ONE);
+
     vitals.heal(report.healed);
     vitals.apply(report.harmed);
 
-    // 5. Oxygen debt clears on its own.
+    // 6. Oxygen debt clears on its own.
     if vitals.damage.oxygen.is_positive() {
         vitals.heal(Damage::of(DamageKind::Oxygen, OXYGEN_RECOVERY));
     }
 
-    // 6. Work off the doses.
-    for (id, _) in present {
-        let rate = data.reagents.get(id).rate();
-        let _ = blood.blood.remove(id, rate);
-    }
-
+    blood.reconcile_collapse(vitals, was_collapsed);
     report.collapsed = vitals.collapsed && !was_collapsed;
     report
 }

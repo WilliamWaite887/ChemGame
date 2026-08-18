@@ -6,6 +6,7 @@ mod arc;
 mod audio;
 mod body;
 mod chem_data;
+mod chem_world;
 mod containers;
 mod crew;
 mod crisis;
@@ -150,6 +151,7 @@ fn main() {
         (
             player::PlayerPlugin,
             interaction::InteractionPlugin,
+            chem_world::ChemWorldPlugin,
             body::BodyPlugin,
             hazards::HazardPlugin,
             // What the chemistry above does to the camera and the

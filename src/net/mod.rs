@@ -25,12 +25,14 @@ use bevy_replicon_renet::renet::{ConnectionConfig, DisconnectReason};
 use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRenetPlugins};
 
 use crate::body::{Bloodstream, Body};
+use crate::chem_world::ChemicalPuddle;
 use crate::containers::{Container, HeldBy, InSlot, InSlotB, Stored};
-use crate::crew::{AtCounter, CrewMember};
-use crate::door::Door;
-use crate::hazards::{ActiveHazard, SmokeCloud, SmokePayload};
-use crate::machines::{Buffer, DispenseAmount, Hopper, Machine, Thermostat};
-use crate::orders::{CounterOrder, CrisisOrder, Order};
+use crate::crew::{AtCounter, CrewMember, NeedsMedicalEvacuation};
+use crate::door::{Corroded, Door};
+use crate::hazards::{ActiveHazard, SmokeCloud, SmokeOwner, SmokePayload};
+use crate::interaction::Interactable;
+use crate::machines::{AgitationRun, Buffer, DispenseAmount, Hopper, Machine, Thermostat};
+use crate::orders::{CounterOrder, CrisisOrder, DevelopmentOrder, Order};
 use crate::player::Player;
 use crate::produce::Produce;
 use crate::rogue_security::Deterrent;
@@ -39,9 +41,15 @@ use crate::AppState;
 
 pub mod steam;
 
-/// Arbitrary; both ends must agree.
-const PROTOCOL_ID: u64 = 0x43_48_45_4d_00_00_00_02;
+/// Arbitrary; both ends must agree. The low byte is an explicit schema
+/// revision so replicated chemistry additions cannot accidentally keep an old
+/// handshake compatible.
+const PROTOCOL_REVISION: u64 = 4;
+const PROTOCOL_ID: u64 = 0x43_48_45_4d_00_00_00_00 | PROTOCOL_REVISION;
 const DEFAULT_PORT: u16 = 5327;
+/// The host is a local chemist, leaving three network seats in a four-person
+/// lab. Both direct and Steam transports use this same value.
+const MAX_REMOTE_CLIENTS: usize = 3;
 
 /// How this process was launched.
 ///
@@ -55,7 +63,7 @@ pub enum LaunchMode {
     /// One chemist, no sockets. Server logic runs locally.
     #[default]
     Singleplayer,
-    /// Listen server: plays the game and accepts a second chemist.
+    /// Listen server: plays the game and accepts up to three more chemists.
     Host,
     /// Joins a lab hosted elsewhere.
     Join(SocketAddr),
@@ -508,6 +516,9 @@ fn register_replication(app: &mut App) {
         .replicate::<Stored>()
         .replicate::<Machine>()
         .replicate::<Buffer>()
+        // Carries the Mixing Chamber's otherwise non-derivable preparation
+        // provenance plus its visible batch clock.
+        .replicate::<AgitationRun>()
         .replicate::<Hopper>()
         .replicate::<DispenseAmount>()
         // `Order` used to carry a `Timer`, which is not `Serialize` — that is
@@ -515,6 +526,7 @@ fn register_replication(app: &mut App) {
         // order queue sat empty. `patience`/`waited` are plain `f32`, so it
         // can finally ride the wire like everything else here.
         .replicate::<Order>()
+        .replicate::<DevelopmentOrder>()
         // The one bit of the (deliberately server-side) `CrewRoute::phase` a
         // client's order queue HUD needs — see `crew::AtCounter`'s own doc
         // comment. Without this a joining client's queue populated with
@@ -532,6 +544,12 @@ fn register_replication(app: &mut App) {
         .replicate::<CounterOrder>()
         .replicate::<Produce>()
         .replicate::<CrewMember>()
+        // Interaction labels are gameplay affordances, not decoration: a
+        // guest cannot hand over an order or evacuate an incapacitated
+        // resident if their focus ray is unable to recognise that entity as
+        // usable. Evacuation's marker selects the dedicated request path.
+        .replicate::<Interactable>()
+        .replicate::<NeedsMedicalEvacuation>()
         // The marker itself, so a client can tell a chemist from any other
         // replicated entity and give them a body to look at.
         .replicate::<Player>()
@@ -542,11 +560,16 @@ fn register_replication(app: &mut App) {
         // writer; every peer's leaves, `Solid` and `WalkableAreas` bridge
         // follow this one bool.
         .replicate::<Door>()
+        .replicate::<Corroded>()
         // Clouds are entities, so replication carries them and no snapshot
         // message is needed — which is exactly why they are entities.
         .replicate::<SmokeCloud>()
         .replicate::<SmokePayload>()
+        .replicate::<SmokeOwner>()
         .replicate::<ActiveHazard>()
+        // Floor chemistry is shared state: composition, reach, remaining
+        // lifetime, attribution and ignition must agree for every player.
+        .replicate::<ChemicalPuddle>()
         // A chemist's condition is shared lab state too: the whole point of
         // the second pair of hands is being able to see that the first pair is
         // in trouble.
@@ -591,7 +614,9 @@ fn start_hosting(mut commands: Commands, channels: Res<RepliconChannels>) {
     });
     let config = ServerConfig {
         current_time: since_epoch,
-        max_clients: 4,
+        // The host is the first chemist; three remote clients make the
+        // supported four-person lab.
+        max_clients: MAX_REMOTE_CLIENTS,
         protocol_id: PROTOCOL_ID,
         public_addresses: public,
         authentication: ServerAuthentication::Unsecure,
@@ -848,6 +873,48 @@ mod tests {
             received.solution.volume_of(chem_sim::ReagentId(3)),
             Units::from_f64(15.25),
             "fractional units must not be rounded in transit"
+        );
+    }
+
+    #[test]
+    fn remote_clients_receive_order_and_medical_evacuation_prompts() {
+        let (mut server, mut client) = connected_pair();
+
+        server.world_mut().spawn((
+            Replicated,
+            CrewMember {
+                name: "Order Patient".into(),
+                role: "Medical".into(),
+            },
+            Interactable::new("Order Patient — hand over 5u Bicaridine"),
+        ));
+        server.world_mut().spawn((
+            Replicated,
+            CrewMember {
+                name: "Down Patient".into(),
+                role: "Engineering".into(),
+            },
+            Interactable::new("Evacuate Down Patient to Medical"),
+            NeedsMedicalEvacuation,
+        ));
+
+        settle(&mut server, &mut client);
+
+        let mut prompts = client.world_mut().query::<&Interactable>();
+        let labels: Vec<&str> = prompts
+            .iter(client.world())
+            .map(|prompt| prompt.label.as_str())
+            .collect();
+        assert!(labels.contains(&"Order Patient — hand over 5u Bicaridine"));
+        assert!(labels.contains(&"Evacuate Down Patient to Medical"));
+
+        let mut evacuation = client
+            .world_mut()
+            .query_filtered::<&Interactable, With<NeedsMedicalEvacuation>>();
+        assert_eq!(
+            evacuation.single(client.world()).unwrap().label,
+            "Evacuate Down Patient to Medical",
+            "the remote input router needs both the visible prompt and its dedicated action marker",
         );
     }
 
@@ -1180,5 +1247,13 @@ mod tests {
             AppState::Playing,
             "must reach Playing once ClientState::Connected actually fires"
         );
+    }
+
+    #[test]
+    fn chemistry_schema_and_four_person_capacity_are_pinned() {
+        assert_eq!(PROTOCOL_ID & 0xff, 4, "order schema needs revision 4");
+        assert_eq!(MAX_REMOTE_CLIENTS, 3);
+        assert_eq!(steam::LOBBY_CAPACITY, 4);
+        assert_eq!(steam::MAX_REMOTE_CLIENTS, MAX_REMOTE_CLIENTS);
     }
 }

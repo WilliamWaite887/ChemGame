@@ -41,10 +41,10 @@ use bevy_trenchbroom::prelude::*;
 use crate::AppState;
 
 use crate::crew::Departments;
-use crate::door::Door;
 
 use super::{
-    Bounds, CrisisSpots, LabLight, MapReady, Solid, WalkableAreas, LAB_ENTRANCE_BRIDGE_ID, TB_SCALE,
+    machine_kind_named, Bounds, CrisisSpots, LabLight, MachineSpots, MapReady, Solid,
+    WalkableAreas, TB_SCALE,
 };
 
 /// The only world asset allowed to replace the station's map-derived state.
@@ -174,8 +174,10 @@ pub struct Walkable {
     /// The room this covers, as shown on the HUD. Leave empty for a doorway
     /// bridge or a stretch of corridor that belongs to no room.
     pub room: String,
-    /// Stable identity for a dynamic threshold. Ordinary room and corridor
-    /// floor omit it; the exterior lab door uses `lab_entrance`.
+    /// Stable identity for a semantic threshold. Ordinary room and corridor
+    /// floor omit it; the exterior lab door uses `lab_entrance` so map
+    /// validation can prove the station has one connected entrance. Its
+    /// powered door does not remove this floor from route planning when shut.
     pub bridge_id: Option<String>,
 }
 
@@ -229,10 +231,10 @@ fn collect_loaded_map(
     roots: Query<(), With<LabMapRoot>>,
     spawner: Res<WorldInstanceSpawner>,
     walkables: Query<(&Walkable, &WalkableFootprints)>,
+    machine_spots: Query<(&MachineSpot, &Transform)>,
     department_spots: Query<(&DepartmentSpot, &Transform)>,
     crisis_spots: Query<(&CrisisSpot, &Transform)>,
     point_lights: Query<&PointLight>,
-    doors: Query<&Door>,
 ) {
     // WorldInstanceReady is global. Other scenes must never replace station
     // resources just because they contain similarly-shaped components.
@@ -241,6 +243,7 @@ fn collect_loaded_map(
     }
 
     let mut areas = WalkableAreas::default();
+    let mut machines = MachineSpots::default();
     let mut departments = Departments::default();
     let mut crises = CrisisSpots::default();
 
@@ -255,6 +258,20 @@ fn collect_loaded_map(
                 .map(str::to_string);
             for bounds in &footprints.bounds {
                 areas.push_with_bridge(*bounds, room.clone(), bridge_id.clone());
+            }
+        }
+
+        if let Ok((spot, transform)) = machine_spots.get(entity) {
+            let id = spot.id.trim();
+            let kind_name = spot.kind.trim();
+            if id.is_empty() {
+                warn!("ignoring machine_spot with an empty id");
+            } else if machines.get(id).is_some() {
+                warn!("duplicate machine_spot id '{id}'; keeping the first");
+            } else if let Some(kind) = machine_kind_named(kind_name) {
+                machines.insert(id, kind, *transform);
+            } else {
+                warn!("ignoring machine_spot '{id}' with unknown kind '{kind_name}'");
             }
         }
 
@@ -283,17 +300,12 @@ fn collect_loaded_map(
         }
     }
 
-    // The door may already be shut by the time the asset finishes loading.
-    // Fold its current state into the fresh layout before nav observes it.
-    if doors.iter().any(|door| !door.open) {
-        areas.set_bridge_blocked(LAB_ENTRANCE_BRIDGE_ID, true);
-    }
-
     // Hot reload fires another ready event while the old registry is still
     // live. Drop the gate in the same command batch as the replacements; nav
     // will restore it only after rebuilding from these areas.
     commands.remove_resource::<MapReady>();
     commands.insert_resource(areas);
+    commands.insert_resource(machines);
     commands.insert_resource(departments);
     commands.insert_resource(crises);
 }
@@ -513,6 +525,8 @@ fn glyph_rows(character: char) -> [u8; 7] {
 )]
 #[derive(Debug, Clone, Default)]
 pub struct MachineSpot {
+    /// Stable identity within the map. Kinds may repeat; ids may not.
+    pub id: String,
     /// Must match a [`MachineKind`](crate::machines::MachineKind) variant name,
     /// e.g. `ChemMaster5000`, `MixingChamber`, `ReactionChamber`.
     pub kind: String,
@@ -696,6 +710,7 @@ fn reset_map_runtime(mut commands: Commands) {
     commands.remove_resource::<MapReady>();
     commands.insert_resource(WalkableAreas::default());
     commands.insert_resource(CrisisSpots::default());
+    commands.insert_resource(MachineSpots::default());
     commands.insert_resource(Departments::default());
 }
 

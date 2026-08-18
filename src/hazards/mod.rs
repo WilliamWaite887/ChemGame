@@ -21,9 +21,10 @@ use crate::net::is_authority;
 
 use crate::body::{Bloodstream, Body, MetabolismClock};
 use crate::chem_data::ChemDb;
-use crate::containers::{Container, HeldBy};
+use crate::chem_world::{assess_exposure, order_authorizes_dose, ChemicalExposure, ExposureSource};
+use crate::containers::{Container, HeldBy, InSlot, InSlotB};
 use crate::lab::{CrisisSpots, MapReady};
-use crate::machines::ReactionsFired;
+use crate::machines::{Machine, ReactionsFired};
 use crate::radio::{RadioEntry, RadioLog};
 use crate::AppState;
 
@@ -44,6 +45,7 @@ pub struct HazardPlugin;
 impl Plugin for HazardPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(RonAssetPlugin::<HazardScript>::new(&["hazards.ron"]))
+            .add_message::<ChemicalExposure>()
             .add_server_message::<HazardFelt>(Channel::Ordered)
             .init_resource::<IncidentSchedule>()
             .init_resource::<IncidentGrace>()
@@ -309,6 +311,10 @@ pub struct SmokeCloud {
 #[derive(Component, Clone, Debug, Serialize, Deserialize)]
 pub struct SmokePayload(pub Solution);
 
+/// Who was holding the vessel when it vented, when attributable.
+#[derive(Component, Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct SmokeOwner(#[entities] pub Option<Entity>);
+
 /// Marks the rendered sphere so the interaction raycast can ignore it.
 ///
 /// Without this the whole lab becomes unusable the first time anything smokes:
@@ -348,16 +354,37 @@ pub enum HazardKind {
 /// it — the server never moves it, because `carry_held_containers` is a local
 /// presentation trick. So a beaker that goes off in your hand has to be located
 /// by finding the hand.
-fn container_position(
+fn container_context(
     container: Entity,
     transforms: &Query<&Transform>,
     held: &Query<&HeldBy>,
-) -> Option<Vec3> {
-    let holder = held.get(container).ok().map(|holder| holder.0);
-    match holder {
-        Some(player) => transforms.get(player).ok().map(|t| t.translation),
-        None => transforms.get(container).ok().map(|t| t.translation),
+    slots: &Query<&InSlot>,
+    slots_b: &Query<&InSlotB>,
+    machines: &Query<&Machine>,
+) -> Option<(Vec3, Option<Entity>)> {
+    if let Ok(holder) = held.get(container) {
+        return transforms
+            .get(holder.0)
+            .ok()
+            .map(|transform| (transform.translation, Some(holder.0)));
     }
+    let machine = slots
+        .get(container)
+        .ok()
+        .map(|slot| slot.0)
+        .or_else(|| slots_b.get(container).ok().map(|slot| slot.0));
+    if let Some(machine_entity) = machine {
+        let origin = transforms.get(machine_entity).ok()?.translation;
+        let operator = machines
+            .get(machine_entity)
+            .ok()
+            .and_then(|machine| machine.in_use_by);
+        return Some((origin, operator));
+    }
+    transforms
+        .get(container)
+        .ok()
+        .map(|transform| (transform.translation, None))
 }
 
 /// Turns reported effects into things in the room.
@@ -370,8 +397,16 @@ fn spawn_hazards(
     mut radio: ResMut<RadioLog>,
     transforms: Query<&Transform>,
     held: Query<&HeldBy>,
+    slots: Query<&InSlot>,
+    slots_b: Query<&InSlotB>,
+    machines: Query<&Machine>,
     mut containers: Query<&mut Container>,
-    mut bodies: Query<(Entity, &mut Body, &crate::player::Chemist)>,
+    mut bodies: Query<(
+        Entity,
+        &mut Body,
+        Option<&Bloodstream>,
+        &crate::player::Chemist,
+    )>,
 ) {
     for report in reports.read() {
         if report.effects.is_empty() {
@@ -391,7 +426,14 @@ fn spawn_hazards(
             }
         }
 
-        let Some(origin) = container_position(report.container, &transforms, &held) else {
+        let Some((origin, operator)) = container_context(
+            report.container,
+            &transforms,
+            &held,
+            &slots,
+            &slots_b,
+            &machines,
+        ) else {
             continue;
         };
 
@@ -408,6 +450,7 @@ fn spawn_hazards(
                     remaining: SMOKE_LIFETIME,
                 },
                 SmokePayload(payload),
+                SmokeOwner(operator),
                 Transform::from_translation(origin),
                 Visibility::default(),
                 Replicated,
@@ -427,7 +470,7 @@ fn spawn_hazards(
             }
 
             let reach = blast_radius(power);
-            for (entity, mut body, chemist) in &mut bodies {
+            for (entity, mut body, blood, chemist) in &mut bodies {
                 let Ok(transform) = transforms.get(entity) else {
                     continue;
                 };
@@ -436,7 +479,13 @@ fn spawn_hazards(
                 if damage.total().is_zero() {
                     continue;
                 }
+                let previously_collapsed = body.0.collapsed;
                 body.0.apply(damage);
+                if let Some(blood) = blood {
+                    blood
+                        .0
+                        .reconcile_collapse(&mut body.0, previously_collapsed);
+                }
                 felt.write(ToClients {
                     targets: SendTargets::Single(chemist.client),
                     message: HazardFelt {
@@ -472,20 +521,34 @@ fn expose_to_smoke(
     db: Res<ChemDb>,
     clock: Res<MetabolismClock>,
     mut felt: MessageWriter<ToClients<HazardFelt>>,
-    mut clouds: Query<(&SmokeCloud, &Transform, &mut SmokePayload)>,
+    mut clouds: Query<(
+        &SmokeCloud,
+        &Transform,
+        &mut SmokePayload,
+        Option<&SmokeOwner>,
+    )>,
     mut bodies: Query<(
+        Entity,
         &Transform,
         &mut Body,
         &mut Bloodstream,
         &crate::player::Chemist,
     )>,
     mut crew_bodies: Query<
-        (&Transform, &mut Body, &mut Bloodstream),
+        (Entity, &Transform, &mut Body, &mut Bloodstream),
         (
             With<crate::crew::CrewMember>,
             Without<crate::player::Chemist>,
         ),
     >,
+    orders: Query<(
+        &crate::orders::Order,
+        Has<crate::orders::IllicitOrder>,
+        Has<crate::orders::CrisisOrder>,
+        Has<crate::orders::CounterOrder>,
+    )>,
+    crisis_targets: Query<(), With<crate::crisis::CrisisResponse>>,
+    mut exposures: MessageWriter<ChemicalExposure>,
 ) {
     // The clock is ticked by `run_metabolism`, which is chained after this;
     // reading `just_finished` here means exposure lands on the same beat.
@@ -494,11 +557,12 @@ fn expose_to_smoke(
         return;
     }
 
-    for (cloud, cloud_transform, mut payload) in &mut clouds {
+    for (cloud, cloud_transform, mut payload, owner) in &mut clouds {
+        let owner = owner.and_then(|owner| owner.0);
         if payload.0.is_empty() {
             continue;
         }
-        for (body_transform, mut body, mut blood, chemist) in &mut bodies {
+        for (target, body_transform, mut body, mut blood, chemist) in &mut bodies {
             let distance = body_transform
                 .translation
                 .distance(cloud_transform.translation);
@@ -512,7 +576,24 @@ fn expose_to_smoke(
             }
             // Touch: 15% absorbed, half contact damage. Standing in a cloud
             // should be survivable and unpleasant, not instantly fatal.
+            let snapshot = dose.clone();
+            let assessment = assess_exposure(&snapshot, Route::Touched, &body, &blood, &db);
             blood.0.receive(&mut dose, Route::Touched, &mut body.0, &db);
+            exposures.write(ChemicalExposure {
+                actor: owner,
+                target,
+                route: Route::Touched,
+                source: ExposureSource::Smoke,
+                solution: snapshot,
+                // A cloud attributable to a chemist is consensual for either
+                // member of that chemist's team. Crew authorization is
+                // evaluated separately against their own request below.
+                authorized: owner.is_some(),
+                helpful: assessment.helpful,
+                harmful: assessment.harmful,
+                illicit: assessment.illicit,
+                overdose: assessment.overdose,
+            });
             felt.write(ToClients {
                 targets: SendTargets::Single(chemist.client),
                 message: HazardFelt {
@@ -521,7 +602,7 @@ fn expose_to_smoke(
                 },
             });
         }
-        for (body_transform, mut body, mut blood) in &mut crew_bodies {
+        for (target, body_transform, mut body, mut blood) in &mut crew_bodies {
             let distance = body_transform
                 .translation
                 .distance(cloud_transform.translation);
@@ -532,7 +613,36 @@ fn expose_to_smoke(
             if dose.total_volume().is_zero() {
                 continue;
             }
+            let snapshot = dose.clone();
+            let assessment = assess_exposure(&snapshot, Route::Touched, &body, &blood, &db);
+            let requested = orders
+                .get(target)
+                .is_ok_and(|(order, illicit, crisis, counter)| {
+                    !assessment.overdose
+                        && order_authorizes_dose(
+                            &snapshot,
+                            order,
+                            crate::orders::OrderKind::of(illicit, crisis, counter),
+                            &db,
+                        )
+                });
+            let crisis_care = crisis_targets.contains(target)
+                && assessment.helpful
+                && !assessment.illicit
+                && !assessment.overdose;
             blood.0.receive(&mut dose, Route::Touched, &mut body.0, &db);
+            exposures.write(ChemicalExposure {
+                actor: owner,
+                target,
+                route: Route::Touched,
+                source: ExposureSource::Smoke,
+                solution: snapshot,
+                authorized: owner == Some(target) || requested || crisis_care,
+                helpful: assessment.helpful,
+                harmful: assessment.harmful,
+                illicit: assessment.illicit,
+                overdose: assessment.overdose,
+            });
         }
     }
 }
@@ -655,6 +765,7 @@ mod tests {
             .init_resource::<MetabolismClock>()
             .init_resource::<Time>()
             .add_message::<ReactionsFired>()
+            .add_message::<ChemicalExposure>()
             .add_message::<ToClients<HazardFelt>>()
             .add_systems(Update, (spawn_hazards, expose_to_smoke, fade_smoke).chain());
         app
@@ -752,6 +863,43 @@ mod tests {
         let (cloud, transform) = query.iter(app.world()).next().unwrap();
         assert_eq!(cloud.radius, 2.5);
         assert_eq!(transform.translation, Vec3::new(2.0, 1.0, -1.0));
+    }
+
+    #[test]
+    fn machine_smoke_is_located_at_and_attributed_to_its_operator() {
+        let mut app = test_app();
+        let operator = app.world_mut().spawn_empty().id();
+        let machine = app
+            .world_mut()
+            .spawn((
+                Machine {
+                    kind: crate::machines::MachineKind::MixingChamber,
+                    in_use_by: Some(operator),
+                },
+                Transform::from_xyz(4.0, 0.8, -2.0),
+            ))
+            .id();
+        let beaker = beaker_at(&mut app, Vec3::new(50.0, 0.0, 50.0), &[("radium", 40)]);
+        app.world_mut().entity_mut(beaker).insert(InSlot(machine));
+        let bystander = crew_at(&mut app, Vec3::new(4.0, 0.8, -2.0));
+
+        report(&mut app, beaker, vec![ReactionEffect::Smoke(2.5)]);
+
+        let mut query = app.world_mut().query::<(&SmokeOwner, &Transform)>();
+        let (owner, transform) = query.iter(app.world()).next().unwrap();
+        assert_eq!(owner.0, Some(operator));
+        assert_eq!(transform.translation, Vec3::new(4.0, 0.8, -2.0));
+
+        one_tick(&mut app);
+        let records: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ChemicalExposure>>()
+            .drain()
+            .filter(|record| record.target == bystander)
+            .collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].actor, Some(operator));
+        assert_eq!(records[0].source, ExposureSource::Smoke);
     }
 
     #[test]

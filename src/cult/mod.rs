@@ -3,14 +3,11 @@
 //! Same shape as [`crate::obsessed`] — one recurring identity, an authored
 //! ordered chain rather than a random pool, advanced by matching the
 //! resolution's name — but the payoff is different: the final stage asks
-//! for a reagent that only exists as the product of a real, hazardous
-//! reaction (`flash_powder`, gated behind mixing aluminium, potassium and
-//! sulfur — see `chem.reactions.ron`). Making it fires a genuine
-//! `ReactionEffect::Smoke` the moment the player combines the precursors,
-//! through the entirely unmodified `Container::mutate` →
-//! `machines::ReactionsFired` → `hazards::spawn_hazards` pipeline every
-//! other reaction already uses. The danger is in *preparing* the ritual's
-//! ask, not in the hand-off — nothing here reaches into hazards at all.
+//! for a reagent that only exists as the product of real chemistry
+//! (`flash_powder`, gated behind mixing aluminium, potassium and sulfur — see
+//! `chem.reactions.ron`). Releasing it produces the reagent's genuine blinding
+//! flash through the same authority-owned world-effect path as every other
+//! spill. Nothing here reaches into hazards or special-cases the ritual ask.
 
 use bevy::prelude::*;
 use bevy_common_assets::ron::RonAssetPlugin;
@@ -617,11 +614,11 @@ mod tests {
     }
 
     #[test]
-    fn the_final_stage_reagent_actually_reacts_dangerously() {
+    fn the_final_stage_reagent_has_real_release_behavior() {
         // Proves the "real chemistry" claim in the module doc rather than
-        // trusting the RON: mixing the final stage's own reagent from base
-        // reagents through the real resolver must fire a hazardous
-        // `ReactionEffect`.
+        // trusting its prose. Flash powder is now transportable until it is
+        // released, so the hazard belongs to its product profile instead of
+        // firing as a generic reaction smoke effect while it is prepared.
         let data = data();
         let script = script();
         let last = script.stages.last().expect("at least one stage");
@@ -635,9 +632,19 @@ mod tests {
                     .any(|(id, _)| data.reagents.get(*id).key == last.reagent)
             })
             .unwrap_or_else(|| panic!("'{}' is never produced by any reaction", last.reagent));
+        let product = reaction
+            .products
+            .iter()
+            .find_map(|(id, _)| (data.reagents.get(*id).key == last.reagent).then_some(*id))
+            .expect("the reaction was selected by this product");
         assert!(
-            !reaction.effects.is_empty(),
-            "'{}' must be the product of a reaction with a real hazard effect, or the finale is all bark",
+            data.reagents
+                .get(product)
+                .world_effects
+                .iter()
+                .copied()
+                .any(chem_sim::WorldEffect::is_harmful),
+            "'{}' needs a real hazardous release effect, or the finale is all bark",
             last.reagent
         );
     }

@@ -4,8 +4,9 @@
 use std::collections::HashSet;
 
 use chem_sim::{
-    is_reacting, resolve, resolve_step, Category, ChemData, Kelvin, ReactionEffect, ReagentId,
-    Solution, Units,
+    is_reacting, is_reacting_with_activation, resolve, resolve_step, resolve_step_with_activation,
+    resolve_with_activation, Category, ChemData, Kelvin, ReactionEffect, ReactionProcess,
+    ReagentId, Solution, Units,
 };
 
 const REAGENTS_RON: &str = include_str!("../../../assets/data/chem.reagents.ron");
@@ -13,6 +14,20 @@ const REACTIONS_RON: &str = include_str!("../../../assets/data/chem.reactions.ro
 
 /// The recipes the player starts the game knowing.
 const STARTING_RECIPES: [&str; 3] = ["inaprovaline", "dylovene", "kelotane"];
+
+/// The rest of the medicines authored into the ordinary order pool. These are
+/// the staged half of the twelve-recipe service workflow.
+const ADVANCED_ORDER_RECIPES: [&str; 9] = [
+    "bicaridine",
+    "hyronalin",
+    "tricordrazine",
+    "dermaline",
+    "dexalin",
+    "arithrazine",
+    "potassium_iodide",
+    "mannitol",
+    "saline_glucose",
+];
 
 fn data() -> ChemData {
     ChemData::from_ron(REAGENTS_RON, REACTIONS_RON).expect("assets/data should load")
@@ -26,6 +41,29 @@ fn beaker(data: &ChemData, capacity: i32, contents: &[(&str, i32)]) -> Solution 
         assert!(overflow.is_zero(), "{name} overflowed the test beaker");
     }
     solution
+}
+
+/// Combines two separately prepared sides exactly as a Mixing Chamber does:
+/// capture provenance first, then transfer the complete first beaker into the
+/// second. The activation has to survive alongside the resulting solution for
+/// every timed resolver step.
+fn agitated_batch(
+    data: &ChemData,
+    capacity: i32,
+    first: &[(&str, i32)],
+    second: &[(&str, i32)],
+) -> (Solution, chem_sim::ReactionActivation) {
+    let mut source = beaker(data, capacity, first);
+    let mut destination = beaker(data, capacity, second);
+    let activation = data.reactions.activate_agitation(&source, &destination);
+    assert!(!activation.is_empty(), "prepared sides activated no recipe");
+    let source_volume = source.total_volume();
+    assert_eq!(
+        source.transfer_to(&mut destination, source_volume),
+        source_volume,
+        "the destination needs room for the complete source beaker"
+    );
+    (destination, activation)
 }
 
 /// Asserts the solution holds exactly these reagents in these amounts.
@@ -233,25 +271,24 @@ fn kelotane_from_base_reagents() {
 }
 
 #[test]
-fn bicaridine_chains_through_inaprovaline_in_one_beaker() {
+fn bicaridine_cannot_chain_through_inaprovaline_in_one_beaker() {
     let data = data();
-    // The wiki writes this as two steps only because a beaker holds 100u. The
-    // chemistry itself works in a single pot, and the resolver must handle it:
-    // inaprovaline forms first, then consumes the leftover carbon.
+    // The starter compound still forms, but no amount of waiting or clockless
+    // resolution can invent the two-beaker provenance bicaridine requires.
     let mut solution = beaker(&data, 100, &[("oxygen", 15), ("sugar", 15), ("carbon", 60)]);
 
     let report = resolve(&mut solution, &data.reactions);
 
-    assert_contents(&data, &solution, &[("bicaridine", 90)]);
+    assert_contents(&data, &solution, &[("inaprovaline", 45), ("carbon", 45)]);
     assert_eq!(
         report.fired_reactions().len(),
-        2,
-        "should have fired inaprovaline then bicaridine"
+        1,
+        "only the ambient starter recipe may fire"
     );
 }
 
 #[test]
-fn tricordrazine_needs_both_intermediates() {
+fn tricordrazine_intermediates_do_not_self_mix() {
     let data = data();
     let mut solution = beaker(
         &data,
@@ -268,13 +305,11 @@ fn tricordrazine_needs_both_intermediates() {
 
     resolve(&mut solution, &data.reactions);
 
-    // Kelotane also wants silicon and carbon; its lower priority is what keeps
-    // it from eating the ingredients before the real recipe runs.
-    assert_contents(&data, &solution, &[("tricordrazine", 180)]);
+    assert_contents(&data, &solution, &[("inaprovaline", 90), ("dylovene", 90)]);
 }
 
 #[test]
-fn dermaline_chains_through_kelotane() {
+fn dermaline_does_not_chain_through_kelotane_without_agitation() {
     let data = data();
     let mut solution = beaker(
         &data,
@@ -289,13 +324,18 @@ fn dermaline_chains_through_kelotane() {
 
     resolve(&mut solution, &data.reactions);
 
-    assert_contents(&data, &solution, &[("dermaline", 90)]);
+    assert_contents(
+        &data,
+        &solution,
+        &[("kelotane", 30), ("oxygen", 30), ("phosphorus", 30)],
+    );
 }
 
 #[test]
-fn arithrazine_resolves_a_three_step_chain() {
+fn arithrazine_requires_two_distinct_agitation_stages() {
     let data = data();
-    // dylovene -> hyronalin -> arithrazine, all in one pass.
+    // Dylovene is ambient, but neither advanced stage can acquire provenance
+    // merely because all of its eventual ingredients share one beaker.
     let mut solution = beaker(
         &data,
         300,
@@ -310,11 +350,15 @@ fn arithrazine_resolves_a_three_step_chain() {
 
     let report = resolve(&mut solution, &data.reactions);
 
-    assert_contents(&data, &solution, &[("arithrazine", 180)]);
+    assert_contents(
+        &data,
+        &solution,
+        &[("dylovene", 45), ("radium", 45), ("hydrogen", 90)],
+    );
     assert_eq!(
         report.fired_reactions().len(),
-        3,
-        "three distinct reactions"
+        1,
+        "only the ambient precursor forms"
     );
 }
 
@@ -325,9 +369,15 @@ fn dexalin_catalyst_is_required_but_not_consumed() {
     resolve(&mut without, &data.reactions);
     assert_contents(&data, &without, &[("oxygen", 60)]);
 
-    // One unit of plasma catalyses the whole beaker and survives intact.
+    // Sharing a beaker is no longer enough, even with the catalyst present.
     let mut with = beaker(&data, 100, &[("oxygen", 60), ("plasma", 1)]);
     resolve(&mut with, &data.reactions);
+    assert_contents(&data, &with, &[("oxygen", 60), ("plasma", 1)]);
+
+    // One unit of plasma on the separately prepared catalyst side unlocks the
+    // whole batch and survives intact.
+    let (mut with, activation) = agitated_batch(&data, 100, &[("oxygen", 60)], &[("plasma", 1)]);
+    resolve_with_activation(&mut with, &data.reactions, &activation);
     assert_contents(&data, &with, &[("dexalin", 30), ("plasma", 1)]);
 }
 
@@ -368,15 +418,11 @@ fn partial_ingredients_leave_the_remainder_behind() {
 }
 
 #[test]
-fn leftover_reagents_keep_reacting_and_contaminate_the_result() {
+fn leftover_reagents_cannot_activate_an_advanced_recipe() {
     let data = data();
-    // Short on sugar, so only 5u of inaprovaline forms — and then the 10u of
-    // carbon still sitting in the beaker converts most of it onward into
-    // bicaridine. The chemist asked for one thing and has made three.
-    //
-    // This is the mess the order system grades as a partial delivery, so it is
-    // worth pinning down: sloppy ratios produce contaminated output rather
-    // than simply less output.
+    // Short on sugar, so only 5-of-ratio of inaprovaline forms. Carbon left in
+    // the same beaker is contamination, not a substitute for the separately
+    // prepared side bicaridine requires.
     let mut solution = beaker(&data, 100, &[("oxygen", 15), ("carbon", 15), ("sugar", 5)]);
 
     resolve(&mut solution, &data.reactions);
@@ -384,7 +430,7 @@ fn leftover_reagents_keep_reacting_and_contaminate_the_result() {
     assert_contents(
         &data,
         &solution,
-        &[("bicaridine", 20), ("inaprovaline", 5), ("oxygen", 10)],
+        &[("inaprovaline", 15), ("carbon", 10), ("oxygen", 10)],
     );
 }
 
@@ -762,6 +808,62 @@ fn unknown_reagents_in_reactions_are_rejected() {
     assert!(ChemData::from_ron(reagents, reactions).is_err());
 }
 
+#[test]
+fn agitation_sides_must_exactly_partition_recipe_inputs_regardless_of_order() {
+    let reagents = r#"[
+        (id: "a", name: "A", color: (1.0, 0.0, 0.0)),
+        (id: "b", name: "B", color: (0.0, 1.0, 0.0)),
+        (id: "c", name: "C", color: (0.0, 0.0, 1.0)),
+        (id: "d", name: "D", color: (1.0, 1.0, 1.0)),
+    ]"#;
+    // Side A deliberately lists B before A. Definition order has no bearing
+    // on validation; the totals and ratios do.
+    let valid = r#"[
+        (id: "mix", reactants: [("a", 2), ("b", 1)], catalysts: [("c", 1)],
+         products: [("d", 1)], process: Agitated(
+             side_a: [("b", 1), ("a", 2)], side_b: [("c", 1)])),
+    ]"#;
+    assert!(ChemData::from_ron(reagents, valid).is_ok());
+
+    let wrong_ratio = r#"[
+        (id: "mix", reactants: [("a", 2), ("b", 1)], catalysts: [("c", 1)],
+         products: [("d", 1)], process: Agitated(
+             side_a: [("a", 1), ("b", 1)], side_b: [("c", 1)])),
+    ]"#;
+    assert!(ChemData::from_ron(reagents, wrong_ratio).is_err());
+}
+
+#[test]
+fn agitation_matching_is_ratio_aware_order_independent_and_reversible() {
+    let data = data();
+    let saline = data.reactions.find("saline_glucose").unwrap().id;
+    // The Solution sorts by reagent id, so this insertion order intentionally
+    // differs from the authored side. Matching uses identities and exact
+    // fixed-point ratios rather than vector position.
+    let side_a = beaker(&data, 100, &[("water", 5), ("saltwater", 10)]);
+    let side_b = beaker(&data, 100, &[("sugar", 5)]);
+    assert!(data
+        .reactions
+        .activate_agitation(&side_a, &side_b)
+        .contains(saline));
+    assert!(data
+        .reactions
+        .activate_agitation(&side_b, &side_a)
+        .contains(saline));
+
+    let wrong_ratio = beaker(&data, 100, &[("water", 6), ("saltwater", 10)]);
+    assert!(!data
+        .reactions
+        .activate_agitation(&wrong_ratio, &side_b)
+        .contains(saline));
+
+    let everything = beaker(&data, 100, &[("water", 5), ("saltwater", 10), ("sugar", 5)]);
+    assert!(data
+        .reactions
+        .activate_agitation(&everything, &Solution::unbounded())
+        .is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // Data and progression guardrails
 // ---------------------------------------------------------------------------
@@ -773,6 +875,219 @@ fn seed_data_loads_completely() {
     assert_eq!(data.reactions.len(), 41);
     for recipe in STARTING_RECIPES {
         assert!(data.reactions.find(recipe).is_some(), "missing {recipe}");
+    }
+}
+
+#[test]
+fn order_medicines_have_the_authored_process_and_four_to_eight_second_batches() {
+    let data = data();
+    for starter in STARTING_RECIPES {
+        let reaction = data.reactions.find(starter).unwrap();
+        assert!(matches!(reaction.process, ReactionProcess::Ambient));
+        assert_eq!(reaction.rate, None, "{starter} must remain instant");
+    }
+
+    // The smallest and largest deliverable quantities from station.orders.ron.
+    // Testing both ends catches a clock that only happens to fit at one order
+    // size, and exercises each recipe's actual yield ratio rather than
+    // assuming every medicine is a 1:1 -> 2 reaction.
+    let advanced = [
+        ("bicaridine", 8.0, 14.0),
+        ("hyronalin", 20.0, 30.0),
+        ("tricordrazine", 30.0, 40.0),
+        ("dermaline", 6.0, 9.0),
+        ("dexalin", 12.0, 20.0),
+        ("arithrazine", 20.0, 30.0),
+        ("potassium_iodide", 20.0, 30.0),
+        ("mannitol", 10.0, 15.0),
+        ("saline_glucose", 40.0, 50.0),
+    ];
+    for (key, smallest_order, largest_order) in advanced {
+        let reaction = data.reactions.find(key).unwrap();
+        let ReactionProcess::Agitated { side_a, side_b } = &reaction.process else {
+            panic!("{key} must require agitation");
+        };
+        assert!(!side_a.is_empty() && !side_b.is_empty());
+        let rate = reaction.rate.expect("agitated order medicine needs a rate");
+        let product_ratio = reaction
+            .products
+            .iter()
+            .find_map(|(id, amount)| (data.reagents.get(*id).key == key).then_some(*amount))
+            .expect("medicine reaction should make its namesake");
+        for ordered_units in [smallest_order, largest_order] {
+            let seconds = ordered_units / product_ratio.as_f64() / rate.as_f64();
+            assert!(
+                (4.0..=8.0).contains(&seconds),
+                "{key}'s {ordered_units}u order batch takes {seconds:.2}s"
+            );
+        }
+    }
+}
+
+#[test]
+fn exactly_the_nine_advanced_order_recipes_require_agitation() {
+    let data = data();
+    let mut actual: Vec<&str> = data
+        .reactions
+        .iter()
+        .filter(|reaction| matches!(reaction.process, ReactionProcess::Agitated { .. }))
+        .map(|reaction| reaction.key.as_str())
+        .collect();
+    let mut expected = ADVANCED_ORDER_RECIPES.to_vec();
+    actual.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn ordinary_direct_pouring_cannot_activate_any_advanced_order_recipe() {
+    let data = data();
+
+    for key in ADVANCED_ORDER_RECIPES {
+        let reaction = data.reactions.find(key).unwrap();
+        let ReactionProcess::Agitated { side_a, side_b } = &reaction.process else {
+            panic!("{key} must be agitated");
+        };
+        let mut combined = Solution::new(Units::whole(300));
+        for &(reagent, amount) in side_a.iter().chain(side_b) {
+            let overflow = combined.add(reagent, amount * 5);
+            assert!(overflow.is_zero());
+        }
+
+        let report = resolve(&mut combined, &data.reactions);
+        let product = reaction.products[0].0;
+        assert_eq!(
+            combined.volume_of(product),
+            Units::ZERO,
+            "putting both prepared sides directly into one beaker formed {key}"
+        );
+        assert!(
+            !report.fired_reactions().contains(&reaction.id),
+            "ordinary resolution forged provenance for {key}"
+        );
+    }
+}
+
+#[test]
+fn staged_order_recipes_preserve_yield_catalysts_contamination_and_report_discovery() {
+    let data = data();
+    let contaminant = data.reagent("plant_fibre");
+
+    for key in ADVANCED_ORDER_RECIPES {
+        let reaction = data.reactions.find(key).unwrap();
+        let ReactionProcess::Agitated { side_a, side_b } = &reaction.process else {
+            panic!("{key} must be agitated");
+        };
+        let mut source = Solution::new(Units::whole(300));
+        let mut destination = Solution::new(Units::whole(300));
+        for &(reagent, amount) in side_a {
+            assert!(source.add(reagent, amount * 5).is_zero());
+        }
+        for &(reagent, amount) in side_b {
+            assert!(destination.add(reagent, amount * 5).is_zero());
+        }
+        assert!(source.add(contaminant, Units::ONE).is_zero());
+
+        let activation = data.reactions.activate_agitation(&source, &destination);
+        assert!(activation.contains(reaction.id), "{key} did not activate");
+        let source_volume = source.total_volume();
+        assert_eq!(
+            source.transfer_to(&mut destination, source_volume),
+            source_volume
+        );
+        let report = resolve_with_activation(&mut destination, &data.reactions, &activation);
+
+        assert!(
+            report.fired_reactions().contains(&reaction.id),
+            "{key} did not report its reaction id for recipe discovery"
+        );
+        for &(reagent, _) in &reaction.reactants {
+            assert_eq!(
+                destination.volume_of(reagent),
+                Units::ZERO,
+                "{key} left a limiting reactant behind"
+            );
+        }
+        for &(catalyst, required) in &reaction.catalysts {
+            assert_eq!(
+                destination.volume_of(catalyst),
+                required * 5,
+                "{key} consumed its catalyst"
+            );
+        }
+        for &(product, amount) in &reaction.products {
+            assert_eq!(
+                destination.volume_of(product),
+                amount * 5,
+                "{key} changed its authored yield"
+            );
+        }
+        assert_eq!(
+            destination.volume_of(contaminant),
+            Units::ONE,
+            "{key} silently removed contamination"
+        );
+    }
+}
+
+#[test]
+fn all_nine_order_medicines_declare_the_expected_preparation_sides() {
+    let data = data();
+    let expected = vec![
+        ("bicaridine", vec![("inaprovaline", 1)], vec![("carbon", 1)]),
+        ("hyronalin", vec![("dylovene", 1)], vec![("radium", 1)]),
+        (
+            "tricordrazine",
+            vec![("inaprovaline", 1)],
+            vec![("dylovene", 1)],
+        ),
+        (
+            "dermaline",
+            vec![("kelotane", 1)],
+            vec![("oxygen", 1), ("phosphorus", 1)],
+        ),
+        ("dexalin", vec![("oxygen", 2)], vec![("plasma", 1)]),
+        ("arithrazine", vec![("hyronalin", 1)], vec![("hydrogen", 1)]),
+        (
+            "potassium_iodide",
+            vec![("potassium", 1)],
+            vec![("iodine", 1)],
+        ),
+        (
+            "mannitol",
+            vec![("hydrogen", 2), ("water", 2)],
+            vec![("sugar", 2)],
+        ),
+        (
+            "saline_glucose",
+            vec![("saltwater", 2), ("water", 1)],
+            vec![("sugar", 1)],
+        ),
+    ];
+
+    for (key, expected_a, expected_b) in expected {
+        let reaction = data.reactions.find(key).unwrap();
+        let ReactionProcess::Agitated { side_a, side_b } = &reaction.process else {
+            panic!("{key} must be agitated");
+        };
+        let named = |side: &[(ReagentId, Units)]| {
+            let mut values: Vec<(String, Units)> = side
+                .iter()
+                .map(|(id, amount)| (data.reagents.get(*id).key.clone(), *amount))
+                .collect();
+            values.sort();
+            values
+        };
+        let expected_named = |side: Vec<(&str, i32)>| {
+            let mut values: Vec<(String, Units)> = side
+                .into_iter()
+                .map(|(name, amount)| (name.to_string(), Units::whole(amount)))
+                .collect();
+            values.sort();
+            values
+        };
+        assert_eq!(named(side_a), expected_named(expected_a), "{key} side A");
+        assert_eq!(named(side_b), expected_named(expected_b), "{key} side B");
     }
 }
 
@@ -1019,29 +1334,35 @@ fn a_recipe_with_no_rate_finishes_inside_a_single_step() {
 
 #[test]
 fn a_rated_recipe_takes_its_authored_time() {
-    // Bicaridine is `rate: 5`, so 10u of each reactant — a scale of 10 —
-    // should take two seconds and arrive as 20u of product.
+    // Bicaridine is `rate: 1`, so the smallest ordered batch — 4u of each
+    // reactant, producing 8u — takes four seconds.
     let data = data();
-    let mut solution = beaker(&data, 50, &[("inaprovaline", 10), ("carbon", 10)]);
+    let (mut solution, activation) =
+        agitated_batch(&data, 50, &[("inaprovaline", 4)], &[("carbon", 4)]);
 
-    let first = resolve_step(&mut solution, &data.reactions, 0.5);
+    let first = resolve_step_with_activation(&mut solution, &data.reactions, 0.5, &activation);
     assert!(first.reacted());
     assert_eq!(
         solution.volume_of(data.reagent("bicaridine")),
-        Units::whole(5),
-        "half a second at 5/s is a scale of 2.5, which is 5u of product"
+        Units::whole(1),
+        "half a second at 1/s is a scale of 0.5, which is 1u of product"
     );
     assert!(
         solution.volume_of(data.reagent("carbon")).is_positive(),
         "the batch is not finished, so there is still carbon left"
     );
 
-    // Three more half-seconds finishes it, and a fourth finds nothing to do.
-    for _ in 0..3 {
-        assert!(resolve_step(&mut solution, &data.reactions, 0.5).reacted());
+    // Seven more half-seconds finish it, and a ninth finds nothing to do.
+    for _ in 0..7 {
+        assert!(
+            resolve_step_with_activation(&mut solution, &data.reactions, 0.5, &activation)
+                .reacted()
+        );
     }
-    assert_contents(&data, &solution, &[("bicaridine", 20)]);
-    assert!(!resolve_step(&mut solution, &data.reactions, 0.5).reacted());
+    assert_contents(&data, &solution, &[("bicaridine", 8)]);
+    assert!(
+        !resolve_step_with_activation(&mut solution, &data.reactions, 0.5, &activation).reacted()
+    );
 }
 
 #[test]
@@ -1057,8 +1378,8 @@ fn a_step_of_zero_runs_the_instant_chemistry_and_leaves_the_slow_alone() {
         report.reacted(),
         "inaprovaline is instant and must still run"
     );
-    // Inaprovaline formed; the bicaridine it now enables did not, because that
-    // one is rated and zero seconds have passed.
+    // Inaprovaline formed; the leftover carbon cannot make bicaridine because
+    // no separate preparation sides were agitated.
     assert_contents(&data, &solution, &[("inaprovaline", 15), ("carbon", 10)]);
 }
 
@@ -1069,13 +1390,14 @@ fn a_rated_reaction_spends_its_allowance_once_per_step_not_once_per_pass() {
     // would simply be picked again next pass and run its whole per-step
     // allowance over a hundred times — a rate that silently does nothing.
     let data = data();
-    let mut solution = beaker(&data, 100, &[("inaprovaline", 30), ("carbon", 30)]);
+    let (mut solution, activation) =
+        agitated_batch(&data, 100, &[("inaprovaline", 30)], &[("carbon", 30)]);
 
-    resolve_step(&mut solution, &data.reactions, 0.1);
+    resolve_step_with_activation(&mut solution, &data.reactions, 0.1, &activation);
     assert_eq!(
         solution.volume_of(data.reagent("bicaridine")),
-        Units::whole(1),
-        "a tenth of a second at 5/s is a scale of 0.5, so 1u of product"
+        Units::from_f64(0.2),
+        "a tenth of a second at 1/s is a scale of 0.1, so 0.2u of product"
     );
 }
 
@@ -1084,26 +1406,28 @@ fn a_rated_reaction_always_creeps_forward_however_short_the_frame() {
     // Rounded honestly, a scale of 5/s over a 1/1000s frame is zero — and a
     // reaction that advances by zero never finishes, on fast machines only.
     let data = data();
-    let mut solution = beaker(&data, 50, &[("inaprovaline", 10), ("carbon", 10)]);
+    let (mut solution, activation) =
+        agitated_batch(&data, 50, &[("inaprovaline", 10)], &[("carbon", 10)]);
 
-    let report = resolve_step(&mut solution, &data.reactions, 0.001);
+    let report = resolve_step_with_activation(&mut solution, &data.reactions, 0.001, &activation);
     assert!(report.reacted());
     assert!(solution.volume_of(data.reagent("bicaridine")).is_positive());
 }
 
 #[test]
-fn resolve_is_resolve_step_with_no_clock() {
-    // `Bloodstream::receive` and `metabolise` both go through `resolve`, and
-    // must keep doing chemistry instantly however the lab's glassware behaves:
-    // a bloodstream is not somewhere a chemist can stand and watch a beaker.
+fn activated_resolve_is_activated_step_with_no_clock() {
+    // Headless callers can still opt into an activated recipe without
+    // modelling wall-clock time. The ordinary `resolve` intentionally cannot.
     let data = data();
 
-    let mut instant = beaker(&data, 50, &[("inaprovaline", 10), ("carbon", 10)]);
-    resolve(&mut instant, &data.reactions);
+    let (mut instant, activation) =
+        agitated_batch(&data, 50, &[("inaprovaline", 10)], &[("carbon", 10)]);
+    resolve_with_activation(&mut instant, &data.reactions, &activation);
     assert_contents(&data, &instant, &[("bicaridine", 20)]);
 
-    let mut stepped = beaker(&data, 50, &[("inaprovaline", 10), ("carbon", 10)]);
-    resolve_step(&mut stepped, &data.reactions, f32::INFINITY);
+    let (mut stepped, activation) =
+        agitated_batch(&data, 50, &[("inaprovaline", 10)], &[("carbon", 10)]);
+    resolve_step_with_activation(&mut stepped, &data.reactions, f32::INFINITY, &activation);
     assert_contents(&data, &stepped, &[("bicaridine", 20)]);
 }
 
@@ -1133,15 +1457,25 @@ fn nothing_that_releases_heat_is_rated() {
 
 #[test]
 fn a_finished_batch_stops_reading_as_a_running_one() {
-    // `is_reacting` is what the panel and the delivery window both ask, on the
-    // authority and on a guest alike. It has to go false the moment the batch
-    // is actually done, or a finished beaker sits in the window forever.
+    // The Mixing Chamber keeps the activation token until its paired
+    // completion query goes false.
     let data = data();
-    let mut solution = beaker(&data, 50, &[("inaprovaline", 10), ("carbon", 10)]);
-    assert!(is_reacting(&solution, &data.reactions));
-
-    while resolve_step(&mut solution, &data.reactions, 0.5).reacted() {}
+    let (mut solution, activation) =
+        agitated_batch(&data, 50, &[("inaprovaline", 10)], &[("carbon", 10)]);
     assert!(!is_reacting(&solution, &data.reactions));
+    assert!(is_reacting_with_activation(
+        &solution,
+        &data.reactions,
+        &activation
+    ));
+
+    while resolve_step_with_activation(&mut solution, &data.reactions, 0.5, &activation).reacted() {
+    }
+    assert!(!is_reacting_with_activation(
+        &solution,
+        &data.reactions,
+        &activation
+    ));
     assert_contents(&data, &solution, &[("bicaridine", 20)]);
 }
 

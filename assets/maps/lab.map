@@ -1439,14 +1439,32 @@
 // entity 12
 {
 "classname" "machine_spot"
-"origin" "202 160 0"
+"origin" "202 216 0"
+"id" "dispenser.a"
 "kind" "ChemMaster5000"
 "angles" "0 0 0"
 }
 // entity 13
 {
 "classname" "machine_spot"
-"origin" "202 -60 0"
+"origin" "202 88 0"
+"id" "mixer.a"
+"kind" "MixingChamber"
+"angles" "0 0 0"
+}
+// duplicate core lane
+{
+"classname" "machine_spot"
+"origin" "202 -56 0"
+"id" "dispenser.b"
+"kind" "ChemMaster5000"
+"angles" "0 0 0"
+}
+// duplicate core lane
+{
+"classname" "machine_spot"
+"origin" "202 -216 0"
+"id" "mixer.b"
 "kind" "MixingChamber"
 "angles" "0 0 0"
 }
@@ -1454,6 +1472,7 @@
 {
 "classname" "machine_spot"
 "origin" "-222 160 0"
+"id" "grinder.main"
 "kind" "Grinder"
 "angles" "0 180 0"
 }
@@ -1461,6 +1480,7 @@
 {
 "classname" "machine_spot"
 "origin" "202 -420 0"
+"id" "analyzer.main"
 "kind" "Analyzer"
 "angles" "0 0 0"
 }
@@ -1468,6 +1488,7 @@
 {
 "classname" "machine_spot"
 "origin" "-184 -160 0"
+"id" "delivery.main"
 "kind" "DeliveryWindow"
 "angles" "0 180 0"
 }
@@ -1475,6 +1496,7 @@
 {
 "classname" "machine_spot"
 "origin" "-20 -284 0"
+"id" "board.main"
 "kind" "StandingBoard"
 "angles" "0 -90 0"
 }
@@ -1482,6 +1504,7 @@
 {
 "classname" "machine_spot"
 "origin" "140 518 0"
+"id" "reactor.main"
 "kind" "ReactionChamber"
 "angles" "0 90 0"
 }
@@ -1489,6 +1512,7 @@
 {
 "classname" "machine_spot"
 "origin" "-98 60 0"
+"id" "locker.main"
 "kind" "Locker"
 "angles" "0 0 0"
 }

@@ -1,5 +1,7 @@
 //! Reaction definitions.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::reagent::{ReagentId, ReagentRegistry};
@@ -35,6 +37,76 @@ pub enum ReactionEffect {
     Explosion(f32),
 }
 
+/// How a recipe is allowed to begin in the lab.
+///
+/// Most chemistry is [`Ambient`](Self::Ambient): as soon as all ingredients
+/// share a solution, the normal resolver may run it.  An
+/// [`Agitated`](Self::Agitated) recipe is deliberately different. Its two
+/// declared sides must exist in two separate solutions immediately before a
+/// Mixing Chamber combines them. That pre-combination fact cannot be inferred
+/// from the combined liquid, so [`ReactionSet::activate_agitation`] captures it
+/// as a short-lived [`ReactionActivation`].
+///
+/// Amounts are preparation ratios as well as minimum amounts. Listing them
+/// here, rather than only listing reagent names, makes catalysts such as the
+/// plasma in dexalin explicit in the reference-book data.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum ReactionProcessDef {
+    #[default]
+    Ambient,
+    Agitated {
+        side_a: Vec<(String, Units)>,
+        side_b: Vec<(String, Units)>,
+    },
+}
+
+/// A resolved [`ReactionProcessDef`].
+///
+/// Reagent names have become ids, so the game can inspect preparation sides
+/// without doing string lookups every frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReactionProcess {
+    Ambient,
+    Agitated {
+        side_a: Vec<(ReagentId, Units)>,
+        side_b: Vec<(ReagentId, Units)>,
+    },
+}
+
+impl ReactionProcess {
+    pub fn is_ambient(&self) -> bool {
+        matches!(self, Self::Ambient)
+    }
+}
+
+/// Proof that one or more agitated recipes had their two sides prepared in
+/// separate solutions.
+///
+/// This token is intentionally independent of a [`Solution`]. The game layer
+/// creates it *before* transferring one Mixing Chamber beaker into the other,
+/// stores it alongside the destination beaker while the batch is running, and
+/// discards it when no activated reaction remains. Merely pouring the same
+/// ingredients together never creates the token and therefore never unlocks
+/// an agitated recipe.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReactionActivation {
+    reactions: Vec<ReactionId>,
+}
+
+impl ReactionActivation {
+    pub fn is_empty(&self) -> bool {
+        self.reactions.is_empty()
+    }
+
+    pub fn contains(&self, reaction: ReactionId) -> bool {
+        self.reactions.contains(&reaction)
+    }
+
+    pub fn reactions(&self) -> impl Iterator<Item = ReactionId> + '_ {
+        self.reactions.iter().copied()
+    }
+}
+
 /// A reaction as written in `assets/data/reactions.ron`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReactionDef {
@@ -47,6 +119,10 @@ pub struct ReactionDef {
     #[serde(default)]
     pub catalysts: Vec<(String, Units)>,
     pub products: Vec<(String, Units)>,
+    /// Defaults to ordinary in-solution chemistry for compatibility with all
+    /// reaction data written before staged mixing existed.
+    #[serde(default)]
+    pub process: ReactionProcessDef,
     #[serde(default)]
     pub min_temp: Option<Kelvin>,
     #[serde(default)]
@@ -92,6 +168,7 @@ pub struct Reaction {
     pub reactants: Vec<(ReagentId, Units)>,
     pub catalysts: Vec<(ReagentId, Units)>,
     pub products: Vec<(ReagentId, Units)>,
+    pub process: ReactionProcess,
     pub min_temp: Option<Kelvin>,
     pub max_temp: Option<Kelvin>,
     pub overheat_temp: Option<Kelvin>,
@@ -235,6 +312,13 @@ impl ReactionSet {
         let reactants = resolve(&def.reactants)?;
         let catalysts = resolve(&def.catalysts)?;
         let products = resolve(&def.products)?;
+        let process = match &def.process {
+            ReactionProcessDef::Ambient => ReactionProcess::Ambient,
+            ReactionProcessDef::Agitated { side_a, side_b } => ReactionProcess::Agitated {
+                side_a: resolve(side_a)?,
+                side_b: resolve(side_b)?,
+            },
+        };
 
         if reactants.is_empty() {
             return Err(ChemDataError::NoReactants { reaction: def.id });
@@ -242,6 +326,7 @@ impl ReactionSet {
         if products.is_empty() {
             return Err(ChemDataError::NoProducts { reaction: def.id });
         }
+        validate_process(&def.id, &reactants, &catalysts, &process)?;
 
         let id = ReactionId(self.reactions.len() as u32);
         self.reactions.push(Reaction {
@@ -250,6 +335,7 @@ impl ReactionSet {
             reactants,
             catalysts,
             products,
+            process,
             min_temp: def.min_temp,
             max_temp: def.max_temp,
             overheat_temp: def.overheat_temp,
@@ -282,6 +368,34 @@ impl ReactionSet {
         self.reactions.iter().find(|r| r.key == key)
     }
 
+    /// Captures every agitated recipe whose declared sides are present in two
+    /// separate solutions.
+    ///
+    /// Orientation is deliberately ignored. `side_a` and `side_b` describe
+    /// recipe preparation groups, not physical slot names, so both "A -> B"
+    /// and "B -> A" controls on a Mixing Chamber behave identically. Extra
+    /// reagents are allowed (and remain contamination); each declared amount
+    /// still has to be present on its own side.
+    ///
+    /// Call this before transferring either solution. The returned token is
+    /// then passed to [`crate::resolve_step_with_activation`] while the
+    /// combined batch runs.
+    pub fn activate_agitation(&self, first: &Solution, second: &Solution) -> ReactionActivation {
+        let reactions = self
+            .reactions
+            .iter()
+            .filter_map(|reaction| {
+                let ReactionProcess::Agitated { side_a, side_b } = &reaction.process else {
+                    return None;
+                };
+                let forward = side_matches(first, side_a) && side_matches(second, side_b);
+                let reversed = side_matches(first, side_b) && side_matches(second, side_a);
+                (forward || reversed).then_some(reaction.id)
+            })
+            .collect();
+        ReactionActivation { reactions }
+    }
+
     /// The reaction that produces `reagent` as one of its products, if any.
     ///
     /// Returns the first match if more than one reaction claims the same
@@ -296,12 +410,74 @@ impl ReactionSet {
     }
 }
 
+fn side_matches(solution: &Solution, requirements: &[(ReagentId, Units)]) -> bool {
+    let Some(&(reference_reagent, reference_required)) = requirements.first() else {
+        return false;
+    };
+    if !reference_required.is_positive()
+        || !solution.contains_at_least(reference_reagent, reference_required)
+    {
+        return false;
+    }
+
+    let reference_present = solution.volume_of(reference_reagent).raw() as i64;
+    requirements.iter().all(|&(reagent, required)| {
+        if !required.is_positive() || !solution.contains_at_least(reagent, required) {
+            return false;
+        }
+        // Compare ratios by cross multiplication. This is exact for fixed-point
+        // Units, independent of requirement order, and avoids float drift.
+        solution.volume_of(reagent).raw() as i64 * reference_required.raw() as i64
+            == reference_present * required.raw() as i64
+    })
+}
+
+fn validate_process(
+    reaction: &str,
+    reactants: &[(ReagentId, Units)],
+    catalysts: &[(ReagentId, Units)],
+    process: &ReactionProcess,
+) -> Result<(), ChemDataError> {
+    let ReactionProcess::Agitated { side_a, side_b } = process else {
+        return Ok(());
+    };
+
+    let valid = !side_a.is_empty()
+        && !side_b.is_empty()
+        && side_a.iter().all(|(_, amount)| amount.is_positive())
+        && side_b.iter().all(|(_, amount)| amount.is_positive())
+        && !side_a
+            .iter()
+            .any(|(reagent, _)| side_b.iter().any(|(other, _)| other == reagent))
+        && ingredient_totals(side_a.iter().chain(side_b.iter()).copied())
+            == ingredient_totals(reactants.iter().chain(catalysts.iter()).copied());
+
+    if valid {
+        Ok(())
+    } else {
+        Err(ChemDataError::InvalidAgitationProcess {
+            reaction: reaction.to_string(),
+        })
+    }
+}
+
+fn ingredient_totals(
+    ingredients: impl Iterator<Item = (ReagentId, Units)>,
+) -> BTreeMap<ReagentId, Units> {
+    let mut totals = BTreeMap::new();
+    for (reagent, amount) in ingredients {
+        *totals.entry(reagent).or_insert(Units::ZERO) += amount;
+    }
+    totals
+}
+
 /// Something wrong with the chemistry data files.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChemDataError {
     UnknownReagent { reaction: String, reagent: String },
     NoReactants { reaction: String },
     NoProducts { reaction: String },
+    InvalidAgitationProcess { reaction: String },
 }
 
 impl std::fmt::Display for ChemDataError {
@@ -319,6 +495,10 @@ impl std::fmt::Display for ChemDataError {
             ChemDataError::NoProducts { reaction } => {
                 write!(f, "reaction '{reaction}' has no products")
             }
+            ChemDataError::InvalidAgitationProcess { reaction } => write!(
+                f,
+                "reaction '{reaction}' has agitation sides that do not exactly partition its reactants and catalysts"
+            ),
         }
     }
 }

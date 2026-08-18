@@ -8,15 +8,16 @@
 //! Placeholder geometry — two flat-shaded slabs, the same "scaled unit cube"
 //! style as the rest of the lab (there is no glTF/scene-loading pipeline in
 //! this codebase to load a modelled one from) — but real state: a closed
-//! door blocks the player like a wall and steers crew around it, not just
-//! looks shut.
+//! door blocks the player like a wall, not just looks shut. The powered
+//! proximity entrance remains traversable to route planning so approaching
+//! crew can reach its sensor and open it themselves.
 //!
 //! [`Door`] follows the exact shape `machines::Thermostat` already
 //! established for "a bool that must read the same on every peer": a plain
 //! replicated component, decided by the authority, reacted to everywhere
-//! else. The four things every peer derives from it — the leaves' slide
-//! animation, whether the root blocks the player, whether its `WalkableAreas`
-//! bridge blocks crew, and the open/close sound — are each their own small
+//! else. The things every peer derives from it — the leaves' slide animation,
+//! whether the root blocks the player, and the open/close sound — are each
+//! their own small
 //! unguarded system, the same "presentation reads replicated state, nothing
 //! reads it back" split `crisis::pulse_alert_lighting` and `fx` already use.
 
@@ -25,8 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crew::CrewMember;
 use crate::lab::{
-    doorways, Solid, WalkableAreas, CREW_DOOR_X, DOOR_HEIGHT, DOOR_WIDTH, LAB_ENTRANCE_BRIDGE_ID,
-    LOBBY, ROOMS, WALL_THICKNESS,
+    doorways, Solid, CREW_DOOR_X, DOOR_HEIGHT, DOOR_WIDTH, LOBBY, ROOMS, WALL_THICKNESS,
 };
 use crate::net::is_authority;
 use crate::player::Chemist;
@@ -47,6 +47,9 @@ const DOOR_PROXIMITY: f32 = 2.2;
 
 /// How fast a leaf slides, in fractions of the way there per second.
 const SLIDE_RATE: f32 = 6.0;
+/// Bleach can etch a door without defeating it. Structural acids and thermite
+/// cross this threshold and hold the breach open permanently.
+const STRUCTURAL_CORROSION: f32 = 1.0;
 
 pub struct DoorPlugin;
 
@@ -63,7 +66,6 @@ impl Plugin for DoorPlugin {
                 decide_door_state.run_if(is_authority),
                 animate_door_leaves,
                 toggle_door_solid,
-                toggle_door_nav,
             )
                 .run_if(in_state(AppState::Playing)),
         );
@@ -80,6 +82,14 @@ pub struct Door {
     /// re-derives it from this index, so there is exactly one source for
     /// "which doorway is this" instead of a cached copy that could drift.
     pub doorway_index: usize,
+}
+
+/// Chemical corrosion has defeated this door. Keeping this as replicated
+/// state, rather than deleting the door entity, preserves navigation and its
+/// visual hierarchy while making the breach permanent and observable.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Corroded {
+    pub strength: f32,
 }
 
 /// Meshes and materials every leaf is drawn from. Its own small resource
@@ -192,15 +202,16 @@ fn dress_door(
 /// `Transform` distance checks against the door's own position.
 #[allow(clippy::type_complexity)]
 fn decide_door_state(
-    mut doors: Query<(&Transform, &mut Door)>,
+    mut doors: Query<(&Transform, &mut Door, Option<&Corroded>)>,
     chemists: Query<&Transform, (With<Chemist>, Without<Door>)>,
     crew: Query<&Transform, (With<CrewMember>, Without<Chemist>, Without<Door>)>,
 ) {
-    for (door_transform, mut door) in &mut doors {
+    for (door_transform, mut door, corroded) in &mut doors {
         let near = |transform: &Transform| {
             transform.translation.distance(door_transform.translation) <= DOOR_PROXIMITY
         };
-        let wants_open = chemists.iter().any(near) || crew.iter().any(near);
+        let breached = corroded.is_some_and(|corrosion| corrosion.strength >= STRUCTURAL_CORROSION);
+        let wants_open = breached || chemists.iter().any(near) || crew.iter().any(near);
         if door.open != wants_open {
             door.open = wants_open;
         }
@@ -256,18 +267,6 @@ fn toggle_door_solid(mut commands: Commands, doors: Query<(Entity, &Door), Chang
             Vec3::new(WALL_THICKNESS * 0.5, DOOR_HEIGHT * 0.5, DOOR_WIDTH * 0.5)
         };
         commands.entity(entity).insert(Solid { half_extents });
-    }
-}
-
-/// Blocks crew pathing exactly while shut, by collapsing this door's own
-/// semantic `WalkableAreas` bridge — see
-/// `WalkableAreas::set_bridge_blocked`. Runs on
-/// both ends unguarded, same as `nav::rebuild_graph` it feeds: every peer
-/// keeps its own local copy of "where may a body stand" in step with the one
-/// thing that has to agree everywhere, `Door.open`.
-fn toggle_door_nav(mut walkable: ResMut<WalkableAreas>, doors: Query<&Door, Changed<Door>>) {
-    for door in &doors {
-        walkable.set_bridge_blocked(LAB_ENTRANCE_BRIDGE_ID, !door.open);
     }
 }
 
@@ -373,6 +372,26 @@ mod tests {
 
         app.update();
         assert!(!is_open(&app, door), "a door opened for nobody near it");
+    }
+
+    #[test]
+    fn only_structural_corrosion_defeats_a_door() {
+        let mut app = test_app();
+        let weak = door_at(&mut app, 0);
+        app.world_mut()
+            .entity_mut(weak)
+            .insert(Corroded { strength: 0.4 });
+        app.update();
+        assert!(!is_open(&app, weak), "peroxide etching opened the door");
+
+        app.world_mut()
+            .entity_mut(weak)
+            .insert(Corroded { strength: 1.5 });
+        app.update();
+        assert!(
+            is_open(&app, weak),
+            "structural acid did not breach the door"
+        );
     }
 
     #[test]

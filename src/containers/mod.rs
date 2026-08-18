@@ -10,7 +10,7 @@ use bevy_replicon::prelude::*;
 use chem_sim::{resolve_step, ResolveReport, Solution, Units};
 use serde::{Deserialize, Serialize};
 
-use crate::body::Body;
+use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::interaction::{InteractRequested, Interactable};
 use crate::lab::{self, Solid};
@@ -354,14 +354,17 @@ fn handle_pickup(
     held: Query<&HeldBy>,
     stored: Query<&Stored>,
     chemists: Query<(Entity, &Chemist)>,
-    bodies: Query<&Body>,
+    bodies: Query<(&Body, &Bloodstream)>,
 ) {
     for request in requests.read() {
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
         // Someone on the floor cannot reach the bench.
-        if bodies.get(player).is_ok_and(|body| body.0.collapsed) {
+        if bodies
+            .get(player)
+            .is_ok_and(|(body, blood)| body.0.collapsed || blood.0.incapacitated())
+        {
             continue;
         }
         if !pickable.contains(request.target) || held.contains(request.target) {

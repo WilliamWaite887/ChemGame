@@ -90,6 +90,10 @@ impl Plugin for KnowledgePlugin {
             // all (unlocking is career-wide, not tied to a machine), so
             // there is nothing for `MapEntities` to translate.
             .add_client_message::<UpgradeDispenserRequested>(Channel::Ordered)
+            // A deliberately explicit playtest escape hatch. It still goes
+            // through the authority so a guest cannot unlock only their local
+            // notebook and be overwritten by the next sync.
+            .add_client_message::<UnlockAllRequested>(Channel::Ordered)
             // Same reasoning as the line above: career-wide, carries no
             // `Entity`, so nothing for `MapEntities` to translate.
             .add_client_message::<BuyHintRequested>(Channel::Ordered)
@@ -101,6 +105,7 @@ impl Plugin for KnowledgePlugin {
                     // owns it and only the server writes the save file.
                     (
                         handle_dispenser_upgrade,
+                        handle_unlock_all,
                         handle_hint_purchase,
                         learn_from_experiments,
                         persist_knowledge,
@@ -134,6 +139,22 @@ fn handle_dispenser_upgrade(
 ) {
     for _ in requests.read() {
         knowledge.upgrade_dispenser(&db);
+    }
+}
+
+/// A playtester asking to bypass progression and expose the complete chemistry
+/// sandbox. This unlocks both dispenser tiers and recipes; doing only one
+/// leaves half the graph unusable and makes the button misleading.
+#[derive(Message, Serialize, Deserialize)]
+pub struct UnlockAllRequested;
+
+fn handle_unlock_all(
+    db: Res<ChemDb>,
+    mut requests: MessageReader<FromClient<UnlockAllRequested>>,
+    mut knowledge: ResMut<Knowledge>,
+) {
+    for _ in requests.read() {
+        knowledge.unlock_all(&db);
     }
 }
 
@@ -305,6 +326,7 @@ impl Knowledge {
     /// Every dispensable reagent the chemist can actually draw from right
     /// now — everything at or below the current dispenser tier. Not
     /// necessarily all of them.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn dispensable(&self, data: &ChemData) -> HashSet<ReagentId> {
         data.reagents
             .dispensable()
@@ -347,10 +369,30 @@ impl Knowledge {
         true
     }
 
+    /// Exposes every dispenser reagent and recipe without spending research.
+    /// Intended for the labelled playtest control, not normal progression.
+    pub fn unlock_all(&mut self, data: &ChemData) {
+        self.dispenser_tier = DISPENSER_TIER_COSTS.len() as u32;
+        for reaction in data.reactions.iter() {
+            self.learn(reaction.id);
+        }
+    }
+
     /// Every reagent the chemist can currently produce, plus the base reagents
     /// they can dispense.
     pub fn available_reagents(&self, data: &ChemData) -> HashSet<ReagentId> {
-        let mut available: HashSet<ReagentId> = self.dispensable(data);
+        self.available_reagents_at_tier(data, self.dispenser_tier)
+    }
+
+    /// What this notebook could produce if the dispenser were at `tier`.
+    /// Known recipes still matter; this only changes the equipment input set.
+    fn available_reagents_at_tier(&self, data: &ChemData, tier: u32) -> HashSet<ReagentId> {
+        let mut available: HashSet<ReagentId> = data
+            .reagents
+            .dispensable()
+            .filter(|reagent| reagent.tier <= tier)
+            .map(|reagent| reagent.id)
+            .collect();
 
         // Known recipes feed each other, so keep going until nothing new
         // appears rather than making a single pass.
@@ -378,10 +420,44 @@ impl Knowledge {
         available
     }
 
+    /// Products suitable for a forgiving development request: unavailable
+    /// now, but reachable through at most the next dispenser tier and one
+    /// currently-unknown reaction. Deep chains stay hidden until their own
+    /// prerequisites become real rather than piling several locks into one
+    /// supposedly motivating order.
+    pub fn development_reagents(&self, data: &ChemData) -> HashSet<ReagentId> {
+        let current = self.available_reagents(data);
+        let preview_tier = self
+            .next_upgrade_cost()
+            .map(|_| self.dispenser_tier.saturating_add(1))
+            .unwrap_or(self.dispenser_tier);
+        let with_next_tier = self.available_reagents_at_tier(data, preview_tier);
+        let mut development = with_next_tier.clone();
+
+        for reaction in data
+            .reactions
+            .iter()
+            .filter(|reaction| !self.is_known(reaction.id))
+        {
+            let inputs_ready = reaction
+                .reactants
+                .iter()
+                .chain(reaction.catalysts.iter())
+                .all(|(id, _)| with_next_tier.contains(id));
+            if inputs_ready {
+                development.extend(reaction.product_ids());
+            }
+        }
+
+        development.retain(|reagent| !current.contains(reagent));
+        development
+    }
+
     /// Locked recipes whose ingredients the chemist can already obtain.
     ///
     /// This is the set worth asking for: reachable with one experiment, but
     /// not yet written down.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn frontier(&self, data: &ChemData) -> Vec<ReactionId> {
         let available = self.available_reagents(data);
         data.reactions
@@ -772,6 +848,36 @@ mod tests {
             knowledge.research_points, leftover,
             "nothing should have been spent"
         );
+    }
+
+    #[test]
+    fn playtest_unlock_exposes_every_reagent_and_recipe_without_spending() {
+        let data = data();
+        let mut knowledge = Knowledge::new(&data);
+        knowledge.award_research(7);
+
+        knowledge.unlock_all(&data);
+
+        assert_eq!(knowledge.research_points, 7);
+        assert_eq!(knowledge.next_upgrade_cost(), None);
+        assert_eq!(knowledge.known_count(), data.reactions.len());
+        assert!(data
+            .reagents
+            .dispensable()
+            .all(|reagent| knowledge.is_reagent_unlocked(&data, reagent.id)));
+    }
+
+    #[test]
+    fn development_preview_stops_at_one_upgrade_and_one_unknown_recipe() {
+        let data = data();
+        let knowledge = Knowledge::new(&data);
+        let preview = knowledge.development_reagents(&data);
+
+        assert!(preview.contains(&data.reagent("bicaridine")));
+        assert!(preview.contains(&data.reagent("mannitol")));
+        assert!(!preview.contains(&data.reagent("inaprovaline")));
+        assert!(!preview.contains(&data.reagent("dermaline")));
+        assert!(!preview.contains(&data.reagent("hyronalin")));
     }
 
     #[test]

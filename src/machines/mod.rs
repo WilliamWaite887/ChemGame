@@ -8,7 +8,7 @@ use bevy::ecs::entity::MapEntities;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use chem_sim::thermal::approach;
-use chem_sim::{Kelvin, ReagentId, Solution, Units};
+use chem_sim::{Kelvin, ReactionActivation, ReagentId, Solution, Units};
 use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
@@ -37,6 +37,7 @@ impl Plugin for MachinePlugin {
             .add_mapped_client_message::<EmptyRequested>(Channel::Ordered)
             .add_mapped_client_message::<TakeRequested>(Channel::Ordered)
             .add_mapped_client_message::<BufferTransferRequested>(Channel::Ordered)
+            .add_mapped_client_message::<AgitateRequested>(Channel::Ordered)
             .add_mapped_client_message::<PackageRequested>(Channel::Ordered)
             .add_mapped_client_message::<AnalyzeRequested>(Channel::Ordered)
             .add_mapped_client_message::<GrindRequested>(Channel::Ordered)
@@ -49,6 +50,7 @@ impl Plugin for MachinePlugin {
                     handle_machine_interact,
                     handle_leave_machine,
                     handle_dispense,
+                    handle_agitate,
                     handle_buffer_transfer,
                     handle_package,
                     handle_analyze,
@@ -102,9 +104,9 @@ pub enum MachineKind {
 }
 
 impl MachineKind {
-    /// Every kind, which is also every machine: the lab holds exactly one of
-    /// each. Both the spawner and the client's fit-out iterate this, so a new
-    /// machine cannot be added to one and forgotten in the other.
+    /// Every equipment kind. Authored map spots may repeat a kind (the paired
+    /// dispenser/mixer lanes do); this list is the code-owned catalogue used
+    /// for geometry, fittings and legacy placement coverage.
     pub const ALL: [MachineKind; 8] = [
         MachineKind::ChemMaster5000,
         MachineKind::MixingChamber,
@@ -181,6 +183,15 @@ const CHAMBER_RATE: f32 = 0.18;
 /// Far slower, so a hot beaker stays useful long enough to carry to the
 /// Mixing Chamber — but not forever. This is the clock a chemist is racing.
 const AMBIENT_RATE: f32 = 0.06;
+
+/// Timed chemistry advances in deterministic tenths of a second.
+///
+/// [`Units`] stores hundredths. Feeding a rated reaction arbitrary render-frame
+/// deltas would round `rate * dt` on every frame, making low-rate recipes run
+/// faster at 144 Hz than at 30 Hz. Accumulating wall time and only handing the
+/// resolver this fixed quantum makes authored rates independent of rendering.
+const CHEMISTRY_QUANTUM_SECS: f32 = 0.1;
+const CHEMISTRY_QUANTUM_EPSILON: f32 = 0.000_001;
 
 /// A machine's shared state.
 ///
@@ -304,7 +315,7 @@ impl ReactionsFired {
     /// Builds a report for `container`, or `None` if nothing worth announcing
     /// happened. Keeps the "did anything happen?" test in one place now that
     /// there are two ways for the answer to be yes.
-    fn from_report(container: Entity, report: &chem_sim::ResolveReport) -> Option<Self> {
+    pub(crate) fn from_report(container: Entity, report: &chem_sim::ResolveReport) -> Option<Self> {
         if !report.reacted() && report.effects.is_empty() {
             return None;
         }
@@ -373,6 +384,41 @@ pub struct BufferTransferRequested {
     pub amount: Units,
     pub direction: BufferDirection,
     pub slot: MachineSlot,
+}
+
+/// Which loaded beaker is poured completely into the other when agitation
+/// begins. Recipe preparation sides are orientation-independent; the direction
+/// only decides which physical beaker is left holding the batch.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum AgitateDirection {
+    AToB,
+    BToA,
+}
+
+impl AgitateDirection {
+    pub fn destination(self) -> MachineSlot {
+        match self {
+            Self::AToB => MachineSlot::B,
+            Self::BToA => MachineSlot::A,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::AToB => "A -> B",
+            Self::BToA => "B -> A",
+        }
+    }
+}
+
+/// Starts the Mixing Chamber's staged, timed combination. The authority
+/// reconstructs both slot occupants and captures provenance before it moves a
+/// drop; no client-supplied ingredient list is trusted.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
+pub struct AgitateRequested {
+    #[entities]
+    pub machine: Entity,
+    pub direction: AgitateDirection,
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
@@ -464,6 +510,7 @@ fn handle_machine_interact(
     slotted_b: Query<(Entity, &InSlotB)>,
     stored: Query<(Entity, &Stored)>,
     bodies: Query<&crate::body::Body>,
+    bloodstreams: Query<&crate::body::Bloodstream>,
     mut opened: MessageWriter<ToClients<MachineOpened>>,
 ) {
     for request in requests.read() {
@@ -473,9 +520,14 @@ fn handle_machine_interact(
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
-        // A collapsed chemist cannot work a machine. Checked before anything
-        // is claimed, so going down never leaves a machine locked.
-        if bodies.get(player).is_ok_and(|body| body.0.collapsed) {
+        // A collapsed or chemically incapacitated chemist cannot work a
+        // machine. Checked before anything is claimed or loaded so forged
+        // input cannot operate the lab while its owner is unconscious.
+        if bodies.get(player).is_ok_and(|body| body.0.collapsed)
+            || bloodstreams
+                .get(player)
+                .is_ok_and(|blood| blood.0.incapacitated())
+        {
             continue;
         }
         let Ok((mut machine, slot, slot_b, transform)) = machines.get_mut(request.target) else {
@@ -713,6 +765,46 @@ fn cool_to_ambient(
 // Reactions that take time
 // ---------------------------------------------------------------------------
 
+/// An agitation run owned by one Mixing Chamber.
+///
+/// Unlike [`Reacting`], this is replicated. An agitated recipe cannot be
+/// inferred from the combined solution alone: the [`ReactionActivation`] is
+/// the proof that its sides were in separate beakers immediately before the
+/// transfer. Keeping that proof on the machine also gives every client a
+/// stable source for the progress and remaining-time readout.
+#[derive(Component, Clone, Debug, Serialize, Deserialize, MapEntities)]
+pub struct AgitationRun {
+    #[entities]
+    pub destination: Entity,
+    pub direction: AgitateDirection,
+    pub activation: ReactionActivation,
+    pub elapsed_secs: f32,
+    pub expected_secs: f32,
+    /// Unprocessed wall time. Replicated with the run so authority migration
+    /// or a joining observer sees one coherent clock state.
+    pub chemistry_accumulator_secs: f32,
+    /// Authority-side report aggregation. These fields cross the wire with the
+    /// component because a joining client needs one coherent serialisable
+    /// state, but only [`tick_reactions`] reads or writes them.
+    reactions: Vec<chem_sim::ReactionId>,
+    effects: Vec<chem_sim::ReactionEffect>,
+    distinct_reagents: usize,
+}
+
+impl AgitationRun {
+    pub fn progress(&self) -> f32 {
+        if self.expected_secs <= f32::EPSILON {
+            1.0
+        } else {
+            (self.elapsed_secs / self.expected_secs).clamp(0.0, 1.0)
+        }
+    }
+
+    pub fn remaining_secs(&self) -> f32 {
+        (self.expected_secs - self.elapsed_secs).max(0.0)
+    }
+}
+
 /// A batch part-way through, and what it has done so far.
 ///
 /// Only reactions that name a `rate` in `chem.reactions.ron` can produce one:
@@ -747,6 +839,9 @@ pub struct Reacting {
     /// do not scale with how much reacted — they are "this happened" flags —
     /// so a stepped reaction would vent a full cloud every frame it ran.
     effects: Vec<chem_sim::ReactionEffect>,
+    /// Same fixed-step clock as [`AgitationRun`]. Ambient timed recipes use the
+    /// identical path so adding one later cannot reintroduce frame-rate drift.
+    chemistry_accumulator_secs: f32,
 }
 
 /// Advances every beaker in the lab by one frame of chemistry.
@@ -761,11 +856,27 @@ pub struct Reacting {
 /// buffer are held separated on purpose — that is the whole point of the
 /// machine, and it has never run the resolver — so reacting them there would
 /// break the one tool the player has for cleaning up a contaminated batch.
+fn accumulate_reaction_report(
+    reactions: &mut Vec<chem_sim::ReactionId>,
+    effects: &mut Vec<chem_sim::ReactionEffect>,
+    report: chem_sim::ResolveReport,
+) -> bool {
+    let changed = report.reacted() || !report.effects.is_empty();
+    for reaction in report.fired_reactions() {
+        if !reactions.contains(&reaction) {
+            reactions.push(reaction);
+        }
+    }
+    effects.extend(report.effects);
+    changed
+}
+
 fn tick_reactions(
     mut commands: Commands,
     time: Res<Time>,
     db: Res<ChemDb>,
     mut fired: MessageWriter<ReactionsFired>,
+    mut agitations: Query<(Entity, &mut AgitationRun)>,
     mut containers: Query<(Entity, &mut Container, Option<&mut Reacting>)>,
 ) {
     let dt = time.delta_secs();
@@ -773,56 +884,159 @@ fn tick_reactions(
         return;
     }
 
-    for (entity, mut container, run) in &mut containers {
-        let report = if container.solution.is_empty() {
-            // An empty beaker cannot react — but this still has to fall
-            // through, not `continue`, so that a run *interrupted* by the
-            // beaker being emptied or detonated is closed out below instead of
-            // leaving a `Reacting` behind to merge into whatever is poured in
-            // next.
-            chem_sim::ResolveReport::default()
-        } else {
-            // Deliberately bypassing change detection to *look*. A `Container`
-            // is replicated, so touching one marks it for the wire; most
-            // beakers in the lab are sitting still, and stepping them must
-            // cost nothing until something actually happens. The `set_changed`
-            // calls below are the honest signal.
-            let solution = &mut container.bypass_change_detection().solution;
-            chem_sim::resolve_step(solution, &db.reactions, dt)
-        };
-
-        let Some(mut run) = run else {
-            if !report.reacted() && report.effects.is_empty() {
-                continue;
-            }
-            container.set_changed();
-            commands.entity(entity).insert(Reacting {
-                distinct_reagents: report.distinct_reagents,
-                reactions: report.fired_reactions(),
-                effects: report.effects,
-            });
+    // Agitated destinations use the provenance-aware resolver and must not be
+    // stepped again by the ambient pass below. The token is retained for the
+    // whole run; recreating it from the combined liquid would make ordinary
+    // pouring an unintended shortcut.
+    let mut agitated_destinations = Vec::new();
+    for (machine, mut run) in &mut agitations {
+        let destination = run.destination;
+        agitated_destinations.push(destination);
+        let Ok((_, mut container, _)) = containers.get_mut(destination) else {
+            commands.entity(machine).remove::<AgitationRun>();
             continue;
         };
 
-        if report.reacted() || !report.effects.is_empty() {
-            container.set_changed();
-            for reaction in report.fired_reactions() {
-                if !run.reactions.contains(&reaction) {
-                    run.reactions.push(reaction);
-                }
-            }
-            run.effects.extend(report.effects);
+        if container.solution.is_empty() {
+            commands.entity(machine).remove::<AgitationRun>();
             continue;
         }
 
-        // Nothing moved this frame, so the run is over: one report for the
-        // whole batch, carrying the reagent count from the frame it started.
-        fired.write(ReactionsFired {
-            reactions: std::mem::take(&mut run.reactions),
-            container: entity,
-            effects: std::mem::take(&mut run.effects),
-            distinct_reagents: run.distinct_reagents,
-        });
+        run.elapsed_secs += dt;
+        run.chemistry_accumulator_secs += dt;
+        let mut finished = false;
+        let mut changed = false;
+        while run.chemistry_accumulator_secs + CHEMISTRY_QUANTUM_EPSILON >= CHEMISTRY_QUANTUM_SECS {
+            run.chemistry_accumulator_secs =
+                (run.chemistry_accumulator_secs - CHEMISTRY_QUANTUM_SECS).max(0.0);
+            let solution = &mut container.bypass_change_detection().solution;
+            let report = chem_sim::resolve_step_with_activation(
+                solution,
+                &db.reactions,
+                CHEMISTRY_QUANTUM_SECS,
+                &run.activation,
+            );
+            let state: &mut AgitationRun = &mut run;
+            changed |= accumulate_reaction_report(&mut state.reactions, &mut state.effects, report);
+            finished =
+                !chem_sim::is_reacting_with_activation(solution, &db.reactions, &run.activation);
+            if finished {
+                break;
+            }
+        }
+        if changed {
+            container.set_changed();
+        }
+        if finished {
+            if !run.reactions.is_empty() || !run.effects.is_empty() {
+                fired.write(ReactionsFired {
+                    reactions: std::mem::take(&mut run.reactions),
+                    container: destination,
+                    effects: std::mem::take(&mut run.effects),
+                    distinct_reagents: run.distinct_reagents,
+                });
+            }
+            commands.entity(machine).remove::<AgitationRun>();
+        }
+    }
+
+    for (entity, mut container, run) in &mut containers {
+        if agitated_destinations.contains(&entity) {
+            continue;
+        }
+        let Some(mut run) = run else {
+            if container.solution.is_empty() {
+                continue;
+            }
+
+            // Pick up any instant chemistry first without advancing a rated
+            // recipe. A raw solution can reach this system in tests/tools;
+            // normal gameplay mutations already perform the same zero-step.
+            let solution = &mut container.bypass_change_detection().solution;
+            let report = chem_sim::resolve_step(solution, &db.reactions, 0.0);
+            let distinct_reagents = report.distinct_reagents;
+            let mut reactions = Vec::new();
+            let mut effects = Vec::new();
+            let mut changed = accumulate_reaction_report(&mut reactions, &mut effects, report);
+            let mut accumulator = dt;
+            let mut still_reacting = chem_sim::is_reacting(solution, &db.reactions);
+
+            while still_reacting
+                && accumulator + CHEMISTRY_QUANTUM_EPSILON >= CHEMISTRY_QUANTUM_SECS
+            {
+                accumulator = (accumulator - CHEMISTRY_QUANTUM_SECS).max(0.0);
+                let report =
+                    chem_sim::resolve_step(solution, &db.reactions, CHEMISTRY_QUANTUM_SECS);
+                changed |= accumulate_reaction_report(&mut reactions, &mut effects, report);
+                still_reacting = chem_sim::is_reacting(solution, &db.reactions);
+            }
+
+            if changed {
+                container.set_changed();
+            }
+            if still_reacting {
+                commands.entity(entity).insert(Reacting {
+                    distinct_reagents,
+                    reactions,
+                    effects,
+                    chemistry_accumulator_secs: accumulator,
+                });
+            } else if !reactions.is_empty() || !effects.is_empty() {
+                fired.write(ReactionsFired {
+                    reactions,
+                    container: entity,
+                    effects,
+                    distinct_reagents,
+                });
+            }
+            continue;
+        };
+
+        // An empty beaker cannot react, but the interrupted run must still be
+        // closed now rather than attaching its report to whatever is poured in
+        // next.
+        if container.solution.is_empty() {
+            if !run.reactions.is_empty() || !run.effects.is_empty() {
+                fired.write(ReactionsFired {
+                    reactions: std::mem::take(&mut run.reactions),
+                    container: entity,
+                    effects: std::mem::take(&mut run.effects),
+                    distinct_reagents: run.distinct_reagents,
+                });
+            }
+            commands.entity(entity).remove::<Reacting>();
+            continue;
+        }
+
+        run.chemistry_accumulator_secs += dt;
+        let solution = &mut container.bypass_change_detection().solution;
+        let mut still_reacting = chem_sim::is_reacting(solution, &db.reactions);
+        let mut changed = false;
+        while still_reacting
+            && run.chemistry_accumulator_secs + CHEMISTRY_QUANTUM_EPSILON >= CHEMISTRY_QUANTUM_SECS
+        {
+            run.chemistry_accumulator_secs =
+                (run.chemistry_accumulator_secs - CHEMISTRY_QUANTUM_SECS).max(0.0);
+            let report = chem_sim::resolve_step(solution, &db.reactions, CHEMISTRY_QUANTUM_SECS);
+            let state: &mut Reacting = &mut run;
+            changed |= accumulate_reaction_report(&mut state.reactions, &mut state.effects, report);
+            still_reacting = chem_sim::is_reacting(solution, &db.reactions);
+        }
+        if changed {
+            container.set_changed();
+        }
+        if still_reacting {
+            continue;
+        }
+
+        if !run.reactions.is_empty() || !run.effects.is_empty() {
+            fired.write(ReactionsFired {
+                reactions: std::mem::take(&mut run.reactions),
+                container: entity,
+                effects: std::mem::take(&mut run.effects),
+                distinct_reagents: run.distinct_reagents,
+            });
+        }
         commands.entity(entity).remove::<Reacting>();
     }
 }
@@ -868,16 +1082,155 @@ fn handle_dispense(
     }
 }
 
+fn expected_agitation_secs(
+    solution: &Solution,
+    activation: &ReactionActivation,
+    db: &ChemDb,
+) -> f32 {
+    activation
+        .reactions()
+        .filter_map(|id| {
+            let reaction = db.reactions.get(id);
+            let scale = reaction.max_scale(solution)?;
+            let rate = reaction.rate?;
+            rate.is_positive().then(|| scale.as_f32() / rate.as_f32())
+        })
+        .fold(0.0_f32, f32::max)
+        .max(0.01)
+}
+
+/// Captures the two-side provenance and pours the complete source beaker into
+/// the destination. No liquid moves unless all validation succeeds, so a
+/// wrong-side attempt or an undersized destination is harmless and retryable.
+#[allow(clippy::too_many_arguments)]
+fn handle_agitate(
+    mut commands: Commands,
+    db: Res<ChemDb>,
+    mut requests: MessageReader<FromClient<AgitateRequested>>,
+    machines: Query<(&Machine, Option<&AgitationRun>)>,
+    chemists: Query<(Entity, &Chemist)>,
+    slotted: Query<(Entity, &InSlot)>,
+    slotted_b: Query<(Entity, &InSlotB)>,
+    mut containers: Query<(Entity, &mut Container, Has<Reacting>)>,
+) {
+    for request in requests.read() {
+        let Some(player) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
+        let Ok((machine, active)) = machines.get(request.machine) else {
+            continue;
+        };
+        if machine.kind != MachineKind::MixingChamber
+            || machine.in_use_by != Some(player)
+            || active.is_some()
+        {
+            continue;
+        }
+
+        let Some(slot_a) = slotted_container(request.machine, &slotted) else {
+            continue;
+        };
+        let Some(slot_b) = slotted_container_b(request.machine, &slotted_b) else {
+            continue;
+        };
+        if slot_a == slot_b {
+            continue;
+        }
+        let (source, destination) = match request.direction {
+            AgitateDirection::AToB => (slot_a, slot_b),
+            AgitateDirection::BToA => (slot_b, slot_a),
+        };
+        let Ok(
+            [(_, mut source_container, source_reacting), (_, mut destination_container, destination_reacting)],
+        ) = containers.get_many_mut([source, destination])
+        else {
+            continue;
+        };
+
+        if !matches!(
+            source_container.kind,
+            ContainerKind::Beaker | ContainerKind::LargeBeaker
+        ) || !matches!(
+            destination_container.kind,
+            ContainerKind::Beaker | ContainerKind::LargeBeaker
+        ) {
+            continue;
+        }
+
+        // A partly running ambient batch has its own accumulated report. Do
+        // not splice a second process into it and lose attribution for either.
+        if source_reacting
+            || destination_reacting
+            || chem_sim::is_reacting(&source_container.solution, &db.reactions)
+            || chem_sim::is_reacting(&destination_container.solution, &db.reactions)
+        {
+            continue;
+        }
+        let source_volume = source_container.solution.total_volume();
+        let destination_volume = destination_container.solution.total_volume();
+        if !source_volume.is_positive()
+            || destination_container.solution.available_volume() < source_volume
+        {
+            continue;
+        }
+
+        // This is the security boundary for staged chemistry: provenance is
+        // inspected before combination and retained as an opaque activation.
+        let activation = db
+            .reactions
+            .activate_agitation(&source_container.solution, &destination_container.solution);
+        if activation.is_empty() {
+            continue;
+        }
+
+        let combined_temperature = Kelvin(
+            (source_container.solution.temperature.0 * source_volume.as_f32()
+                + destination_container.solution.temperature.0 * destination_volume.as_f32())
+                / (source_volume + destination_volume).as_f32(),
+        );
+        let moved = source_container
+            .solution
+            .transfer_to(&mut destination_container.solution, source_volume);
+        if moved != source_volume {
+            // Capacity was checked before mutation, so this is defensive. The
+            // transfer API puts rejected liquid back in the source.
+            continue;
+        }
+        destination_container.solution.temperature = combined_temperature;
+        source_container.set_changed();
+        destination_container.set_changed();
+
+        let expected_secs =
+            expected_agitation_secs(&destination_container.solution, &activation, &db);
+        let distinct_reagents = destination_container.solution.len();
+        commands.entity(request.machine).insert(AgitationRun {
+            destination,
+            direction: request.direction,
+            activation,
+            elapsed_secs: 0.0,
+            expected_secs,
+            chemistry_accumulator_secs: 0.0,
+            reactions: Vec::new(),
+            effects: Vec::new(),
+            distinct_reagents,
+        });
+    }
+}
+
 fn handle_buffer_transfer(
     db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<BufferTransferRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
     mut buffers: Query<&mut Buffer>,
+    active: Query<(), With<AgitationRun>>,
     slotted: Query<(Entity, &InSlot)>,
     slotted_b: Query<(Entity, &InSlotB)>,
     mut containers: Query<&mut Container>,
 ) {
     for request in requests.read() {
+        if active.contains(request.machine) {
+            continue;
+        }
         let Ok(mut buffer) = buffers.get_mut(request.machine) else {
             continue;
         };
@@ -1017,12 +1370,16 @@ fn handle_eject(
     mut commands: Commands,
     mut requests: MessageReader<FromClient<EjectRequested>>,
     machines: Query<&Machine>,
+    active: Query<(), With<AgitationRun>>,
     chemists: Query<(Entity, &Chemist)>,
     slotted: Query<(Entity, &InSlot)>,
     slotted_b: Query<(Entity, &InSlotB)>,
     held: Query<&HeldBy>,
 ) {
     for request in requests.read() {
+        if active.contains(request.machine) {
+            continue;
+        }
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
@@ -1081,12 +1438,17 @@ fn handle_take(
     containers: Query<&Container>,
     held: Query<&HeldBy>,
     bodies: Query<&crate::body::Body>,
+    bloodstreams: Query<&crate::body::Bloodstream>,
 ) {
     for request in requests.read() {
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
-        if bodies.get(player).is_ok_and(|body| body.0.collapsed) {
+        if bodies.get(player).is_ok_and(|body| body.0.collapsed)
+            || bloodstreams
+                .get(player)
+                .is_ok_and(|blood| blood.0.incapacitated())
+        {
             continue;
         }
         // The item has to be in the locker the message names. Checked rather
@@ -1124,11 +1486,15 @@ fn handle_take(
 
 fn handle_empty(
     mut requests: MessageReader<FromClient<EmptyRequested>>,
+    active: Query<(), With<AgitationRun>>,
     slotted: Query<(Entity, &InSlot)>,
     slotted_b: Query<(Entity, &InSlotB)>,
     mut containers: Query<&mut Container>,
 ) {
     for request in requests.read() {
+        if active.contains(request.machine) {
+            continue;
+        }
         let target = match request.slot {
             MachineSlot::A => slotted_container(request.machine, &slotted),
             MachineSlot::B => slotted_container_b(request.machine, &slotted_b),
@@ -1307,6 +1673,7 @@ mod tests {
             .add_message::<FromClient<DispenseRequested>>()
             .add_message::<ReactionsFired>()
             .add_message::<FromClient<BufferTransferRequested>>()
+            .add_message::<FromClient<AgitateRequested>>()
             .add_message::<FromClient<InteractRequested>>()
             .add_message::<FromClient<LeaveMachineRequested>>()
             .add_message::<FromClient<GrindRequested>>()
@@ -1314,6 +1681,7 @@ mod tests {
             .add_message::<FromClient<SetHeaterPower>>()
             .add_message::<FromClient<PackageRequested>>()
             .add_message::<FromClient<EjectRequested>>()
+            .add_message::<FromClient<EmptyRequested>>()
             .add_message::<FromClient<TakeRequested>>()
             // What the server tells a client when it grants them a machine.
             // Headless there is nobody to tell, but the writer still has to
@@ -1326,11 +1694,13 @@ mod tests {
                     handle_machine_interact,
                     handle_leave_machine,
                     handle_dispense,
+                    handle_agitate,
                     handle_buffer_transfer,
                     handle_package,
                     handle_grind,
                     handle_eject,
                     handle_take,
+                    handle_empty,
                     handle_thermostat_controls,
                     apply_thermostats,
                     cool_to_ambient,
@@ -1475,9 +1845,7 @@ mod tests {
     }
 
     #[test]
-    fn causing_a_reaction_reports_which_recipe_fired() {
-        // Discovery is built on this: the resolver already names what fired,
-        // so learning is a matter of noticing rather than re-deriving.
+    fn direct_dispenser_combination_cannot_start_an_agitated_recipe() {
         let mut app = test_app();
         let dispenser = app.world_mut().spawn(DispenseAmount(Units::whole(15))).id();
         app.world_mut().spawn((
@@ -1485,8 +1853,8 @@ mod tests {
             InSlot(dispenser),
         ));
 
-        // Oxygen, sugar, then a double helping of carbon: inaprovaline forms
-        // first and the leftover carbon carries it on to bicaridine.
+        // Oxygen, sugar, then a double helping of carbon: inaprovaline forms,
+        // but the leftover carbon shares its beaker and has no provenance.
         for key in ["oxygen", "sugar", "carbon", "carbon"] {
             let reagent = reagent(&app, key);
             app.world_mut().write_message(FromClient {
@@ -1498,14 +1866,14 @@ mod tests {
             });
             app.update();
         }
-        // Both halves of the pipeline, in one test: inaprovaline has no rate
-        // and is reported by the dispense that made it, while bicaridine does
-        // and is reported by `tick_reactions` once its batch finishes.
         let names = reactions_over(&mut app, 8.0);
         assert!(
-            names.iter().any(|key| key == "inaprovaline")
-                && names.iter().any(|key| key == "bicaridine"),
-            "both steps of the chain should be reported, got {names:?}"
+            names.iter().any(|key| key == "inaprovaline"),
+            "the tutorial recipe should still resolve, got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|key| key == "bicaridine"),
+            "ordinary dispensing must not forge staged provenance, got {names:?}"
         );
     }
 
@@ -1518,7 +1886,9 @@ mod tests {
         // cloud sixty times, and `knowledge::learn_from_experiments` grading
         // one experiment sixty times over.
         let mut app = test_app();
-        loose_beaker(&mut app, &[("inaprovaline", 10), ("carbon", 10)]);
+        let (client, machine, _, _) =
+            staged_mixer(&mut app, &[("inaprovaline", 5)], &[("carbon", 5)]);
+        request_agitation(&mut app, client, machine, AgitateDirection::AToB);
         let bicaridine = reaction_id(&app, "bicaridine");
 
         let reports = fired_over(&mut app, 8.0);
@@ -1536,7 +1906,9 @@ mod tests {
         // at the *end* of a slow run it flatters a beaker that started as a
         // pile of everything — the exact dump the check exists to refuse.
         let mut app = test_app();
-        loose_beaker(&mut app, &[("inaprovaline", 10), ("carbon", 10)]);
+        let (client, machine, _, _) =
+            staged_mixer(&mut app, &[("inaprovaline", 5)], &[("carbon", 5)]);
+        request_agitation(&mut app, client, machine, AgitateDirection::AToB);
         let bicaridine = reaction_id(&app, "bicaridine");
 
         let reports = fired_over(&mut app, 8.0);
@@ -1555,21 +1927,23 @@ mod tests {
         // What the panel's "Still reacting…" line reads, and the difference
         // between "not finished yet" and "this is all you are getting".
         let mut app = test_app();
-        let beaker = loose_beaker(&mut app, &[("inaprovaline", 10), ("carbon", 10)]);
+        let (client, machine, _, beaker) =
+            staged_mixer(&mut app, &[("inaprovaline", 5)], &[("carbon", 5)]);
+        request_agitation(&mut app, client, machine, AgitateDirection::AToB);
 
         run_for(&mut app, 0.5);
         assert!(
-            app.world().get::<Reacting>(beaker).is_some(),
-            "two seconds of bicaridine is not done in half of one"
+            app.world().get::<AgitationRun>(machine).is_some(),
+            "a five-second agitation should not finish in half a second"
         );
 
         run_for(&mut app, 8.0);
-        assert!(app.world().get::<Reacting>(beaker).is_none());
+        assert!(app.world().get::<AgitationRun>(machine).is_none());
         let container = app.world().get::<Container>(beaker).unwrap();
         let product = container
             .solution
             .volume_of(app.world().resource::<ChemDb>().reagent("bicaridine"));
-        assert_eq!(product, Units::whole(20));
+        assert_eq!(product, Units::whole(10));
     }
 
     #[test]
@@ -1602,9 +1976,11 @@ mod tests {
         // Otherwise the next thing poured in inherits the last batch's reagent
         // count and its half-finished list of what fired.
         let mut app = test_app();
-        let beaker = loose_beaker(&mut app, &[("inaprovaline", 10), ("carbon", 10)]);
+        let (client, machine, _, beaker) =
+            staged_mixer(&mut app, &[("inaprovaline", 5)], &[("carbon", 5)]);
+        request_agitation(&mut app, client, machine, AgitateDirection::AToB);
         run_for(&mut app, 0.5);
-        assert!(app.world().get::<Reacting>(beaker).is_some());
+        assert!(app.world().get::<AgitationRun>(machine).is_some());
 
         app.world_mut()
             .get_mut::<Container>(beaker)
@@ -1614,7 +1990,7 @@ mod tests {
         run_for(&mut app, 0.5);
 
         assert!(
-            app.world().get::<Reacting>(beaker).is_none(),
+            app.world().get::<AgitationRun>(machine).is_none(),
             "an interrupted run has to be closed out, not left attached"
         );
     }
@@ -1677,6 +2053,409 @@ mod tests {
     // -----------------------------------------------------------------------
     // The Mixing Chamber's second slot
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn agitation_rejects_wrong_sides_and_a_missing_second_beaker() {
+        let mut app = test_app();
+        let (client, machine, beaker_a, beaker_b) =
+            staged_mixer(&mut app, &[("water", 5)], &[("carbon", 5)]);
+        request_agitation(&mut app, client, machine, AgitateDirection::AToB);
+        assert!(app.world().get::<AgitationRun>(machine).is_none());
+        assert_eq!(
+            app.world()
+                .get::<Container>(beaker_a)
+                .unwrap()
+                .solution
+                .total_volume(),
+            Units::whole(5),
+            "a rejected request must not drain its source"
+        );
+        assert_eq!(
+            app.world()
+                .get::<Container>(beaker_b)
+                .unwrap()
+                .solution
+                .total_volume(),
+            Units::whole(5)
+        );
+
+        let mut app = test_app();
+        let (client, machine, beaker_a, beaker_b) =
+            staged_mixer(&mut app, &[("inaprovaline", 5)], &[("carbon", 5)]);
+        app.world_mut().entity_mut(beaker_b).remove::<InSlotB>();
+        request_agitation(&mut app, client, machine, AgitateDirection::AToB);
+        assert!(app.world().get::<AgitationRun>(machine).is_none());
+        assert_eq!(
+            app.world()
+                .get::<Container>(beaker_a)
+                .unwrap()
+                .solution
+                .total_volume(),
+            Units::whole(5),
+            "one loaded beaker is not a staged mix"
+        );
+
+        let mut app = test_app();
+        let (client, machine, packaged_source, _) =
+            staged_mixer(&mut app, &[("inaprovaline", 5)], &[("carbon", 5)]);
+        app.world_mut()
+            .get_mut::<Container>(packaged_source)
+            .unwrap()
+            .kind = ContainerKind::Bottle;
+        request_agitation(&mut app, client, machine, AgitateDirection::AToB);
+        assert!(
+            app.world().get::<AgitationRun>(machine).is_none(),
+            "staged preparation requires laboratory beakers, not packaged doses"
+        );
+    }
+
+    #[test]
+    fn agitation_works_in_both_directions_and_finishes_on_its_recipe_clock() {
+        for direction in [AgitateDirection::AToB, AgitateDirection::BToA] {
+            let mut app = test_app();
+            let (client, machine, beaker_a, beaker_b) =
+                staged_mixer(&mut app, &[("inaprovaline", 5)], &[("carbon", 5)]);
+            let (source, destination) = match direction {
+                AgitateDirection::AToB => (beaker_a, beaker_b),
+                AgitateDirection::BToA => (beaker_b, beaker_a),
+            };
+
+            request_agitation(&mut app, client, machine, direction);
+            let run = app
+                .world()
+                .get::<AgitationRun>(machine)
+                .expect("valid sides should start a run");
+            assert_eq!(run.destination, destination);
+            assert!((run.expected_secs - 5.0).abs() < 0.01);
+            assert!(
+                app.world()
+                    .get::<Container>(source)
+                    .unwrap()
+                    .solution
+                    .is_empty(),
+                "the complete source beaker is transferred"
+            );
+
+            run_for(&mut app, 4.0);
+            assert!(
+                app.world().get::<AgitationRun>(machine).is_some(),
+                "the visible run must remain active before its tuned duration"
+            );
+            run_for(&mut app, 1.2);
+            assert!(app.world().get::<AgitationRun>(machine).is_none());
+            let product = reagent(&app, "bicaridine");
+            assert_eq!(
+                app.world()
+                    .get::<Container>(destination)
+                    .unwrap()
+                    .solution
+                    .volume_of(product),
+                Units::whole(10)
+            );
+        }
+    }
+
+    #[test]
+    fn agitation_duration_is_frame_rate_independent_for_authored_order_batches() {
+        struct Batch<'a> {
+            label: &'a str,
+            product: &'a str,
+            side_a: Vec<(&'a str, Units)>,
+            side_b: Vec<(&'a str, Units)>,
+        }
+
+        let whole = Units::whole;
+        let batches = [
+            Batch {
+                label: "bicaridine minimum",
+                product: "bicaridine",
+                side_a: vec![("inaprovaline", whole(4))],
+                side_b: vec![("carbon", whole(4))],
+            },
+            Batch {
+                label: "bicaridine maximum",
+                product: "bicaridine",
+                side_a: vec![("inaprovaline", whole(7))],
+                side_b: vec![("carbon", whole(7))],
+            },
+            Batch {
+                label: "dermaline minimum",
+                product: "dermaline",
+                side_a: vec![("kelotane", whole(2))],
+                side_b: vec![("oxygen", whole(2)), ("phosphorus", whole(2))],
+            },
+            Batch {
+                label: "dermaline maximum",
+                product: "dermaline",
+                side_a: vec![("kelotane", whole(3))],
+                side_b: vec![("oxygen", whole(3)), ("phosphorus", whole(3))],
+            },
+            Batch {
+                label: "mannitol minimum",
+                product: "mannitol",
+                // 6.68 of each input yields 10.02u, the first hundredth-unit
+                // batch at or above the authored 10u order minimum.
+                side_a: vec![
+                    ("hydrogen", Units::from_raw(668)),
+                    ("water", Units::from_raw(668)),
+                ],
+                side_b: vec![("sugar", Units::from_raw(668))],
+            },
+            Batch {
+                label: "mannitol maximum",
+                product: "mannitol",
+                side_a: vec![("hydrogen", whole(10)), ("water", whole(10))],
+                side_b: vec![("sugar", whole(10))],
+            },
+        ];
+
+        for batch in batches {
+            let mut measured = Vec::new();
+            for hz in [30.0_f32, 60.0, 144.0] {
+                let mut app = test_app();
+                let (client, machine, _, destination) =
+                    staged_mixer_units(&mut app, &batch.side_a, &batch.side_b);
+                request_agitation(&mut app, client, machine, AgitateDirection::AToB);
+                let expected = app
+                    .world()
+                    .get::<AgitationRun>(machine)
+                    .expect("the authored sides should activate")
+                    .expected_secs;
+                assert!(
+                    (4.0..=8.0).contains(&expected),
+                    "{} has an authored clock outside 4–8s: {expected}",
+                    batch.label
+                );
+
+                let frame = 1.0 / hz;
+                let mut elapsed = 0.0;
+                while app.world().get::<AgitationRun>(machine).is_some() {
+                    app.world_mut()
+                        .resource_mut::<Time>()
+                        .advance_by(std::time::Duration::from_secs_f32(frame));
+                    app.update();
+                    elapsed += frame;
+                    assert!(elapsed < 8.2, "{} never finished at {hz}Hz", batch.label);
+                }
+                assert!(
+                    elapsed + 0.000_1 >= expected,
+                    "{} finished early at {hz}Hz: {elapsed:.4}s vs {expected:.4}s",
+                    batch.label
+                );
+                assert!(
+                    elapsed <= expected + CHEMISTRY_QUANTUM_SECS + frame,
+                    "{} finished late at {hz}Hz: {elapsed:.4}s vs {expected:.4}s",
+                    batch.label
+                );
+                assert!(
+                    app.world()
+                        .get::<Container>(destination)
+                        .unwrap()
+                        .solution
+                        .volume_of(reagent(&app, batch.product))
+                        .is_positive(),
+                    "{} did not produce its medicine at {hz}Hz",
+                    batch.label
+                );
+                measured.push(elapsed);
+            }
+
+            let fastest = measured.iter().copied().fold(f32::INFINITY, f32::min);
+            let slowest = measured.iter().copied().fold(0.0_f32, f32::max);
+            assert!(
+                slowest - fastest <= 1.0 / 30.0 + 0.002,
+                "{} drifted with frame rate: {measured:?}",
+                batch.label
+            );
+        }
+    }
+
+    #[test]
+    fn ambient_timed_reactions_use_the_same_frame_rate_independent_clock() {
+        let mut measured = Vec::new();
+        for hz in [30.0_f32, 60.0, 144.0] {
+            let data = ChemData::from_ron(
+                r#"[
+                    (id: "feed", name: "Feed", color: (0.4, 0.4, 0.4), dispensable: true),
+                    (id: "product", name: "Product", color: (0.6, 0.6, 0.6)),
+                ]"#,
+                r#"[
+                    (
+                        id: "slow_ambient",
+                        reactants: [("feed", 1)],
+                        products: [("product", 1)],
+                        rate: Some(1),
+                    ),
+                ]"#,
+            )
+            .expect("the focused ambient fixture should load");
+            let feed = data.reagent("feed");
+            let product = data.reagent("product");
+            let mut container = Container::new(ContainerKind::LargeBeaker);
+            assert!(container.solution.add(feed, Units::whole(5)).is_zero());
+
+            let mut app = App::new();
+            app.insert_resource(ChemDb(data))
+                .init_resource::<Time>()
+                .add_message::<ReactionsFired>()
+                .add_systems(Update, tick_reactions);
+            let beaker = app.world_mut().spawn(container).id();
+            let frame = 1.0 / hz;
+            let mut elapsed = 0.0;
+            loop {
+                app.world_mut()
+                    .resource_mut::<Time>()
+                    .advance_by(std::time::Duration::from_secs_f32(frame));
+                app.update();
+                elapsed += frame;
+                let contents = &app.world().get::<Container>(beaker).unwrap().solution;
+                if contents.volume_of(product) == Units::whole(5)
+                    && app.world().get::<Reacting>(beaker).is_none()
+                {
+                    break;
+                }
+                assert!(elapsed < 5.2, "ambient batch never finished at {hz}Hz");
+            }
+            assert!(elapsed + 0.000_1 >= 5.0);
+            assert!(elapsed <= 5.0 + CHEMISTRY_QUANTUM_SECS + frame);
+            measured.push(elapsed);
+        }
+
+        let fastest = measured.iter().copied().fold(f32::INFINITY, f32::min);
+        let slowest = measured.iter().copied().fold(0.0_f32, f32::max);
+        assert!(
+            slowest - fastest <= 1.0 / 30.0 + 0.002,
+            "ambient timing drifted with frame rate: {measured:?}"
+        );
+    }
+
+    #[test]
+    fn agitation_requires_room_for_the_entire_source() {
+        let mut app = test_app();
+        let (client, machine, beaker_a, beaker_b) =
+            staged_mixer(&mut app, &[("inaprovaline", 60)], &[("carbon", 50)]);
+        request_agitation(&mut app, client, machine, AgitateDirection::AToB);
+
+        assert!(app.world().get::<AgitationRun>(machine).is_none());
+        assert_eq!(
+            app.world()
+                .get::<Container>(beaker_a)
+                .unwrap()
+                .solution
+                .total_volume(),
+            Units::whole(60)
+        );
+        assert_eq!(
+            app.world()
+                .get::<Container>(beaker_b)
+                .unwrap()
+                .solution
+                .total_volume(),
+            Units::whole(50),
+            "an undersized destination must be left untouched"
+        );
+    }
+
+    #[test]
+    fn agitation_blends_the_two_prepared_temperatures() {
+        let mut app = test_app();
+        let (client, machine, beaker_a, beaker_b) =
+            staged_mixer(&mut app, &[("inaprovaline", 5)], &[("carbon", 5)]);
+        app.world_mut()
+            .get_mut::<Container>(beaker_a)
+            .unwrap()
+            .solution
+            .temperature = Kelvin(400.0);
+        app.world_mut()
+            .get_mut::<Container>(beaker_b)
+            .unwrap()
+            .solution
+            .temperature = Kelvin(300.0);
+
+        request_agitation(&mut app, client, machine, AgitateDirection::AToB);
+        assert_eq!(
+            app.world()
+                .get::<Container>(beaker_b)
+                .unwrap()
+                .solution
+                .temperature,
+            Kelvin(350.0),
+            "equal volumes should retain their volume-weighted temperature"
+        );
+    }
+
+    #[test]
+    fn an_active_agitation_locks_separation_ejection_and_emptying() {
+        let mut app = test_app();
+        let (client, machine, _, destination) =
+            staged_mixer(&mut app, &[("inaprovaline", 5)], &[("carbon", 5)]);
+        request_agitation(&mut app, client, machine, AgitateDirection::AToB);
+        let carbon = reagent(&app, "carbon");
+
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: BufferTransferRequested {
+                machine,
+                reagent: carbon,
+                amount: Units::whole(5),
+                direction: BufferDirection::ToBuffer,
+                slot: MachineSlot::B,
+            },
+        });
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: EmptyRequested {
+                machine,
+                slot: MachineSlot::B,
+            },
+        });
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: EjectRequested {
+                machine,
+                slot: MachineSlot::B,
+            },
+        });
+        app.update();
+
+        assert!(app.world().get::<InSlotB>(destination).is_some());
+        assert!(app
+            .world()
+            .get::<Container>(destination)
+            .unwrap()
+            .solution
+            .total_volume()
+            .is_positive());
+        assert!(app.world().get::<Buffer>(machine).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn two_mixing_chambers_can_agitate_concurrently() {
+        let mut app = test_app();
+        let (client_a, machine_a, _, destination_a) =
+            staged_mixer(&mut app, &[("inaprovaline", 5)], &[("carbon", 5)]);
+        let (client_b, machine_b, _, destination_b) =
+            staged_mixer(&mut app, &[("inaprovaline", 5)], &[("carbon", 5)]);
+
+        request_agitation(&mut app, client_a, machine_a, AgitateDirection::AToB);
+        request_agitation(&mut app, client_b, machine_b, AgitateDirection::AToB);
+        assert!(app.world().get::<AgitationRun>(machine_a).is_some());
+        assert!(app.world().get::<AgitationRun>(machine_b).is_some());
+
+        run_for(&mut app, 5.2);
+        let product = reagent(&app, "bicaridine");
+        for (machine, destination) in [(machine_a, destination_a), (machine_b, destination_b)] {
+            assert!(app.world().get::<AgitationRun>(machine).is_none());
+            assert_eq!(
+                app.world()
+                    .get::<Container>(destination)
+                    .unwrap()
+                    .solution
+                    .volume_of(product),
+                Units::whole(10)
+            );
+        }
+    }
 
     #[test]
     fn loading_two_beakers_fills_a_then_b_then_refuses() {
@@ -1988,10 +2767,9 @@ mod tests {
     }
 
     #[test]
-    fn grinding_into_a_loaded_beaker_can_set_off_a_reaction() {
-        // Grinding is extraction, not chemistry — but what it extracts lands in
-        // a beaker that may already hold something. Dylovene meeting radium is
-        // hyronalin, and that has to count as a discovery like any other.
+    fn grinding_into_a_loaded_beaker_does_not_bypass_agitation() {
+        // Dylovene extracted into a beaker already holding radium has every
+        // ingredient for hyronalin, but both recipe sides now share one vessel.
         let mut app = test_app();
         let ambrosia = produce(&app, "Ambrosia");
         let grinder = grinder(&mut app, &[ambrosia], Some(ContainerKind::LargeBeaker));
@@ -2004,13 +2782,10 @@ mod tests {
         }
 
         grind(&mut app, grinder, false);
-        // Hyronalin is rated, so the grind starts it and `tick_reactions`
-        // carries it. The thing under test is unchanged: the grind has to go
-        // through `Container::mutate` at all, or nothing would ever start.
         let names = reactions_over(&mut app, 8.0);
         assert!(
-            names.iter().any(|key| key == "hyronalin"),
-            "the grind must go through Container::mutate so reactions resolve, got {names:?}"
+            !names.iter().any(|key| key == "hyronalin"),
+            "a grinder must not counterfeit a staged mix, got {names:?}"
         );
     }
 
@@ -2484,6 +3259,157 @@ mod tests {
         );
     }
 
+    #[test]
+    fn four_clients_claim_both_core_lanes_without_stealing_each_others_panels() {
+        let mut app = test_app();
+        let machines: Vec<Entity> = [
+            MachineKind::ChemMaster5000,
+            MachineKind::ChemMaster5000,
+            MachineKind::MixingChamber,
+            MachineKind::MixingChamber,
+        ]
+        .into_iter()
+        .map(|kind| {
+            app.world_mut()
+                .spawn((Machine::new(kind), Transform::default()))
+                .id()
+        })
+        .collect();
+        let chemists: Vec<(ClientId, Entity)> = (0..4).map(|_| chemist(&mut app)).collect();
+
+        for ((client, _), machine) in chemists.iter().zip(machines.iter()) {
+            press_e(&mut app, *client, *machine);
+        }
+        for ((_, player), machine) in chemists.iter().zip(machines.iter()) {
+            assert_eq!(
+                app.world().get::<Machine>(*machine).unwrap().in_use_by,
+                Some(*player),
+                "every physical lane machine should have its own claim"
+            );
+        }
+
+        // Each operator attempts to take the next operator's station. Every
+        // request is refused independently and their original panel remains.
+        for index in 0..4 {
+            let requester = chemists[index];
+            let occupied = machines[(index + 1) % machines.len()];
+            press_e(&mut app, requester.0, occupied);
+        }
+        for ((_, player), machine) in chemists.iter().zip(machines.iter()) {
+            assert_eq!(
+                app.world().get::<Machine>(*machine).unwrap().in_use_by,
+                Some(*player)
+            );
+            assert_eq!(
+                *app.world().get::<InteractionMode>(*player).unwrap(),
+                InteractionMode::UsingMachine(*machine),
+                "a refused claim must not close or redirect the operator's own panel"
+            );
+        }
+    }
+
+    #[test]
+    fn another_player_can_load_a_free_mixer_slot_without_stealing_the_panel() {
+        let mut app = test_app();
+        let (owner_client, owner) = chemist(&mut app);
+        let (loader_client, loader) = chemist(&mut app);
+        let machine = app
+            .world_mut()
+            .spawn((
+                Machine::new(MachineKind::MixingChamber),
+                ContainerSlot { offset: Vec3::ZERO },
+                ContainerSlotB { offset: Vec3::X },
+                Transform::default(),
+            ))
+            .id();
+        app.world_mut()
+            .spawn((Container::new(ContainerKind::Beaker), InSlot(machine)));
+
+        press_e(&mut app, owner_client, machine);
+        assert_eq!(
+            app.world().get::<Machine>(machine).unwrap().in_use_by,
+            Some(owner)
+        );
+
+        let second_beaker = app
+            .world_mut()
+            .spawn((Container::new(ContainerKind::Beaker), HeldBy(loader)))
+            .id();
+        press_e(&mut app, loader_client, machine);
+
+        assert_eq!(
+            app.world().get::<InSlotB>(second_beaker).map(|slot| slot.0),
+            Some(machine),
+            "the free physical slot remains collaborative while the panel is claimed"
+        );
+        assert_eq!(
+            app.world().get::<Machine>(machine).unwrap().in_use_by,
+            Some(owner),
+            "loading glassware must not change panel ownership"
+        );
+        assert_eq!(
+            *app.world().get::<InteractionMode>(owner).unwrap(),
+            InteractionMode::UsingMachine(machine)
+        );
+        assert_eq!(
+            *app.world().get::<InteractionMode>(loader).unwrap(),
+            InteractionMode::Roaming,
+            "loading is a physical action, not a second panel claim"
+        );
+    }
+
+    #[test]
+    fn chemically_incapacitated_clients_cannot_operate_or_take_from_machines() {
+        let mut app = test_app();
+        let (client, player) = chemist(&mut app);
+        let machine = app
+            .world_mut()
+            .spawn((
+                Machine::new(MachineKind::Locker),
+                Transform::default(),
+                Solid {
+                    half_extents: Vec3::splat(0.5),
+                },
+            ))
+            .id();
+        let stored = app
+            .world_mut()
+            .spawn((Container::new(ContainerKind::Beaker), Stored(machine)))
+            .id();
+        let mut blood = crate::body::Bloodstream::default();
+        blood.0.add_status(chem_sim::StatusKind::Sedated, 20.0, 2.0);
+        app.world_mut()
+            .entity_mut(player)
+            .insert((crate::body::Body::default(), blood));
+
+        press_e(&mut app, client, machine);
+        assert_eq!(
+            app.world().get::<Machine>(machine).unwrap().in_use_by,
+            None,
+            "sedation must be enforced by the authority, not only by local input"
+        );
+
+        // Forge the claim too: `handle_take` must independently enforce the
+        // condition rather than relying on the panel-open path.
+        app.world_mut()
+            .get_mut::<Machine>(machine)
+            .unwrap()
+            .in_use_by = Some(player);
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: TakeRequested {
+                machine,
+                item: stored,
+            },
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<Stored>(stored).map(|stored| stored.0),
+            Some(machine),
+            "an incapacitated forged request cannot remove stored equipment"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Reaction chamber
     // -----------------------------------------------------------------------
@@ -2586,6 +3512,74 @@ mod tests {
             assert!(overflow.is_zero(), "the test beaker overflowed");
         }
         app.world_mut().spawn(container).id()
+    }
+
+    /// A claimed Mixing Chamber with independently prepared beakers in A and
+    /// B. Ingredients are inserted without calling the resolver so the helper
+    /// models the exact state immediately before the operator presses the
+    /// agitation control.
+    fn staged_mixer(
+        app: &mut App,
+        side_a: &[(&str, i32)],
+        side_b: &[(&str, i32)],
+    ) -> (ClientId, Entity, Entity, Entity) {
+        let side_a = side_a
+            .iter()
+            .map(|(key, amount)| (*key, Units::whole(*amount)))
+            .collect::<Vec<_>>();
+        let side_b = side_b
+            .iter()
+            .map(|(key, amount)| (*key, Units::whole(*amount)))
+            .collect::<Vec<_>>();
+        staged_mixer_units(app, &side_a, &side_b)
+    }
+
+    fn staged_mixer_units(
+        app: &mut App,
+        side_a: &[(&str, Units)],
+        side_b: &[(&str, Units)],
+    ) -> (ClientId, Entity, Entity, Entity) {
+        let (client, player) = chemist(app);
+        let mut machine_state = Machine::new(MachineKind::MixingChamber);
+        machine_state.in_use_by = Some(player);
+        let machine = app
+            .world_mut()
+            .spawn((
+                machine_state,
+                Buffer(Solution::new(Units::whole(300))),
+                Transform::default(),
+            ))
+            .id();
+
+        let make_beaker = |contents: &[(&str, Units)]| {
+            let mut container = Container::new(ContainerKind::LargeBeaker);
+            for (key, amount) in contents {
+                let id = reagent(app, key);
+                assert!(
+                    container.solution.add(id, *amount).is_zero(),
+                    "test beaker overflowed"
+                );
+            }
+            container
+        };
+        let a = make_beaker(side_a);
+        let b = make_beaker(side_b);
+        let beaker_a = app.world_mut().spawn((a, InSlot(machine))).id();
+        let beaker_b = app.world_mut().spawn((b, InSlotB(machine))).id();
+        (client, machine, beaker_a, beaker_b)
+    }
+
+    fn request_agitation(
+        app: &mut App,
+        client: ClientId,
+        machine: Entity,
+        direction: AgitateDirection,
+    ) {
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: AgitateRequested { machine, direction },
+        });
+        app.update();
     }
 
     fn reaction_id(app: &App, key: &str) -> chem_sim::ReactionId {

@@ -9,7 +9,9 @@ use chem_sim::body::{
     metabolise, Bloodstream, Vitals, CONTACT_REFERENCE_DOSE, DIGESTION_RATE, MAX_DAMAGE_PER_KIND,
     OXYGEN_RECOVERY, RECOVER,
 };
-use chem_sim::{ChemData, Damage, DamageKind, ReagentEffect, Route, Solution, StatusKind, Units};
+use chem_sim::{
+    ChemData, Damage, DamageKind, ReagentEffect, Route, Solution, StatusKind, Units, WorldEffect,
+};
 
 const REAGENTS_RON: &str = include_str!("../../../assets/data/chem.reagents.ron");
 const REACTIONS_RON: &str = include_str!("../../../assets/data/chem.reactions.ron");
@@ -32,6 +34,14 @@ const FIXTURE_REAGENTS: &str = r#"[
      effects: [Counter(kind: Drunk, seconds: 2.0, intensity: 0.25)]),
     (id: "glow",    name: "Glow",    color: (0.4, 0.9, 0.4), dispensable: true,
      effects: [Status(kind: Irradiated, seconds: 6.0, intensity: 2.0)]),
+    (id: "shield",  name: "Shield",  color: (0.4, 0.9, 0.4), dispensable: true,
+     effects: [Status(kind: RadiationShield, seconds: 6.0, intensity: 1.0)]),
+    (id: "detox",   name: "Detox",   color: (0.4, 0.9, 0.4), dispensable: true,
+     effects: [Purge(1)]),
+    (id: "crasher", name: "Crasher", color: (0.4, 0.9, 0.4), dispensable: true,
+     metabolism: Some(2.0),
+     effects: [Status(kind: Hastened, seconds: 4.0, intensity: 1.0)],
+     after_effects: [Status(kind: Sluggish, seconds: 8.0, intensity: 1.5)]),
     (id: "tiered",  name: "Tiered",  color: (0.7, 0.3, 0.7), dispensable: true,
      overdose: Some(10), critical_overdose: Some(20),
      effects: [Heal(Brute, 1)],
@@ -407,7 +417,7 @@ fn water_sobers_you_up_faster_than_waiting() {
 }
 
 #[test]
-fn radiation_is_the_one_status_that_hurts_you() {
+fn radiation_deals_damage_through_its_status_tick() {
     let data = fixture();
     let (mut vitals, mut blood) = injected(&data, "glow", 5);
 
@@ -418,6 +428,132 @@ fn radiation_is_the_one_status_that_hurts_you() {
         "irradiated deals toxin equal to its intensity"
     );
     assert!(blood.status(StatusKind::Irradiated).remaining > 0.0);
+}
+
+#[test]
+fn radiation_shield_reduces_new_irradiation_without_erasing_old_exposure() {
+    let mut blood = Bloodstream::new();
+    blood.add_status(StatusKind::Irradiated, 8.0, 2.0);
+    assert_eq!(blood.status(StatusKind::Irradiated).intensity, 2.0);
+
+    blood.add_status(StatusKind::RadiationShield, 8.0, 1.0);
+    blood.add_status(StatusKind::Irradiated, 8.0, 4.0);
+
+    // One point of protection blocks 75% of the incoming intensity. The old
+    // exposure remains stronger, because prophylaxis is not a cure.
+    assert_eq!(blood.status(StatusKind::Irradiated).intensity, 2.0);
+    assert_eq!(blood.radiation_resistance(), 0.75);
+}
+
+#[test]
+fn sedation_incapacitation_and_apparent_death_are_distinct_from_damage() {
+    let mut blood = Bloodstream::new();
+    blood.add_status(StatusKind::Sedated, 10.0, 2.0);
+    assert!(blood.incapacitated());
+    assert!(!blood.appears_dead());
+
+    blood.add_status(StatusKind::Sedated, 10.0, 4.0);
+    assert!(blood.appears_dead());
+    assert!(
+        Vitals::default().damage.is_zero(),
+        "sedation does not fake injury"
+    );
+}
+
+#[test]
+fn stabilization_and_analgesia_raise_collapse_without_healing() {
+    let mut vitals = Vitals::default();
+    let mut blood = Bloodstream::new();
+    blood.add_status(StatusKind::Stabilized, 10.0, 1.0);
+    blood.add_status(StatusKind::Analgesic, 10.0, 1.0);
+    vitals.apply(Damage {
+        brute: Units::whole(80),
+        burn: Units::whole(60),
+        ..Damage::default()
+    });
+    blood.reconcile_collapse(&mut vitals, false);
+
+    assert_eq!(blood.collapse_threshold(), Units::whole(155));
+    assert!(
+        !vitals.collapsed,
+        "masked damage remains below the raised threshold"
+    );
+    assert_eq!(vitals.total(), Units::whole(140), "no damage was healed");
+}
+
+#[test]
+fn status_aggregates_provide_deterministic_gameplay_inputs() {
+    let mut blood = Bloodstream::new();
+    blood.add_status(StatusKind::Chilled, 8.0, 1.0);
+    blood.add_status(StatusKind::Hallucinating, 8.0, 1.0);
+    blood.add_status(StatusKind::Unsteady, 8.0, 1.0);
+
+    assert!(blood.movement_multiplier() < 1.0);
+    assert!(blood.perception_distortion() > 0.0);
+    assert!(blood.motor_instability() > 0.0);
+}
+
+#[test]
+fn every_status_has_a_mechanical_or_behavioral_signal() {
+    for kind in StatusKind::ALL {
+        let signalled = !kind.tick_damage(1.0).is_zero()
+            || kind.movement_multiplier(1.0) != 1.0
+            || kind.perception_distortion(1.0) != 0.0
+            || kind.motor_instability(1.0) != 0.0
+            || matches!(
+                kind,
+                StatusKind::Stabilized | StatusKind::Analgesic | StatusKind::RadiationShield
+            );
+        assert!(
+            signalled,
+            "{} has no headless gameplay signal",
+            kind.label()
+        );
+    }
+}
+
+#[test]
+fn purge_accelerates_only_currently_harmful_reagents() {
+    let data = fixture();
+    let mut vitals = Vitals::default();
+    let mut blood = Bloodstream::new();
+    for (key, amount) in [("poison", 5), ("cure", 5), ("detox", 5)] {
+        let mut d = dose(&data, key, amount);
+        blood.receive(&mut d, Route::Injected, &mut vitals, &data);
+    }
+
+    let report = metabolise(&mut vitals, &mut blood, &data);
+    assert!(report
+        .purged
+        .iter()
+        .any(|(id, amount)| *id == data.reagent("poison") && *amount == Units::whole(1)));
+    assert_eq!(
+        blood.blood.volume_of(data.reagent("poison")),
+        Units::whole(5) - Units::whole(1) - chem_sim::DEFAULT_METABOLISM
+    );
+    assert_eq!(
+        blood.blood.volume_of(data.reagent("cure")),
+        Units::whole(5) - chem_sim::DEFAULT_METABOLISM,
+        "therapeutic medicine is not a purge target"
+    );
+}
+
+#[test]
+fn after_effects_fire_once_when_the_whole_dose_clears() {
+    let data = fixture();
+    let (mut vitals, mut blood) = injected(&data, "crasher", 4);
+    let crasher = data.reagent("crasher");
+
+    let first = metabolise(&mut vitals, &mut blood, &data);
+    assert!(first.after_effects.is_empty());
+    let cleared = metabolise(&mut vitals, &mut blood, &data);
+    assert_eq!(cleared.after_effects, vec![crasher]);
+    assert_eq!(blood.status(StatusKind::Sluggish).intensity, 1.5);
+    let later = metabolise(&mut vitals, &mut blood, &data);
+    assert!(
+        later.after_effects.is_empty(),
+        "a comedown is a one-shot edge"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +646,7 @@ fn no_effect_is_written_with_a_meaningless_magnitude() {
             .iter()
             .chain(&reagent.overdose_effects)
             .chain(&reagent.critical_effects)
+            .chain(&reagent.after_effects)
         {
             assert!(
                 effect.magnitude() > 0.0,
@@ -517,7 +654,127 @@ fn no_effect_is_written_with_a_meaningless_magnitude() {
                 reagent.key
             );
         }
+        for effect in &reagent.world_effects {
+            assert!(
+                effect.magnitude() > 0.0,
+                "'{}' has a world effect with a zero or negative magnitude: {effect:?}",
+                reagent.key
+            );
+        }
     }
+}
+
+#[test]
+fn every_crafted_compound_has_an_explicit_identity() {
+    let data = real();
+    let mut products = std::collections::BTreeSet::new();
+    for reaction in data.reactions.iter() {
+        products.extend(reaction.product_ids());
+    }
+
+    assert_eq!(
+        products.len(),
+        41,
+        "the audit should cover every shipped product"
+    );
+    for id in products {
+        let reagent = data.reagents.get(id);
+        assert!(
+            reagent
+                .treats
+                .as_deref()
+                .is_some_and(|description| !description.trim().is_empty()),
+            "crafted compound '{}' has no player-facing identity text",
+            reagent.key
+        );
+        assert!(
+            !reagent.effects.is_empty()
+                || !reagent.after_effects.is_empty()
+                || !reagent.world_effects.is_empty()
+                || reagent.intentionally_inert,
+            "crafted compound '{}' has no body, after-, world, or documented inert identity",
+            reagent.key
+        );
+    }
+}
+
+#[test]
+fn drug_like_compounds_do_not_share_a_complete_effect_signature() {
+    let data = real();
+    let keys = [
+        "chloral_hydrate",
+        "hyperzine",
+        "synaptizine",
+        "hooch",
+        "space_drugs",
+        "bath_salts",
+        "krokodil",
+        "methamphetamine",
+        "mindbreaker_toxin",
+        "zombie_powder",
+    ];
+    let mut seen = std::collections::HashMap::<String, &str>::new();
+    for key in keys {
+        let reagent = data.reagents.get(data.reagent(key));
+        let signature = format!(
+            "{:?}|{:?}|{:?}|{:?}",
+            reagent.effects,
+            reagent.overdose_effects,
+            reagent.critical_effects,
+            reagent.after_effects
+        );
+        if let Some(other) = seen.insert(signature, key) {
+            panic!("'{key}' and '{other}' have identical complete drug effects");
+        }
+    }
+}
+
+#[test]
+fn flagship_compounds_expose_their_new_systemic_profiles() {
+    let data = real();
+    let has_status =
+        |key: &str, expected: StatusKind| {
+            data.reagents.get(data.reagent(key)).effects.iter().any(
+                |effect| matches!(effect, ReagentEffect::Status { kind, .. } if *kind == expected),
+            )
+        };
+    assert!(has_status("inaprovaline", StatusKind::Stabilized));
+    assert!(has_status("chloral_hydrate", StatusKind::Sedated));
+    assert!(has_status("space_drugs", StatusKind::Euphoric));
+    assert!(has_status("space_drugs", StatusKind::Hallucinating));
+    assert!(has_status("bath_salts", StatusKind::Paranoid));
+    assert!(has_status("krokodil", StatusKind::Analgesic));
+    assert!(data
+        .reagents
+        .get(data.reagent("krokodil"))
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, ReagentEffect::Harm(DamageKind::Burn, _))));
+    assert!(has_status("phlogiston", StatusKind::Burning));
+    assert!(has_status("cryostylane", StatusKind::Chilled));
+    assert!(has_status("potassium_iodide", StatusKind::RadiationShield));
+    assert!(has_status("cyanide", StatusKind::Choking));
+    assert!(has_status("unstable_mutagen", StatusKind::Mutating));
+    assert!(has_status("synaptizine", StatusKind::Focused));
+
+    assert!(data
+        .reagents
+        .get(data.reagent("dylovene"))
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, ReagentEffect::Purge(_))));
+    assert!(data
+        .reagents
+        .get(data.reagent("space_cleaner"))
+        .world_effects
+        .iter()
+        .any(|effect| matches!(effect, WorldEffect::Clean { .. })));
+    assert!(data
+        .reagents
+        .get(data.reagent("thermite"))
+        .world_effects
+        .iter()
+        .any(|effect| matches!(effect, WorldEffect::Corrode { .. })));
 }
 
 /// Pins the RON spelling of every field added for bodies.
@@ -536,10 +793,20 @@ fn every_new_field_round_trips_through_ron() {
              Heal(Brute, 2), Harm(Toxin, 1), Contact(Burn, 0.5),
              Status(kind: Drunk, seconds: 4.0, intensity: 0.65),
              Counter(kind: Irradiated, seconds: 2.0, intensity: 1.0),
+             Purge(0.5),
          ],
          overdose_effects: [Harm(Toxin, 1)],
-         critical_effects: [Harm(Toxin, 4)]),
-        (id: "other", name: "Other", color: (0.0, 0.0, 0.0), dispensable: true),
+         critical_effects: [Harm(Toxin, 4)],
+         after_effects: [Status(kind: Sluggish, seconds: 8.0, intensity: 1.0)],
+         world_effects: [
+             Clean(strength: 1.0), Corrode(strength: 2.0),
+             Ignite(intensity: 1.0, seconds: 4.0),
+             ReleaseSmoke(radius: 3.0, seconds: 5.0),
+             Slippery(seconds: 6.0), Flammable(intensity: 1.0, seconds: 8.0),
+             Chill(kelvin_per_unit: 2.0), Flash(radius: 4.0, seconds: 3.0),
+         ]),
+        (id: "other", name: "Other", color: (0.0, 0.0, 0.0), dispensable: true,
+         intentionally_inert: true),
     ]"#;
     let reactions = r#"[
         (id: "hot", reactants: [("pinned", 1)], products: [("other", 1)],
@@ -559,7 +826,7 @@ fn every_new_field_round_trips_through_ron() {
     assert_eq!(pinned.metabolism, Some(Units::from_f64(0.2)));
     assert_eq!(pinned.rate(), Units::from_f64(0.2));
     assert_eq!(pinned.boils_at.map(|k| k.0), Some(323.15));
-    assert_eq!(pinned.effects.len(), 5);
+    assert_eq!(pinned.effects.len(), 6);
     assert_eq!(
         pinned.effects[3],
         ReagentEffect::Status {
@@ -568,6 +835,9 @@ fn every_new_field_round_trips_through_ron() {
             intensity: 0.65,
         }
     );
+    assert_eq!(pinned.after_effects.len(), 1);
+    assert_eq!(pinned.world_effects.len(), 8);
+    assert!(data.reagents.get(data.reagent("other")).intentionally_inert);
     assert!(pinned.is_harmful());
 
     let hot = data.reactions.find("hot").expect("reaction should load");

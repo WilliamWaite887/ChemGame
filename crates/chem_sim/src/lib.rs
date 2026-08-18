@@ -35,13 +35,18 @@ pub mod units;
 
 pub use body::{
     blast_radius, explosion_damage, metabolise, Bloodstream, ExposureReport, Health, StatusState,
-    TickReport, Vitals, COLLAPSE, MAX_DAMAGE_PER_KIND, RECOVER, TICK_SECONDS,
+    TickReport, Vitals, ANALGESIC_COLLAPSE_BONUS, COLLAPSE, MAX_DAMAGE_PER_KIND, RECOVER,
+    STABILIZED_COLLAPSE_BONUS, TICK_SECONDS,
 };
-pub use effect::{Damage, DamageKind, ReagentEffect, Route, StatusKind};
-pub use reaction::{ChemDataError, Reaction, ReactionDef, ReactionEffect, ReactionId, ReactionSet};
+pub use effect::{Damage, DamageKind, ReagentEffect, Route, StatusKind, WorldEffect};
+pub use reaction::{
+    ChemDataError, Reaction, ReactionActivation, ReactionDef, ReactionEffect, ReactionId,
+    ReactionProcess, ReactionProcessDef, ReactionSet,
+};
 pub use reagent::{Category, Reagent, ReagentDef, ReagentId, ReagentRegistry, DEFAULT_METABOLISM};
 pub use resolver::{
-    is_reacting, resolve, resolve_step, ReactionEvent, ResolveReport, MAX_ITERATIONS,
+    is_reacting, is_reacting_with_activation, resolve, resolve_step, resolve_step_with_activation,
+    resolve_with_activation, ReactionEvent, ResolveReport, MAX_ITERATIONS,
 };
 pub use solution::Solution;
 pub use thermal::{approach, boil_off, Overheat};

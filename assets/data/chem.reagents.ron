@@ -14,7 +14,9 @@
 // `effects` is what the reagent does per metabolism tick to whoever takes it,
 // and `overdose_effects` stack on top of those past the threshold rather than
 // replacing them: an overdose is the medicine still working while it also
-// hurts you. Numbers follow /tg/station where it has an opinion.
+// hurts you. `after_effects` fire once when the last of a dose clears, while
+// `world_effects` describe authority-owned station behaviour when a solution
+// is released. Numbers follow /tg/station where it has an opinion.
 //
 // A note for editors: RON will not coerce an integer into the `f32` inside
 // `boils_at`. Write `Some((323.15))`, never `Some((323))`.
@@ -253,9 +255,9 @@
         // General stabiliser rather than airloss-specific, so it's the weak
         // end of the category for order-favor purposes too.
         potency: 1,
-        // Weak on purpose: it is the thing you take to stop getting worse, not
-        // the thing that fixes you.
-        effects: [Heal(Oxygen, 0.5)],
+        // It creates headroom before collapse and softens new airloss without
+        // pretending to repair oxygen debt already suffered.
+        effects: [Status(kind: Stabilized, seconds: 6.0, intensity: 1.0)],
     ),
     (
         id: "dylovene",
@@ -265,7 +267,9 @@
         treats: Some("Poisoning and toxin damage."),
         categories: [Antitoxins],
         potency: 2,
-        effects: [Heal(Toxin, 2)],
+        // In addition to repairing toxin damage, strips a little of every
+        // actively harmful chemical from the bloodstream each tick.
+        effects: [Heal(Toxin, 2), Purge(0.5)],
         overdose_effects: [Harm(Toxin, 1)],
     ),
     (
@@ -324,7 +328,10 @@
         treats: Some("Airloss and oxygen deprivation."),
         categories: [Airloss],
         potency: 2,
-        effects: [Heal(Oxygen, 3)],
+        effects: [
+            Heal(Oxygen, 3),
+            Status(kind: Stabilized, seconds: 5.0, intensity: 1.5),
+        ],
         overdose_effects: [Harm(Toxin, 1)],
     ),
     (
@@ -364,10 +371,12 @@
         treats: Some("Radiation, before you get it rather than after."),
         categories: [Radiation],
         potency: 1,
-        // Weaker than hyronalin at stripping a dose already taken, but it is
-        // two base reagents and nothing else, so it is what you can have ready
-        // in a bottle before the alarm goes off.
-        effects: [Heal(Toxin, 0.5), Counter(kind: Irradiated, seconds: 2.0, intensity: 2.0)],
+        // Primarily prophylactic. It blocks most new radiation while active
+        // but only weakly cleans exposure that has already landed.
+        effects: [
+            Status(kind: RadiationShield, seconds: 8.0, intensity: 1.0),
+            Counter(kind: Irradiated, seconds: 1.0, intensity: 0.25),
+        ],
         overdose_effects: [Harm(Toxin, 1)],
     ),
     (
@@ -417,6 +426,7 @@
         // The only reagent whose route really matters: a needle drives it past
         // the skin that a mouthful mostly does not.
         effects: [Harm(Toxin, 1), Contact(Burn, 2)],
+        world_effects: [Corrode(strength: 1.5)],
     ),
     (
         id: "chloral_hydrate",
@@ -426,10 +436,13 @@
         treats: Some("Puts people out. Past 15u it does rather more than that."),
         categories: [Stimulants],
         effects: [
-            Status(kind: Sluggish, seconds: 6.0, intensity: 1.0),
-            Status(kind: Blurred, seconds: 6.0, intensity: 1.0),
+            Status(kind: Sedated, seconds: 7.0, intensity: 1.5),
+            Status(kind: Blurred, seconds: 5.0, intensity: 0.8),
         ],
-        overdose_effects: [Harm(Toxin, 2)],
+        overdose_effects: [
+            Harm(Toxin, 2),
+            Status(kind: Sedated, seconds: 10.0, intensity: 3.0),
+        ],
     ),
     (
         id: "phlogiston",
@@ -437,7 +450,11 @@
         color: (0.98, 0.42, 0.18),
         treats: Some("Nothing. It burns, and it does not stop."),
         categories: [Pyrotechnics],
-        effects: [Harm(Burn, 2), Contact(Burn, 6)],
+        effects: [
+            Status(kind: Burning, seconds: 8.0, intensity: 2.0),
+            Contact(Burn, 6),
+        ],
+        world_effects: [Ignite(intensity: 2.0, seconds: 12.0)],
     ),
     (
         id: "unstable_mutagen",
@@ -445,7 +462,11 @@
         color: (0.36, 0.86, 0.30),
         treats: Some("Nothing. It rewrites you, and it is not careful about it."),
         categories: [Poisons],
-        effects: [Harm(Toxin, 2), Status(kind: Irradiated, seconds: 4.0, intensity: 1.5)],
+        effects: [
+            Harm(Toxin, 1),
+            Status(kind: Mutating, seconds: 8.0, intensity: 1.5),
+            Status(kind: Irradiated, seconds: 4.0, intensity: 1.0),
+        ],
     ),
     (
         id: "cyanide",
@@ -453,10 +474,12 @@
         color: (0.30, 0.34, 0.30),
         treats: Some("Nothing. It stops you breathing from the inside."),
         categories: [Poisons],
-        // The only reagent in the game that does oxygen damage directly, which
-        // makes dexalin the one thing that will not save you from it — the
-        // debt comes back faster than dexalin clears it.
-        effects: [Harm(Oxygen, 4), Harm(Toxin, 1)],
+        // Choking keeps adding oxygen debt after the direct dose lands;
+        // dexalin can slow that spiral, but does not simply counter the status.
+        effects: [
+            Harm(Toxin, 1),
+            Status(kind: Choking, seconds: 6.0, intensity: 4.0),
+        ],
     ),
 
     // ---- Stimulants -------------------------------------------------------
@@ -473,6 +496,7 @@
         categories: [Stimulants],
         effects: [Status(kind: Hastened, seconds: 4.0, intensity: 1.0)],
         overdose_effects: [Harm(Toxin, 1)],
+        after_effects: [Status(kind: Sluggish, seconds: 12.0, intensity: 1.0)],
     ),
     (
         id: "synaptizine",
@@ -484,6 +508,10 @@
         // The antidote to your own bad decisions, at a price. Note the low
         // overdose threshold: five units is not much of a margin.
         effects: [
+            Status(kind: Focused, seconds: 5.0, intensity: 1.5),
+            Counter(kind: Sedated, seconds: 4.0, intensity: 1.0),
+            Counter(kind: Hallucinating, seconds: 4.0, intensity: 2.0),
+            Counter(kind: Paranoid, seconds: 4.0, intensity: 2.0),
             Counter(kind: Blurred, seconds: 4.0, intensity: 2.0),
             Counter(kind: Unsteady, seconds: 4.0, intensity: 2.0),
             Harm(Toxin, 0.5),
@@ -500,7 +528,11 @@
         overdose: Some(30),
         treats: Some("Nothing good. Cheap, nasty, and strong."),
         categories: [Utility],
-        effects: [Status(kind: Drunk, seconds: 4.0, intensity: 1.6), Harm(Toxin, 0.3)],
+        effects: [
+            Status(kind: Drunk, seconds: 6.0, intensity: 1.6),
+            Status(kind: Unsteady, seconds: 4.0, intensity: 0.8),
+            Harm(Toxin, 0.3),
+        ],
         overdose_effects: [Harm(Toxin, 1)],
     ),
 
@@ -515,7 +547,10 @@
         color: (0.72, 0.86, 0.78),
         treats: Some("Nothing. A fertiliser, and the way in to three other recipes."),
         categories: [Precursors],
-        effects: [Harm(Toxin, 1)],
+        effects: [
+            Harm(Toxin, 0.5),
+            Status(kind: Choking, seconds: 5.0, intensity: 1.5),
+        ],
     ),
     (
         id: "sodium_chloride",
@@ -523,6 +558,7 @@
         color: (0.96, 0.96, 0.94),
         treats: Some("Nothing. Salt. The first thing sodium has ever been good for."),
         categories: [Precursors],
+        intentionally_inert: true,
     ),
     (
         id: "saltwater",
@@ -530,6 +566,7 @@
         color: (0.68, 0.80, 0.90),
         treats: Some("Nothing on its own. Half of a saline drip."),
         categories: [Precursors],
+        intentionally_inert: true,
     ),
     (
         id: "ice",
@@ -537,7 +574,8 @@
         color: (0.80, 0.92, 0.98),
         treats: Some("Nothing. Water that had a hard time. Keeps its cool."),
         categories: [Precursors],
-        effects: [Status(kind: Sluggish, seconds: 3.0, intensity: 0.8)],
+        effects: [Status(kind: Chilled, seconds: 5.0, intensity: 0.8)],
+        world_effects: [Chill(kelvin_per_unit: 0.8)],
     ),
     (
         id: "stabilizing_agent",
@@ -545,6 +583,7 @@
         color: (0.62, 0.64, 0.60),
         treats: Some("Nothing. Present at a reaction, it stops the reaction going off."),
         categories: [Precursors],
+        effects: [Counter(kind: Burning, seconds: 5.0, intensity: 1.0)],
     ),
     (
         id: "oil",
@@ -553,6 +592,10 @@
         treats: Some("Nothing. Flammable, and the base of two worse things."),
         categories: [Precursors],
         effects: [Harm(Toxin, 0.5)],
+        world_effects: [
+            Slippery(seconds: 25.0),
+            Flammable(intensity: 1.0, seconds: 20.0),
+        ],
     ),
     (
         id: "hydrogen_peroxide",
@@ -563,6 +606,7 @@
         // accident, and a chemist looking under either heading should find it.
         categories: [Poisons, Precursors],
         effects: [Harm(Toxin, 0.5), Contact(Burn, 2)],
+        world_effects: [Clean(strength: 0.5), Corrode(strength: 0.4)],
     ),
 
     // ---- Pyrotechnics -----------------------------------------------------
@@ -575,7 +619,14 @@
         color: (0.52, 0.36, 0.22),
         treats: Some("Nothing. It burns through a bulkhead, and through you."),
         categories: [Pyrotechnics],
-        effects: [Harm(Burn, 2), Contact(Burn, 3)],
+        effects: [
+            Status(kind: Burning, seconds: 8.0, intensity: 1.5),
+            Contact(Burn, 3),
+        ],
+        world_effects: [
+            Corrode(strength: 3.0),
+            Ignite(intensity: 1.5, seconds: 10.0),
+        ],
     ),
     (
         id: "flash_powder",
@@ -584,6 +635,7 @@
         treats: Some("Nothing. A bright, blinding nuisance."),
         categories: [Pyrotechnics],
         effects: [Status(kind: Blurred, seconds: 6.0, intensity: 2.0), Contact(Burn, 1)],
+        world_effects: [Flash(radius: 4.0, seconds: 5.0)],
     ),
     (
         id: "smoke",
@@ -591,7 +643,11 @@
         color: (0.60, 0.60, 0.62),
         treats: Some("Nothing. It fills the room the instant it is made."),
         categories: [Pyrotechnics],
-        effects: [Harm(Toxin, 0.5), Status(kind: Blurred, seconds: 4.0, intensity: 1.0)],
+        effects: [
+            Status(kind: Choking, seconds: 4.0, intensity: 0.8),
+            Status(kind: Blurred, seconds: 4.0, intensity: 1.0),
+        ],
+        world_effects: [ReleaseSmoke(radius: 4.5, seconds: 8.0)],
     ),
     (
         id: "smoke_powder",
@@ -599,7 +655,11 @@
         color: (0.72, 0.70, 0.66),
         treats: Some("Nothing. The same cloud, held in the beaker until you want it."),
         categories: [Pyrotechnics],
-        effects: [Harm(Toxin, 0.3), Status(kind: Blurred, seconds: 2.0, intensity: 0.5)],
+        effects: [
+            Status(kind: Choking, seconds: 3.0, intensity: 0.5),
+            Status(kind: Blurred, seconds: 2.0, intensity: 0.5),
+        ],
+        world_effects: [ReleaseSmoke(radius: 3.5, seconds: 7.0)],
     ),
     (
         id: "chlorine_trifluoride",
@@ -610,7 +670,14 @@
         // Metabolises out ten times faster than anything else, which is the
         // only reason a dose is survivable at all.
         metabolism: Some(4.0),
-        effects: [Harm(Burn, 6), Contact(Burn, 8)],
+        effects: [
+            Status(kind: Burning, seconds: 10.0, intensity: 4.0),
+            Contact(Burn, 8),
+        ],
+        world_effects: [
+            Corrode(strength: 5.0),
+            Ignite(intensity: 4.0, seconds: 18.0),
+        ],
     ),
     (
         id: "cryostylane",
@@ -618,7 +685,12 @@
         color: (0.62, 0.86, 0.96),
         treats: Some("Nothing. Cold enough to slow a body down and keep it that way."),
         categories: [Pyrotechnics],
-        effects: [Status(kind: Sluggish, seconds: 6.0, intensity: 2.0), Harm(Brute, 0.5)],
+        effects: [
+            Status(kind: Chilled, seconds: 8.0, intensity: 2.0),
+            Counter(kind: Burning, seconds: 5.0, intensity: 1.0),
+            Harm(Brute, 0.5),
+        ],
+        world_effects: [Chill(kelvin_per_unit: 3.0)],
     ),
     (
         id: "napalm",
@@ -626,7 +698,15 @@
         color: (0.68, 0.30, 0.12),
         treats: Some("Nothing. It burns slowly, and it sticks."),
         categories: [Pyrotechnics],
-        effects: [Harm(Burn, 1), Contact(Burn, 4)],
+        effects: [
+            Status(kind: Burning, seconds: 12.0, intensity: 1.2),
+            Contact(Burn, 4),
+        ],
+        world_effects: [
+            Ignite(intensity: 1.2, seconds: 30.0),
+            Slippery(seconds: 30.0),
+            Flammable(intensity: 2.0, seconds: 30.0),
+        ],
     ),
 
     // ---- Utility ----------------------------------------------------------
@@ -637,6 +717,7 @@
         treats: Some("Nothing. The janitor will thank you. Do not drink it."),
         categories: [Utility],
         effects: [Harm(Toxin, 1)],
+        world_effects: [Clean(strength: 2.0)],
     ),
 
     // ---- Illicit ------------------------------------------------------
@@ -658,8 +739,18 @@
         overdose: Some(20),
         treats: Some("Nothing anyone orders. A euphoric with a nasty comedown."),
         categories: [Illicit],
-        effects: [Status(kind: Drunk, seconds: 6.0, intensity: 1.8)],
-        overdose_effects: [Harm(Toxin, 2), Status(kind: Unsteady, seconds: 4.0, intensity: 1.5)],
+        effects: [
+            Status(kind: Euphoric, seconds: 8.0, intensity: 2.0),
+            Status(kind: Hallucinating, seconds: 6.0, intensity: 1.2),
+        ],
+        overdose_effects: [
+            Harm(Toxin, 2),
+            Status(kind: Unsteady, seconds: 4.0, intensity: 1.5),
+        ],
+        after_effects: [
+            Status(kind: Sluggish, seconds: 14.0, intensity: 1.2),
+            Status(kind: Unsteady, seconds: 8.0, intensity: 0.8),
+        ],
     ),
     (
         id: "bath_salts",
@@ -671,9 +762,11 @@
         categories: [Illicit],
         effects: [
             Status(kind: Hastened, seconds: 5.0, intensity: 1.5),
+            Status(kind: Paranoid, seconds: 7.0, intensity: 2.0),
             Status(kind: Unsteady, seconds: 5.0, intensity: 1.0),
         ],
         overdose_effects: [Harm(Toxin, 3), Harm(Brute, 1)],
+        after_effects: [Status(kind: Sluggish, seconds: 10.0, intensity: 1.4)],
     ),
     (
         // The worst of them: it heals just enough that someone can tell
@@ -685,7 +778,11 @@
         overdose: Some(15),
         treats: Some("Nothing. Numbs injury while it rots you from the inside."),
         categories: [Illicit],
-        effects: [Heal(Brute, 1), Harm(Toxin, 1)],
+        effects: [
+            Status(kind: Analgesic, seconds: 8.0, intensity: 1.0),
+            Harm(Toxin, 1),
+            Harm(Burn, 0.5),
+        ],
         overdose_effects: [Harm(Toxin, 3), Harm(Burn, 2)],
     ),
     (
@@ -696,8 +793,15 @@
         overdose: Some(10),
         treats: Some("Nothing. A hard, grinding burst of speed."),
         categories: [Illicit],
-        effects: [Status(kind: Hastened, seconds: 6.0, intensity: 2.0)],
+        effects: [
+            Status(kind: Hastened, seconds: 6.0, intensity: 2.5),
+            Status(kind: Unsteady, seconds: 3.0, intensity: 0.7),
+        ],
         overdose_effects: [Harm(Toxin, 2), Harm(Brute, 1)],
+        after_effects: [
+            Status(kind: Sluggish, seconds: 16.0, intensity: 2.0),
+            Status(kind: Sedated, seconds: 8.0, intensity: 1.0),
+        ],
     ),
     (
         id: "mindbreaker_toxin",
@@ -708,8 +812,8 @@
         treats: Some("Nothing. A hallucinogen that unsteadies as much as it blurs."),
         categories: [Illicit],
         effects: [
-            Status(kind: Blurred, seconds: 8.0, intensity: 2.5),
-            Status(kind: Unsteady, seconds: 8.0, intensity: 2.0),
+            Status(kind: Hallucinating, seconds: 10.0, intensity: 3.0),
+            Status(kind: Unsteady, seconds: 8.0, intensity: 1.5),
         ],
         overdose_effects: [Harm(Toxin, 2)],
     ),
@@ -723,7 +827,11 @@
         overdose: Some(10),
         treats: Some("Nothing. Enough of it and you barely move at all."),
         categories: [Illicit],
-        effects: [Harm(Toxin, 3), Status(kind: Sluggish, seconds: 10.0, intensity: 3.0)],
-        overdose_effects: [Harm(Toxin, 6)],
+        effects: [
+            Harm(Toxin, 2),
+            Status(kind: Sedated, seconds: 12.0, intensity: 4.0),
+            Status(kind: Analgesic, seconds: 8.0, intensity: 1.5),
+        ],
+        overdose_effects: [Harm(Toxin, 6), Status(kind: Sedated, seconds: 14.0, intensity: 5.0)],
     ),
 ]

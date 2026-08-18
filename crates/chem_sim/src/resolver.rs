@@ -1,6 +1,8 @@
 //! Runs reactions to completion in a solution.
 
-use crate::reaction::{Reaction, ReactionEffect, ReactionId, ReactionSet};
+use crate::reaction::{
+    Reaction, ReactionActivation, ReactionEffect, ReactionId, ReactionProcess, ReactionSet,
+};
 use crate::solution::Solution;
 use crate::thermal::Overheat;
 use crate::units::{Kelvin, Units};
@@ -60,18 +62,34 @@ impl ResolveReport {
 
 /// Reacts `solution` until nothing more can happen.
 ///
-/// Each pass picks the single best applicable reaction — highest priority,
-/// ties broken by definition order — and runs it as far as it will go. Looping
-/// afterwards is what makes chains work: producing inaprovaline in one pass
-/// lets bicaridine fire in the next, so a chemist can build a multi-step
-/// recipe in a single beaker.
+/// Each pass picks the single best applicable ambient reaction — highest
+/// priority, ties broken by definition order — and runs it as far as it will
+/// go. Looping afterwards still makes ambient chains work. Recipes marked
+/// [`ReactionProcess::Agitated`] are invisible here; use
+/// [`resolve_with_activation`] with provenance captured before mixing them.
 ///
 /// Ignores [`Reaction::rate`] entirely: this is the "no clock" resolution, and
 /// it is what reagents reacting *inside a body* want — a bloodstream is not
 /// somewhere a chemist can stand and watch a beaker. See [`resolve_step`] for
-/// the timed form the lab's glassware uses.
+/// the timed ambient form and [`resolve_step_with_activation`] for a Mixing
+/// Chamber batch.
 pub fn resolve(solution: &mut Solution, reactions: &ReactionSet) -> ResolveReport {
-    resolve_step(solution, reactions, f32::INFINITY)
+    resolve_step_inner(solution, reactions, f32::INFINITY, None)
+}
+
+/// Reacts `solution` to completion, including recipes unlocked by
+/// `activation`.
+///
+/// This is the no-clock counterpart to [`resolve_step_with_activation`]. A
+/// Mixing Chamber normally wants the stepped form; this form is useful to
+/// headless simulations and tools that deliberately do not model elapsed
+/// wall-clock time.
+pub fn resolve_with_activation(
+    solution: &mut Solution,
+    reactions: &ReactionSet,
+    activation: &ReactionActivation,
+) -> ResolveReport {
+    resolve_step_inner(solution, reactions, f32::INFINITY, Some(activation))
 }
 
 /// Advances `solution` by `dt` seconds.
@@ -80,14 +98,40 @@ pub fn resolve(solution: &mut Solution, reactions: &ReactionSet) -> ResolveRepor
 /// may only advance `rate * dt` reaction-units in this call — in total, however
 /// many passes it takes — and is then set aside so the loop can get on with
 /// whatever else the beaker can do. A reaction with no rate is unaffected and
-/// still completes inside this one call, which is what keeps every existing
-/// recipe, and every test pinning one, behaving exactly as it did.
+/// still completes inside this one call. Like [`resolve`], this entry point
+/// only permits ambient reactions.
 ///
 /// `dt` of `0.0` therefore means "run the instant chemistry and leave the slow
 /// chemistry where it is", which is precisely what a beaker being poured into
 /// wants: the pour must not silently advance a batch by a frame's worth on the
 /// strength of having been touched.
 pub fn resolve_step(solution: &mut Solution, reactions: &ReactionSet, dt: f32) -> ResolveReport {
+    resolve_step_inner(solution, reactions, dt, None)
+}
+
+/// Advances ordinary chemistry and any agitated recipes named by
+/// `activation` by `dt` seconds.
+///
+/// The activation is proof about the two solutions *before* they were mixed;
+/// it does not get reconstructed from `solution`. This is what makes staged
+/// mixing enforceable instead of being a UI convention. The caller should
+/// retain the same token across ticks, and discard it once
+/// [`is_reacting_with_activation`] becomes false.
+pub fn resolve_step_with_activation(
+    solution: &mut Solution,
+    reactions: &ReactionSet,
+    dt: f32,
+    activation: &ReactionActivation,
+) -> ResolveReport {
+    resolve_step_inner(solution, reactions, dt, Some(activation))
+}
+
+fn resolve_step_inner(
+    solution: &mut Solution,
+    reactions: &ReactionSet,
+    dt: f32,
+    activation: Option<&ReactionActivation>,
+) -> ResolveReport {
     let mut report = ResolveReport {
         distinct_reagents: solution.len(),
         ..Default::default()
@@ -98,7 +142,8 @@ pub fn resolve_step(solution: &mut Solution, reactions: &ReactionSet, dt: f32) -
     let mut spent: Vec<(ReactionId, Units)> = Vec::new();
 
     for _ in 0..MAX_ITERATIONS {
-        let Some((reaction, scale)) = best_reaction(solution, reactions, dt, &spent) else {
+        let Some((reaction, scale)) = best_reaction(solution, reactions, dt, &spent, activation)
+        else {
             return report;
         };
         match spent.iter_mut().find(|(id, _)| *id == reaction.id) {
@@ -147,7 +192,7 @@ pub fn resolve_step(solution: &mut Solution, reactions: &ReactionSet, dt: f32) -
     }
 
     // Fell out of the loop still having work to do.
-    report.hit_iteration_cap = best_reaction(solution, reactions, dt, &spent).is_some();
+    report.hit_iteration_cap = best_reaction(solution, reactions, dt, &spent, activation).is_some();
     report
 }
 
@@ -163,9 +208,31 @@ pub fn resolve_step(solution: &mut Solution, reactions: &ReactionSet, dt: f32) -
 /// where one can run is a solution nobody has resolved yet, which is a bug
 /// elsewhere rather than a batch in progress.
 pub fn is_reacting(solution: &Solution, reactions: &ReactionSet) -> bool {
-    reactions
-        .iter()
-        .any(|reaction| reaction.rate.is_some() && reaction.max_scale(solution).is_some())
+    is_reacting_inner(solution, reactions, None)
+}
+
+/// Whether a rated ambient or activated agitated reaction can still advance.
+///
+/// This is the completion check paired with
+/// [`resolve_step_with_activation`].
+pub fn is_reacting_with_activation(
+    solution: &Solution,
+    reactions: &ReactionSet,
+    activation: &ReactionActivation,
+) -> bool {
+    is_reacting_inner(solution, reactions, Some(activation))
+}
+
+fn is_reacting_inner(
+    solution: &Solution,
+    reactions: &ReactionSet,
+    activation: Option<&ReactionActivation>,
+) -> bool {
+    reactions.iter().any(|reaction| {
+        process_allows(reaction, activation)
+            && reaction.rate.is_some()
+            && reaction.max_scale(solution).is_some()
+    })
 }
 
 /// Highest-priority applicable reaction, ties broken by definition order so
@@ -180,9 +247,13 @@ fn best_reaction<'a>(
     reactions: &'a ReactionSet,
     dt: f32,
     spent: &[(ReactionId, Units)],
+    activation: Option<&ReactionActivation>,
 ) -> Option<(&'a Reaction, Units)> {
     let mut best: Option<(&Reaction, Units)> = None;
     for reaction in reactions.iter() {
+        if !process_allows(reaction, activation) {
+            continue;
+        }
         let Some(scale) = reaction.max_scale(solution) else {
             continue;
         };
@@ -209,6 +280,13 @@ fn best_reaction<'a>(
         }
     }
     best
+}
+
+fn process_allows(reaction: &Reaction, activation: Option<&ReactionActivation>) -> bool {
+    match reaction.process {
+        ReactionProcess::Ambient => true,
+        ReactionProcess::Agitated { .. } => activation.is_some_and(|it| it.contains(reaction.id)),
+    }
 }
 
 /// Consumes reactants and adds products. Catalysts are untouched by design.

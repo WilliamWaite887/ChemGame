@@ -1,10 +1,9 @@
 // A ritual, escalating one delivery at a time. One recurring identity, kept
 // off station.crew.ron for the same reason obsessed.ron's is. The final
 // stage asks for flash_powder — never dispensable on its own, only ever the
-// product of mixing aluminium, potassium and sulfur, which fires a real
-// Smoke effect the instant the player combines them (see
-// chem.reactions.ron's flash_powder entry). The danger is in preparing the
-// ritual's own ask, through entirely unmodified chemistry.
+// product of mixing aluminium, potassium and sulfur. Releasing that product
+// fires its real blinding world effect (see chem.reagents.ron's flash_powder
+// entry), through entirely unmodified chemistry.
 (
     name: "Corwin Ashe",
     role: "Cargo",

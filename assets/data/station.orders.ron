@@ -35,17 +35,24 @@
         patience_floor: 80.0,
         max_active_every: 2,
         max_active_cap: 5,
-        stretch_base: 0.25,
-        stretch_step: 0.02,
-        stretch_cap: 0.4,
+        // Optional development requests preview at most one equipment tier
+        // and one unknown reaction ahead. They start only after the opening
+        // tutorial run, never stack, wait longer, and cost just one standing
+        // (not a botch) when ignored.
+        stretch_base: 0.12,
+        stretch_step: 0.01,
+        stretch_cap: 0.22,
+        stretch_after_successes: 5,
+        stretch_patience_scale: 1.5,
+        stretch_expiry_standing: -1,
         forecast_boost: 2.0,
 
         // Team-size scaling, layered on top of the tier ramp above rather
         // than replacing it — see `shift::scale_for_chemists`. Solo
         // (one chemist) is a mathematical no-op by construction: these three
-        // are the newest and least-playtested knobs in this file, expect to
-        // re-tune them once a 3-4 person table has actually been played.
-        chemist_gap_scale: 0.85,
+        // are tuned around a 30-second advanced batch: roughly 67% useful
+        // load solo and 77% per player at a four-person table.
+        chemist_gap_scale: 0.60,
         max_active_per_chemist: 1,
         max_active_chemist_cap: 3,
     ),

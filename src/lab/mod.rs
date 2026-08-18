@@ -34,7 +34,7 @@ use crate::AppState;
 /// Checks on the hand-edited TrenchBroom map. Test-only, and unconditional: the
 /// map is in the repo whether or not the feature that loads it is on.
 #[cfg(test)]
-mod tb_map;
+pub(crate) mod tb_map;
 
 /// The TrenchBroom-driven station loader. It is the default build; the feature
 /// gate keeps the const-table fallback available through `--no-default-features`.
@@ -79,6 +79,62 @@ impl CrisisSpots {
     }
 }
 
+/// Map-authored locations for authority-owned lab machines.
+///
+/// The transform is the floor origin and orientation of the authored model;
+/// [`reconcile_machine_spots`] raises the gameplay root to the collider centre
+/// before it is replicated. IDs, rather than kinds, are the identity because a
+/// lab may contain several machines of the same kind.
+#[derive(Debug, Clone)]
+pub struct MachinePlacement {
+    pub kind: MachineKind,
+    pub transform: Transform,
+}
+
+#[derive(Resource, Debug, Default, Clone)]
+pub struct MachineSpots {
+    spots: std::collections::BTreeMap<String, MachinePlacement>,
+}
+
+impl MachineSpots {
+    /// Adds or replaces a stable placement id, returning the old placement.
+    pub fn insert(
+        &mut self,
+        id: impl Into<String>,
+        kind: MachineKind,
+        transform: Transform,
+    ) -> Option<MachinePlacement> {
+        self.spots
+            .insert(id.into(), MachinePlacement { kind, transform })
+    }
+
+    pub fn get(&self, id: &str) -> Option<&MachinePlacement> {
+        self.spots.get(id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &MachinePlacement)> {
+        self.spots
+            .iter()
+            .map(|(id, placement)| (id.as_str(), placement))
+    }
+
+    pub fn len(&self) -> usize {
+        self.spots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.spots.is_empty()
+    }
+}
+
+#[cfg(feature = "trenchbroom")]
+fn machine_kind_named(name: &str) -> Option<MachineKind> {
+    let name = name.trim();
+    MachineKind::ALL
+        .into_iter()
+        .find(|kind| format!("{kind:?}") == name)
+}
+
 /// Present only after the current station layout has been collected and its
 /// navigation graph rebuilt.
 ///
@@ -88,7 +144,12 @@ impl CrisisSpots {
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct MapReady;
 
-/// Semantic id of the walkable bridge controlled by the lab's exterior door.
+/// Semantic id of the walkable bridge through the lab's exterior door.
+///
+/// The powered proximity door does not collapse this bridge while shut: crew
+/// need a complete route through it before they can approach and trigger its
+/// sensor. The id remains map-authored so validation can require exactly one
+/// entrance connection.
 pub const LAB_ENTRANCE_BRIDGE_ID: &str = "lab_entrance";
 
 pub(crate) const WALL_THICKNESS: f32 = 0.25;
@@ -354,8 +415,8 @@ impl WallRun {
 /// Every doorway in the suite, as (the run it is cut into, its centre).
 ///
 /// `pub(crate)`: `door::spawn_doors` walks this to place the fallback lab's
-/// physical door. Runtime nav blocking uses a semantic bridge id instead of
-/// depending on this iterator's order.
+/// physical door. Authored navigation identifies its matching walkable bridge
+/// semantically rather than depending on this iterator's order.
 pub(crate) fn doorways() -> impl Iterator<Item = (&'static WallRun, f32)> {
     WALLS
         .iter()
@@ -374,6 +435,7 @@ impl Plugin for LabPlugin {
         // collector.
         app.init_resource::<WalkableAreas>()
             .init_resource::<CrisisSpots>()
+            .init_resource::<MachineSpots>()
             // Readiness belongs to a single visit. `nav` inserts it only after
             // the replacement floor plan has produced a graph.
             .add_systems(OnExit(AppState::Playing), clear_map_runtime);
@@ -392,20 +454,23 @@ impl Plugin for LabPlugin {
                 .after(load_machine_assets),
         );
 
-        app.add_systems(
-            OnEnter(AppState::Playing),
-            (
-                load_machine_assets,
-                // The machines are state, so only the authority creates them.
-                spawn_machines.run_if(is_authority),
+        app.add_systems(OnEnter(AppState::Playing), load_machine_assets)
+            // The map loads asynchronously; its collected spot registry is the
+            // signal that authority-owned machine state can be reconciled.
+            .add_systems(
+                Update,
+                reconcile_machine_spots
+                    .run_if(in_state(AppState::Playing))
+                    .run_if(is_authority),
             )
-                // Chained for the sync point: the two spawners read the
-                // resource the loader inserts.
-                .chain(),
-        )
-        // Fitting them out runs everywhere, against whatever machines exist —
-        // spawned locally here, or arrived by replication there.
-        .add_systems(Update, dress_machines.run_if(in_state(AppState::Playing)));
+            // Presentation runs everywhere, using the replicated transform on
+            // clients rather than deriving placement from machine kind.
+            .add_systems(
+                Update,
+                dress_machines
+                    .after(reconcile_machine_spots)
+                    .run_if(in_state(AppState::Playing)),
+            );
     }
 }
 
@@ -413,6 +478,7 @@ fn clear_map_runtime(world: &mut World) {
     world.remove_resource::<MapReady>();
     world.insert_resource(WalkableAreas::default());
     world.insert_resource(CrisisSpots::default());
+    world.insert_resource(MachineSpots::default());
     world.insert_resource(crate::crew::Departments::default());
     world.insert_resource(crate::nav::NavGraph::default());
 }
@@ -423,10 +489,10 @@ fn clear_map_runtime(world: &mut World) {
 fn seed_legacy_map_runtime(mut commands: Commands) {
     commands.remove_resource::<MapReady>();
 
-    let mut walkable = WalkableAreas::from_floor_plan();
-    // The exterior door starts shut, so the first graph must already agree.
-    walkable.set_bridge_blocked(LAB_ENTRANCE_BRIDGE_ID, true);
-    commands.insert_resource(walkable);
+    // Automatic doors stay traversable to route planning even when their
+    // leaves are shut. Otherwise a visitor cannot plan close enough to trigger
+    // the proximity sensor, leaving orders stranded until a chemist opens it.
+    commands.insert_resource(WalkableAreas::from_floor_plan());
 
     let mut spots = CrisisSpots::default();
     for (id, at) in [
@@ -443,6 +509,7 @@ fn seed_legacy_map_runtime(mut commands: Commands) {
         spots.insert(id, Transform::from_translation(at));
     }
     commands.insert_resource(spots);
+    commands.insert_resource(legacy_machine_spots());
 }
 
 /// An axis-aligned obstruction the player cannot walk through.
@@ -526,8 +593,10 @@ pub struct Bounds {
 
 impl Bounds {
     /// An inverted rectangle — `is_standable()` is false and `holds()` is
-    /// false for every point. What a doorway bridge collapses to while its
-    /// door is shut; see [`WalkableAreas::set_door_blocked`].
+    /// false for every point. Available for a genuinely impassable dynamic
+    /// barrier; the powered lab entrance deliberately never uses it because
+    /// approaching crew must be able to plan through its proximity sensor.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub const EMPTY: Bounds = Bounds {
         min_x: 0.0,
         max_x: -1.0,
@@ -611,10 +680,9 @@ const MAX_BODY_RADIUS: f32 = 0.4;
 /// reintroduced from the other direction.
 const DOOR_BRIDGE_REACH: f32 = 2.0 * MAX_BODY_RADIUS + WALL_THICKNESS * 0.5;
 
-/// The healthy (open) walkable bridge for the doorway cut into `run` at
-/// `center`. Factored out of [`WalkableAreas::from_floor_plan`] so
-/// [`WalkableAreas::set_door_blocked`] can recompute exactly the same
-/// rectangle to reopen a door, rather than caching a copy of it somewhere.
+/// The walkable bridge for the doorway cut into `run` at `center`.
+/// Factored out of [`WalkableAreas::from_floor_plan`] so every fallback
+/// doorway is connected using exactly the same clearance calculation.
 fn doorway_bridge_bounds(run: &WallRun, center: f32) -> Bounds {
     let (half_x, half_z) = if run.along_x {
         (DOOR_WIDTH * 0.5, DOOR_BRIDGE_REACH)
@@ -636,11 +704,13 @@ pub struct Region {
     pub bounds: Bounds,
     /// The authored/open shape. A dynamic blocker may collapse `bounds`, but
     /// reopening never has to reconstruct map geometry from Rust constants.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub open_bounds: Bounds,
     /// Which room this is part of, or `None` for a doorway bridge: a threshold
     /// belongs to neither of the rooms it joins.
     pub room: Option<String>,
     /// Stable map-authored identity for a dynamic bridge, if this is one.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub bridge_id: Option<String>,
 }
 
@@ -710,9 +780,10 @@ impl WalkableAreas {
         &self.regions
     }
 
-    /// Compatibility helper for fallback code/tests that still identify a
-    /// doorway by the const floor-plan iterator. It immediately translates to
-    /// the semantic id used by the runtime blocker.
+    /// Compatibility helper for a genuinely impassable fallback barrier that
+    /// still identifies a doorway through the const floor-plan iterator.
+    /// Automatic proximity doors must remain traversable and must not call it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_door_blocked(&mut self, doorway_index: usize, blocked: bool) {
         let Some((run, center)) = doorways().nth(doorway_index) else {
             return;
@@ -731,6 +802,9 @@ impl WalkableAreas {
     ///
     /// Returning the number matched makes a missing/mistyped id observable to
     /// callers and tests without making a temporarily unloaded map an error.
+    /// This is reserved for barriers actors cannot open by approaching; using
+    /// it for a proximity door creates a pathfinding/sensor deadlock.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_bridge_blocked(&mut self, bridge_id: &str, blocked: bool) -> usize {
         let mut matched = 0;
         for region in &mut self.regions {
@@ -986,14 +1060,14 @@ fn light_spots(room: &Room) -> Vec<Vec3> {
         .collect()
 }
 
-/// Where a machine stands, how big it is, and which way it faces.
+/// Collision and authored-model geometry at one concrete placement.
 ///
-/// Keyed on kind alone, because the lab holds exactly one of each. That is
-/// what lets a client rebuild the entire fit-out from the replicated
-/// `MachineKind` without a single byte of room layout crossing the wire.
+/// Kind owns dimensions and sockets; a map spot owns position and orientation.
+/// The split permits repeated kinds without a second placement table.
 struct MachineFit {
     base: Vec3,
     size: Vec3,
+    rotation: Quat,
     /// The face the screen sits on, and the side the player walks up to.
     facing: Vec3,
 }
@@ -1003,80 +1077,127 @@ struct MachineFit {
 const CABINET: Vec3 = Vec3::new(1.5, 1.7, 0.8);
 const OFF_WALL: f32 = 0.45;
 
-fn fit(kind: MachineKind) -> MachineFit {
-    let hall = &ROOMS[HALL];
-
-    // A cabinet against a room's north wall, screen facing into the room.
-    let north = |room: &Room, x: f32| MachineFit {
-        base: Vec3::new(x, 0.0, room.min_z + OFF_WALL),
-        size: CABINET,
-        facing: Vec3::Z,
-    };
-
+/// Model-space dimensions. Width is local X and working depth is local Z;
+/// placement rotation turns these into the world-space AABB used by `Solid`.
+fn machine_local_size(kind: MachineKind) -> Vec3 {
     match kind {
-        // The core loop, spread across the hall's north wall with room to stand
-        // between them. In the one-room lab these were two of five machines at
-        // 2.3m centres; five metres apart, each one has its own place to work.
-        MachineKind::ChemMaster5000 => north(hall, -4.0),
-        MachineKind::MixingChamber => north(hall, 1.5),
-        // On the hall's east wall beside the lobby door, so it is the last
-        // thing you pass on the way out to the counter and the first on the way
-        // back in. Shallow, because it is a notice board, not a cabinet.
-        MachineKind::StandingBoard => MachineFit {
-            base: Vec3::new(hall.max_x - 0.4, 0.0, 0.5),
-            size: Vec3::new(0.8, 1.7, 1.5),
-            facing: Vec3::NEG_X,
-        },
-        // Analysis, in its own room, against the north wall.
-        MachineKind::Analyzer => north(&ROOMS[ANALYSIS], 10.5),
-        // The reaction bay's whole reason to exist, on its west wall — as far
-        // from the Mixing Chamber as the suite gets. A hot batch has to cross a
-        // doorway and the length of the hall, which is the only cost heating
-        // has; putting the chamber next to the Mixing Chamber would remove it.
-        MachineKind::ReactionChamber => MachineFit {
-            base: Vec3::new(ROOMS[REACTION_BAY].min_x + 0.55, 0.0, -3.5),
-            size: Vec3::new(1.0, 1.5, 1.4),
-            facing: Vec3::X,
-        },
-        // Storage, in the room named for it, on the north wall just east of the
-        // hall door. Everything carried between the mixing hall and the
-        // storeroom passes it, which is what a place to put things down has to
-        // be near to get used at all.
-        MachineKind::Locker => MachineFit {
-            base: Vec3::new(-1.5, 0.0, ROOMS[PREP].min_z + OFF_WALL),
-            size: CABINET,
-            facing: Vec3::Z,
-        },
-        // The grinder, on the storeroom's south wall. Produce is dropped at the
-        // counter through the connecting door, so the haul from crate to hopper
-        // is a few steps.
-        MachineKind::Grinder => MachineFit {
-            base: Vec3::new(-4.0, 0.0, ROOMS[PREP].max_z - OFF_WALL),
-            size: CABINET,
-            facing: Vec3::NEG_Z,
-        },
-        // The delivery counter, across the lobby. Stood well off the south wall
-        // so crew can reach the far side of it after coming through the door,
-        // and wide enough for a queue plus an incoming crate.
-        MachineKind::DeliveryWindow => MachineFit {
-            base: Vec3::new(COUNTER_SPOT.x, 0.0, COUNTER_DROP_Z),
-            size: Vec3::new(3.4, COUNTER_TOP, 0.7),
-            facing: Vec3::NEG_Z,
-        },
+        MachineKind::ChemMaster5000
+        | MachineKind::MixingChamber
+        | MachineKind::Grinder
+        | MachineKind::Analyzer
+        | MachineKind::Locker
+        | MachineKind::StandingBoard => CABINET,
+        MachineKind::ReactionChamber => Vec3::new(1.4, 1.5, 1.0),
+        MachineKind::DeliveryWindow => Vec3::new(3.4, COUNTER_TOP, 0.7),
     }
 }
 
+fn placement_transform(base: Vec3, facing: Vec3) -> Transform {
+    Transform::from_translation(base).with_rotation(Quat::from_rotation_y(facing.x.atan2(facing.z)))
+}
+
+/// The supported no-map layout, expressed through the same stable-id registry
+/// populated by TrenchBroom in the default build.
+fn legacy_machine_spots() -> MachineSpots {
+    let hall = &ROOMS[HALL];
+    let north = |room: &Room, x: f32| {
+        placement_transform(Vec3::new(x, 0.0, room.min_z + OFF_WALL), Vec3::Z)
+    };
+    let mut spots = MachineSpots::default();
+    for (id, kind, transform) in [
+        (
+            "dispenser.a",
+            MachineKind::ChemMaster5000,
+            north(hall, -5.4),
+        ),
+        ("mixer.a", MachineKind::MixingChamber, north(hall, -2.2)),
+        ("dispenser.b", MachineKind::ChemMaster5000, north(hall, 1.4)),
+        // Nudged east of the nominal 4.6 m lane centre so its casing and
+        // standing point clear the authored Chemistry fume hood and island.
+        ("mixer.b", MachineKind::MixingChamber, north(hall, 5.4)),
+        (
+            "grinder.main",
+            MachineKind::Grinder,
+            placement_transform(
+                Vec3::new(-4.0, 0.0, ROOMS[PREP].max_z - OFF_WALL),
+                Vec3::NEG_Z,
+            ),
+        ),
+        (
+            "analyzer.main",
+            MachineKind::Analyzer,
+            north(&ROOMS[ANALYSIS], 10.5),
+        ),
+        (
+            "delivery.main",
+            MachineKind::DeliveryWindow,
+            placement_transform(Vec3::new(COUNTER_SPOT.x, 0.0, COUNTER_DROP_Z), Vec3::NEG_Z),
+        ),
+        (
+            "board.main",
+            MachineKind::StandingBoard,
+            placement_transform(Vec3::new(hall.max_x - 0.4, 0.0, 0.5), Vec3::NEG_X),
+        ),
+        (
+            "reactor.main",
+            MachineKind::ReactionChamber,
+            placement_transform(
+                Vec3::new(ROOMS[REACTION_BAY].min_x + 0.55, 0.0, -3.5),
+                Vec3::X,
+            ),
+        ),
+        (
+            "locker.main",
+            MachineKind::Locker,
+            north(&ROOMS[PREP], -1.5),
+        ),
+    ] {
+        spots.insert(id, kind, transform);
+    }
+    debug_assert!(
+        MachineKind::ALL
+            .into_iter()
+            .all(|kind| spots.iter().any(|(_, placement)| placement.kind == kind)),
+        "the fallback registry must represent every machine kind",
+    );
+    spots
+}
+
 impl MachineFit {
+    fn from_placement(kind: MachineKind, placement: Transform) -> Self {
+        let local_size = machine_local_size(kind);
+        let right = placement.rotation * Vec3::X;
+        let up = placement.rotation * Vec3::Y;
+        let forward = placement.rotation * Vec3::Z;
+        MachineFit {
+            base: placement.translation,
+            size: right.abs() * local_size.x
+                + up.abs() * local_size.y
+                + forward.abs() * local_size.z,
+            rotation: placement.rotation,
+            facing: forward.normalize_or_zero(),
+        }
+    }
+
+    fn from_root(kind: MachineKind, root: Transform) -> Self {
+        let mut placement = root;
+        placement.translation -= root.rotation * Vec3::Y * (machine_local_size(kind).y * 0.5);
+        Self::from_placement(kind, placement)
+    }
+
+    fn root_transform(&self) -> Transform {
+        Transform::from_translation(self.center()).with_rotation(self.rotation)
+    }
+
     fn center(&self) -> Vec3 {
         self.base + Vec3::Y * (self.size.y * 0.5)
     }
 
     /// GLBs are authored floor-first with local `+Z` as their working face.
-    /// The gameplay entity stays at the collider centre, so the child drops by
-    /// half the collider height and yaws its front onto the mapped facing.
+    /// The gameplay root stays at the collider centre and carries the authored
+    /// rotation, so the child only drops by half the collider height.
     fn visual_transform(&self) -> Transform {
         Transform::from_translation(Vec3::NEG_Y * (self.size.y * 0.5))
-            .with_rotation(Quat::from_rotation_y(self.facing.x.atan2(self.facing.z)))
     }
 
     /// Maps a floor-origin point from an authored GLB into an offset from the
@@ -1084,7 +1205,7 @@ impl MachineFit {
     /// the visual child, so a code-owned slot and its visible dock cannot drift.
     fn visual_point_offset(&self, point: Vec3) -> Vec3 {
         let visual = self.visual_transform();
-        visual.translation + visual.rotation * (visual.scale * point)
+        self.rotation * (visual.translation + point)
     }
 }
 
@@ -1213,72 +1334,138 @@ fn spawn_fixtures(mut commands: Commands, assets: Res<MachineAssets>) {
     );
 }
 
-/// Creates the machines and their state. Authority only.
-///
-/// Everything spawned here is either replicated or derivable from what is —
-/// no meshes, because a client builds those itself in [`dress_machines`].
-fn spawn_machines(mut commands: Commands) {
-    for kind in MachineKind::ALL {
-        let fit = fit(kind);
-        let machine = commands
-            .spawn((
-                Machine::new(kind),
-                // Scale belongs to neither networking nor collision. Keeping
-                // this identity prevents the detailed visual child from being
-                // stretched by the old unit-cube presentation transform.
-                Transform::from_translation(fit.center()),
-                // Occupancy and buffer contents must match for both chemists.
-                bevy_replicon::prelude::Replicated,
-                crate::until_we_leave_the_lab(),
-            ))
-            .id();
+/// Authority-local identity used to reconcile hot-reloaded map markers.
+#[derive(Component, Debug)]
+struct MachineSpotId(String);
 
-        // Equipment-specific state.
-        match kind {
-            MachineKind::ChemMaster5000 => {
-                commands.entity(machine).insert(DispenseAmount::default());
-            }
-            MachineKind::MixingChamber => {
-                commands
-                    .entity(machine)
-                    .insert(Buffer(Solution::new(Units::whole(300))));
-            }
-            MachineKind::Grinder => {
-                // Two loading points: produce goes in the hopper, the extract
-                // runs out into whatever beaker is in the slot.
-                commands.entity(machine).insert(Hopper::default());
-            }
-            MachineKind::ReactionChamber => {
-                commands.entity(machine).insert(Thermostat::default());
-            }
-            // The locker keeps no state of its own: what is in it lives on the
-            // items, as `Stored`, so there is nothing to spawn here.
-            MachineKind::Analyzer
-            | MachineKind::DeliveryWindow
-            | MachineKind::StandingBoard
-            | MachineKind::Locker => {}
+/// Creates one machine and its equipment-specific state. Authority only.
+/// Presentation remains local to each peer through [`dress_machines`].
+fn spawn_machine_at(commands: &mut Commands, id: &str, placement: &MachinePlacement) -> Entity {
+    let kind = placement.kind;
+    let fit = MachineFit::from_placement(kind, placement.transform);
+    let machine = commands
+        .spawn((
+            Name::new(format!("{} [{id}]", kind.label())),
+            MachineSpotId(id.to_string()),
+            Machine::new(kind),
+            fit.root_transform(),
+            bevy_replicon::prelude::Replicated,
+            crate::until_we_leave_the_lab(),
+        ))
+        .id();
+
+    match kind {
+        MachineKind::ChemMaster5000 => {
+            commands.entity(machine).insert(DispenseAmount::default());
+        }
+        MachineKind::MixingChamber => {
+            commands
+                .entity(machine)
+                .insert(Buffer(Solution::new(Units::whole(300))));
+        }
+        MachineKind::Grinder => {
+            commands.entity(machine).insert(Hopper::default());
+        }
+        MachineKind::ReactionChamber => {
+            commands.entity(machine).insert(Thermostat::default());
+        }
+        MachineKind::Analyzer
+        | MachineKind::DeliveryWindow
+        | MachineKind::StandingBoard
+        | MachineKind::Locker => {}
+    }
+    machine
+}
+
+/// Reconciles authority-owned state with the current map marker registry.
+///
+/// Repeated kinds are expected; only the stable spot id is unique. Reusing an
+/// id during map hot reload preserves that machine's state while applying its
+/// newly authored transform.
+fn reconcile_machine_spots(
+    mut commands: Commands,
+    spots: Res<MachineSpots>,
+    existing: Query<(Entity, &MachineSpotId, &Machine)>,
+) {
+    if !spots.is_changed() {
+        return;
+    }
+    if spots.is_empty() {
+        for (entity, ..) in &existing {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
+    debug!("reconciling {} map-authored machine spots", spots.len());
+
+    let mut found = std::collections::HashSet::new();
+    for (entity, id, machine) in &existing {
+        let Some(placement) = spots.get(&id.0) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        found.insert(id.0.clone());
+        if placement.kind != machine.kind {
+            commands.entity(entity).despawn();
+            spawn_machine_at(&mut commands, &id.0, placement);
+            continue;
+        }
+
+        let fit = MachineFit::from_placement(placement.kind, placement.transform);
+        commands.entity(entity).insert(fit.root_transform());
+    }
+
+    for (id, placement) in spots.iter() {
+        if !found.contains(id) {
+            spawn_machine_at(&mut commands, id, placement);
         }
     }
 }
 
 /// Gives a machine its authored visual scene, simple collider and slot.
 ///
-/// Runs on both ends, against `Added<Machine>`. On the authority that fires
-/// the frame [`spawn_machines`] runs; on a client it fires when the machine
-/// arrives by replication. Everything here is derived from the kind, so the
-/// two ends cannot disagree about where a machine is or how big it is.
+/// Runs on both ends. Position and orientation are replicated authority state;
+/// only presentation, collision and socket offsets are derived locally.
+#[derive(Component)]
+pub(crate) struct MachineDressed;
+
+fn fallback_machine_fit(kind: MachineKind) -> MachineFit {
+    let spots = legacy_machine_spots();
+    let placement = spots
+        .iter()
+        .find_map(|(_, placement)| (placement.kind == kind).then_some(placement))
+        .expect("every machine kind has a legacy placement");
+    MachineFit::from_placement(kind, placement.transform)
+}
+
 pub(crate) fn dress_machines(
     mut commands: Commands,
     assets: Option<Res<MachineAssets>>,
-    machines: Query<(Entity, &Machine), Added<Machine>>,
+    machines: Query<(
+        Entity,
+        &Machine,
+        Option<Ref<Transform>>,
+        Option<&MachineDressed>,
+    )>,
 ) {
     let Some(assets) = assets else {
         return;
     };
 
-    for (entity, machine) in &machines {
+    for (entity, machine, transform, dressed) in &machines {
+        if dressed.is_some()
+            && transform
+                .as_ref()
+                .is_none_or(|transform| !transform.is_changed())
+        {
+            continue;
+        }
+
         let kind = machine.kind;
-        let fit = fit(kind);
+        let fit = transform
+            .as_deref()
+            .map(|transform| MachineFit::from_root(kind, *transform))
+            .unwrap_or_else(|| fallback_machine_fit(kind));
 
         let visual_transform = fit.visual_transform();
         commands
@@ -1294,24 +1481,25 @@ pub(crate) fn dress_machines(
                 // hands back has to end up.
                 Facing(fit.facing),
                 Interactable::new(kind.label()),
+                MachineDressed,
                 // The authored visual is a child. Visibility propagation in
                 // Bevy requires every parent in that hierarchy to carry the
                 // visibility components too; Mesh3d used to add them for us.
                 Visibility::default(),
-                // Position is replicated, but a client that dresses a machine
-                // the same frame it arrives may not have received the transform
-                // yet. Scale stays one: collision lives in `Solid`, while the
-                // GLB child is already authored in metres.
-                Transform::from_translation(fit.center()),
             ))
             .with_children(|parent| {
-                parent.spawn((
-                    Name::new(format!("{} visual", kind.label())),
-                    MachineVisual,
-                    WorldAssetRoot(assets.model(kind)),
-                    visual_transform,
-                ));
+                if dressed.is_none() {
+                    parent.spawn((
+                        Name::new(format!("{} visual", kind.label())),
+                        MachineVisual,
+                        WorldAssetRoot(assets.model(kind)),
+                        visual_transform,
+                    ));
+                }
             });
+        if transform.is_none() {
+            commands.entity(entity).insert(fit.root_transform());
+        }
 
         // Slot positions are authored in the GLB and copied into the manifest.
         // They are static geometry, so they are derived rather than replicated.
@@ -1407,7 +1595,7 @@ mod tests {
         );
         assert_eq!(
             world.get::<Transform>(visual).unwrap().translation.y,
-            -fit(MachineKind::ChemMaster5000).size.y * 0.5
+            -machine_local_size(MachineKind::ChemMaster5000).y * 0.5
         );
         assert!(
             world.get::<Interactable>(arrived).is_some(),
@@ -1477,7 +1665,7 @@ mod tests {
         app.update();
 
         for ((kind, slot_a, slot_b), (_, entity)) in authored.into_iter().zip(machines) {
-            let fit = fit(kind);
+            let fit = fallback_machine_fit(kind);
             let yaw = Quat::from_rotation_y(fit.facing.x.atan2(fit.facing.z));
             let root = app.world().get::<Transform>(entity).unwrap().translation;
             let actual_a = root + app.world().get::<ContainerSlot>(entity).unwrap().offset;
@@ -1522,7 +1710,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{kind:?} has no facing"));
             assert_eq!(
                 facing.0,
-                fit(kind).facing,
+                fallback_machine_fit(kind).facing,
                 "{kind:?} is dressed facing a different way from its fit"
             );
         }
@@ -1583,32 +1771,118 @@ mod tests {
     }
 
     #[test]
-    fn both_ends_agree_on_where_every_machine_stands() {
-        // The client derives position and size from the kind alone. If that
-        // ever drifted from what the authority spawns, the second chemist
-        // would see machines floating away from their casings.
-        for kind in MachineKind::ALL {
-            let placed = fit(kind);
-            let dressed = fit(kind);
-            assert_eq!(placed.center(), dressed.center(), "{kind:?} moved");
-            assert_eq!(placed.size, dressed.size, "{kind:?} resized");
-        }
+    fn dressing_preserves_the_replicated_machine_transform() {
+        let mut app = client_lab();
+        let authored = Transform::from_xyz(23.0, 0.85, -17.0)
+            .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2));
+        let machine = app
+            .world_mut()
+            .spawn((Machine::new(MachineKind::ChemMaster5000), authored))
+            .id();
+
+        app.update();
+
+        assert_eq!(app.world().get::<Transform>(machine), Some(&authored));
+        assert!(
+            app.world()
+                .get::<Facing>(machine)
+                .unwrap()
+                .0
+                .distance(Vec3::NEG_X)
+                < 0.000_01,
+            "facing must come from the replicated rotation",
+        );
     }
 
     #[test]
     fn no_two_machines_are_stacked_in_the_same_spot() {
-        // `ALL` drives both the spawner and the fit-out, so a machine added to
-        // the enum but forgotten in `fit` would silently land on top of
-        // another one rather than failing to compile.
-        for (index, kind) in MachineKind::ALL.iter().enumerate() {
-            for other in &MachineKind::ALL[index + 1..] {
+        let spots = legacy_machine_spots();
+        let fits: Vec<_> = spots
+            .iter()
+            .map(|(id, placement)| {
+                (
+                    id,
+                    MachineFit::from_placement(placement.kind, placement.transform),
+                )
+            })
+            .collect();
+        for (index, (id, fit)) in fits.iter().enumerate() {
+            for (other_id, other) in &fits[index + 1..] {
                 assert_ne!(
-                    fit(*kind).center(),
-                    fit(*other).center(),
-                    "{kind:?} and {other:?} occupy the same place"
+                    fit.center(),
+                    other.center(),
+                    "{id} and {other_id} occupy the same place"
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_fallback_registry_spawns_two_independent_core_lanes() {
+        let spots = legacy_machine_spots();
+        assert_eq!(spots.len(), 10);
+
+        let mut app = App::new();
+        app.insert_resource(spots)
+            .add_systems(Update, reconcile_machine_spots);
+        app.update();
+
+        let mut machines = app
+            .world_mut()
+            .query::<(Entity, &MachineSpotId, &Machine, &Transform)>();
+        let placed: Vec<_> = machines
+            .iter(app.world())
+            .map(|(entity, id, machine, transform)| {
+                (entity, id.0.clone(), machine.kind, *transform)
+            })
+            .collect();
+        assert_eq!(placed.len(), 10);
+        for kind in MachineKind::ALL {
+            let expected = if matches!(
+                kind,
+                MachineKind::ChemMaster5000 | MachineKind::MixingChamber
+            ) {
+                2
+            } else {
+                1
+            };
+            assert_eq!(
+                placed
+                    .iter()
+                    .filter(|(_, _, found, _)| *found == kind)
+                    .count(),
+                expected,
+                "wrong fallback count for {kind:?}",
+            );
+        }
+
+        let (original, _, _, _) = placed
+            .iter()
+            .find(|(_, id, _, _)| id == "dispenser.a")
+            .expect("first dispenser");
+        let moved = placement_transform(Vec3::new(-6.2, 0.0, -5.05), Vec3::X);
+        app.world_mut().resource_mut::<MachineSpots>().insert(
+            "dispenser.a",
+            MachineKind::ChemMaster5000,
+            moved,
+        );
+        app.update();
+
+        let same = app
+            .world_mut()
+            .query::<(Entity, &MachineSpotId, &Transform)>()
+            .iter(app.world())
+            .find(|(_, id, _)| id.0 == "dispenser.a")
+            .map(|(entity, _, transform)| (entity, *transform))
+            .expect("moved dispenser");
+        assert_eq!(
+            same.0, *original,
+            "moving a spot should preserve machine state"
+        );
+        assert_eq!(
+            same.1,
+            MachineFit::from_placement(MachineKind::ChemMaster5000, moved).root_transform(),
+        );
     }
 
     #[test]
@@ -1617,10 +1891,11 @@ mod tests {
         // in the gap between two rooms still spawns, still replicates and still
         // draws — as a machine embedded in a wall, or floating in the void
         // outside, reachable from nowhere.
-        for kind in MachineKind::ALL {
-            let fit = fit(kind);
+        for (id, placement) in legacy_machine_spots().iter() {
+            let kind = placement.kind;
+            let fit = MachineFit::from_placement(kind, placement.transform);
             let room = room_name(fit.base)
-                .unwrap_or_else(|| panic!("{kind:?} stands outside every room at {}", fit.base));
+                .unwrap_or_else(|| panic!("{id} stands outside every room at {}", fit.base));
 
             // And its casing must fit, not just its centre line.
             let corners = [
@@ -1633,7 +1908,7 @@ mod tests {
                 assert_eq!(
                     room_name(corner),
                     Some(room),
-                    "{kind:?} overhangs {room} at {corner}"
+                    "{id} ({kind:?}) overhangs {room} at {corner}"
                 );
             }
         }
@@ -1738,13 +2013,13 @@ mod tests {
                 Vec3::new(WALL_THICKNESS * 0.5 + BODY, 0.0, DOOR_WIDTH * 0.5)
             };
 
-            for kind in MachineKind::ALL {
-                let fit = fit(kind);
+            for (id, placement) in legacy_machine_spots().iter() {
+                let fit = MachineFit::from_placement(placement.kind, placement.transform);
                 let gap = (fit.base - door).abs();
                 let clearance = half + Vec3::new(fit.size.x, 0.0, fit.size.z) * 0.5;
                 assert!(
                     gap.x >= clearance.x || gap.z >= clearance.z,
-                    "{kind:?} blocks the doorway at {door}"
+                    "{id} blocks the doorway at {door}"
                 );
             }
         }
@@ -1773,9 +2048,9 @@ mod tests {
 
     #[test]
     fn blocking_a_door_seals_it_and_reopening_recovers_the_original_bridge() {
-        // `door::toggle_door_nav` is the only real caller, but it only ever
-        // reacts to `Changed<Door>` inside a full app — this exercises the
-        // actual floor-plan math without needing one.
+        // Genuinely impassable dynamic barriers may still collapse a bridge;
+        // this exercises the floor-plan math without needing a full app. The
+        // powered proximity entrance deliberately does not use this operation.
         for index in 0..doorways().count() {
             let mut areas = WalkableAreas::from_floor_plan();
             let healthy = areas.regions()[ROOMS.len() + index].bounds;
@@ -1874,12 +2149,19 @@ mod tests {
         spots.insert("old.incident", Transform::from_xyz(1.0, 0.0, 1.0));
         let mut departments = crate::crew::Departments::default();
         departments.set("Engineering".to_string(), Vec3::new(1.0, 0.0, 1.0));
+        let mut machines = MachineSpots::default();
+        machines.insert(
+            "old.machine",
+            MachineKind::Analyzer,
+            Transform::from_xyz(2.0, 0.0, 2.0),
+        );
 
         let mut world = World::new();
         world.insert_resource(MapReady);
         world.insert_resource(areas);
         world.insert_resource(graph);
         world.insert_resource(spots);
+        world.insert_resource(machines);
         world.insert_resource(departments);
 
         clear_map_runtime(&mut world);
@@ -1890,6 +2172,7 @@ mod tests {
             .resource::<CrisisSpots>()
             .get("old.incident")
             .is_none());
+        assert!(world.resource::<MachineSpots>().is_empty());
         assert!(world
             .resource::<crate::crew::Departments>()
             .home("Engineering")
@@ -1931,7 +2214,11 @@ mod tests {
         // counter left sample vials hovering in mid-air a metre and a half short
         // of it, and nothing failed: a floating bottle is still pickable, so it
         // reads as a graphics glitch rather than a stale coordinate.
-        let counter = fit(MachineKind::DeliveryWindow);
+        let placement = legacy_machine_spots()
+            .get("delivery.main")
+            .expect("delivery window placement")
+            .clone();
+        let counter = MachineFit::from_placement(placement.kind, placement.transform);
         assert_eq!(
             COUNTER_TOP, counter.size.y,
             "things are set down at COUNTER_TOP, so it must be the counter's height"
@@ -1951,16 +2238,19 @@ mod tests {
         // The delivery window is the one machine crew touch, and the whole point
         // of it is that they touch the other side. If the queue spot ended up
         // north of the counter, crew would walk through the lab to reach it.
-        let counter = fit(MachineKind::DeliveryWindow);
+        let placement = legacy_machine_spots()
+            .get("delivery.main")
+            .expect("delivery window placement")
+            .clone();
+        let counter = MachineFit::from_placement(placement.kind, placement.transform);
         let front = counter.base.z + counter.size.z * 0.5;
         assert!(
             COUNTER_SPOT.z > front,
             "crew queue at {} but the counter's public face is at {front}",
             COUNTER_SPOT.z
         );
-        assert_eq!(
-            counter.facing,
-            Vec3::NEG_Z,
+        assert!(
+            counter.facing.distance(Vec3::NEG_Z) < 0.000_01,
             "the chemist works the counter from the lobby's north side"
         );
     }

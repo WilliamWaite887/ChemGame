@@ -11,10 +11,17 @@
 // still locked, coarsest first. Ingredient *count* is derived automatically,
 // so hints should add something beyond it.
 //
-// `rate` is reaction-units per second. Omitted, a recipe is instantaneous: it
-// finishes inside the pour that made it possible, exactly as all of them once
-// did. Given a rate, the same recipe takes real seconds — you can watch it,
-// carry it, be interrupted during it, or pull it out of the chamber halfway.
+// `process` controls how a recipe is allowed to begin. Omitted means Ambient:
+// ingredients react whenever they share a solution. Agitated recipes declare
+// two preparation sides. Both sides must be present in separate beakers before
+// the Mixing Chamber combines them; pouring everything into one beaker cannot
+// start them.
+//
+// `rate` is reaction-units per second. Omitted, an ambient recipe is
+// instantaneous: it finishes inside the pour that made it possible, exactly as
+// all of them once did. Given a rate, the same recipe takes real seconds — you
+// can watch it, carry it, be interrupted during it, or pull it out of the
+// chamber halfway.
 // `scale` is the multiplier the recipe runs at, so a 1:1 recipe producing 2
 // needs a scale of 10 to make 20u of product: at `rate: 5` that is two seconds.
 //
@@ -72,8 +79,12 @@
         id: "bicaridine",
         reactants: [("inaprovaline", 1), ("carbon", 1)],
         products: [("bicaridine", 2)],
-        // A 20u order is a scale of 10, so about two seconds.
-        rate: Some(5),
+        process: Agitated(
+            side_a: [("inaprovaline", 1)],
+            side_b: [("carbon", 1)],
+        ),
+        // The ordered 8–14u range takes 4–7 seconds.
+        rate: Some(1),
         priority: 20,
         hints: [
             "One ingredient is a compound you already know how to make.",
@@ -85,7 +96,12 @@
         id: "hyronalin",
         reactants: [("dylovene", 1), ("radium", 1)],
         products: [("hyronalin", 2)],
-        rate: Some(5),
+        process: Agitated(
+            side_a: [("dylovene", 1)],
+            side_b: [("radium", 1)],
+        ),
+        // The ordered 20–30u range takes 5–7.5 seconds.
+        rate: Some(2),
         priority: 15,
         hints: [
             "One ingredient is a compound you already know how to make.",
@@ -97,10 +113,12 @@
         id: "tricordrazine",
         reactants: [("inaprovaline", 1), ("dylovene", 1)],
         products: [("tricordrazine", 2)],
-        // Slower than the others one step up: it wants two compounds rather
-        // than a compound and a base reagent, and the extra second is what
-        // makes the broad-spectrum answer cost something over the specific one.
-        rate: Some(4),
+        process: Agitated(
+            side_a: [("inaprovaline", 1)],
+            side_b: [("dylovene", 1)],
+        ),
+        // The ordered 30–40u range takes 5–6.67 seconds.
+        rate: Some(3),
         priority: 20,
         hints: [
             "No base reagents at all.",
@@ -112,7 +130,12 @@
         id: "dermaline",
         reactants: [("kelotane", 1), ("oxygen", 1), ("phosphorus", 1)],
         products: [("dermaline", 3)],
-        rate: Some(5),
+        process: Agitated(
+            side_a: [("kelotane", 1)],
+            side_b: [("oxygen", 1), ("phosphorus", 1)],
+        ),
+        // The ordered 6–9u range takes 4–6 seconds.
+        rate: Some(0.5),
         priority: 20,
         hints: [
             "Three ingredients: one compound and two base reagents.",
@@ -126,10 +149,12 @@
         id: "arithrazine",
         reactants: [("hyronalin", 1), ("hydrogen", 1)],
         products: [("arithrazine", 2)],
-        // The slowest thing in the book, and the deepest chain in it. A 20u
-        // order of this is roughly three seconds on top of the five the
-        // hyronalin underneath it already took.
-        rate: Some(3),
+        process: Agitated(
+            side_a: [("hyronalin", 1)],
+            side_b: [("hydrogen", 1)],
+        ),
+        // Its second agitation takes 5–7.5 seconds for a 20–30u order.
+        rate: Some(2),
         priority: 20,
         hints: [
             "Two ingredients. One is a compound two steps removed from base reagents.",
@@ -146,11 +171,13 @@
         reactants: [("oxygen", 2)],
         catalysts: [("plasma", 1)],
         products: [("dexalin", 1)],
-        // Higher than the rest because this recipe *loses* volume: two oxygen
-        // make one dexalin, so a 20u order is a scale of 20 rather than 10.
-        // At 8/s that lands in the same two-and-a-bit seconds as its
-        // neighbours, which is the number that was actually being chosen.
-        rate: Some(8),
+        process: Agitated(
+            side_a: [("oxygen", 2)],
+            side_b: [("plasma", 1)],
+        ),
+        // Higher because this recipe loses volume. The ordered 12–20u range
+        // takes 4–6.67 seconds while the catalyst survives.
+        rate: Some(3),
         priority: 12,
         hints: [
             "Only one ingredient is consumed, and you get back half what you put in.",
@@ -357,6 +384,12 @@
         id: "potassium_iodide",
         reactants: [("potassium", 1), ("iodine", 1)],
         products: [("potassium_iodide", 2)],
+        process: Agitated(
+            side_a: [("potassium", 1)],
+            side_b: [("iodine", 1)],
+        ),
+        // The ordered 20–30u range takes 4–6 seconds.
+        rate: Some(2.5),
         priority: 20,
         hints: [
             "Two base reagents, equal parts, and the name gives both away.",
@@ -368,6 +401,12 @@
         id: "mannitol",
         reactants: [("hydrogen", 2), ("water", 2), ("sugar", 2)],
         products: [("mannitol", 3)],
+        process: Agitated(
+            side_a: [("hydrogen", 2), ("water", 2)],
+            side_b: [("sugar", 2)],
+        ),
+        // The ordered 10–15u range takes 4.17–6.25 seconds.
+        rate: Some(0.8),
         priority: 20,
         hints: [
             "Three base reagents in equal parts, and you get back half.",
@@ -379,6 +418,12 @@
         id: "saline_glucose",
         reactants: [("saltwater", 2), ("water", 1), ("sugar", 1)],
         products: [("saline_glucose", 4)],
+        process: Agitated(
+            side_a: [("saltwater", 2), ("water", 1)],
+            side_b: [("sugar", 1)],
+        ),
+        // The ordered 40–50u range takes 5–6.25 seconds.
+        rate: Some(2),
         priority: 20,
         hints: [
             "One compound and two base reagents, and the compound is doubled.",
@@ -407,10 +452,9 @@
         id: "flash_powder",
         reactants: [("aluminium", 1), ("potassium", 1), ("sulfur", 1)],
         products: [("flash_powder", 3)],
-        effects: [Smoke(1.2)],
         priority: 8,
         hints: [
-            "Three base reagents, equal parts, and it goes off as it forms.",
+            "Three base reagents, equal parts; release the powder to trigger its flash.",
             "Aluminium again, with the yellow one.",
             "Equal parts aluminium, potassium and sulfur.",
         ],

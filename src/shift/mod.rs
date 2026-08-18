@@ -174,9 +174,14 @@ pub fn current_rules(config: &OrderConfig, shift: &Shift, chemist_count: usize) 
 fn scale_for_chemists(rules: ShiftRules, chemist_count: usize, ramp: &RampDef) -> ShiftRules {
     let extra = chemist_count.saturating_sub(1);
     let decay = ramp.chemist_gap_scale.powi(extra as i32);
+    // `gap_floor` protects a solo career from an impossible late-game ramp.
+    // A full team can service several orders in parallel, so it gets that
+    // floor divided across its live headcount instead of every additional
+    // chemist becoming inert as soon as the solo floor is reached.
+    let team_floor = ramp.gap_floor / chemist_count.max(1) as f32;
     let gap_seconds = (
-        (rules.gap_seconds.0 * decay).max(ramp.gap_floor),
-        (rules.gap_seconds.1 * decay).max(ramp.gap_floor),
+        (rules.gap_seconds.0 * decay).max(team_floor),
+        (rules.gap_seconds.1 * decay).max(team_floor),
     );
     let bonus = (extra * ramp.max_active_per_chemist).min(ramp.max_active_chemist_cap);
     ShiftRules {
@@ -1396,19 +1401,79 @@ mod tests {
     }
 
     #[test]
-    fn the_chemist_gap_never_crosses_the_same_floor_the_tier_ramp_uses() {
+    fn a_team_uses_the_solo_floor_as_shared_capacity() {
         let base = config();
         // A late-tier shift, so the tier ramp has already pushed the gap
-        // down near `gap_floor` on its own — the player-count decay must
-        // not push it any lower than that same floor.
+        // down near `gap_floor` on its own. A team shares that protected solo
+        // capacity across its live headcount, but the decay may not push it
+        // below that per-person share.
         let shift = Shift {
             succeeded: base.ramp.orders_per_tier * 50,
             ..Shift::default()
         };
 
         let rules = current_rules(&base, &shift, 4);
-        assert!(rules.gap_seconds.0 >= base.ramp.gap_floor);
-        assert!(rules.gap_seconds.1 >= base.ramp.gap_floor);
+        let team_floor = base.ramp.gap_floor / 4.0;
+        assert!(rules.gap_seconds.0 >= team_floor);
+        assert!(rules.gap_seconds.1 >= team_floor);
+    }
+
+    #[test]
+    fn advanced_batch_load_hits_the_solo_and_four_player_targets() {
+        // A representative advanced order occupies one pair of hands for
+        // about thirty seconds including fetching, precursor work, agitation
+        // and packaging. Arrival gaps should turn that into the design's
+        // target utilization without changing recipes by player count.
+        let base = config();
+        let shift = Shift::default();
+        let mean_gap = |rules: ShiftRules| (rules.gap_seconds.0 + rules.gap_seconds.1) * 0.5;
+        let work = 30.0;
+        let solo = work / mean_gap(current_rules(&base, &shift, 1));
+        let quad_per_player = work / mean_gap(current_rules(&base, &shift, 4)) / 4.0;
+
+        assert!(
+            (0.55..=0.70).contains(&solo),
+            "solo utilization was {solo:.1}%",
+            solo = solo * 100.0
+        );
+        assert!(
+            (0.70..=0.85).contains(&quad_per_player),
+            "four-player utilization was {quad_per_player:.1}% per player",
+            quad_per_player = quad_per_player * 100.0
+        );
+    }
+
+    #[test]
+    fn the_service_pool_is_exactly_three_starters_and_nine_staged_medicines() {
+        let base = config();
+        let actual: std::collections::BTreeSet<&str> = base
+            .requests
+            .iter()
+            .map(|request| request.reagent.as_str())
+            .collect();
+        let expected: std::collections::BTreeSet<&str> = [
+            "inaprovaline",
+            "dylovene",
+            "kelotane",
+            "bicaridine",
+            "hyronalin",
+            "tricordrazine",
+            "dermaline",
+            "dexalin",
+            "arithrazine",
+            "potassium_iodide",
+            "mannitol",
+            "saline_glucose",
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            base.requests.len(),
+            12,
+            "order-facing medicines must be unique"
+        );
     }
 
     // -- forecast weighting -----------------------------------------------

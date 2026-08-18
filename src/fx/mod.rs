@@ -41,6 +41,8 @@ impl Plugin for FxPlugin {
                     // every effect here nudges the camera the base placement
                     // already set this frame, never replaces it.
                     apply_camera_fx.after(crate::player::follow_chemist),
+                    update_status_readout,
+                    update_hallucination_cue,
                     animate_chemist_body,
                     animate_crew_body,
                 )
@@ -63,6 +65,17 @@ struct ScreenFx {
 #[derive(Component)]
 struct ScreenOverlay;
 
+/// Plain-language local status list. Colour and camera language make a drug
+/// felt; this label makes it unambiguous which state the player is actually in.
+#[derive(Component)]
+struct StatusReadout;
+
+/// A transient false station cue produced by hallucinogens. It is deliberately
+/// presentation-only: believable enough to create doubt, never an input loss
+/// or a fabricated gameplay state other systems can react to.
+#[derive(Component)]
+struct HallucinationCue;
+
 fn build_overlay(mut commands: Commands) {
     commands.spawn((
         Node {
@@ -79,6 +92,108 @@ fn build_overlay(mut commands: Commands) {
         GlobalZIndex(1000),
         crate::until_we_leave_the_lab(),
     ));
+    commands.spawn((
+        Text::new(""),
+        TextFont::from_font_size(14.0),
+        TextColor(Color::srgb(0.90, 0.94, 1.0)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(18),
+            bottom: px(76),
+            ..default()
+        },
+        StatusReadout,
+        GlobalZIndex(1001),
+        crate::until_we_leave_the_lab(),
+    ));
+    commands.spawn((
+        Text::new(""),
+        TextFont::from_font_size(17.0),
+        TextColor(Color::srgb(0.80, 0.67, 0.94)),
+        Node {
+            position_type: PositionType::Absolute,
+            right: px(12),
+            top: Val::Percent(38.0),
+            max_width: px(290),
+            ..default()
+        },
+        HallucinationCue,
+        GlobalZIndex(1002),
+        crate::until_we_leave_the_lab(),
+    ));
+}
+
+fn status_readout_text(blood: &ChemBloodstream) -> String {
+    let mut lines = Vec::new();
+    if blood.appears_dead() {
+        lines.push("APPARENT DEATH".to_string());
+    } else if blood.incapacitated() {
+        lines.push("CHEMICALLY INCAPACITATED".to_string());
+    }
+    lines.extend(blood.active_statuses().filter_map(|(kind, state)| {
+        (state.intensity > 0.0 && state.remaining > 0.0).then(|| {
+            format!(
+                "{}  x{:.1}  {:.0}s",
+                kind.label(),
+                state.intensity,
+                state.remaining.ceil(),
+            )
+        })
+    }));
+    lines.join("\n")
+}
+
+fn update_status_readout(
+    local: Query<&Bloodstream, With<LocalPlayer>>,
+    mut readout: Query<&mut Text, With<StatusReadout>>,
+) {
+    let Ok(blood) = local.single() else {
+        return;
+    };
+    let Ok(mut text) = readout.single_mut() else {
+        return;
+    };
+    let next = status_readout_text(&blood.0);
+    if text.0 != next {
+        text.0 = next;
+    }
+}
+
+fn hallucination_cue(blood: &ChemBloodstream, t: f32) -> Option<&'static str> {
+    let intensity = blood.status(StatusKind::Hallucinating).intensity;
+    if intensity <= 0.0 {
+        return None;
+    }
+    let period = (5.2 - intensity.min(3.0) * 0.45).max(3.4);
+    let cycle = (t / period).floor() as usize;
+    let phase = (t / period).fract();
+    if !(0.58..0.82).contains(&phase) {
+        return None;
+    }
+    const CUES: [&str; 4] = [
+        "A beaker shatters somewhere behind you.",
+        "Footsteps stop just outside the room.",
+        "Someone whispers your name over the intercom.",
+        "A figure slips past the edge of your vision.",
+    ];
+    Some(CUES[cycle % CUES.len()])
+}
+
+fn update_hallucination_cue(
+    time: Res<Time>,
+    local: Query<&Bloodstream, With<LocalPlayer>>,
+    mut cue: Query<&mut Text, With<HallucinationCue>>,
+) {
+    let Ok(blood) = local.single() else {
+        return;
+    };
+    let Ok(mut text) = cue.single_mut() else {
+        return;
+    };
+    let next = hallucination_cue(&blood.0, time.elapsed_secs()).unwrap_or_default();
+    if text.0 != next {
+        text.0 = next.to_string();
+    }
 }
 
 /// `Camera3d` requires `Projection` (for FOV) but not `ColorGrading` — insert
@@ -119,27 +234,71 @@ fn apply_hazard_felt(mut fx: ResMut<ScreenFx>, mut felt: MessageReader<HazardFel
 /// The persistent, status-driven half of the vignette — separate from the
 /// one-shot flash so the two can be blended rather than one clobbering the
 /// other.
+fn status_color(kind: StatusKind) -> Color {
+    match kind {
+        StatusKind::Sluggish => Color::srgb(0.42, 0.46, 0.52),
+        StatusKind::Hastened => Color::srgb(1.00, 0.27, 0.10),
+        StatusKind::Blurred => Color::srgb(0.72, 0.78, 0.94),
+        StatusKind::Unsteady => Color::srgb(0.92, 0.72, 0.16),
+        StatusKind::Drunk => Color::srgb(0.78, 0.50, 0.10),
+        StatusKind::Irradiated => Color::srgb(0.24, 0.88, 0.23),
+        StatusKind::Stabilized => Color::srgb(0.16, 0.82, 0.70),
+        StatusKind::Sedated => Color::srgb(0.16, 0.19, 0.42),
+        StatusKind::Euphoric => Color::srgb(1.00, 0.38, 0.67),
+        StatusKind::Hallucinating => Color::srgb(0.72, 0.18, 1.00),
+        StatusKind::Paranoid => Color::srgb(0.92, 0.08, 0.12),
+        StatusKind::Analgesic => Color::srgb(0.66, 0.48, 0.86),
+        StatusKind::Burning => Color::srgb(1.00, 0.30, 0.03),
+        StatusKind::Chilled => Color::srgb(0.18, 0.76, 1.00),
+        StatusKind::RadiationShield => Color::srgb(0.92, 0.93, 0.25),
+        StatusKind::Choking => Color::srgb(0.18, 0.36, 0.72),
+        StatusKind::Mutating => Color::srgb(0.60, 0.10, 0.67),
+        StatusKind::Focused => Color::srgb(0.16, 0.56, 1.00),
+    }
+}
+
+/// All statuses get a screen-readable cue, including beneficial ones. Harmful
+/// sensory statuses are stronger, while stabilization stays a restrained edge
+/// tint rather than making treatment unpleasant to use.
 fn vignette_tint(blood: &ChemBloodstream) -> (Color, f32) {
-    let drunk = blood.status(StatusKind::Drunk).intensity;
-    let irradiated = blood.status(StatusKind::Irradiated).intensity;
-    let blurred = blood.status(StatusKind::Blurred).intensity;
+    let strongest = blood
+        .active_statuses()
+        .map(|(kind, state)| {
+            let sensory_weight = 1.0 + kind.perception_distortion(state.intensity).abs();
+            (state.intensity * sensory_weight, status_color(kind))
+        })
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Whichever status is currently strongest wins the colour; their alphas
-    // still stack, so two mild statuses together read as "off" without
-    // fighting each other over a single colour.
-    let strongest = [
-        (drunk, Color::srgb(0.75, 0.55, 0.15)),
-        (irradiated, Color::srgb(0.35, 0.85, 0.30)),
-        (blurred, Color::srgb(0.85, 0.85, 0.90)),
-    ]
-    .into_iter()
-    .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let status_alpha = blood
+        .active_statuses()
+        .map(|(_, state)| state.intensity.max(0.0) * 0.035)
+        .sum::<f32>();
+    let alpha = (status_alpha + blood.perception_distortion() * 0.075).clamp(0.0, 0.58);
 
-    let alpha = ((drunk * 0.12) + (irradiated * 0.10) + (blurred * 0.18)).clamp(0.0, 0.55);
+    if blood.appears_dead() {
+        return (Color::srgb(0.025, 0.025, 0.035), alpha.max(0.68));
+    }
     match strongest {
         Some((intensity, color)) if intensity > 0.0 => (color, alpha),
         _ => (Color::NONE, 0.0),
     }
+}
+
+/// Deterministic motor-warning waveform. The broad shoulder is the warning;
+/// the brief peak is the visible stumble. It never changes or discards input.
+fn stumble_cadence(t: f32, instability: f32) -> (f32, f32) {
+    if instability <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let period = (3.6 - instability.min(4.0) * 0.55).max(1.25);
+    let phase = (t / period).fract();
+    let warning = ((phase - 0.68) / 0.18).clamp(0.0, 1.0);
+    let stumble = if phase >= 0.86 {
+        ((phase - 0.86) / 0.07).clamp(0.0, 1.0) * ((1.0 - phase) / 0.07).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (warning, stumble)
 }
 
 /// Everything that lands on the camera itself: the hazard shake/flash decay,
@@ -163,9 +322,13 @@ fn apply_camera_fx(
         return;
     };
     let drunk = blood.0.status(StatusKind::Drunk).intensity;
-    let unsteady = blood.0.status(StatusKind::Unsteady).intensity;
     let sluggish = blood.0.status(StatusKind::Sluggish).intensity;
     let hastened = blood.0.status(StatusKind::Hastened).intensity;
+    let perception = blood.0.perception_distortion();
+    let instability = blood.0.motor_instability();
+    let incapacitated = blood.0.incapacitated();
+    let appears_dead = blood.0.appears_dead();
+    let (motor_warning, stumble) = stumble_cadence(t, instability);
 
     let mut rng = rand::rng();
     for (mut transform, mut projection) in &mut cameras {
@@ -187,11 +350,30 @@ fn apply_camera_fx(
             transform.translation.y += (t * 0.9).sin() * 0.03 * drunk;
         }
 
-        // Unsteady: fast, small, arrhythmic jitter — the room will not hold
-        // still, as distinct from drunk's slow roll.
-        if unsteady > 0.0 {
-            transform.translation.x += (t * 13.0).sin() * 0.012 * unsteady;
-            transform.translation.y += (t * 17.0).cos() * 0.012 * unsteady;
+        // Sensory distortion compounds into a small deterministic camera
+        // drift; different statuses remain distinguishable by their vignette.
+        if perception > 0.0 {
+            transform.translation.x += (t * 7.0).sin() * 0.010 * perception.min(3.0);
+            transform.translation.y += (t * 5.0).cos() * 0.007 * perception.min(3.0);
+            transform.rotate_local_z((t * 2.3).sin() * 0.012 * perception.min(3.0));
+        }
+
+        // Motor impairment announces itself before the short camera dip. The
+        // body keeps obeying input throughout; this is warning/presentation,
+        // not a random movement veto.
+        if instability > 0.0 {
+            let strength = instability.min(3.0);
+            transform.rotate_local_z(motor_warning * (t * 18.0).sin() * 0.018 * strength);
+            transform.translation.y -= stumble * 0.09 * strength;
+            transform.rotate_local_z(stumble * 0.055 * strength);
+        }
+
+        // Chemical unconsciousness lowers and rolls the point of view. The
+        // strongest tier is unmistakably apparent-death presentation, while
+        // the authoritative body remains alive and can recover.
+        if incapacitated {
+            transform.translation.y -= 0.55;
+            transform.rotate_local_z(if appears_dead { 1.15 } else { 0.16 });
         }
 
         // Sluggish narrows the view (tunnel vision, heavy legs); hastened
@@ -206,7 +388,8 @@ fn apply_camera_fx(
     }
 
     let (vignette_color, vignette_alpha) = vignette_tint(&blood.0);
-    let total_alpha = (vignette_alpha + fx.flash_alpha).clamp(0.0, 0.85);
+    let warning_alpha = motor_warning * instability.min(2.0) * 0.025;
+    let total_alpha = (vignette_alpha + warning_alpha + fx.flash_alpha).clamp(0.0, 0.85);
     let color = if fx.flash_alpha > vignette_alpha {
         fx.flash_color
     } else {
@@ -230,6 +413,18 @@ fn gait_offset(blood: &ChemBloodstream, t: f32) -> (Vec3, f32) {
     let hastened = blood.status(StatusKind::Hastened).intensity;
     let sluggish = blood.status(StatusKind::Sluggish).intensity;
     let irradiated = blood.status(StatusKind::Irradiated).intensity;
+    let stabilized = blood.status(StatusKind::Stabilized).intensity;
+    let sedated = blood.status(StatusKind::Sedated).intensity;
+    let euphoric = blood.status(StatusKind::Euphoric).intensity;
+    let hallucinating = blood.status(StatusKind::Hallucinating).intensity;
+    let paranoid = blood.status(StatusKind::Paranoid).intensity;
+    let analgesic = blood.status(StatusKind::Analgesic).intensity;
+    let burning = blood.status(StatusKind::Burning).intensity;
+    let chilled = blood.status(StatusKind::Chilled).intensity;
+    let radiation_shield = blood.status(StatusKind::RadiationShield).intensity;
+    let choking = blood.status(StatusKind::Choking).intensity;
+    let mutating = blood.status(StatusKind::Mutating).intensity;
+    let focused = blood.status(StatusKind::Focused).intensity;
 
     let mut offset = Vec3::ZERO;
     let mut roll = 0.0_f32;
@@ -259,6 +454,56 @@ fn gait_offset(blood: &ChemBloodstream, t: f32) -> (Vec3, f32) {
         offset.z += (t * 23.0).cos() * 0.008 * irradiated;
     }
 
+    // The expanded vocabulary deliberately uses posture and cadence as well
+    // as colour. Every state remains legible under the station's coloured
+    // lighting, and the root entity is never displaced by presentation.
+    offset.y += 0.012 * stabilized.min(1.0);
+    offset.y += (t * 5.0).sin().abs() * 0.025 * euphoric;
+    offset.y += 0.008 * analgesic.min(1.0);
+    offset.y += 0.010 * radiation_shield.min(1.0);
+    offset.y += 0.010 * focused.min(1.0);
+
+    if sedated > 0.0 {
+        offset.y -= 0.07 * sedated.min(2.0);
+        roll += (t * 0.7).sin() * 0.035 * sedated;
+    }
+    if hallucinating > 0.0 {
+        offset.x += (t * 2.7).sin() * 0.030 * hallucinating;
+        roll += (t * 1.9).cos() * 0.040 * hallucinating;
+    }
+    if paranoid > 0.0 {
+        offset.x += (t * 14.0).sin() * 0.012 * paranoid;
+        roll += (t * 9.0).sin() * 0.025 * paranoid;
+    }
+    if burning > 0.0 {
+        offset.y += (t * 12.0).sin().abs() * 0.025 * burning;
+        roll += (t * 15.0).sin() * 0.018 * burning;
+    }
+    if chilled > 0.0 {
+        offset.x += (t * 24.0).sin() * 0.008 * chilled;
+        offset.z += (t * 21.0).cos() * 0.008 * chilled;
+    }
+    if choking > 0.0 {
+        offset.y -= (t * 5.5).sin().abs() * 0.025 * choking;
+        roll += (t * 5.5).sin() * 0.025 * choking;
+    }
+    if mutating > 0.0 {
+        offset.x += (t * 4.1).sin() * 0.025 * mutating;
+        offset.z += (t * 3.3).cos() * 0.020 * mutating;
+        roll += (t * 3.7).sin() * 0.035 * mutating;
+    }
+
+    // Focus visibly steadies rather than adding another wobble.
+    let steadiness = (1.0 - focused * 0.22).clamp(0.35, 1.0);
+    offset.x *= steadiness;
+    offset.z *= steadiness;
+    roll *= steadiness;
+
+    if blood.appears_dead() {
+        offset.y -= 0.22;
+        roll = 1.40;
+    }
+
     (offset, roll)
 }
 
@@ -270,31 +515,30 @@ fn status_tint(base: Color, blood: &ChemBloodstream) -> Color {
     let base = base.to_srgba();
     let (mut r, mut g, mut b) = (base.red, base.green, base.blue);
 
-    let irradiated = blood.status(StatusKind::Irradiated).intensity;
-    let drunk = blood.status(StatusKind::Drunk).intensity;
-    let hastened = blood.status(StatusKind::Hastened).intensity;
-    let sluggish = blood.status(StatusKind::Sluggish).intensity;
-
-    // Sickly green cast.
-    let ir = (irradiated / 2.0).clamp(0.0, 1.0);
-    g += (1.0 - g) * ir * 0.5;
-    r *= 1.0 - ir * 0.4;
-    b *= 1.0 - ir * 0.4;
-
-    // Flushed red — drunk or wired.
-    let flush = ((drunk + hastened) / 3.0).clamp(0.0, 0.6);
-    r += (1.0 - r) * flush * 0.6;
-    g *= 1.0 - flush * 0.3;
-    b *= 1.0 - flush * 0.3;
-
-    // Pale and grey — worn down.
-    let pale = (sluggish / 3.0).clamp(0.0, 0.5);
-    let grey = (r + g + b) / 3.0;
-    r += (grey - r) * pale;
-    g += (grey - g) * pale;
-    b += (grey - b) * pale;
+    // A stable palette gives every status a third-person identity. Blend in
+    // enum order so the result is deterministic across peers and replays.
+    for (kind, state) in blood.active_statuses() {
+        let target = status_color(kind).to_srgba();
+        let amount = (0.10 * state.intensity.max(0.0)).clamp(0.0, 0.42);
+        r += (target.red - r) * amount;
+        g += (target.green - g) * amount;
+        b += (target.blue - b) * amount;
+    }
 
     Color::srgb(r, g, b)
+}
+
+fn body_scale(blood: &ChemBloodstream, t: f32) -> Vec3 {
+    let mutating = blood.status(StatusKind::Mutating).intensity.min(3.0);
+    if mutating <= 0.0 {
+        return Vec3::ONE;
+    }
+    let pulse = (t * 3.1).sin();
+    Vec3::new(
+        1.0 + pulse * 0.10 * mutating,
+        1.0 - pulse * 0.07 * mutating,
+        1.0 + (t * 2.3).cos() * 0.08 * mutating,
+    )
 }
 
 fn animate_chemist_body(
@@ -313,7 +557,13 @@ fn animate_chemist_body(
             continue;
         };
         let (offset, roll) = gait_offset(&blood.0, t);
-        apply_part_pose(&mut transform, part.rest, offset, roll);
+        apply_part_pose(
+            &mut transform,
+            part.rest,
+            offset,
+            roll,
+            body_scale(&blood.0, t),
+        );
         apply_part_tint(&mut materials, &material.0, part.base_color, &blood.0);
     }
 }
@@ -324,7 +574,7 @@ fn animate_chemist_body(
 /// `(Vec3::ZERO, 0.0)` every frame. Writing that unconditionally marked the
 /// part `Changed<Transform>` and re-ran propagation for the whole body
 /// hierarchy on every peer, every frame, for a pose that had not moved.
-fn apply_part_pose(transform: &mut Transform, rest: Vec3, offset: Vec3, roll: f32) {
+fn apply_part_pose(transform: &mut Transform, rest: Vec3, offset: Vec3, roll: f32, scale: Vec3) {
     let translation = rest + offset;
     if transform.translation != translation {
         transform.translation = translation;
@@ -332,6 +582,9 @@ fn apply_part_pose(transform: &mut Transform, rest: Vec3, offset: Vec3, roll: f3
     let rotation = Quat::from_rotation_z(roll);
     if transform.rotation != rotation {
         transform.rotation = rotation;
+    }
+    if transform.scale != scale {
+        transform.scale = scale;
     }
 }
 
@@ -372,7 +625,13 @@ fn animate_crew_body(
             continue;
         };
         let (offset, roll) = gait_offset(&blood.0, t);
-        apply_part_pose(&mut transform, part.rest, offset, roll);
+        apply_part_pose(
+            &mut transform,
+            part.rest,
+            offset,
+            roll,
+            body_scale(&blood.0, t),
+        );
         apply_part_tint(&mut materials, &material.0, part.base_color, &blood.0);
     }
 }
@@ -427,8 +686,89 @@ mod tests {
 
         let tinted = status_tint(Color::WHITE, &blood).to_srgba();
         let base = Color::WHITE.to_srgba();
-        assert!(tinted.green >= base.green);
+        assert!(tinted.green > tinted.red && tinted.green > tinted.blue);
         assert!(tinted.red < base.red);
         assert!(tinted.blue < base.blue);
+    }
+
+    #[test]
+    fn every_status_has_first_and_third_person_presentation() {
+        let base = Color::srgb(0.31, 0.34, 0.37);
+        let base_srgba = base.to_srgba();
+
+        for kind in StatusKind::ALL {
+            let mut blood = ChemBloodstream::default();
+            blood.add_status(kind, 4.0, 1.0);
+
+            let (vignette, alpha) = vignette_tint(&blood);
+            assert!(
+                alpha > 0.0 && vignette != Color::NONE,
+                "{} has no player presentation",
+                kind.label(),
+            );
+            assert!(
+                status_readout_text(&blood).contains(kind.label()),
+                "{} is not named in the player status readout",
+                kind.label(),
+            );
+
+            let tinted = status_tint(base, &blood).to_srgba();
+            let delta = (tinted.red - base_srgba.red).abs()
+                + (tinted.green - base_srgba.green).abs()
+                + (tinted.blue - base_srgba.blue).abs();
+            assert!(
+                delta > 0.01,
+                "{} has no third-person presentation",
+                kind.label(),
+            );
+        }
+    }
+
+    #[test]
+    fn motor_warning_and_stumble_are_deterministic_and_staged() {
+        let period = 3.6 - 0.55;
+        let warning = stumble_cadence(period * 0.78, 1.0);
+        assert!(warning.0 > 0.0, "a warning must precede the stumble");
+        assert_eq!(warning.1, 0.0);
+
+        let stumble = stumble_cadence(period * 0.90, 1.0);
+        assert!(stumble.1 > 0.0);
+        assert_eq!(stumble, stumble_cadence(period * 0.90, 1.0));
+        assert_eq!(stumble_cadence(10.0, 0.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn apparent_death_is_visually_distinct_from_lethal_state() {
+        let mut blood = ChemBloodstream::default();
+        blood.add_status(StatusKind::Sedated, 4.0, 4.0);
+        assert!(blood.appears_dead());
+
+        let (color, alpha) = vignette_tint(&blood);
+        let dark = color.to_srgba();
+        assert!(alpha >= 0.68);
+        assert!(dark.red < 0.1 && dark.green < 0.1 && dark.blue < 0.1);
+    }
+
+    #[test]
+    fn mutation_visibly_changes_body_proportions() {
+        let mut blood = ChemBloodstream::default();
+        blood.add_status(StatusKind::Mutating, 4.0, 1.0);
+
+        assert_ne!(body_scale(&blood, 0.4), Vec3::ONE);
+        assert_eq!(body_scale(&ChemBloodstream::default(), 0.4), Vec3::ONE);
+    }
+
+    #[test]
+    fn hallucinations_emit_deterministic_false_station_cues() {
+        let mut blood = ChemBloodstream::default();
+        blood.add_status(StatusKind::Hallucinating, 10.0, 1.0);
+        let period = 5.2 - 0.45;
+        let at = period * 0.70;
+
+        let cue = hallucination_cue(&blood, at).expect("active cue window");
+        assert!(!cue.is_empty());
+        assert_eq!(Some(cue), hallucination_cue(&blood, at));
+        assert_eq!(hallucination_cue(&blood, period * 0.2), None);
+        assert_eq!(hallucination_cue(&ChemBloodstream::default(), at), None);
     }
 }
