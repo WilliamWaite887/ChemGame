@@ -19,7 +19,7 @@ use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlo
 use crate::crew::{spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{InteractRequested, Interactable};
 use crate::knowledge::{research_for_delivery, Knowledge};
-use crate::lab::COUNTER_SPOT;
+use crate::lab::{DeliveryLane, DeliveryStation, DeliveryStations, COUNTER_SPOT};
 use crate::machines::{chemist_entity, slotted_container, Machine, MachineKind};
 use crate::net::is_authority;
 use crate::player::Chemist;
@@ -1705,9 +1705,11 @@ fn container_matches(contents: &Solution, order: &Order, kind: OrderKind, db: &C
 fn window_recipient<'a>(
     contents: &Solution,
     waiting: impl Iterator<Item = (Entity, &'a Order, &'a CrewRoute, OrderKind)>,
+    lane: DeliveryLane,
     db: &ChemDb,
 ) -> Option<Entity> {
     waiting
+        .filter(|(_, _, route, _)| route.delivery_lane == lane)
         .filter(|(_, _, route, _)| route.phase == CrewPhase::Waiting)
         .filter(|(_, order, _, kind)| container_matches(contents, order, *kind, db))
         .min_by(|a, b| a.1.remaining().total_cmp(&b.1.remaining()))
@@ -1729,7 +1731,7 @@ fn handle_window_delivery(
     mut resolved: MessageWriter<OrderResolved>,
     mut exposures: MessageWriter<ChemicalExposure>,
     mut knowledge: ResMut<Knowledge>,
-    windows: Query<(Entity, &Machine)>,
+    windows: Query<(Entity, &Machine, Option<&DeliveryLane>)>,
     slotted: Query<(Entity, &InSlot)>,
     containers: Query<&Container>,
     mut crew: Query<(
@@ -1743,7 +1745,7 @@ fn handle_window_delivery(
     )>,
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
 ) {
-    for (window, machine) in &windows {
+    for (window, machine, lane) in &windows {
         if machine.kind != MachineKind::DeliveryWindow {
             continue;
         }
@@ -1777,7 +1779,8 @@ fn handle_window_delivery(
                     OrderKind::of(illicit, crisis, counter),
                 )
             });
-        let Some(recipient) = window_recipient(&container.solution, candidates, &db) else {
+        let lane = lane.copied().unwrap_or(DeliveryLane::Public);
+        let Some(recipient) = window_recipient(&container.solution, candidates, lane, &db) else {
             continue;
         };
 
@@ -1843,25 +1846,33 @@ const VIAL_LANE_Z_TOLERANCE: f32 = 0.35;
 /// Falls back to lane zero when every lane is taken: overlapping is bad, but
 /// spawning through the lobby's east wall is worse.
 pub fn free_vial_lane(occupied: &[Vec3]) -> Vec3 {
+    free_vial_lane_at(
+        occupied,
+        DeliveryStations::default().station(DeliveryLane::Public),
+    )
+}
+
+fn free_vial_lane_at(occupied: &[Vec3], station: DeliveryStation) -> Vec3 {
+    let (_, height) = ContainerKind::Bottle.dimensions();
+    let base = station.drop_position(crate::lab::COUNTER_TOP + height * 0.5);
+    let across = -(station.transform.rotation * Vec3::X);
+    let toward_crew = -(station.transform.rotation * Vec3::Z);
     let at_the_drop: Vec<f32> = occupied
         .iter()
-        .filter(|spot| (spot.z - crate::lab::COUNTER_DROP_Z).abs() <= VIAL_LANE_Z_TOLERANCE)
-        .map(|spot| spot.x)
+        .filter(|spot| ((*spot - base).dot(toward_crew)).abs() <= VIAL_LANE_Z_TOLERANCE)
+        .map(|spot| (*spot - base).dot(across))
         .collect();
 
-    let (_, height) = ContainerKind::Bottle.dimensions();
-    let y = crate::lab::COUNTER_TOP + height * 0.5;
-
     for lane in 0..VIAL_LANES {
-        let x = COUNTER_SPOT.x + lane as f32 * VIAL_SPACING;
+        let offset = lane as f32 * VIAL_SPACING;
         let clear = at_the_drop
             .iter()
-            .all(|taken| (taken - x).abs() > VIAL_SPACING * 0.5);
+            .all(|taken| (taken - offset).abs() > VIAL_SPACING * 0.5);
         if clear {
-            return Vec3::new(x, y, crate::lab::COUNTER_DROP_Z);
+            return base + across * offset;
         }
     }
-    Vec3::new(COUNTER_SPOT.x, y, crate::lab::COUNTER_DROP_Z)
+    base
 }
 
 /// Grateful crew occasionally leave a sample of something else they use.
@@ -1876,6 +1887,7 @@ fn leave_sample_vials(
     knowledge: Res<Knowledge>,
     mut resolved: MessageReader<OrderResolved>,
     mut radio: ResMut<RadioLog>,
+    stations: Option<Res<DeliveryStations>>,
     loose: Query<
         &Transform,
         (
@@ -1921,7 +1933,12 @@ fn leave_sample_vials(
             continue;
         };
 
-        let spot = free_vial_lane(&occupied);
+        let station = stations
+            .as_deref()
+            .cloned()
+            .unwrap_or_default()
+            .station(DeliveryLane::Public);
+        let spot = free_vial_lane_at(&occupied, station);
         occupied.push(spot);
         let vial = spawn_container(&mut commands, ContainerKind::Bottle, spot);
         let amount = ContainerKind::Bottle.capacity();
@@ -1986,10 +2003,18 @@ mod tests {
 
     /// A delivery window with `contents` sitting in its slot.
     fn window_with(app: &mut App, contents: &[(&str, i32)]) -> (Entity, Entity) {
+        window_with_lane(app, contents, DeliveryLane::Public)
+    }
+
+    fn window_with_lane(
+        app: &mut App,
+        contents: &[(&str, i32)],
+        lane: DeliveryLane,
+    ) -> (Entity, Entity) {
         let data = app.world().resource::<ChemDb>().0.clone();
         let window = app
             .world_mut()
-            .spawn(Machine::new(MachineKind::DeliveryWindow))
+            .spawn((Machine::new(MachineKind::DeliveryWindow), lane))
             .id();
 
         let mut container = Container::new(ContainerKind::LargeBeaker);
@@ -2011,8 +2036,28 @@ mod tests {
         patience: f32,
         arrived: bool,
     ) -> Entity {
+        waiting_crew_in_lane(
+            app,
+            name,
+            wants,
+            amount,
+            patience,
+            arrived,
+            DeliveryLane::Public,
+        )
+    }
+
+    fn waiting_crew_in_lane(
+        app: &mut App,
+        name: &str,
+        wants: &str,
+        amount: i32,
+        patience: f32,
+        arrived: bool,
+        lane: DeliveryLane,
+    ) -> Entity {
         let reagent = reagent_id(app, wants);
-        let mut route = CrewRoute::arrival(0.0);
+        let mut route = CrewRoute::arrival_for(lane, 0.0);
         route.phase = if arrived {
             CrewPhase::Waiting
         } else {
@@ -2236,6 +2281,40 @@ mod tests {
             "the order should be closed out"
         );
         assert_eq!(app.world().resource::<Shift>().succeeded, 1);
+    }
+
+    #[test]
+    fn each_window_only_serves_orders_assigned_to_its_lane() {
+        let mut app = window_app();
+        let (_, beaker) = window_with_lane(&mut app, &[("dylovene", 30)], DeliveryLane::Public);
+        let patient = waiting_crew_in_lane(
+            &mut app,
+            "Clinical patient",
+            "dylovene",
+            30,
+            10.0,
+            true,
+            DeliveryLane::Medical,
+        );
+        let visitor = waiting_crew_in_lane(
+            &mut app,
+            "Public visitor",
+            "dylovene",
+            30,
+            60.0,
+            true,
+            DeliveryLane::Public,
+        );
+
+        app.update();
+
+        assert!(app.world().get::<Order>(patient).is_some());
+        assert!(app.world().get::<Order>(visitor).is_none());
+        assert!(app.world().get_entity(beaker).is_err());
+        assert_eq!(
+            outcomes(&app),
+            vec![("Public visitor".to_string(), Outcome::Success)]
+        );
     }
 
     #[test]

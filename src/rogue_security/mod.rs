@@ -37,6 +37,7 @@ use crate::containers::{Container, HeldBy};
 use crate::crew::{spawn_crew_member, CrewDef, CrewPhase, CrewRoute};
 use crate::hazards::{HazardFelt, HazardKind};
 use crate::interaction::{InteractRequested, Interactable};
+use crate::lab::{DeliveryLane, DeliveryStations};
 use crate::machines::chemist_entity;
 use crate::net::is_authority;
 use crate::orders::{Department, Shift, StationData};
@@ -490,6 +491,7 @@ fn check_redemption(
     shift: Res<Shift>,
     mut redeemed: ResMut<RogueRedeemed>,
     mut radio: ResMut<RadioLog>,
+    stations: Option<Res<DeliveryStations>>,
 ) {
     let Some(script) = script else {
         return;
@@ -515,14 +517,18 @@ fn check_redemption(
         .positive(),
     );
 
+    let station = stations
+        .as_deref()
+        .cloned()
+        .unwrap_or_default()
+        .station(DeliveryLane::Public);
     commands.spawn((
         Deterrent {
             charges: DETERRENT_CHARGES,
         },
-        Transform::from_xyz(
-            crate::lab::COUNTER_SPOT.x - 0.4,
-            crate::lab::COUNTER_TOP,
-            crate::lab::COUNTER_DROP_Z,
+        Transform::from_translation(
+            station.drop_position(crate::lab::COUNTER_TOP)
+                - (station.transform.rotation * Vec3::X) * 0.4,
         ),
         Replicated,
         crate::until_we_leave_the_lab(),

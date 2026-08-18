@@ -27,7 +27,7 @@ use crate::antagonist::SecuritySuspicion;
 use crate::chem_data::ChemDb;
 use crate::containers::{spawn_container, Container, ContainerKind};
 use crate::knowledge::Knowledge;
-use crate::lab::{COUNTER_DROP_Z, COUNTER_SPOT, COUNTER_TOP};
+use crate::lab::{DeliveryLane, DeliveryStation, DeliveryStations, COUNTER_DROP_Z, COUNTER_TOP};
 use crate::machines::{Machine, MachineKind};
 use crate::net::is_authority;
 use crate::orders::{
@@ -528,6 +528,7 @@ pub fn apply_requisition(
     db: &ChemDb,
     suspicion: Option<&mut SecuritySuspicion>,
     carried: Option<&mut CarriedSuspicion>,
+    delivery_station: DeliveryStation,
     kind: RequisitionKind,
 ) -> bool {
     let department = kind.department();
@@ -549,10 +550,10 @@ pub fn apply_requisition(
             knowledge.award_research(RESEARCH_GRANT);
         }
         RequisitionKind::AntitoxinCrate => {
-            gift_container(commands, db, "dylovene");
+            gift_container(commands, db, delivery_station, "dylovene");
         }
         RequisitionKind::KitchenCarePackage => {
-            gift_container(commands, db, "saline_glucose");
+            gift_container(commands, db, delivery_station, "saline_glucose");
         }
         RequisitionKind::SecondOpinion => {
             shift.requisition.quack_wards += 1;
@@ -592,7 +593,12 @@ pub const RESEARCH_GRANT: u32 = 2;
 /// command to fill it once it exists (`Container` isn't available to write
 /// synchronously from a plain `&mut Commands`). Filled to the bottle's full
 /// capacity rather than a token amount — this is a real crate, not a nudge.
-fn gift_container(commands: &mut Commands, db: &ChemDb, reagent_key: &str) {
+fn gift_container(
+    commands: &mut Commands,
+    db: &ChemDb,
+    station: DeliveryStation,
+    reagent_key: &str,
+) {
     let Some(reagent) = db.reagents.id_of(reagent_key) else {
         warn!("requisition gifts unknown reagent '{reagent_key}'");
         return;
@@ -601,11 +607,8 @@ fn gift_container(commands: &mut Commands, db: &ChemDb, reagent_key: &str) {
     let token = spawn_container(
         commands,
         ContainerKind::Bottle,
-        Vec3::new(
-            COUNTER_SPOT.x - 0.6,
-            COUNTER_TOP + height * 0.5,
-            COUNTER_DROP_Z,
-        ),
+        station.drop_position(COUNTER_TOP + height * 0.5)
+            - (station.transform.rotation * Vec3::X) * 0.6,
     );
     let amount = ContainerKind::Bottle.capacity();
     commands.queue(move |world: &mut World| {
@@ -643,6 +646,7 @@ fn handle_requisition(
     mut suspicion: Option<ResMut<SecuritySuspicion>>,
     mut carried: Option<ResMut<CarriedSuspicion>>,
     mut radio: ResMut<RadioLog>,
+    delivery_stations: Option<Res<DeliveryStations>>,
 ) {
     let Some(station) = station else {
         return;
@@ -651,6 +655,11 @@ fn handle_requisition(
         if !is_board(request.board, &boards) {
             continue;
         }
+        let delivery_station = delivery_stations
+            .as_deref()
+            .cloned()
+            .unwrap_or_default()
+            .station(DeliveryLane::Public);
         if !apply_requisition(
             &mut commands,
             &mut shift,
@@ -660,6 +669,7 @@ fn handle_requisition(
             &db,
             suspicion.as_deref_mut(),
             carried.as_deref_mut(),
+            delivery_station,
             request.kind,
         ) {
             continue;

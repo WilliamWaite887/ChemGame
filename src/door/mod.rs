@@ -1,9 +1,6 @@
-//! An automatic sliding door at the lab's one external entrance — the
-//! doorway `CREW_DOOR_X` marks on the lobby's south wall, the only way in
-//! from the rest of the station. The five interior doorways stay exactly
-//! what they always were: open gaps, no door object, nothing to spawn —
-//! [`spawn_doors`] picks the one doorway out of `lab::doorways()` that
-//! matches the crew door's position and ignores the rest.
+//! Map-authored automatic sliding airlocks for department entrances and
+//! maintenance crossovers. Each door keeps a stable semantic identity and a
+//! matching navigation bridge across hot reload and replication.
 //!
 //! Placeholder geometry — two flat-shaded slabs, the same "scaled unit cube"
 //! style as the rest of the lab (there is no glTF/scene-loading pipeline in
@@ -26,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crew::CrewMember;
 use crate::lab::{
-    doorways, Solid, CREW_DOOR_X, DOOR_HEIGHT, DOOR_WIDTH, LOBBY, ROOMS, WALL_THICKNESS,
+    doorways, DoorPlacement, DoorSpots, Solid, DOOR_HEIGHT, DOOR_WIDTH, WALL_THICKNESS,
 };
 use crate::net::is_authority;
 use crate::player::Chemist;
@@ -55,33 +52,28 @@ pub struct DoorPlugin;
 
 impl Plugin for DoorPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            OnEnter(AppState::Playing),
-            (load_door_assets, spawn_doors.run_if(is_authority)),
-        )
-        .add_systems(
-            Update,
-            (
-                dress_door,
-                decide_door_state.run_if(is_authority),
-                animate_door_leaves,
-                toggle_door_solid,
-            )
-                .run_if(in_state(AppState::Playing)),
-        );
+        app.add_systems(OnEnter(AppState::Playing), load_door_assets)
+            .add_systems(
+                Update,
+                (
+                    reconcile_doors.run_if(is_authority),
+                    dress_door,
+                    decide_door_state.run_if(is_authority),
+                    animate_door_leaves,
+                    toggle_door_solid,
+                )
+                    .run_if(in_state(AppState::Playing)),
+            );
     }
 }
 
 /// A door's state. Registered `.replicate::<Door>()` in `net`, next to
 /// `Thermostat` — see the module doc for why the two are the same shape.
-#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Door {
     pub open: bool,
-    /// Position in `lab::doorways()`'s own iteration order. Not looked up by
-    /// world position anywhere: every system that needs this door's run/axis
-    /// re-derives it from this index, so there is exactly one source for
-    /// "which doorway is this" instead of a cached copy that could drift.
-    pub doorway_index: usize,
+    pub bridge_id: String,
+    pub along_x: bool,
 }
 
 /// Chemical corrosion has defeated this door. Keeping this as replicated
@@ -117,30 +109,56 @@ fn load_door_assets(
     });
 }
 
-/// The lobby's south wall, and the only way into the lab from the rest of
-/// the station — see `lab::CREW_DOOR_X`'s own doc. The one doorway that
-/// gets an actual door; see the module doc for why the other five do not.
-fn is_crew_doorway(at: Vec3) -> bool {
-    (at.x - CREW_DOOR_X).abs() < 0.001 && (at.z - ROOMS[LOBBY].max_z).abs() < 0.001
+/// Stable map identity used to reconcile airlocks without duplicating them.
+#[derive(Component, Debug)]
+struct DoorSpotId(String);
+
+fn along_x(transform: Transform) -> bool {
+    let axis = transform.rotation * Vec3::X;
+    axis.x.abs() >= axis.z.abs()
 }
 
 /// Creates the door's state. Authority only — see `Door`'s doc and
 /// `machines::spawn_machines`, the pattern this copies.
-fn spawn_doors(mut commands: Commands) {
-    for (index, (run, center)) in doorways().enumerate() {
-        let at = run.point(center);
-        if !is_crew_doorway(at) {
+fn spawn_door_at(commands: &mut Commands, id: &str, placement: &DoorPlacement) {
+    commands.spawn((
+        Name::new(format!("Airlock [{id}]")),
+        DoorSpotId(id.to_string()),
+        Door {
+            open: false,
+            bridge_id: placement.bridge_id.clone(),
+            along_x: along_x(placement.transform),
+        },
+        placement.transform,
+        Visibility::default(),
+        bevy_replicon::prelude::Replicated,
+        crate::until_we_leave_the_lab(),
+    ));
+}
+
+fn reconcile_doors(
+    mut commands: Commands,
+    spots: Res<DoorSpots>,
+    mut existing: Query<(Entity, &DoorSpotId, &mut Door)>,
+) {
+    if !spots.is_changed() {
+        return;
+    }
+    let mut found = std::collections::HashSet::new();
+    for (entity, id, mut door) in &mut existing {
+        let Some(placement) = spots.get(&id.0) else {
+            commands.entity(entity).despawn();
             continue;
+        };
+        found.insert(id.0.clone());
+        door.bridge_id.clone_from(&placement.bridge_id);
+        door.along_x = along_x(placement.transform);
+        commands.entity(entity).insert(placement.transform);
+    }
+    for (id, placement) in spots.iter() {
+        if !found.contains(id) {
+            spawn_door_at(&mut commands, id, placement);
         }
-        commands.spawn((
-            Door {
-                open: false,
-                doorway_index: index,
-            },
-            Transform::from_translation(at),
-            bevy_replicon::prelude::Replicated,
-            crate::until_we_leave_the_lab(),
-        ));
     }
 }
 
@@ -165,19 +183,12 @@ fn dress_door(
     let Some(assets) = assets else {
         return;
     };
-    for (entity, door) in &doors {
-        let Some((run, _)) = doorways().nth(door.doorway_index) else {
-            continue;
-        };
+    for (entity, _door) in &doors {
         // Meeting at the centre (closed) or slid a full leaf-width into
         // where the flanking wall segment already stands (open) — the same
         // gap `WallRun::segments()` cuts, worked out from the same axis.
-        let axis = if run.along_x { Vec3::X } else { Vec3::Z };
-        let size = if run.along_x {
-            Vec3::new(DOOR_WIDTH * 0.5, DOOR_HEIGHT, LEAF_THICKNESS)
-        } else {
-            Vec3::new(LEAF_THICKNESS, DOOR_HEIGHT, DOOR_WIDTH * 0.5)
-        };
+        let axis = Vec3::X;
+        let size = Vec3::new(DOOR_WIDTH * 0.5, DOOR_HEIGHT, LEAF_THICKNESS);
         for side in [-1.0f32, 1.0] {
             let closed_local = axis * (side * DOOR_WIDTH * 0.25) + Vec3::Y * DOOR_HEIGHT * 0.5;
             let open_local = closed_local + axis * (side * DOOR_WIDTH * 0.5);
@@ -258,10 +269,7 @@ fn toggle_door_solid(mut commands: Commands, doors: Query<(Entity, &Door), Chang
             commands.entity(entity).remove::<Solid>();
             continue;
         }
-        let Some((run, _)) = doorways().nth(door.doorway_index) else {
-            continue;
-        };
-        let half_extents = if run.along_x {
+        let half_extents = if door.along_x {
             Vec3::new(DOOR_WIDTH * 0.5, DOOR_HEIGHT * 0.5, WALL_THICKNESS * 0.5)
         } else {
             Vec3::new(WALL_THICKNESS * 0.5, DOOR_HEIGHT * 0.5, DOOR_WIDTH * 0.5)
@@ -289,7 +297,8 @@ mod tests {
             .spawn((
                 Door {
                     open: false,
-                    doorway_index,
+                    bridge_id: format!("test.{doorway_index}"),
+                    along_x: run.along_x,
                 },
                 Transform::from_translation(run.point(center)),
             ))
@@ -395,15 +404,21 @@ mod tests {
     }
 
     #[test]
-    fn spawn_doors_makes_exactly_one_door_and_it_is_the_crew_entrance() {
-        // Only the lab's one external doorway gets a door — the five
-        // interior ones stay open gaps, same as before this module existed.
+    fn map_spots_reconcile_to_semantic_doors() {
+        // A changed map registry creates exactly one door for each stable id.
         let mut app = App::new();
-        app.add_systems(Update, spawn_doors);
+        let mut spots = DoorSpots::default();
+        spots.insert(
+            "door.test",
+            "bridge.test",
+            Transform::from_xyz(3.0, 0.0, 4.0),
+        );
+        app.insert_resource(spots);
+        app.add_systems(Update, reconcile_doors);
         app.update();
 
-        let mut doors = app.world_mut().query::<(&Door, &Transform)>();
-        let found: Vec<(&Door, &Transform)> = doors.iter(app.world()).collect();
+        let mut doors = app.world_mut().query::<(&Door, &Transform, &Visibility)>();
+        let found: Vec<(&Door, &Transform, &Visibility)> = doors.iter(app.world()).collect();
         assert_eq!(
             found.len(),
             1,
@@ -411,17 +426,9 @@ mod tests {
             found.len()
         );
 
-        let (door, transform) = found[0];
-        assert!(
-            is_crew_doorway(transform.translation),
-            "the one door spawned is not at the crew entrance: {:?}",
-            transform.translation
-        );
-        let (run, center) = doorways().nth(door.doorway_index).expect("a real doorway");
-        assert_eq!(
-            run.point(center),
-            transform.translation,
-            "doorway_index does not match where the door actually is"
-        );
+        let (door, transform, visibility) = found[0];
+        assert_eq!(door.bridge_id, "bridge.test");
+        assert_eq!(transform.translation, Vec3::new(3.0, 0.0, 4.0));
+        assert_eq!(*visibility, Visibility::Inherited);
     }
 }

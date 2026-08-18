@@ -14,7 +14,7 @@ use bevy::prelude::*;
 
 use crate::containers::{spawn_container, Container, ContainerKind};
 use crate::crew::{spawn_crew_member, CrewMember, CrewPhase, CrewRoute};
-use crate::lab::{COUNTER_DROP_Z, COUNTER_SPOT, COUNTER_TOP};
+use crate::lab::{DeliveryLane, DeliveryStations, COUNTER_TOP};
 use crate::net::is_authority;
 use crate::orders::{Shift, StationData};
 use crate::radio::{channel_for, RadioEntry, RadioLog};
@@ -196,6 +196,7 @@ fn dispatch_glassware(
 fn unload_glassware(
     mut commands: Commands,
     mut radio: ResMut<RadioLog>,
+    stations: Option<Res<DeliveryStations>>,
     mut couriers: Query<(Entity, &CrewMember, &GlasswareDelivery, &mut CrewRoute)>,
 ) {
     for (entity, member, delivery, mut route) in &mut couriers {
@@ -206,14 +207,20 @@ fn unload_glassware(
         let kinds = std::iter::repeat_n(ContainerKind::Beaker, delivery.beakers).chain(
             std::iter::repeat_n(ContainerKind::LargeBeaker, delivery.large),
         );
+        let station = stations
+            .as_deref()
+            .cloned()
+            .unwrap_or_default()
+            .station(DeliveryLane::Public);
+        let across = station.transform.rotation * Vec3::X;
         let span = (delivery.total() as f32 - 1.0) * ITEM_SPACING;
         for (index, kind) in kinds.enumerate() {
-            let x = COUNTER_SPOT.x + CRATE_X_OFFSET - span * 0.5 + index as f32 * ITEM_SPACING;
+            let offset = CRATE_X_OFFSET - span * 0.5 + index as f32 * ITEM_SPACING;
             let (_, height) = kind.dimensions();
             spawn_container(
                 &mut commands,
                 kind,
-                Vec3::new(x, COUNTER_TOP + height * 0.5, COUNTER_DROP_Z),
+                station.drop_position(COUNTER_TOP + height * 0.5) + across * offset,
             );
         }
 

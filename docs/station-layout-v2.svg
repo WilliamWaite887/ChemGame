@@ -1,0 +1,192 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">ChemGame Station Layout V2</title>
+  <desc id="desc">A scaled station plan with a bright public loop around Service, a yellow outer maintenance ring and cross-spines, red airlocks, and blue public and Medical Chemistry delivery windows.</desc>
+  <defs>
+    <pattern id="grid" width="50" height="50" patternUnits="userSpaceOnUse">
+      <path d="M 50 0 L 0 0 0 50" fill="none" stroke="#d7dde5" stroke-width="1"/>
+    </pattern>
+    <pattern id="maint" width="18" height="18" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="18" height="18" fill="#ffd84d"/>
+      <rect width="7" height="18" fill="#f2c62e"/>
+    </pattern>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#4f5d6b"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#202832" flood-opacity="0.25"/>
+    </filter>
+    <style>
+      .room { stroke:#202832; stroke-width:3; filter:url(#shadow); }
+      .subroom { fill:#ffffff; fill-opacity:0.42; stroke:#52606d; stroke-width:2; }
+      .room-title { font:700 24px system-ui, sans-serif; fill:#17202a; text-anchor:middle; }
+      .sub { font:500 15px system-ui, sans-serif; fill:#364553; text-anchor:middle; }
+      .corridor { fill:#e9eef3; stroke:#657280; stroke-width:2; }
+      .maintenance { fill:url(#maint); stroke:#9a7900; stroke-width:2; }
+      .door { stroke:#b4232f; stroke-width:9; stroke-linecap:round; }
+      .window { stroke:#008fc9; stroke-width:10; stroke-linecap:round; }
+      .label { font:600 15px system-ui, sans-serif; fill:#263340; }
+      .small { font:500 13px system-ui, sans-serif; fill:#4a5866; }
+      .route { fill:none; stroke:#4f5d6b; stroke-width:3; stroke-dasharray:9 7; marker-end:url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1600" height="980" fill="#f8fafc"/>
+  <text x="55" y="54" font-family="system-ui, sans-serif" font-size="30" font-weight="700" fill="#17202a">Station Layout V2</text>
+  <text x="55" y="81" font-family="system-ui, sans-serif" font-size="16" fill="#4a5866">North is negative Z · diagram scale 10 px = 1 m · station envelope approximately 129 × 66 m</text>
+
+  <g transform="translate(0,75)">
+    <rect x="50" y="30" width="1290" height="660" fill="url(#grid)" stroke="#202832" stroke-width="4"/>
+
+    <!-- Outer maintenance ring: x=-75..54, z=-12..54. -->
+    <path class="maintenance" fill-rule="evenodd" d="M50 30H1340V690H50Z M80 60H1310V660H80Z"/>
+
+    <!-- Public north gallery and loop around Service. -->
+    <rect class="corridor" x="80" y="250" width="1230" height="50"/>
+    <rect class="corridor" x="650" y="300" width="50" height="290"/>
+    <rect class="corridor" x="940" y="300" width="50" height="290"/>
+    <rect class="corridor" x="650" y="540" width="340" height="50"/>
+
+    <!-- North department row. -->
+    <rect class="room" x="80" y="60" width="260" height="190" fill="#e7b0b4"/>
+    <rect class="room" x="340" y="60" width="420" height="190" fill="#d9d2eb"/>
+    <rect class="room" x="788" y="60" width="222" height="190" fill="#c8e2f5"/>
+    <rect class="room" x="1010" y="60" width="300" height="190" fill="#d3edf0"/>
+
+    <!-- West, centre, and east departments. -->
+    <rect class="room" x="80" y="300" width="570" height="136" fill="#f2df9e"/>
+    <rect class="room" x="80" y="464" width="570" height="196" fill="#d8c1a4"/>
+    <rect class="room" x="700" y="300" width="240" height="240" fill="#f2d8c6"/>
+    <rect class="room" x="990" y="300" width="320" height="360" fill="#cce5ba"/>
+
+    <!-- Maintenance cross-spines divide the authored room envelopes into smaller walkable rooms. -->
+    <rect class="maintenance" x="760" y="30" width="28" height="660"/>
+    <rect class="maintenance" x="50" y="436" width="1290" height="28"/>
+
+    <!-- Interstitial rooms turn leftover edges into useful buffers between public and service circulation. -->
+    <rect class="subroom" x="88" y="142" width="105" height="96"/>
+    <text class="small" x="140" y="188" text-anchor="middle">BRIG</text>
+    <text class="small" x="140" y="208" text-anchor="middle">EVIDENCE</text>
+    <rect class="subroom" x="640" y="142" width="112" height="96"/>
+    <text class="small" x="696" y="188" text-anchor="middle">BRIEFING</text>
+    <text class="small" x="696" y="208" text-anchor="middle">COMMS</text>
+    <rect class="subroom" x="930" y="142" width="72" height="96"/>
+    <text class="small" x="966" y="188" text-anchor="middle">QUAR.</text>
+    <text class="small" x="966" y="208" text-anchor="middle">AIRLOCK</text>
+    <rect class="subroom" x="520" y="338" width="122" height="90"/>
+    <text class="small" x="581" y="378" text-anchor="middle">ATMOS</text>
+    <text class="small" x="581" y="398" text-anchor="middle">UTILITY</text>
+    <rect class="subroom" x="520" y="472" width="122" height="86"/>
+    <text class="small" x="581" y="510" text-anchor="middle">RECEIVING</text>
+    <text class="small" x="581" y="530" text-anchor="middle">VESTIBULE</text>
+    <rect class="subroom" x="796" y="314" width="132" height="104"/>
+    <text class="small" x="862" y="360" text-anchor="middle">BAR / KITCHEN</text>
+    <text class="small" x="862" y="382" text-anchor="middle">SERVICE FRONT</text>
+    <rect class="subroom" x="650" y="590" width="110" height="70"/>
+    <text class="small" x="705" y="620" text-anchor="middle">CHAPEL</text>
+    <text class="small" x="705" y="640" text-anchor="middle">QUIET ROOM</text>
+    <line class="door" x1="690" y1="590" x2="720" y2="590"/>
+    <rect class="subroom" x="998" y="310" width="112" height="96"/>
+    <text class="small" x="1054" y="353" text-anchor="middle">BOTANY</text>
+    <text class="small" x="1054" y="375" text-anchor="middle">WORKROOM</text>
+
+    <!-- Department labels. -->
+    <text class="room-title" x="210" y="105">SECURITY</text>
+    <text class="sub" x="210" y="132">front desk / secure back rooms</text>
+
+    <text class="room-title" x="550" y="105">BRIDGE</text>
+    <text class="sub" x="550" y="132">command / accessible event space</text>
+
+    <text class="room-title" x="899" y="105">MEDICAL</text>
+    <text class="sub" x="899" y="132">treatment / clinical queue</text>
+
+    <text class="room-title" x="1160" y="119">CHEMISTRY</text>
+    <text class="sub" x="1160" y="148">existing five-room workflow</text>
+    <text class="sub" x="1160" y="174">plus Medical handoff vestibule</text>
+
+    <text class="room-title" x="300" y="347">ENGINEERING</text>
+    <text class="sub" x="300" y="376">workshop / rear service access</text>
+
+    <text class="room-title" x="300" y="523">CARGO</text>
+    <text class="sub" x="300" y="552">storage / deep event room</text>
+    <text class="sub" x="300" y="579">farthest routine department from Chemistry</text>
+
+    <text class="room-title" x="862" y="494">SERVICE</text>
+    <text class="sub" x="862" y="520">public island / crossroads</text>
+
+    <text class="room-title" x="1175" y="500">BOTANY</text>
+    <text class="sub" x="1175" y="528">greenhouse / accessible event space</text>
+
+    <!-- Public entrances. -->
+    <line class="door" x1="185" y1="250" x2="225" y2="250"/>
+    <line class="door" x1="520" y1="250" x2="560" y2="250"/>
+    <line class="door" x1="855" y1="250" x2="895" y2="250"/>
+    <line class="door" x1="1030" y1="250" x2="1070" y2="250"/>
+    <line class="door" x1="650" y1="345" x2="650" y2="385"/>
+    <line class="door" x1="650" y1="520" x2="650" y2="560"/>
+    <line class="door" x1="700" y1="365" x2="700" y2="405"/>
+    <line class="door" x1="940" y1="365" x2="940" y2="405"/>
+    <line class="door" x1="990" y1="350" x2="990" y2="390"/>
+
+    <!-- Maintenance entrances and spine crossings. -->
+    <line class="door" x1="185" y1="60" x2="225" y2="60"/>
+    <line class="door" x1="520" y1="60" x2="560" y2="60"/>
+    <line class="door" x1="855" y1="60" x2="895" y2="60"/>
+    <line class="door" x1="1310" y1="130" x2="1310" y2="170"/>
+    <line class="door" x1="80" y1="345" x2="80" y2="385"/>
+    <line class="door" x1="80" y1="520" x2="80" y2="560"/>
+    <line class="door" x1="1310" y1="350" x2="1310" y2="390"/>
+    <line class="door" x1="1125" y1="660" x2="1165" y2="660"/>
+    <line class="door" x1="760" y1="250" x2="788" y2="250"/>
+    <line class="door" x1="760" y1="540" x2="788" y2="540"/>
+    <line class="door" x1="650" y1="436" x2="650" y2="464"/>
+    <line class="door" x1="990" y1="436" x2="990" y2="464"/>
+
+    <!-- Delivery windows. -->
+    <line class="window" x1="1010" y1="132" x2="1010" y2="188"/>
+    <text class="label" x="1024" y="210">Medical window</text>
+    <line class="window" x1="1195" y1="250" x2="1260" y2="250"/>
+    <text class="label" x="1228" y="230" text-anchor="middle">Public delivery counter</text>
+
+    <!-- Route annotations. -->
+    <path class="route" d="M1228 275 H720 V350"/>
+    <text class="small" x="950" y="292" text-anchor="middle">bright public route</text>
+    <path class="route" stroke="#8b6b00" d="M1285 185 V445 H820"/>
+    <text class="small" x="1115" y="426" text-anchor="middle">risky maintenance shortcut</text>
+
+    <!-- Escape marker. -->
+    <g transform="translate(95,270)">
+      <circle cx="0" cy="0" r="13" fill="#ffffff" stroke="#263340" stroke-width="3"/>
+      <path d="M-5,-7 L7,0 L-5,7 Z" fill="#263340"/>
+      <text class="label" x="22" y="5">Escape pod marker</text>
+    </g>
+
+    <!-- North arrow. -->
+    <g transform="translate(1395,80)">
+      <text x="0" y="-22" text-anchor="middle" font-family="system-ui, sans-serif" font-size="20" font-weight="700" fill="#17202a">N</text>
+      <path d="M0,-10 L-13,24 L0,16 L13,24 Z" fill="#17202a"/>
+      <text class="small" x="0" y="45" text-anchor="middle">-Z</text>
+    </g>
+
+    <!-- Scale bar. -->
+    <g transform="translate(1375,610)">
+      <path d="M0 0 H100 M0 -8 V8 M100 -8 V8" stroke="#17202a" stroke-width="3"/>
+      <text class="label" x="50" y="28" text-anchor="middle">10 m</text>
+    </g>
+  </g>
+
+  <!-- Legend. -->
+  <g transform="translate(55,820)">
+    <text x="0" y="0" font-family="system-ui, sans-serif" font-size="20" font-weight="700" fill="#17202a">Legend</text>
+    <rect x="0" y="22" width="55" height="26" class="corridor"/>
+    <text class="label" x="68" y="42">Public circulation</text>
+    <rect x="235" y="22" width="55" height="26" class="maintenance"/>
+    <text class="label" x="303" y="42">Maintenance / service route</text>
+    <line class="door" x1="550" y1="35" x2="605" y2="35"/>
+    <text class="label" x="618" y="42">Unrestricted proximity airlock</text>
+    <line class="window" x1="900" y1="35" x2="955" y2="35"/>
+    <text class="label" x="968" y="42">Delivery window</text>
+
+    <text class="small" x="0" y="84">Public corridors are the default NPC route. Maintenance is optional, darker, and intended for shortcuts, hazards, and antagonist pressure.</text>
+    <text class="small" x="0" y="108">Bridge and Botany are accessible geometry in this pass; existing incidents remain in Medical/Quarantine, Engineering/Atmos, Service/Chapel, Maintenance, and Chemistry.</text>
+  </g>
+</svg>

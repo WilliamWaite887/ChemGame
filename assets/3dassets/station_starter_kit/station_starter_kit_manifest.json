@@ -973,6 +973,242 @@
       }
     },
     {
+      "asset_id": "DEC_ChemSupplyShelf",
+      "label": "Chemistry Supply Shelf",
+      "category": "decoration",
+      "file": "glb/decor_chem_supply_shelf.glb",
+      "runtime_dressing_file": null,
+      "description": "Wall-mounted reagent shelf with labelled bottles, bins, gloves, and a clipboard.",
+      "nominal_envelope": {
+        "blender_size_wdh_m": [
+          1.65,
+          0.38,
+          1.95
+        ],
+        "gltf_size_whd_m": [
+          1.65,
+          1.95,
+          0.38
+        ],
+        "purpose": "Authoring and placement target, not a visual AABB or collision guarantee."
+      },
+      "runtime_collision": null,
+      "visual_bounds": {
+        "blender": {
+          "min_xyz_m": [
+            -0.79,
+            -0.352,
+            0.36
+          ],
+          "max_xyz_m": [
+            0.79,
+            0.0,
+            1.88
+          ],
+          "size_wdh_m": [
+            1.58,
+            0.352,
+            1.52
+          ]
+        },
+        "gltf_bevy": {
+          "min_xyz_m": [
+            -0.79,
+            0.36,
+            -0.0
+          ],
+          "max_xyz_m": [
+            0.79,
+            1.88,
+            0.352
+          ],
+          "size_whd_m": [
+            1.58,
+            1.52,
+            0.352
+          ]
+        }
+      },
+      "sockets": {}
+    },
+    {
+      "asset_id": "DEC_ChemAnalysisPanel",
+      "label": "Chemistry Analysis Panel",
+      "category": "decoration",
+      "file": "glb/decor_chem_analysis_panel.glb",
+      "runtime_dressing_file": null,
+      "description": "Wall-mounted diagnostic displays, sample rack, and status indicators.",
+      "nominal_envelope": {
+        "blender_size_wdh_m": [
+          1.55,
+          0.24,
+          1.9
+        ],
+        "gltf_size_whd_m": [
+          1.55,
+          1.9,
+          0.24
+        ],
+        "purpose": "Authoring and placement target, not a visual AABB or collision guarantee."
+      },
+      "runtime_collision": null,
+      "visual_bounds": {
+        "blender": {
+          "min_xyz_m": [
+            -0.74,
+            -0.274,
+            0.57
+          ],
+          "max_xyz_m": [
+            0.74,
+            0.0,
+            1.85
+          ],
+          "size_wdh_m": [
+            1.48,
+            0.274,
+            1.28
+          ]
+        },
+        "gltf_bevy": {
+          "min_xyz_m": [
+            -0.74,
+            0.57,
+            -0.0
+          ],
+          "max_xyz_m": [
+            0.74,
+            1.85,
+            0.274
+          ],
+          "size_whd_m": [
+            1.48,
+            1.28,
+            0.274
+          ]
+        }
+      },
+      "sockets": {}
+    },
+    {
+      "asset_id": "DEC_ChemEmergencyStation",
+      "label": "Chemistry Emergency Station",
+      "category": "decoration",
+      "file": "glb/decor_chem_emergency_station.glb",
+      "runtime_dressing_file": null,
+      "description": "Wall-mounted eyewash, shower pipe, extinguisher, and hazard placard.",
+      "nominal_envelope": {
+        "blender_size_wdh_m": [
+          1.25,
+          0.42,
+          2.55
+        ],
+        "gltf_size_whd_m": [
+          1.25,
+          2.55,
+          0.42
+        ],
+        "purpose": "Authoring and placement target, not a visual AABB or collision guarantee."
+      },
+      "runtime_collision": null,
+      "visual_bounds": {
+        "blender": {
+          "min_xyz_m": [
+            -0.59,
+            -0.474413,
+            0.39
+          ],
+          "max_xyz_m": [
+            0.59,
+            0.0,
+            2.404661
+          ],
+          "size_wdh_m": [
+            1.18,
+            0.474413,
+            2.014661
+          ]
+        },
+        "gltf_bevy": {
+          "min_xyz_m": [
+            -0.59,
+            0.39,
+            -0.0
+          ],
+          "max_xyz_m": [
+            0.59,
+            2.404661,
+            0.474413
+          ],
+          "size_whd_m": [
+            1.18,
+            2.014661,
+            0.474413
+          ]
+        }
+      },
+      "sockets": {}
+    },
+    {
+      "asset_id": "DEC_ChemServiceBoard",
+      "label": "Chemistry Service Board",
+      "category": "decoration",
+      "file": "glb/decor_chem_service_board.glb",
+      "runtime_dressing_file": null,
+      "description": "Wall-mounted intercom, service lamps, order tickets, and shift notes.",
+      "nominal_envelope": {
+        "blender_size_wdh_m": [
+          1.35,
+          0.22,
+          1.9
+        ],
+        "gltf_size_whd_m": [
+          1.35,
+          1.9,
+          0.22
+        ],
+        "purpose": "Authoring and placement target, not a visual AABB or collision guarantee."
+      },
+      "runtime_collision": null,
+      "visual_bounds": {
+        "blender": {
+          "min_xyz_m": [
+            -0.64,
+            -0.179,
+            0.63617
+          ],
+          "max_xyz_m": [
+            0.64,
+            -0.0005,
+            1.83
+          ],
+          "size_wdh_m": [
+            1.28,
+            0.1785,
+            1.19383
+          ]
+        },
+        "gltf_bevy": {
+          "min_xyz_m": [
+            -0.64,
+            0.63617,
+            0.0005
+          ],
+          "max_xyz_m": [
+            0.64,
+            1.83,
+            0.179
+          ],
+          "size_whd_m": [
+            1.28,
+            1.19383,
+            0.1785
+          ]
+        }
+      },
+      "sockets": {}
+    },
+    {
       "asset_id": "DEPT_Medical",
       "label": "Medical Department Starter Bay",
       "category": "department",

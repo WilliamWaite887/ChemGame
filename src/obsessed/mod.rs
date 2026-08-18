@@ -25,6 +25,7 @@ use crate::chem_data::ChemDb;
 use crate::containers::{spawn_container, ContainerKind};
 use crate::crew::{spawn_crew_member, CrewDef};
 use crate::interaction::Interactable;
+use crate::lab::{DeliveryLane, DeliveryStations};
 use crate::net::is_authority;
 use crate::orders::{deliverable_amount, Order, OrderResolved, Shift, StationData};
 use crate::player::Chemist;
@@ -165,6 +166,7 @@ fn generate_obsessed_visit(
     shift: Res<Shift>,
     mut radio: ResMut<RadioLog>,
     chemists: Query<(), With<Chemist>>,
+    stations: Option<Res<DeliveryStations>>,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
@@ -232,14 +234,16 @@ fn generate_obsessed_visit(
 
     if visit.leaves_token {
         let (_, height) = ContainerKind::Bottle.dimensions();
+        let station = stations
+            .as_deref()
+            .cloned()
+            .unwrap_or_default()
+            .station(DeliveryLane::Public);
         let token = spawn_container(
             &mut commands,
             ContainerKind::Bottle,
-            Vec3::new(
-                crate::lab::COUNTER_SPOT.x - 0.6,
-                crate::lab::COUNTER_TOP + height * 0.5,
-                crate::lab::COUNTER_DROP_Z,
-            ),
+            station.drop_position(crate::lab::COUNTER_TOP + height * 0.5)
+                - (station.transform.rotation * Vec3::X) * 0.6,
         );
         commands.queue(move |world: &mut World| {
             if let Some(mut container) = world.get_mut::<crate::containers::Container>(token) {

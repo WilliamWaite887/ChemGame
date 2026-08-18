@@ -67,6 +67,21 @@ fn footprint(brush: &[quake_map::Surface]) -> Bounds {
     }
 }
 
+fn vertical_span(brush: &[quake_map::Surface]) -> (f32, f32) {
+    let mut min = f64::MAX;
+    let mut max = f64::MIN;
+    for surface in brush {
+        for point in surface.half_space {
+            min = min.min(point[2]);
+            max = max.max(point[2]);
+        }
+    }
+    (
+        (min / TB_SCALE as f64) as f32,
+        (max / TB_SCALE as f64) as f32,
+    )
+}
+
 /// A point entity's origin converted from TrenchBroom coordinates to Bevy XZ.
 fn origin_xz(entity: &Entity) -> Option<(f32, f32)> {
     let origin = property(entity, "origin")?;
@@ -90,6 +105,22 @@ fn parse() -> Vec<Entity> {
     quake_map::parse(&mut source.as_slice())
         .unwrap_or_else(|err| panic!("{MAP} is not a valid Quake map: {err}"))
         .entities
+}
+
+#[test]
+fn every_map_texture_has_a_runtime_asset() {
+    for entity in parse() {
+        for brush in entity.brushes {
+            for surface in brush {
+                let texture = surface.texture.to_string_lossy();
+                let path = format!("assets/textures/{texture}.png");
+                assert!(
+                    std::path::Path::new(&path).is_file(),
+                    "{MAP} references `{texture}`, but {path} does not exist"
+                );
+            }
+        }
+    }
 }
 
 /// The exact walkable registry the authored map contributes at runtime.
@@ -290,7 +321,7 @@ fn every_room_in_the_floor_plan_has_a_walkable_volume_drawn_for_it() {
 }
 
 #[test]
-fn the_expansion_keeps_its_authored_room_and_loop_footprints() {
+fn selective_subrooms_are_inside_their_parent_departments() {
     let map = parse();
     let named_bounds = |room: &str| -> Vec<Bounds> {
         map.iter()
@@ -302,98 +333,425 @@ fn the_expansion_keeps_its_authored_room_and_loop_footprints() {
 
     for (room, expected) in [
         (
-            "Maintenance",
+            "Security Back Room",
             Bounds {
-                min_x: -37.0,
-                max_x: -31.0,
-                min_z: 5.0,
-                max_z: 11.0,
+                min_x: -109.5,
+                max_x: -83.5,
+                min_z: -9.0,
+                max_z: -2.0,
             },
         ),
         (
-            "Chapel",
+            "Bridge Operations",
             Bounds {
-                min_x: -31.0,
-                max_x: -25.0,
-                min_z: 5.0,
-                max_z: 11.0,
+                min_x: -83.5,
+                max_x: -41.5,
+                min_z: -9.0,
+                max_z: -3.0,
             },
         ),
         (
             "Quarantine",
             Bounds {
-                min_x: -25.0,
-                max_x: -19.0,
-                min_z: 5.0,
-                max_z: 11.0,
+                min_x: -38.7,
+                max_x: -16.5,
+                min_z: -9.0,
+                max_z: -3.0,
+            },
+        ),
+        (
+            "Medical Handoff Vestibule",
+            Bounds {
+                min_x: -16.25,
+                max_x: -7.5,
+                min_z: 1.5,
+                max_z: 5.0,
             },
         ),
         (
             "Atmos/Utility",
             Bounds {
-                min_x: -19.0,
-                max_x: -13.0,
-                min_z: 5.0,
-                max_z: 11.0,
+                min_x: -66.0,
+                max_x: -52.5,
+                min_z: 15.0,
+                max_z: 28.6,
+            },
+        ),
+        (
+            "Cargo Receiving",
+            Bounds {
+                min_x: -109.5,
+                max_x: -94.0,
+                min_z: 31.4,
+                max_z: 51.0,
+            },
+        ),
+        (
+            "Chapel",
+            Bounds {
+                min_x: -38.7,
+                max_x: -23.5,
+                min_z: 31.4,
+                max_z: 39.0,
+            },
+        ),
+        (
+            "Quiet Room",
+            Bounds {
+                min_x: -47.5,
+                max_x: -41.5,
+                min_z: 31.4,
+                max_z: 39.0,
+            },
+        ),
+        (
+            "Botany Nursery",
+            Bounds {
+                min_x: -18.5,
+                max_x: 13.5,
+                min_z: 42.0,
+                max_z: 51.0,
             },
         ),
     ] {
         let found = named_bounds(room);
         assert_eq!(found.len(), 1, "{room} should be one walkable rectangle");
+        assert!(bounds_are_close(found[0], expected), "{room}: {found:?}");
+    }
+}
+
+#[test]
+fn station_v2_keeps_its_department_and_route_footprints() {
+    let map = parse();
+    let named_bounds = |room: &str| -> Vec<Bounds> {
+        map.iter()
+            .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
+            .filter(|entity| property(entity, "room").as_deref() == Some(room))
+            .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
+            .collect()
+    };
+
+    for (room, expected) in [
+        (
+            "Security",
+            Bounds {
+                min_x: -109.5,
+                max_x: -83.5,
+                min_z: -2.0,
+                max_z: 10.0,
+            },
+        ),
+        (
+            "Bridge",
+            Bounds {
+                min_x: -83.5,
+                max_x: -41.5,
+                min_z: -3.0,
+                max_z: 10.0,
+            },
+        ),
+        (
+            "Medical",
+            Bounds {
+                min_x: -38.7,
+                max_x: -16.5,
+                min_z: -3.0,
+                max_z: 10.0,
+            },
+        ),
+        (
+            "Engineering",
+            Bounds {
+                min_x: -109.5,
+                max_x: -66.0,
+                min_z: 15.0,
+                max_z: 28.6,
+            },
+        ),
+        (
+            "Cargo",
+            Bounds {
+                min_x: -94.0,
+                max_x: -52.5,
+                min_z: 31.4,
+                max_z: 51.0,
+            },
+        ),
+    ] {
+        let found = named_bounds(room);
+        assert_eq!(found.len(), 1, "{room} should be one authored rectangle");
+        assert!(bounds_are_close(found[0], expected), "{room}: {found:?}");
+    }
+
+    let service = named_bounds("Service");
+    assert_eq!(
+        service.len(),
+        2,
+        "the technical spine should divide Service"
+    );
+    for expected in [
+        Bounds {
+            min_x: -47.5,
+            max_x: -41.5,
+            min_z: 15.0,
+            max_z: 28.6,
+        },
+        Bounds {
+            min_x: -38.7,
+            max_x: -23.5,
+            min_z: 15.0,
+            max_z: 28.6,
+        },
+    ] {
         assert!(
-            bounds_are_close(found[0], expected),
-            "{room} moved or changed size: {:?}, expected {:?}",
-            found[0],
-            expected,
+            service
+                .iter()
+                .any(|actual| bounds_are_close(*actual, expected)),
+            "Service is missing {expected:?}: {service:?}",
         );
     }
 
-    let corridor = named_bounds("Main Corridor");
-    assert_eq!(corridor.len(), 1, "Main Corridor should be one rectangle");
-    assert!(
-        (corridor[0].min_x + 40.0).abs() < 0.001,
-        "Main Corridor no longer reaches the expansion's west edge: {:?}",
-        corridor[0],
-    );
-
-    let loop_bounds = named_bounds("Maintenance Loop");
-    let expected_loop = [
-        Bounds {
-            min_x: -40.0,
-            max_x: -37.0,
-            min_z: 4.2,
-            max_z: 11.0,
-        },
-        Bounds {
-            min_x: -40.0,
-            max_x: -10.0,
-            min_z: 2.0,
-            max_z: 5.8,
-        },
-        Bounds {
-            min_x: -13.0,
-            max_x: -10.0,
-            min_z: 4.2,
-            max_z: 11.0,
-        },
-    ];
+    let botany = named_bounds("Botany");
     assert_eq!(
-        loop_bounds.len(),
-        expected_loop.len(),
-        "Maintenance Loop lost one of its three U-shaped components",
+        botany.len(),
+        2,
+        "the maintenance spine should divide Botany"
     );
-    for expected in expected_loop {
+    for expected in [
+        Bounds {
+            min_x: -18.5,
+            max_x: 13.5,
+            min_z: 15.0,
+            max_z: 28.6,
+        },
+        Bounds {
+            min_x: -18.5,
+            max_x: 13.5,
+            min_z: 31.4,
+            max_z: 42.0,
+        },
+    ] {
         assert!(
-            loop_bounds
+            botany
                 .iter()
                 .any(|actual| bounds_are_close(*actual, expected)),
-            "Maintenance Loop is missing component {expected:?}; found {loop_bounds:?}",
+            "Botany is missing {expected:?}: {botany:?}",
+        );
+    }
+
+    let public = named_bounds("Public Loop");
+    assert_eq!(public.len(), 5, "public loop lost a circulation segment");
+    assert!(
+        public.iter().any(|bounds| bounds_are_close(
+            *bounds,
+            Bounds {
+                min_x: -109.5,
+                max_x: 13.5,
+                min_z: 10.0,
+                max_z: 15.0,
+            }
+        )),
+        "the five-metre northern gallery is missing"
+    );
+
+    let maintenance = named_bounds("Maintenance V2");
+    assert_eq!(
+        maintenance.len(),
+        6,
+        "maintenance needs four ring and two cross-route segments"
+    );
+    for bounds in &maintenance {
+        let width = (bounds.max_x - bounds.min_x).min(bounds.max_z - bounds.min_z);
+        assert!(
+            (width - 3.0).abs() < 0.001 || (width - 2.8).abs() < 0.001,
+            "maintenance route is {width} m wide: {bounds:?}"
         );
     }
 }
 
 #[test]
-fn the_expansion_lighting_matches_the_blockout_budget() {
+fn the_map_authors_two_semantic_delivery_windows() {
+    let map = parse();
+    for (id, lane) in [
+        ("delivery.public", "public"),
+        ("delivery.medical", "medical"),
+    ] {
+        let matches: Vec<_> = map
+            .iter()
+            .filter(|entity| classname(entity).as_deref() == Some("machine_spot"))
+            .filter(|entity| property(entity, "id").as_deref() == Some(id))
+            .collect();
+        assert_eq!(matches.len(), 1, "expected one `{id}` window");
+        assert_eq!(
+            property(matches[0], "kind").as_deref(),
+            Some("DeliveryWindow")
+        );
+        assert_eq!(property(matches[0], "lane").as_deref(), Some(lane));
+    }
+}
+
+#[test]
+fn medical_delivery_is_a_shared_wall_window_with_a_floored_chemistry_vestibule() {
+    let map = parse();
+    let marker = map
+        .iter()
+        .find(|entity| {
+            classname(entity).as_deref() == Some("machine_spot")
+                && property(entity, "id").as_deref() == Some("delivery.medical")
+        })
+        .expect("delivery.medical marker");
+    let (x, z) = origin_xz(marker).expect("delivery.medical has a valid origin");
+    let window = Vec3::new(x, 0.0, z);
+    assert!(
+        window.distance(Vec3::new(-16.5, 0.0, 3.25)) < 0.001,
+        "clinical delivery must sit in the Medical/Chemistry partition: {window}",
+    );
+    assert_eq!(
+        property(marker, "angles").as_deref(),
+        Some("0 90 0"),
+        "the clinical face must look into Medical while its back opens to Chemistry",
+    );
+
+    let world = map
+        .iter()
+        .find(|entity| classname(entity).as_deref() == Some("worldspawn"))
+        .expect("worldspawn");
+    let is_texture = |brush: &[quake_map::Surface], expected: &str| {
+        brush
+            .first()
+            .is_some_and(|surface| surface.texture.to_string_lossy() == expected)
+    };
+    assert!(
+        world.brushes.iter().any(|brush| {
+            is_texture(brush, "wall")
+                && vertical_span(brush).0 >= 2.34
+                && footprint(brush).holds(window)
+        }),
+        "the delivery model has no shared-wall header above it",
+    );
+    assert!(
+        world.brushes.iter().all(|brush| {
+            !is_texture(brush, "wall")
+                || vertical_span(brush).0 > 0.01
+                || !footprint(brush).holds(window)
+        }),
+        "a floor-height wall still seals the clinical delivery opening",
+    );
+
+    let has_floor = |point: Vec3| {
+        world.brushes.iter().any(|brush| {
+            brush
+                .first()
+                .is_some_and(|surface| surface.texture.to_string_lossy().starts_with("floor_"))
+                && vertical_span(brush).0 <= -0.01
+                && vertical_span(brush).1 >= -0.01
+                && footprint(brush).holds(point)
+        })
+    };
+    for sample_x in [-17.0, -16.0, -14.0, -12.0, -10.0, -8.0, -7.0] {
+        let sample = Vec3::new(sample_x, 0.0, 3.25);
+        assert!(
+            has_floor(sample),
+            "the Medical-to-Prep handoff has a floor gap at {sample}",
+        );
+    }
+
+    let vestibule: Vec<Bounds> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
+        .filter(|entity| property(entity, "room").as_deref() == Some("Medical Handoff Vestibule"))
+        .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
+        .collect();
+    assert_eq!(vestibule.len(), 1);
+    assert!(bounds_are_close(
+        vestibule[0],
+        Bounds {
+            min_x: -16.25,
+            max_x: -7.5,
+            min_z: 1.5,
+            max_z: 5.0,
+        }
+    ));
+}
+
+#[test]
+fn chemistry_public_door_has_enclosed_wall_returns_on_both_sides() {
+    let map = parse();
+    let door = map
+        .iter()
+        .find(|entity| {
+            classname(entity).as_deref() == Some("door_spot")
+                && property(entity, "id").as_deref() == Some("door.chemistry.public")
+        })
+        .expect("door.chemistry.public marker");
+    let (door_x, door_z) = origin_xz(door).expect("Chemistry door has a valid origin");
+    assert!((door_x - 4.0).abs() < 0.001 && (door_z - 7.1).abs() < 0.001);
+
+    let world = map
+        .iter()
+        .find(|entity| classname(entity).as_deref() == Some("worldspawn"))
+        .expect("worldspawn");
+    let walls: Vec<Bounds> = world
+        .brushes
+        .iter()
+        .filter(|brush| {
+            brush
+                .first()
+                .is_some_and(|surface| surface.texture.to_string_lossy() == "wall")
+                && vertical_span(brush).0 <= 0.01
+                && vertical_span(brush).1 >= 3.19
+        })
+        .map(|brush| footprint(brush))
+        .collect();
+
+    for (side, expected) in [
+        (
+            "west",
+            Bounds {
+                min_x: 2.125,
+                max_x: 2.375,
+                min_z: 7.0,
+                max_z: 10.0,
+            },
+        ),
+        (
+            "east",
+            Bounds {
+                min_x: 5.625,
+                max_x: 5.875,
+                min_z: 7.0,
+                max_z: 10.0,
+            },
+        ),
+    ] {
+        assert!(
+            walls
+                .iter()
+                .any(|actual| bounds_are_close(*actual, expected)),
+            "the {side} side of the Chemistry entrance has no enclosing wall return",
+        );
+    }
+
+    let throat_points = [Vec3::new(4.0, 0.0, 7.5), Vec3::new(4.0, 0.0, 9.5)];
+    for point in throat_points {
+        assert!(
+            world.brushes.iter().any(|brush| {
+                brush
+                    .first()
+                    .is_some_and(|surface| surface.texture.to_string_lossy() == "floor_corridor")
+                    && footprint(brush).holds(point)
+            }),
+            "the enclosed Chemistry entrance lost its floor at {point}",
+        );
+        assert!(
+            walls.iter().all(|wall| !wall.holds(point)),
+            "a new wall return blocks the Chemistry entrance at {point}",
+        );
+    }
+}
+
+#[test]
+fn station_v2_lighting_stays_inside_the_shell_and_reaches_every_room() {
     let map = parse();
     let lights: Vec<(&Entity, Vec3)> = map
         .iter()
@@ -404,115 +762,57 @@ fn the_expansion_lighting_matches_the_blockout_budget() {
         })
         .collect();
 
-    for (room, bounds) in [
-        (
-            "Maintenance",
-            Bounds {
-                min_x: -37.0,
-                max_x: -31.0,
-                min_z: 5.0,
-                max_z: 11.0,
-            },
-        ),
-        (
-            "Chapel",
-            Bounds {
-                min_x: -31.0,
-                max_x: -25.0,
-                min_z: 5.0,
-                max_z: 11.0,
-            },
-        ),
-        (
-            "Quarantine",
-            Bounds {
-                min_x: -25.0,
-                max_x: -19.0,
-                min_z: 5.0,
-                max_z: 11.0,
-            },
-        ),
-        (
-            "Atmos/Utility",
-            Bounds {
-                min_x: -19.0,
-                max_x: -13.0,
-                min_z: 5.0,
-                max_z: 11.0,
-            },
-        ),
-    ] {
-        let count = lights
-            .iter()
-            .filter(|(_, point)| bounds.holds(*point))
-            .count();
-        assert_eq!(count, 2, "{room} should have two authored light fixtures");
-    }
-
-    let expansion_lights = lights.iter().filter(|(_, point)| {
-        point.x >= -40.0 && point.x <= -10.0 && point.z >= 2.0 && point.z <= 14.0
-    });
-    for (entity, _) in expansion_lights {
-        assert_eq!(
-            property(entity, "shadows_enabled").as_deref(),
-            Some("false"),
-            "new station lights must stay non-shadowed",
+    for (_, point) in &lights {
+        assert!(
+            (-112.5..=16.5).contains(&point.x) && (-12.0..=54.0).contains(&point.z),
+            "light at {point} sits outside the V2 station shell",
         );
     }
 
-    let assert_even_spacing =
-        |label: &str, mut positions: Vec<f32>, start: f32, end: f32, max_gap: f32| {
-            positions.sort_by(f32::total_cmp);
-            assert!(!positions.is_empty(), "{label} has no lights");
-            assert!(
-                positions[0] - start <= max_gap * 0.5,
-                "{label}'s first light is too far from its start: {positions:?}",
-            );
-            assert!(
-                end - positions[positions.len() - 1] <= max_gap * 0.5,
-                "{label}'s last light is too far from its end: {positions:?}",
-            );
-            for pair in positions.windows(2) {
-                assert!(
-                    pair[1] - pair[0] <= max_gap,
-                    "{label} has a lighting gap wider than {max_gap} m: {positions:?}",
-                );
-            }
-        };
-
-    assert_even_spacing(
-        "Main Corridor",
-        lights
-            .iter()
-            .filter(|(_, point)| {
-                point.x >= -40.0 && point.x <= 26.0 && (point.z - 12.5).abs() < 0.1
-            })
-            .map(|(_, point)| point.x)
-            .collect(),
-        -40.0,
-        26.0,
-        5.3,
-    );
-    assert_even_spacing(
-        "rear maintenance passage",
-        lights
-            .iter()
-            .filter(|(_, point)| {
-                point.x >= -40.0 && point.x <= -10.0 && (point.z - 3.5).abs() < 0.1
-            })
-            .map(|(_, point)| point.x)
-            .collect(),
-        -40.0,
-        -10.0,
-        5.3,
-    );
-    for expected in [Vec3::new(-38.5, 0.0, 8.0), Vec3::new(-11.5, 0.0, 8.0)] {
+    let named_bounds = |room: &str| -> Vec<Bounds> {
+        map.iter()
+            .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
+            .filter(|entity| property(entity, "room").as_deref() == Some(room))
+            .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
+            .collect()
+    };
+    for room in [
+        "Security",
+        "Security Back Room",
+        "Bridge",
+        "Bridge Operations",
+        "Medical",
+        "Quarantine",
+        "Engineering",
+        "Atmos/Utility",
+        "Cargo",
+        "Cargo Receiving",
+        "Service",
+        "Chapel",
+        "Quiet Room",
+        "Botany",
+        "Botany Nursery",
+        "Public Loop",
+        "Maintenance V2",
+    ] {
+        let bounds = named_bounds(room);
+        assert!(!bounds.is_empty(), "{room} has no walkable floor");
         assert!(
             lights
                 .iter()
-                .any(|(_, point)| point.distance(expected) < 0.1),
-            "maintenance leg has no light near {expected}",
+                .any(|(_, light)| bounds.iter().any(|area| area.holds(*light))),
+            "{room} has no authored light",
         );
+    }
+
+    for (entity, point) in &lights {
+        if point.x < -14.0 || point.z > 8.0 || point.z < -8.0 {
+            assert_eq!(
+                property(entity, "shadows_enabled").as_deref(),
+                Some("false"),
+                "station blockout light at {point} must stay non-shadowed",
+            );
+        }
     }
 }
 
@@ -565,16 +865,21 @@ fn department_dressing_markers_fit_their_authored_rooms() {
             Vec3::new(5.0, 0.0, -3.7),
             "0 0 0",
         ),
-        ("Medical", "Medical", Vec3::new(-21.0, 0.0, 20.2), "0 180 0"),
+        ("Medical", "Medical", Vec3::new(-27.0, 0.0, 4.0), "0 180 0"),
         (
             "Engineering",
             "Engineering",
-            Vec3::new(-13.0, 0.0, 20.2),
+            Vec3::new(-80.0, 0.0, 18.0),
             "0 180 0",
         ),
-        ("Cargo", "Cargo", Vec3::new(-5.0, 0.0, 20.2), "0 180 0"),
-        ("Security", "Security", Vec3::new(3.0, 0.0, 20.2), "0 180 0"),
-        ("Service", "Service", Vec3::new(11.0, 0.0, 20.2), "0 180 0"),
+        ("Cargo", "Cargo", Vec3::new(-80.0, 0.0, 35.0), "0 180 0"),
+        (
+            "Security",
+            "Security",
+            Vec3::new(-96.0, 0.0, 4.0),
+            "0 180 0",
+        ),
+        ("Service", "Service", Vec3::new(-35.0, 0.0, 18.0), "0 180 0"),
     ];
 
     let map = parse();
@@ -619,14 +924,14 @@ fn department_dressing_markers_fit_their_authored_rooms() {
             .filter(|entity| property(entity, "room").as_deref() == Some(*room))
             .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
             .collect();
-        assert_eq!(room_bounds.len(), 1, "{room} should be one rectangle");
-        let bounds = room_bounds[0];
         assert!(
-            origin.x - HALF_WIDTH >= bounds.min_x - 0.001
-                && origin.x + HALF_WIDTH <= bounds.max_x + 0.001
-                && origin.z - HALF_DEPTH >= bounds.min_z - 0.001
-                && origin.z + HALF_DEPTH <= bounds.max_z + 0.001,
-            "{department}'s 4.6 x 3.6 m dressing envelope leaves {room}: {origin} in {bounds:?}",
+            room_bounds.iter().any(|bounds| {
+                origin.x - HALF_WIDTH >= bounds.min_x - 0.001
+                    && origin.x + HALF_WIDTH <= bounds.max_x + 0.001
+                    && origin.z - HALF_DEPTH >= bounds.min_z - 0.001
+                    && origin.z + HALF_DEPTH <= bounds.max_z + 0.001
+            }),
+            "{department}'s 4.6 x 3.6 m dressing envelope leaves {room}: {origin} in {room_bounds:?}",
         );
     }
 }
@@ -668,6 +973,238 @@ fn every_department_dressing_marker_has_an_exported_glb() {
 }
 
 #[test]
+fn chemistry_decoration_markers_have_known_assets_and_fit_their_rooms() {
+    struct Placement {
+        kind: &'static str,
+        origin: &'static str,
+        angles: &'static str,
+        room: Bounds,
+        width: f32,
+        depth: f32,
+    }
+
+    const PLACEMENTS: &[Placement] = &[
+        Placement {
+            kind: "chem.supply_shelf",
+            origin: "-176 296 0",
+            angles: "0 90 0",
+            room: Bounds {
+                min_x: -7.5,
+                max_x: 0.5,
+                min_z: 2.0,
+                max_z: 6.0,
+            },
+            width: 1.65,
+            depth: 0.38,
+        },
+        Placement {
+            kind: "chem.analysis_panel",
+            origin: "104 -536 0",
+            angles: "0 -90 0",
+            room: Bounds {
+                min_x: 7.5,
+                max_x: 13.5,
+                min_z: -5.5,
+                max_z: -0.5,
+            },
+            width: 1.55,
+            depth: 0.24,
+        },
+        Placement {
+            kind: "chem.emergency_station",
+            origin: "64 416 0",
+            angles: "0 180 0",
+            room: Bounds {
+                min_x: -13.5,
+                max_x: -7.5,
+                min_z: -5.5,
+                max_z: -1.5,
+            },
+            width: 1.25,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "chem.service_board",
+            origin: "-216 -296 0",
+            angles: "0 -90 0",
+            room: Bounds {
+                min_x: 0.5,
+                max_x: 7.5,
+                min_z: 2.0,
+                max_z: 7.0,
+            },
+            width: 1.35,
+            depth: 0.22,
+        },
+        Placement {
+            kind: "chem.service_board",
+            origin: "-64 480 0",
+            angles: "0 0 0",
+            room: Bounds {
+                min_x: -16.25,
+                max_x: -7.5,
+                min_z: 1.5,
+                max_z: 5.0,
+            },
+            width: 1.35,
+            depth: 0.22,
+        },
+    ];
+
+    let map = parse();
+    let markers: Vec<&Entity> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("decoration_spot"))
+        .collect();
+    assert_eq!(markers.len(), PLACEMENTS.len());
+
+    let mut visual_envelopes = Vec::new();
+    for placement in PLACEMENTS {
+        let matches: Vec<&Entity> = markers
+            .iter()
+            .copied()
+            .filter(|entity| property(entity, "kind").as_deref() == Some(placement.kind))
+            .filter(|entity| property(entity, "origin").as_deref() == Some(placement.origin))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected one {} marker at {}",
+            placement.kind,
+            placement.origin,
+        );
+        assert_eq!(
+            property(matches[0], "angles").as_deref(),
+            Some(placement.angles),
+        );
+
+        let (x, z) = origin_xz(matches[0]).expect("decoration_spot has a valid origin");
+        let half_width = placement.width * 0.5;
+        let bounds = match placement.angles {
+            "0 0 0" => Bounds {
+                min_x: x - half_width,
+                max_x: x + half_width,
+                min_z: z,
+                max_z: z + placement.depth,
+            },
+            "0 90 0" => Bounds {
+                min_x: x,
+                max_x: x + placement.depth,
+                min_z: z - half_width,
+                max_z: z + half_width,
+            },
+            "0 180 0" => Bounds {
+                min_x: x - half_width,
+                max_x: x + half_width,
+                min_z: z - placement.depth,
+                max_z: z,
+            },
+            "0 -90 0" => Bounds {
+                min_x: x - placement.depth,
+                max_x: x,
+                min_z: z - half_width,
+                max_z: z + half_width,
+            },
+            other => panic!("unsupported decoration angle {other}"),
+        };
+        assert!(
+            bounds.min_x >= placement.room.min_x
+                && bounds.max_x <= placement.room.max_x
+                && bounds.min_z >= placement.room.min_z
+                && bounds.max_z <= placement.room.max_z,
+            "{} leaves its authored room: {bounds:?} vs {:?}",
+            placement.kind,
+            placement.room,
+        );
+        visual_envelopes.push((placement.origin, bounds));
+    }
+
+    let blockers = [
+        Bounds {
+            min_x: -5.0,
+            max_x: -3.0,
+            min_z: 4.4,
+            max_z: 6.0,
+        },
+        Bounds {
+            min_x: -2.3,
+            max_x: -0.7,
+            min_z: 2.0,
+            max_z: 3.5,
+        },
+        Bounds {
+            min_x: 9.6,
+            max_x: 11.4,
+            min_z: -5.5,
+            max_z: -4.0,
+        },
+        Bounds {
+            min_x: -13.5,
+            max_x: -12.0,
+            min_z: -4.3,
+            max_z: -2.7,
+        },
+        Bounds {
+            min_x: 2.3,
+            max_x: 5.7,
+            min_z: 4.1,
+            max_z: 5.2,
+        },
+        Bounds {
+            min_x: 3.1,
+            max_x: 4.9,
+            min_z: 6.5,
+            max_z: 7.5,
+        },
+        Bounds {
+            min_x: -16.25,
+            max_x: -14.5,
+            min_z: 2.0,
+            max_z: 4.5,
+        },
+    ];
+    let overlaps = |a: Bounds, b: Bounds| {
+        a.min_x < b.max_x && a.max_x > b.min_x && a.min_z < b.max_z && a.max_z > b.min_z
+    };
+    for (origin, decoration) in visual_envelopes {
+        assert!(
+            blockers
+                .iter()
+                .all(|blocker| !overlaps(decoration, *blocker)),
+            "decoration at {origin} overlaps a machine, working point, delivery window, or door",
+        );
+    }
+}
+
+#[test]
+fn every_chemistry_decoration_kind_has_an_exported_glb() {
+    for (kind, path) in [
+        (
+            "chem.supply_shelf",
+            "assets/3dassets/station_starter_kit/glb/decor_chem_supply_shelf.glb",
+        ),
+        (
+            "chem.analysis_panel",
+            "assets/3dassets/station_starter_kit/glb/decor_chem_analysis_panel.glb",
+        ),
+        (
+            "chem.emergency_station",
+            "assets/3dassets/station_starter_kit/glb/decor_chem_emergency_station.glb",
+        ),
+        (
+            "chem.service_board",
+            "assets/3dassets/station_starter_kit/glb/decor_chem_service_board.glb",
+        ),
+    ] {
+        let bytes = std::fs::read(path)
+            .unwrap_or_else(|error| panic!("{kind} decoration is missing at {path}: {error}"));
+        bevy::gltf::gltf::Gltf::from_slice(&bytes).unwrap_or_else(|error| {
+            panic!("{kind} decoration at {path} is not Bevy-compatible glTF: {error}")
+        });
+    }
+}
+
+#[test]
 fn every_station_kit_glb_parses_with_bevys_gltf_parser() {
     let directory = "assets/3dassets/station_starter_kit/glb";
     let mut count = 0;
@@ -685,7 +1222,7 @@ fn every_station_kit_glb_parses_with_bevys_gltf_parser() {
             panic!("{} is not Bevy-compatible glTF: {error}", path.display())
         });
     }
-    assert_eq!(count, 20, "the station starter kit should contain 20 GLBs");
+    assert_eq!(count, 24, "the station starter kit should contain 24 GLBs");
 }
 
 #[test]
@@ -751,6 +1288,116 @@ fn department_and_escape_markers_are_on_floor_and_route_to_gameplay() {
 }
 
 #[test]
+fn station_v2_routes_hit_the_pacing_distance_budget() {
+    let map = parse();
+    let areas = authored_walkable_areas();
+    let graph = NavGraph::build(&areas, NAV_RADIUS);
+    let route_length = |from: Vec3, to: Vec3| {
+        let path = graph
+            .path(from, to)
+            .unwrap_or_else(|| panic!("no route from {from} to {to}"));
+        let mut length = 0.0;
+        let mut previous = from;
+        for waypoint in path {
+            length += previous.distance(waypoint);
+            previous = waypoint;
+        }
+        length
+    };
+
+    let entrances: Vec<(String, Vec3)> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("department_spot"))
+        .filter_map(|entity| {
+            let role = property(entity, "department")?;
+            let (x, z) = origin_xz(entity)?;
+            Some((role, Vec3::new(x, 0.0, z)))
+        })
+        .filter(|(role, _)| role != "Chemistry")
+        .collect();
+    let (role, farthest) = entrances
+        .iter()
+        .map(|(role, point)| (role, route_length(COUNTER_SPOT, *point)))
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+        .expect("department entrances");
+    assert!(
+        (90.0..=115.0).contains(&farthest),
+        "Chemistry to farthest entrance ({role}) is {farthest:.1} m",
+    );
+
+    let deepest_cargo = Vec3::new(-106.0, 0.0, 48.0);
+    let deep = route_length(COUNTER_SPOT, deepest_cargo);
+    assert!(
+        (125.0..=155.0).contains(&deep),
+        "Chemistry to deep Cargo event space is {deep:.1} m",
+    );
+}
+
+#[test]
+fn maintenance_cross_routes_create_meaningful_optional_shortcuts() {
+    let map = parse();
+    let mut public_areas = WalkableAreas::default();
+    for entity in map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
+        .filter(|entity| {
+            !property(entity, "room")
+                .unwrap_or_default()
+                .starts_with("Maintenance")
+        })
+    {
+        for brush in &entity.brushes {
+            public_areas.push(footprint(brush), property(entity, "room"));
+        }
+    }
+    let public = NavGraph::build(&public_areas, NAV_RADIUS);
+    let full = NavGraph::build(&authored_walkable_areas(), NAV_RADIUS);
+    let length = |graph: &NavGraph, from: Vec3, to: Vec3| -> Option<f32> {
+        let mut previous = from;
+        let mut total = 0.0;
+        for point in graph.path(from, to)? {
+            total += previous.distance(point);
+            previous = point;
+        }
+        Some(total)
+    };
+    let mut improvements = Vec::new();
+    let mut measured = Vec::new();
+    for (a, b, from, to) in [
+        (
+            "Security back room",
+            "Engineering utility",
+            Vec3::new(-107.0, 0.0, -7.0),
+            Vec3::new(-107.0, 0.0, 22.0),
+        ),
+        (
+            "Security back room",
+            "Cargo deep storage",
+            Vec3::new(-107.0, 0.0, -7.0),
+            Vec3::new(-107.0, 0.0, 42.0),
+        ),
+        (
+            "Engineering utility",
+            "Cargo deep storage",
+            Vec3::new(-107.0, 0.0, 22.0),
+            Vec3::new(-107.0, 0.0, 42.0),
+        ),
+    ] {
+        let normal = length(&public, from, to).expect("public route");
+        let shortcut = length(&full, from, to).expect("maintenance route");
+        measured.push((a, b, normal, shortcut));
+        if shortcut <= normal * 0.8 {
+            improvements.push((a, b, normal, shortcut));
+        }
+    }
+    assert!(
+        improvements.len() >= 3,
+        "only {} representative pairs gained a 20% shortcut: {measured:?}",
+        improvements.len(),
+    );
+}
+
+#[test]
 fn the_station_is_one_connected_space() {
     // The failure this catches is a wing whose doorway bridge was forgotten:
     // the room is drawn, lit and walkable, and simply cannot be reached. Uses
@@ -808,9 +1455,11 @@ fn every_entity_in_the_map_is_a_class_the_game_registers() {
         "light_point",
         "func_walkable",
         "machine_spot",
+        "door_spot",
         "chemist_start",
         "department_spot",
         "department_dressing",
+        "decoration_spot",
         "escape_pod",
         "crisis_spot",
         "room_sign",
@@ -821,6 +1470,124 @@ fn every_entity_in_the_map_is_a_class_the_game_registers() {
         assert!(
             KNOWN.contains(&name.as_str()),
             "{MAP} has a `{name}` entity, which no class in lab::tb registers",
+        );
+    }
+}
+
+#[test]
+fn every_airlock_has_unique_semantic_ids_and_a_matching_nav_bridge() {
+    let map = parse();
+    let bridges: std::collections::HashSet<String> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
+        .filter_map(|entity| property(entity, "bridge_id"))
+        .collect();
+    let mut ids = std::collections::HashSet::new();
+    let mut door_bridges = std::collections::HashSet::new();
+    let mut count = 0;
+
+    for door in map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("door_spot"))
+    {
+        count += 1;
+        let id = property(door, "id").unwrap_or_default();
+        let bridge = property(door, "bridge_id").unwrap_or_default();
+        assert!(!id.trim().is_empty(), "a door_spot has no stable id");
+        assert!(
+            !bridge.trim().is_empty(),
+            "door_spot `{id}` has no bridge_id"
+        );
+        assert!(ids.insert(id.clone()), "duplicate door_spot id `{id}`");
+        assert!(
+            door_bridges.insert(bridge.clone()),
+            "two door_spots claim bridge `{bridge}`",
+        );
+        assert!(
+            bridges.contains(&bridge),
+            "door_spot `{id}` references missing nav bridge `{bridge}`",
+        );
+    }
+
+    assert!(
+        count >= 8,
+        "the station needs authored department/crossover airlocks"
+    );
+}
+
+#[test]
+fn physical_walls_match_walkable_routes_and_airlock_gaps() {
+    let map = parse();
+    let blocking_walls: Vec<Bounds> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("worldspawn"))
+        .flat_map(|entity| &entity.brushes)
+        .filter(|brush| {
+            brush
+                .first()
+                .is_some_and(|surface| surface.texture.to_string_lossy() == "wall")
+                && vertical_span(brush).0 <= 0.01
+                && vertical_span(brush).1 >= 1.0
+        })
+        .map(|brush| footprint(brush))
+        .collect();
+
+    for area in map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
+        .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
+    {
+        let standing = area.inset(NAV_RADIUS);
+        if let Some(wall) = blocking_walls
+            .iter()
+            .find(|wall| wall.intersection(&standing).is_some())
+        {
+            panic!("floor-height wall {wall:?} intrudes into walkable area {area:?}");
+        }
+    }
+
+    for door in map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("door_spot"))
+    {
+        let id = property(door, "id").unwrap_or_else(|| "<missing>".into());
+        let bridge_id = property(door, "bridge_id").unwrap_or_default();
+        let (x, z) = origin_xz(door).expect("door_spot with a valid origin");
+        let point = Vec3::new(x, 0.0, z);
+        assert!(
+            blocking_walls.iter().all(|wall| !wall.holds(point)),
+            "door_spot `{id}` is embedded in a floor-height wall",
+        );
+
+        let matching: Vec<Bounds> = map
+            .iter()
+            .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
+            .filter(|entity| property(entity, "bridge_id").as_deref() == Some(&bridge_id))
+            .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "door_spot `{id}` should own exactly one bridge footprint",
+        );
+        assert!(
+            matching[0].holds(point),
+            "door_spot `{id}` at {point} is not centred on bridge {bridge_id}",
+        );
+    }
+
+    for stale in [
+        "Legacy Medical Spur",
+        "Legacy Engineering Spur",
+        "Legacy Cargo Spur",
+        "Legacy Security Spur",
+        "Legacy Service Spur",
+        "Maintenance Loop",
+    ] {
+        assert!(
+            map.iter()
+                .all(|entity| property(entity, "room").as_deref() != Some(stale)),
+            "stale pre-V2 walkable region `{stale}` remains in {MAP}",
         );
     }
 }
@@ -939,7 +1706,25 @@ fn room_signs_have_visible_text_and_the_lab_entrance_has_one_bridge() {
         .filter(|entity| classname(entity).as_deref() == Some("room_sign"))
         .filter_map(|entity| property(entity, "text"))
         .collect();
-    for expected in ["MAINTENANCE", "CHAPEL", "QUARANTINE", "ATMOS / UTILITY"] {
+    for expected in [
+        "SECURITY",
+        "BRIDGE",
+        "MEDICAL / QUARANTINE",
+        "ENGINEERING / ATMOS",
+        "CARGO / RECEIVING",
+        "SERVICE / CHAPEL",
+        "BOTANY",
+        "SECURITY BACK ROOM",
+        "BRIDGE OPERATIONS",
+        "QUARANTINE",
+        "ATMOS / UTILITY",
+        "CARGO RECEIVING",
+        "CHAPEL / QUIET ROOM",
+        "BOTANY NURSERY",
+        "QUIET ROOM",
+        "CHEMISTRY / DISPENSARY",
+        "MEDICAL HANDOFF",
+    ] {
         assert_eq!(
             sign_text
                 .iter()
@@ -949,14 +1734,7 @@ fn room_signs_have_visible_text_and_the_lab_entrance_has_one_bridge() {
             "public sign `{expected}` should agree with one named walkable room",
         );
     }
-    assert_eq!(
-        sign_text
-            .iter()
-            .filter(|text| text.as_str() == "MAINTENANCE ACCESS")
-            .count(),
-        2,
-        "both loop entrances need a maintenance access sign",
-    );
+    assert_eq!(sign_text.len(), 17, "stale or duplicate room signs remain");
 
     let entrance_bridges = map
         .iter()
@@ -1003,9 +1781,14 @@ fn the_map_still_places_every_machine() {
             Vec3::new(10.5, 0.0, -5.05),
         ),
         (
-            "delivery.main",
+            "delivery.public",
             MachineKind::DeliveryWindow,
             Vec3::new(4.0, 0.0, 4.6),
+        ),
+        (
+            "delivery.medical",
+            MachineKind::DeliveryWindow,
+            Vec3::new(-16.5, 0.0, 3.25),
         ),
         (
             "board.main",
@@ -1025,8 +1808,12 @@ fn the_map_still_places_every_machine() {
     ];
 
     let fallback = super::legacy_machine_spots();
-    assert_eq!(fallback.len(), EXPECTED.len());
+    assert_eq!(fallback.len() + 1, EXPECTED.len());
     for (id, kind, expected) in EXPECTED {
+        if *id == "delivery.medical" {
+            assert!(fallback.get(id).is_none());
+            continue;
+        }
         let placement = fallback
             .get(id)
             .unwrap_or_else(|| panic!("fallback has no machine spot `{id}`"));
@@ -1036,7 +1823,7 @@ fn the_map_still_places_every_machine() {
             "fallback `{id}` and authored map placement disagree",
         );
         let expected_facing = match *id {
-            "grinder.main" | "delivery.main" => Vec3::NEG_Z,
+            "grinder.main" | "delivery.public" => Vec3::NEG_Z,
             "board.main" => Vec3::NEG_X,
             "reactor.main" => Vec3::X,
             _ => Vec3::Z,
@@ -1079,9 +1866,9 @@ fn the_map_still_places_every_machine() {
             "machine_spot `{id}` changed kind",
         );
         let expected_angles = match *id {
-            "grinder.main" | "delivery.main" => "0 180 0",
+            "grinder.main" | "delivery.public" => "0 180 0",
             "board.main" => "0 -90 0",
-            "reactor.main" => "0 90 0",
+            "delivery.medical" | "reactor.main" => "0 90 0",
             _ => "0 0 0",
         };
         assert_eq!(
@@ -1100,7 +1887,7 @@ fn the_map_still_places_every_machine() {
     for kind in MachineKind::ALL {
         let expected = if matches!(
             kind,
-            MachineKind::ChemMaster5000 | MachineKind::MixingChamber
+            MachineKind::ChemMaster5000 | MachineKind::MixingChamber | MachineKind::DeliveryWindow
         ) {
             2
         } else {

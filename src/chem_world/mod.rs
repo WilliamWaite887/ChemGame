@@ -1274,7 +1274,8 @@ mod tests {
             .spawn((
                 crate::door::Door {
                     open: false,
-                    doorway_index: 0,
+                    bridge_id: "test.door".into(),
+                    along_x: true,
                 },
                 Transform::from_xyz(0.4, 0.0, 0.0),
             ))

@@ -20,6 +20,7 @@
 
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use chem_sim::{Solution, Units};
 
@@ -64,6 +65,45 @@ pub struct CrisisSpots {
     spots: std::collections::HashMap<String, Transform>,
 }
 
+#[derive(Clone, Debug)]
+pub struct DoorPlacement {
+    pub bridge_id: String,
+    pub transform: Transform,
+}
+
+/// Stable map-authored proximity-airlock placements.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct DoorSpots {
+    spots: std::collections::BTreeMap<String, DoorPlacement>,
+}
+
+impl DoorSpots {
+    pub fn insert(
+        &mut self,
+        id: impl Into<String>,
+        bridge_id: impl Into<String>,
+        transform: Transform,
+    ) -> Option<DoorPlacement> {
+        self.spots.insert(
+            id.into(),
+            DoorPlacement {
+                bridge_id: bridge_id.into(),
+                transform,
+            },
+        )
+    }
+
+    pub fn get(&self, id: &str) -> Option<&DoorPlacement> {
+        self.spots.get(id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &DoorPlacement)> {
+        self.spots
+            .iter()
+            .map(|(id, placement)| (id.as_str(), placement))
+    }
+}
+
 impl CrisisSpots {
     /// Adds or replaces a semantic spot.
     ///
@@ -89,6 +129,7 @@ impl CrisisSpots {
 pub struct MachinePlacement {
     pub kind: MachineKind,
     pub transform: Transform,
+    pub lane: Option<DeliveryLane>,
 }
 
 #[derive(Resource, Debug, Default, Clone)]
@@ -104,8 +145,24 @@ impl MachineSpots {
         kind: MachineKind,
         transform: Transform,
     ) -> Option<MachinePlacement> {
-        self.spots
-            .insert(id.into(), MachinePlacement { kind, transform })
+        self.insert_with_lane(id, kind, transform, None)
+    }
+
+    pub fn insert_with_lane(
+        &mut self,
+        id: impl Into<String>,
+        kind: MachineKind,
+        transform: Transform,
+        lane: Option<DeliveryLane>,
+    ) -> Option<MachinePlacement> {
+        self.spots.insert(
+            id.into(),
+            MachinePlacement {
+                kind,
+                transform,
+                lane,
+            },
+        )
     }
 
     pub fn get(&self, id: &str) -> Option<&MachinePlacement> {
@@ -124,6 +181,98 @@ impl MachineSpots {
 
     pub fn is_empty(&self) -> bool {
         self.spots.is_empty()
+    }
+}
+
+/// Which physical handoff counter owns an arriving order.
+#[derive(
+    Component,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+)]
+pub enum DeliveryLane {
+    #[default]
+    Public,
+    Medical,
+}
+
+impl DeliveryLane {
+    #[cfg(feature = "trenchbroom")]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "public" => Some(Self::Public),
+            "medical" => Some(Self::Medical),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeliveryStation {
+    pub transform: Transform,
+}
+
+impl DeliveryStation {
+    /// The map marker's local -Z points from the machine toward waiting crew.
+    pub fn queue_position(&self, lane_offset: f32) -> Vec3 {
+        let toward_crew = -(self.transform.rotation * Vec3::Z);
+        let across_queue = -(self.transform.rotation * Vec3::X);
+        let mut point = self.transform.translation + toward_crew + across_queue * lane_offset;
+        point.y = 0.0;
+        point
+    }
+
+    pub fn drop_position(&self, height: f32) -> Vec3 {
+        Vec3::new(
+            self.transform.translation.x,
+            height,
+            self.transform.translation.z,
+        )
+    }
+}
+
+/// Delivery counters rebuilt atomically from map-authored machine spots.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct DeliveryStations {
+    stations: std::collections::BTreeMap<DeliveryLane, DeliveryStation>,
+}
+
+impl DeliveryStations {
+    pub fn station(&self, preferred: DeliveryLane) -> DeliveryStation {
+        self.stations
+            .get(&preferred)
+            .or_else(|| self.stations.get(&DeliveryLane::Public))
+            .copied()
+            .unwrap_or_else(|| DeliveryStation {
+                transform: Transform::from_translation(Vec3::new(
+                    COUNTER_SPOT.x,
+                    0.0,
+                    COUNTER_DROP_Z,
+                ))
+                .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+            })
+    }
+
+    fn rebuild_from(&mut self, spots: &MachineSpots) {
+        self.stations.clear();
+        for (_, placement) in spots.iter() {
+            if placement.kind != MachineKind::DeliveryWindow {
+                continue;
+            }
+            let lane = placement.lane.unwrap_or(DeliveryLane::Public);
+            self.stations.entry(lane).or_insert(DeliveryStation {
+                transform: placement.transform,
+            });
+        }
     }
 }
 
@@ -436,6 +585,8 @@ impl Plugin for LabPlugin {
         app.init_resource::<WalkableAreas>()
             .init_resource::<CrisisSpots>()
             .init_resource::<MachineSpots>()
+            .init_resource::<DeliveryStations>()
+            .init_resource::<DoorSpots>()
             // Readiness belongs to a single visit. `nav` inserts it only after
             // the replacement floor plan has produced a graph.
             .add_systems(OnExit(AppState::Playing), clear_map_runtime);
@@ -455,6 +606,10 @@ impl Plugin for LabPlugin {
         );
 
         app.add_systems(OnEnter(AppState::Playing), load_machine_assets)
+            .add_systems(
+                Update,
+                rebuild_delivery_stations.run_if(in_state(AppState::Playing)),
+            )
             // The map loads asynchronously; its collected spot registry is the
             // signal that authority-owned machine state can be reconciled.
             .add_systems(
@@ -479,6 +634,8 @@ fn clear_map_runtime(world: &mut World) {
     world.insert_resource(WalkableAreas::default());
     world.insert_resource(CrisisSpots::default());
     world.insert_resource(MachineSpots::default());
+    world.insert_resource(DeliveryStations::default());
+    world.insert_resource(DoorSpots::default());
     world.insert_resource(crate::crew::Departments::default());
     world.insert_resource(crate::nav::NavGraph::default());
 }
@@ -510,6 +667,32 @@ fn seed_legacy_map_runtime(mut commands: Commands) {
     }
     commands.insert_resource(spots);
     commands.insert_resource(legacy_machine_spots());
+
+    let (run, center) = doorways()
+        .find(|(run, center)| {
+            let at = run.point(*center);
+            (at.x - CREW_DOOR_X).abs() < 0.001 && (at.z - ROOMS[LOBBY].max_z).abs() < 0.001
+        })
+        .expect("legacy lab entrance doorway exists");
+    let at = run.point(center);
+    let rotation = if run.along_x {
+        Quat::IDENTITY
+    } else {
+        Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
+    };
+    let mut doors = DoorSpots::default();
+    doors.insert(
+        "door.lab.public",
+        LAB_ENTRANCE_BRIDGE_ID,
+        Transform::from_translation(at).with_rotation(rotation),
+    );
+    commands.insert_resource(doors);
+}
+
+fn rebuild_delivery_stations(spots: Res<MachineSpots>, mut stations: ResMut<DeliveryStations>) {
+    if spots.is_changed() {
+        stations.rebuild_from(&spots);
+    }
 }
 
 /// An axis-aligned obstruction the player cannot walk through.
@@ -1129,7 +1312,7 @@ fn legacy_machine_spots() -> MachineSpots {
             north(&ROOMS[ANALYSIS], 10.5),
         ),
         (
-            "delivery.main",
+            "delivery.public",
             MachineKind::DeliveryWindow,
             placement_transform(Vec3::new(COUNTER_SPOT.x, 0.0, COUNTER_DROP_Z), Vec3::NEG_Z),
         ),
@@ -1154,6 +1337,16 @@ fn legacy_machine_spots() -> MachineSpots {
     ] {
         spots.insert(id, kind, transform);
     }
+    let delivery = spots
+        .get("delivery.public")
+        .expect("legacy delivery window exists")
+        .clone();
+    spots.insert_with_lane(
+        "delivery.public",
+        delivery.kind,
+        delivery.transform,
+        Some(DeliveryLane::Public),
+    );
     debug_assert!(
         MachineKind::ALL
             .into_iter()
@@ -1354,6 +1547,10 @@ fn spawn_machine_at(commands: &mut Commands, id: &str, placement: &MachinePlacem
         ))
         .id();
 
+    if let Some(lane) = placement.lane {
+        commands.entity(machine).insert(lane);
+    }
+
     match kind {
         MachineKind::ChemMaster5000 => {
             commands.entity(machine).insert(DispenseAmount::default());
@@ -1412,7 +1609,13 @@ fn reconcile_machine_spots(
         }
 
         let fit = MachineFit::from_placement(placement.kind, placement.transform);
-        commands.entity(entity).insert(fit.root_transform());
+        let mut entity_commands = commands.entity(entity);
+        entity_commands.insert(fit.root_transform());
+        if let Some(lane) = placement.lane {
+            entity_commands.insert(lane);
+        } else {
+            entity_commands.remove::<DeliveryLane>();
+        }
     }
 
     for (id, placement) in spots.iter() {
@@ -2215,7 +2418,7 @@ mod tests {
         // of it, and nothing failed: a floating bottle is still pickable, so it
         // reads as a graphics glitch rather than a stale coordinate.
         let placement = legacy_machine_spots()
-            .get("delivery.main")
+            .get("delivery.public")
             .expect("delivery window placement")
             .clone();
         let counter = MachineFit::from_placement(placement.kind, placement.transform);
@@ -2239,7 +2442,7 @@ mod tests {
         // of it is that they touch the other side. If the queue spot ended up
         // north of the counter, crew would walk through the lab to reach it.
         let placement = legacy_machine_spots()
-            .get("delivery.main")
+            .get("delivery.public")
             .expect("delivery window placement")
             .clone();
         let counter = MachineFit::from_placement(placement.kind, placement.transform);
@@ -2252,6 +2455,18 @@ mod tests {
         assert!(
             counter.facing.distance(Vec3::NEG_Z) < 0.000_01,
             "the chemist works the counter from the lobby's north side"
+        );
+    }
+
+    #[test]
+    fn fallback_maps_resolve_the_missing_medical_lane_to_public() {
+        let spots = legacy_machine_spots();
+        let mut stations = DeliveryStations::default();
+        stations.rebuild_from(&spots);
+
+        assert_eq!(
+            stations.station(DeliveryLane::Medical),
+            stations.station(DeliveryLane::Public),
         );
     }
 }

@@ -159,6 +159,20 @@ def validate_source(manifest: dict) -> None:
             continue
         require(root.get("source_front_axis") == "-Y", f"{asset_id}: bad source front")
         require(root.get("export_front_axis") == "+Z", f"{asset_id}: bad export front")
+        if asset["category"] == "decoration":
+            bounds = asset["visual_bounds"]["blender"]
+            require(
+                bounds["max_xyz_m"][1] <= EPSILON,
+                f"{asset_id}: decoration crosses behind its wall mounting plane",
+            )
+            require(
+                bounds["min_xyz_m"][2] >= 0.30,
+                f"{asset_id}: decoration is not clear of the walkable floor",
+            )
+            require(
+                asset.get("runtime_collision") is None,
+                f"{asset_id}: visual decoration unexpectedly declares collision",
+            )
 
         for socket_name, socket in asset["sockets"].items():
             node_name = socket["node"]
@@ -322,7 +336,7 @@ def main() -> None:
     require(bool(bpy.data.filepath), "open station_starter_kit.blend before validation")
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     require(manifest.get("generator_version") == 1, "unexpected generator version")
-    require(len(manifest.get("assets", [])) == 14, "expected fourteen assets")
+    require(len(manifest.get("assets", [])) == 18, "expected eighteen assets")
     require(
         manifest.get("coordinate_spaces", {})
         .get("export_gltf_bevy", {})
@@ -338,7 +352,11 @@ def main() -> None:
         not (HERE / "station_starter_kit.blend1").exists(),
         "stale station_starter_kit.blend1 backup is present",
     )
-    for preview in ["preview_machines.png", "preview_departments.png"]:
+    for preview in [
+        "preview_machines.png",
+        "preview_departments.png",
+        "preview_chemistry_decor.png",
+    ]:
         path = HERE / preview
         require(path.is_file() and path.stat().st_size > 100_000, f"{preview} is missing or empty")
 
@@ -346,7 +364,7 @@ def main() -> None:
         details = "\n - ".join(ERRORS)
         raise RuntimeError(f"station starter kit validation failed:\n - {details}")
     print(
-        "Validated 14 editable assets, 20 GLBs, all node contracts, imported "
+        "Validated 18 editable assets, 24 GLBs, all node contracts, imported "
         "visual bounds, shell-free runtime dressing, source/exported normals, "
         "nondegenerate triangles, material culling, sockets, and previews."
     )

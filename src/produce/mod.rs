@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::chem_data::ChemDb;
 use crate::crew::{spawn_crew_member, CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::Interactable;
-use crate::lab::{COUNTER_DROP_Z, COUNTER_SPOT, COUNTER_TOP};
+use crate::lab::{DeliveryLane, DeliveryStations, COUNTER_TOP};
 use crate::net::is_authority;
 use crate::orders::StationData;
 use crate::radio::{channel_for, RadioEntry, RadioLog};
@@ -398,6 +398,7 @@ fn unload_produce(
     // themselves are dressed from the catalog on each end.
     catalog: Option<Res<ProduceCatalog>>,
     mut radio: ResMut<RadioLog>,
+    stations: Option<Res<DeliveryStations>>,
     mut couriers: Query<(Entity, &CrewMember, &ProduceDelivery, &mut CrewRoute)>,
 ) {
     let Some(catalog) = catalog else {
@@ -410,14 +411,17 @@ fn unload_produce(
         }
 
         // Laid out in a row so several items do not stack in one spot.
+        let station = stations
+            .as_deref()
+            .cloned()
+            .unwrap_or_default()
+            .station(DeliveryLane::Public);
+        let base = station.drop_position(COUNTER_TOP + ITEM_RADIUS);
+        let across = station.transform.rotation * Vec3::X;
         let span = (delivery.items.len() as f32 - 1.0) * ITEM_SPACING;
         for (index, kind) in delivery.items.iter().enumerate() {
-            let x = COUNTER_SPOT.x - span * 0.5 + index as f32 * ITEM_SPACING;
-            spawn_produce(
-                &mut commands,
-                *kind,
-                Vec3::new(x, COUNTER_TOP + ITEM_RADIUS, COUNTER_DROP_Z),
-            );
+            let offset = -span * 0.5 + index as f32 * ITEM_SPACING;
+            spawn_produce(&mut commands, *kind, base + across * offset);
         }
 
         radio.push(

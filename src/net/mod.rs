@@ -44,7 +44,7 @@ pub mod steam;
 /// Arbitrary; both ends must agree. The low byte is an explicit schema
 /// revision so replicated chemistry additions cannot accidentally keep an old
 /// handshake compatible.
-const PROTOCOL_REVISION: u64 = 5;
+const PROTOCOL_REVISION: u64 = 6;
 const PROTOCOL_ID: u64 = 0x43_48_45_4d_00_00_00_00 | PROTOCOL_REVISION;
 const DEFAULT_PORT: u16 = 5327;
 /// The host is a local chemist, leaving three network seats in a four-person
@@ -1253,8 +1253,8 @@ mod tests {
     fn chemistry_schema_and_four_person_capacity_are_pinned() {
         assert_eq!(
             PROTOCOL_ID & 0xff,
-            5,
-            "positional sound messages need revision 5"
+            6,
+            "static topology, semantic doors, and delivery lanes need revision 6"
         );
         assert_eq!(MAX_REMOTE_CLIENTS, 3);
         assert_eq!(steam::LOBBY_CAPACITY, 4);

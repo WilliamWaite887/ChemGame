@@ -24,6 +24,13 @@ Department starter bays:
 - Security — checkpoint, evidence locker, brig gate, camera, and beacon
 - Service — kitchen run, drink dispenser, bar, stools, and hydro tray
 
+Chemistry decoration modules:
+
+- Supply shelf — labelled bottles, bins, glove box, and clipboard
+- Analysis panel — diagnostic displays, sample rack, and status lights
+- Emergency station — eyewash, shower pipe, extinguisher, and warning plate
+- Service board — intercom, service lamps, order tickets, and shift notes
+
 The full department bays are editable moodboards and prop groupings. Matching `*_dressing.glb` exports contain the same furniture without the starter floor, walls, pilasters, sign, stripes, or ceiling light, so they can be placed directly in the game's mapped rooms.
 
 ## Files
@@ -32,8 +39,9 @@ The full department bays are editable moodboards and prop groupings. Matching `*
 - `glb/machine_*.glb` — one game-ready authored export per machine
 - `glb/department_*_starter.glb` — six complete reference/showroom bays
 - `glb/department_*_dressing.glb` — six shell-free runtime furniture groupings
+- `glb/decor_chem_*.glb` — four wall-origin, shell-free chemistry decoration modules
 - `station_starter_kit_manifest.json` — coordinate spaces, nominal envelopes, runtime collision sizes, measured visual bounds, and named sockets
-- `preview_machines.png` and `preview_departments.png` — quick visual catalogs
+- `preview_machines.png`, `preview_departments.png`, and `preview_chemistry_decor.png` — quick visual catalogs
 - `generate_station_starter_kit.py` — fully procedural source
 - `validate_station_starter_kit.py` — Blender-side source/GLB contract checks
 
@@ -54,6 +62,7 @@ Conventions:
 - In the Blender source, `+Z` is up, `+X` is right, and `-Y` is the working/front side.
 - The Y-up GLB export maps Blender `(x, y, z)` to glTF/Bevy `(x, z, -y)`, so exported assets use `+Y` up and `+Z` as their working/front side.
 - Origins sit at the center of each nominal body footprint on the floor; measured decorative overhangs can be asymmetric.
+- Chemistry decoration origins sit at the floor projection of their wall-mount centre. Geometry stays on the front (`-Y`) side of the mounting plane so a TrenchBroom marker can be placed directly against an interior wall.
 - Bevel modifiers remain editable in the `.blend` and are applied by the GLB exporter.
 - Detailed mesh collision is intentionally omitted; keep ChemGame's existing simple collision boxes.
 

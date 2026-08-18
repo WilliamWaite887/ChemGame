@@ -309,6 +309,7 @@ fn afflict_victim(
 
     let victim = spawn_crew_member(commands, crew_def, 0.0);
     commands.entity(victim).insert((
+        crate::crew::CrewRoute::arrival_for(crate::lab::DeliveryLane::Medical, 0.0),
         Body(body),
         Bloodstream(blood),
         Order {

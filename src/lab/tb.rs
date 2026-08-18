@@ -43,7 +43,7 @@ use crate::AppState;
 use crate::crew::Departments;
 
 use super::{
-    machine_kind_named, Bounds, CrisisSpots, LabLight, MachineSpots, MapReady, Solid,
+    machine_kind_named, Bounds, CrisisSpots, DoorSpots, LabLight, MachineSpots, MapReady, Solid,
     WalkableAreas, TB_SCALE,
 };
 
@@ -234,6 +234,7 @@ fn collect_loaded_map(
     machine_spots: Query<(&MachineSpot, &Transform)>,
     department_spots: Query<(&DepartmentSpot, &Transform)>,
     crisis_spots: Query<(&CrisisSpot, &Transform)>,
+    door_spots: Query<(&DoorSpot, &Transform)>,
     point_lights: Query<&PointLight>,
 ) {
     // WorldInstanceReady is global. Other scenes must never replace station
@@ -246,6 +247,7 @@ fn collect_loaded_map(
     let mut machines = MachineSpots::default();
     let mut departments = Departments::default();
     let mut crises = CrisisSpots::default();
+    let mut doors = DoorSpots::default();
 
     for entity in spawner.iter_instance_entities(ready.instance_id) {
         if let Ok((walkable, footprints)) = walkables.get(entity) {
@@ -269,7 +271,18 @@ fn collect_loaded_map(
             } else if machines.get(id).is_some() {
                 warn!("duplicate machine_spot id '{id}'; keeping the first");
             } else if let Some(kind) = machine_kind_named(kind_name) {
-                machines.insert(id, kind, *transform);
+                let lane = if spot.lane.trim().is_empty() {
+                    None
+                } else {
+                    crate::lab::DeliveryLane::parse(&spot.lane)
+                };
+                if !spot.lane.trim().is_empty() && lane.is_none() {
+                    warn!(
+                        "machine_spot '{id}' has unknown delivery lane '{}'",
+                        spot.lane
+                    );
+                }
+                machines.insert_with_lane(id, kind, *transform, lane);
             } else {
                 warn!("ignoring machine_spot '{id}' with unknown kind '{kind_name}'");
             }
@@ -293,6 +306,18 @@ fn collect_loaded_map(
             }
         }
 
+        if let Ok((spot, transform)) = door_spots.get(entity) {
+            let id = spot.id.trim();
+            let bridge_id = spot.bridge_id.trim();
+            if id.is_empty() || bridge_id.is_empty() {
+                warn!("ignoring door_spot with an empty id or bridge_id");
+            } else if doors.get(id).is_some() {
+                warn!("duplicate door_spot id '{id}'; keeping the first");
+            } else {
+                doors.insert(id, bridge_id, *transform);
+            }
+        }
+
         if let Ok(light) = point_lights.get(entity) {
             commands.entity(entity).insert(LabLight {
                 base_color: light.color,
@@ -308,6 +333,19 @@ fn collect_loaded_map(
     commands.insert_resource(machines);
     commands.insert_resource(departments);
     commands.insert_resource(crises);
+    commands.insert_resource(doors);
+}
+
+#[point_class(
+    classname("door_spot"),
+    base(Transform),
+    color(220 48 64),
+    size(-36 -10 0, 36 10 92),
+)]
+#[derive(Debug, Clone, Default)]
+pub struct DoorSpot {
+    pub id: String,
+    pub bridge_id: String,
 }
 
 /// A semantic location at which authored gameplay may manifest something.
@@ -530,6 +568,8 @@ pub struct MachineSpot {
     /// Must match a [`MachineKind`](crate::machines::MachineKind) variant name,
     /// e.g. `ChemMaster5000`, `MixingChamber`, `ReactionChamber`.
     pub kind: String,
+    /// Optional for ordinary machines; `public` or `medical` for a delivery window.
+    pub lane: String,
 }
 
 /// A department's home ground: where its crew belong when they are not
@@ -637,6 +677,80 @@ fn dress_departments(
     }
 }
 
+/// Render-only modular scenery whose exact placement belongs to the map.
+///
+/// The `kind` string is deliberately a small authored API rather than an asset
+/// path: maps cannot request arbitrary files, and renaming an export does not
+/// silently invalidate every marker. Like department dressing, these scenes
+/// never receive [`Solid`] or replicated gameplay state.
+#[point_class(
+    classname("decoration_spot"),
+    base(Transform),
+    color(255 128 48),
+    size(-20 -20 0, 20 20 72),
+)]
+#[derive(Debug, Clone, Default)]
+pub struct DecorationSpot {
+    pub kind: String,
+}
+
+#[derive(Resource)]
+struct DecorationAssets {
+    supply_shelf: Handle<WorldAsset>,
+    analysis_panel: Handle<WorldAsset>,
+    emergency_station: Handle<WorldAsset>,
+    service_board: Handle<WorldAsset>,
+}
+
+impl DecorationAssets {
+    fn scene(&self, kind: &str) -> Option<&Handle<WorldAsset>> {
+        match kind.trim() {
+            "chem.supply_shelf" => Some(&self.supply_shelf),
+            "chem.analysis_panel" => Some(&self.analysis_panel),
+            "chem.emergency_station" => Some(&self.emergency_station),
+            "chem.service_board" => Some(&self.service_board),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Component)]
+struct DecorationDressed;
+
+fn load_decoration_assets(mut commands: Commands, assets: Res<AssetServer>) {
+    let scene = |path: &'static str| assets.load(GltfAssetLabel::Scene(0).from_asset(path));
+    commands.insert_resource(DecorationAssets {
+        supply_shelf: scene("3dassets/station_starter_kit/glb/decor_chem_supply_shelf.glb"),
+        analysis_panel: scene("3dassets/station_starter_kit/glb/decor_chem_analysis_panel.glb"),
+        emergency_station: scene(
+            "3dassets/station_starter_kit/glb/decor_chem_emergency_station.glb",
+        ),
+        service_board: scene("3dassets/station_starter_kit/glb/decor_chem_service_board.glb"),
+    });
+}
+
+fn dress_decorations(
+    mut commands: Commands,
+    assets: Option<Res<DecorationAssets>>,
+    markers: Query<(Entity, &DecorationSpot), Without<DecorationDressed>>,
+) {
+    let Some(assets) = assets else {
+        return;
+    };
+
+    for (entity, marker) in &markers {
+        let kind = marker.kind.trim();
+        let Some(scene) = assets.scene(kind) else {
+            warn!("decoration_spot has unknown kind '{kind}'");
+            commands.entity(entity).insert(DecorationDressed);
+            continue;
+        };
+        commands
+            .entity(entity)
+            .insert((WorldAssetRoot(scene.clone()), DecorationDressed));
+    }
+}
+
 /// The way off the station. Eventually the end of a run; for now, a place on
 /// the far side of the map that everything can be routed to.
 #[point_class(
@@ -679,8 +793,10 @@ impl Plugin for LabTrenchBroomPlugin {
             .register_type::<Walkable>()
             .register_type::<DepartmentSpot>()
             .register_type::<DepartmentDressing>()
+            .register_type::<DecorationSpot>()
             .register_type::<EscapePod>()
             .register_type::<CrisisSpot>()
+            .register_type::<DoorSpot>()
             .register_type::<RoomSign>()
             // Not Quake classes — plain components the hooks write into the
             // scene world. The scene spawner panics on any component it cannot
@@ -695,13 +811,15 @@ impl Plugin for LabTrenchBroomPlugin {
                     reset_map_runtime,
                     load_room_sign_assets,
                     load_department_dressing_assets,
+                    load_decoration_assets,
                     spawn_lab_map,
                 )
                     .chain(),
             )
             .add_systems(
                 Update,
-                (dress_room_signs, dress_departments).run_if(in_state(AppState::Playing)),
+                (dress_room_signs, dress_departments, dress_decorations)
+                    .run_if(in_state(AppState::Playing)),
             );
     }
 }
@@ -711,6 +829,7 @@ fn reset_map_runtime(mut commands: Commands) {
     commands.insert_resource(WalkableAreas::default());
     commands.insert_resource(CrisisSpots::default());
     commands.insert_resource(MachineSpots::default());
+    commands.insert_resource(DoorSpots::default());
     commands.insert_resource(Departments::default());
 }
 
@@ -814,6 +933,45 @@ mod tests {
             world.get::<Transform>(marker),
             Some(&authored),
             "dressing must preserve the transform authored in TrenchBroom",
+        );
+    }
+
+    #[test]
+    fn modular_decoration_is_visual_only_and_keeps_the_map_transform() {
+        let mut app = App::new();
+        app.insert_resource(DecorationAssets {
+            supply_shelf: default(),
+            analysis_panel: default(),
+            emergency_station: default(),
+            service_board: default(),
+        })
+        .add_systems(Update, dress_decorations);
+
+        let authored = Transform::from_xyz(-7.4, 0.0, 4.4)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let marker = app
+            .world_mut()
+            .spawn((
+                DecorationSpot {
+                    kind: "chem.supply_shelf".to_string(),
+                },
+                authored,
+            ))
+            .id();
+
+        app.update();
+
+        let world = app.world();
+        assert!(world.get::<WorldAssetRoot>(marker).is_some());
+        assert!(world.get::<DecorationDressed>(marker).is_some());
+        assert!(
+            world.get::<Solid>(marker).is_none(),
+            "modular decoration must not become navigation-blind collision",
+        );
+        assert_eq!(
+            world.get::<Transform>(marker),
+            Some(&authored),
+            "decoration must preserve the transform authored in TrenchBroom",
         );
     }
 }

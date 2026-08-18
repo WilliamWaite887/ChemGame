@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::body::{Bloodstream, Body, COLLAPSE_PENALTY};
 use crate::interaction::{Interactable, InteractionMode};
-use crate::lab::{MapReady, COUNTER_SPOT, DOOR_MAX_X, DOOR_MIN_X};
+use crate::lab::{DeliveryLane, DeliveryStations, MapReady, COUNTER_SPOT, DOOR_MAX_X, DOOR_MIN_X};
 use crate::machines::chemist_entity;
 use crate::net::is_authority;
 use crate::orders::{Department, Shift};
@@ -150,16 +150,28 @@ pub struct CrewRoute {
     /// [`walk_route`] turns it into waypoints once — it is the system that can
     /// see the nav graph.
     pending: Option<Vec3>,
+    /// True only for an order/visitor walking to a delivery window. Ambient
+    /// residents also use `Arriving`, so phase alone cannot identify a queue.
+    counter_bound: bool,
+    pub delivery_lane: DeliveryLane,
+    lane_offset: f32,
 }
 
 impl CrewRoute {
     /// The walk in: to their place at the counter.
     pub fn arrival(lane: f32) -> Self {
+        Self::arrival_for(DeliveryLane::Public, lane)
+    }
+
+    pub fn arrival_for(delivery_lane: DeliveryLane, lane_offset: f32) -> Self {
         CrewRoute {
             waypoints: Vec::new(),
             index: 0,
             phase: CrewPhase::Arriving,
-            pending: Some(Vec3::new(COUNTER_SPOT.x + lane, 0.0, COUNTER_SPOT.z)),
+            pending: Some(Vec3::new(COUNTER_SPOT.x + lane_offset, 0.0, COUNTER_SPOT.z)),
+            counter_bound: true,
+            delivery_lane,
+            lane_offset,
         }
     }
 
@@ -169,6 +181,7 @@ impl CrewRoute {
         self.index = 0;
         self.phase = CrewPhase::Leaving;
         self.pending = Some(Vec3::new(door_x(), 0.0, spawn_z()));
+        self.counter_bound = false;
     }
 }
 
@@ -181,8 +194,8 @@ impl CrewRoute {
 /// [`walk_route`] flips `phase` to [`CrewPhase::Waiting`] and never removed —
 /// once an order is delivered or expires its `Order` component goes with it,
 /// which is what actually drops a crew member out of the queue, on both ends.
-#[derive(Component, Serialize, Deserialize)]
-pub struct AtCounter;
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtCounter(pub DeliveryLane);
 
 /// Authority-owned indication that pressing Use on this resident requests a
 /// medical evacuation rather than delivering whatever happens to be held.
@@ -276,7 +289,14 @@ pub fn spawn_crew_member(commands: &mut Commands, def: &CrewDef, lane: f32) -> E
                 name: def.name.clone(),
                 role: def.role.clone(),
             },
-            CrewRoute::arrival(lane),
+            CrewRoute::arrival_for(
+                if def.role == "Medical" {
+                    DeliveryLane::Medical
+                } else {
+                    DeliveryLane::Public
+                },
+                lane,
+            ),
             Transform::from_translation(position),
             Body::default(),
             Bloodstream::default(),
@@ -470,6 +490,9 @@ fn populate_departments(
             index: 0,
             phase: CrewPhase::Arriving,
             pending: Some(home),
+            counter_bound: false,
+            delivery_lane: DeliveryLane::Public,
+            lane_offset: 0.0,
         });
     }
 }
@@ -509,6 +532,7 @@ fn ambient_behaviour(
                 let flat = Vec3::new(post.x, transform.translation.y, post.z);
                 if transform.translation.distance(flat) > 1.5 {
                     route.pending = Some(post);
+                    route.counter_bound = false;
                     route.phase = CrewPhase::Arriving;
                 }
                 continue;
@@ -524,6 +548,7 @@ fn ambient_behaviour(
         // Somewhere else on the station: another department, or their own.
         if let Some(next) = departments.somewhere_else(&member.role) {
             route.pending = Some(next);
+            route.counter_bound = false;
             route.phase = CrewPhase::Arriving;
         }
     }
@@ -748,6 +773,7 @@ fn walk_route(
     time: Res<Time>,
     nav: Res<crate::nav::NavGraph>,
     departments: Res<Departments>,
+    delivery_stations: Res<DeliveryStations>,
     mut crew: Query<(
         Entity,
         &mut Transform,
@@ -769,7 +795,12 @@ fn walk_route(
         }
 
         // Turn a new destination into a path, once, the frame it is set.
-        if let Some(requested_goal) = route.pending {
+        if let Some(mut requested_goal) = route.pending {
+            if route.counter_bound {
+                requested_goal = delivery_stations
+                    .station(route.delivery_lane)
+                    .queue_position(route.lane_offset);
+            }
             // Someone leaving heads for their own department when the station
             // has one, rather than the generic spot outside the lobby door.
             let goal = match (route.phase, member) {
@@ -798,7 +829,9 @@ fn walk_route(
                 commands.entity(entity).despawn();
             } else if route.phase == CrewPhase::Arriving {
                 route.phase = CrewPhase::Waiting;
-                commands.entity(entity).insert(AtCounter);
+                commands
+                    .entity(entity)
+                    .insert(AtCounter(route.delivery_lane));
             }
             continue;
         };
@@ -840,6 +873,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<Departments>()
+            .init_resource::<DeliveryStations>()
             .insert_resource(crate::nav::NavGraph::build(
                 &crate::lab::WalkableAreas::from_floor_plan(),
                 crate::nav::NAV_RADIUS,
@@ -932,6 +966,8 @@ mod tests {
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Departments>()
+            .init_resource::<DeliveryStations>()
+            .init_resource::<crate::lab::DoorSpots>()
             .insert_resource(authored)
             .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
                 std::time::Duration::from_secs_f32(0.05),
@@ -947,6 +983,25 @@ mod tests {
                 )
                     .chain()
                     .run_if(in_state(AppState::Playing)),
+            );
+        let (run, center) = crate::lab::doorways()
+            .find(|(run, center)| {
+                let at = run.point(*center);
+                (at.x - crate::lab::CREW_DOOR_X).abs() < 0.001
+                    && (at.z - crate::lab::ROOMS[crate::lab::LOBBY].max_z).abs() < 0.001
+            })
+            .expect("legacy lab entrance doorway");
+        let rotation = if run.along_x {
+            Quat::IDENTITY
+        } else {
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
+        };
+        app.world_mut()
+            .resource_mut::<crate::lab::DoorSpots>()
+            .insert(
+                "door.chemistry.public",
+                crate::lab::LAB_ENTRANCE_BRIDGE_ID,
+                Transform::from_translation(run.point(center)).with_rotation(rotation),
             );
         app.finish();
         app.world_mut()
@@ -1006,19 +1061,13 @@ mod tests {
         app.update();
         let planned = &app.world().get::<CrewRoute>(visitor).unwrap().waypoints;
         let door_at = app.world().get::<Transform>(door).unwrap().translation;
-        let enters_sensor = |waypoint: &&Vec3| {
-            (waypoint.x - door_at.x).abs() < crate::lab::DOOR_WIDTH * 0.5
-                && (waypoint.z - door_at.z).abs() < 0.75
-        };
         assert!(
-            planned
-                .iter()
-                .filter(enters_sensor)
-                .any(|at| at.z < door_at.z)
-                && planned
+            planned.windows(2).any(|segment| {
+                segment
                     .iter()
-                    .filter(enters_sensor)
-                    .any(|at| at.z > door_at.z),
+                    .all(|at| (at.x - door_at.x).abs() < crate::lab::DOOR_WIDTH * 0.5)
+                    && (segment[0].z - door_at.z) * (segment[1].z - door_at.z) <= 0.0
+            }),
             "authored route did not cross both sides of the real entrance sensor: {planned:?}",
         );
 
@@ -1285,6 +1334,9 @@ mod tests {
                     index: 0,
                     phase: CrewPhase::Waiting,
                     pending: None,
+                    counter_bound: false,
+                    delivery_lane: DeliveryLane::Public,
+                    lane_offset: 0.0,
                 },
                 Ambient { dwell: 0.1 },
             ))
@@ -1424,6 +1476,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<Departments>()
+            .init_resource::<DeliveryStations>()
             .insert_resource(crate::nav::NavGraph::build(
                 &crate::lab::WalkableAreas::from_floor_plan(),
                 crate::nav::NAV_RADIUS,
@@ -1450,6 +1503,9 @@ mod tests {
                     index: 0,
                     phase: CrewPhase::Waiting,
                     pending: None,
+                    counter_bound: false,
+                    delivery_lane: DeliveryLane::Public,
+                    lane_offset: 0.0,
                 },
                 // Long dwell, so any movement in these tests is the crisis
                 // talking and never the idle wander.
@@ -1597,6 +1653,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<Departments>()
+            .init_resource::<DeliveryStations>()
             .init_resource::<crate::nav::NavGraph>()
             .add_systems(Update, walk_route);
 
