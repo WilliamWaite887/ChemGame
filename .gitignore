@@ -14,3 +14,5 @@ progress.ron
 /steam_appid.txt
 .cargo/config.toml
 assets/3dassets/station_starter_kit/generate_station_starter_kit.py
+assets/textures/IMAGEGEN_PROMPTS.md
+assets/textures/README.md

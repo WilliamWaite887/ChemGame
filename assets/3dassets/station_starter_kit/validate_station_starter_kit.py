@@ -25,6 +25,14 @@ MANIFEST_PATH = HERE / "station_starter_kit_manifest.json"
 GLB_DIR = HERE / "glb"
 EPSILON = 2.0e-4
 DEPARTMENT_SHELL_EXTRA = "cg_department_shell"
+PIXEL_TEXTURE_SIZE = 128
+PIXEL_TEXELS_PER_METRE = 64.0
+PIXEL_MATERIAL_TEXTURES = {
+    "MAT_Casing": "machine_casing.png",
+    "MAT_Casing_Light": "machine_casing_light.png",
+    "MAT_Dark_Metal": "machine_dark_metal.png",
+    "MAT_Steel": "machine_steel.png",
+}
 
 ERRORS: list[str] = []
 
@@ -57,6 +65,14 @@ def read_glb_json(path: Path) -> dict:
     json_length, json_type = struct.unpack_from("<II", raw, 12)
     require(json_type == 0x4E4F534A, f"{path.name}: first chunk is not JSON")
     return json.loads(raw[20 : 20 + json_length].decode("utf-8"))
+
+
+def png_dimensions(path: Path) -> tuple[int, int]:
+    raw = path.read_bytes()
+    require(raw[:8] == b"\x89PNG\r\n\x1a\n", f"{path.name}: not a PNG")
+    if len(raw) < 24:
+        return (0, 0)
+    return struct.unpack(">II", raw[16:24])
 
 
 def validate_bevy_scene_contract(document: dict, path: Path) -> None:
@@ -139,6 +155,61 @@ def measured_import_bounds(path: Path, asset_id: str) -> tuple[list[float], list
 
 
 def validate_source(manifest: dict) -> None:
+    pixel_manifest = manifest.get("pixel_materials", {})
+    require(
+        pixel_manifest.get("texture_size_px") == PIXEL_TEXTURE_SIZE,
+        "manifest has the wrong pixel material texture size",
+    )
+    require(
+        pixel_manifest.get("texels_per_metre") == PIXEL_TEXELS_PER_METRE,
+        "manifest has the wrong pixel material density",
+    )
+    require(
+        pixel_manifest.get("materials") == PIXEL_MATERIAL_TEXTURES,
+        "manifest pixel material registry differs from validation",
+    )
+    for material_name, texture_filename in PIXEL_MATERIAL_TEXTURES.items():
+        texture_path = HERE / "textures" / texture_filename
+        require(texture_path.is_file(), f"missing {texture_path}")
+        if texture_path.is_file():
+            require(
+                png_dimensions(texture_path)
+                == (PIXEL_TEXTURE_SIZE, PIXEL_TEXTURE_SIZE),
+                f"{texture_filename}: expected {PIXEL_TEXTURE_SIZE}px square",
+            )
+
+        material = bpy.data.materials.get(material_name)
+        require(material is not None, f"missing {material_name}")
+        if material is None:
+            continue
+        require(
+            material.get("cg_pixel_texture") == texture_filename,
+            f"{material_name}: wrong pixel texture tag",
+        )
+        texture_nodes = [
+            node
+            for node in material.node_tree.nodes
+            if node.type == "TEX_IMAGE" and node.image is not None
+        ]
+        require(
+            len(texture_nodes) == 1,
+            f"{material_name}: expected exactly one image texture node",
+        )
+        if len(texture_nodes) == 1:
+            texture_node = texture_nodes[0]
+            require(
+                texture_node.interpolation == "Closest",
+                f"{material_name}: pixel texture is not nearest-filtered",
+            )
+            require(
+                texture_node.extension == "REPEAT",
+                f"{material_name}: pixel texture does not repeat",
+            )
+            require(
+                texture_node.image.packed_file is not None,
+                f"{material_name}: source image is not packed into the blend",
+            )
+
     asset_collections = [
         collection
         for collection in bpy.data.collections
@@ -195,7 +266,19 @@ def validate_source(manifest: dict) -> None:
     )
 
     for obj in bpy.data.objects:
-        if obj.get("cg_primitive") != "box" or obj.type != "MESH":
+        if obj.type != "MESH":
+            continue
+        material_names = {material.name for material in obj.data.materials}
+        if material_names.intersection(PIXEL_MATERIAL_TEXTURES):
+            require(
+                obj.data.uv_layers.active is not None,
+                f"{obj.name}: textured mesh has no active UV map",
+            )
+            require(
+                obj.get("cg_texels_per_metre") == PIXEL_TEXELS_PER_METRE,
+                f"{obj.name}: textured mesh has the wrong UV density tag",
+            )
+        if obj.get("cg_primitive") != "box":
             continue
         tagged_boxes += 1
         for polygon in obj.data.polygons:
@@ -223,6 +306,7 @@ def validate_exports(manifest: dict) -> None:
     actual_files = {path.name for path in GLB_DIR.glob("*.glb")}
     require(actual_files == expected_files, "GLB directory does not match the manifest")
 
+    exported_pixel_materials: set[str] = set()
     for asset in manifest["assets"]:
         path = HERE / asset["file"]
         require(path.is_file(), f"{asset['asset_id']}: missing {asset['file']}")
@@ -260,6 +344,41 @@ def validate_exports(manifest: dict) -> None:
                 ),
                 f"{path.name}: opaque material {material.get('name', '<unnamed>')} is double-sided",
             )
+            material_name = material.get("name")
+            if material_name not in PIXEL_MATERIAL_TEXTURES:
+                continue
+            exported_pixel_materials.add(material_name)
+            base_color_texture = (
+                material.get("pbrMetallicRoughness", {}).get("baseColorTexture")
+            )
+            require(
+                base_color_texture is not None,
+                f"{path.name}: {material_name} lost its base-color texture",
+            )
+            if base_color_texture is None:
+                continue
+            texture = document.get("textures", [])[base_color_texture["index"]]
+            image = document.get("images", [])[texture["source"]]
+            require(
+                "bufferView" in image,
+                f"{path.name}: {material_name} texture is not embedded in the GLB",
+            )
+            sampler_index = texture.get("sampler")
+            require(
+                sampler_index is not None,
+                f"{path.name}: {material_name} texture has no sampler",
+            )
+            if sampler_index is not None:
+                sampler = document.get("samplers", [])[sampler_index]
+                require(
+                    sampler.get("magFilter") == 9728,
+                    f"{path.name}: {material_name} is not nearest-filtered",
+                )
+                require(
+                    sampler.get("wrapS", 10497) == 10497
+                    and sampler.get("wrapT", 10497) == 10497,
+                    f"{path.name}: {material_name} does not repeat",
+                )
 
         imported_minimum, imported_maximum = measured_import_bounds(
             path, asset["asset_id"]
@@ -330,6 +449,11 @@ def validate_exports(manifest: dict) -> None:
                 f"{runtime_path.name}: opaque material {material.get('name', '<unnamed>')} is double-sided",
             )
         measured_import_bounds(runtime_path, asset["asset_id"])
+
+    require(
+        exported_pixel_materials == set(PIXEL_MATERIAL_TEXTURES),
+        "not every pixel material appears in an exported GLB",
+    )
 
 
 def main() -> None:

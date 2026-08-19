@@ -23,6 +23,17 @@
     }
   },
   "export_format": "glTF Binary (.glb)",
+  "pixel_materials": {
+    "texture_size_px": 128,
+    "texels_per_metre": 64.0,
+    "uv_projection": "dominant-axis box projection in object-local metres",
+    "materials": {
+      "MAT_Casing": "machine_casing.png",
+      "MAT_Casing_Light": "machine_casing_light.png",
+      "MAT_Dark_Metal": "machine_dark_metal.png",
+      "MAT_Steel": "machine_steel.png"
+    }
+  },
   "assets": [
     {
       "asset_id": "MCH_ChemMaster5000",

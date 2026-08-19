@@ -123,6 +123,97 @@ fn every_map_texture_has_a_runtime_asset() {
     }
 }
 
+#[test]
+fn chemistry_surface_sprites_are_small_power_of_two_pngs() {
+    const CHEMISTRY_SURFACES: &[&str] = &[
+        "floor_mixing_hall",
+        "floor_prep_storage",
+        "floor_analysis",
+        "floor_reaction_bay",
+        "floor_lobby",
+        "wall",
+        "wall_chemistry",
+    ];
+
+    for texture in CHEMISTRY_SURFACES {
+        let path = format!("assets/textures/{texture}.png");
+        let png = std::fs::read(&path).unwrap_or_else(|err| panic!("reading {path}: {err}"));
+        assert!(
+            png.len() >= 24,
+            "{path} is too short to contain a PNG header"
+        );
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "{path} is not a PNG");
+
+        let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+        assert_eq!((width, height), (128, 128), "{path} changed sprite scale");
+        assert!(
+            width.is_power_of_two() && height.is_power_of_two(),
+            "{path} must repeat as a power-of-two texture"
+        );
+    }
+}
+
+#[test]
+fn common_area_floor_sprite_is_a_small_power_of_two_png() {
+    let path = "assets/textures/floor_corridor.png";
+    let png = std::fs::read(path).unwrap_or_else(|err| panic!("reading {path}: {err}"));
+    assert!(
+        png.len() >= 24,
+        "{path} is too short to contain a PNG header"
+    );
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "{path} is not a PNG");
+    let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+    assert_eq!((width, height), (128, 128), "{path} changed sprite scale");
+    assert!(width.is_power_of_two() && height.is_power_of_two());
+}
+
+#[test]
+fn chemistry_brushes_use_the_department_wall_and_one_metre_sprite_scale() {
+    const FLOORS: &[&str] = &[
+        "floor_mixing_hall",
+        "floor_prep_storage",
+        "floor_analysis",
+        "floor_reaction_bay",
+        "floor_lobby",
+    ];
+
+    let mut floor_faces = std::collections::HashMap::<String, usize>::new();
+    let mut wall_faces = 0;
+    for entity in parse() {
+        for brush in entity.brushes {
+            for surface in brush {
+                let texture = surface.texture.to_string_lossy();
+                if FLOORS.contains(&texture.as_ref()) || texture == "wall_chemistry" {
+                    assert_eq!(
+                        surface.alignment.scale,
+                        [0.625, 0.625],
+                        "{texture} must map each 64-pixel sub-panel to one metre"
+                    );
+                }
+                if FLOORS.contains(&texture.as_ref()) {
+                    *floor_faces.entry(texture.to_string()).or_default() += 1;
+                } else if texture == "wall_chemistry" {
+                    wall_faces += 1;
+                }
+            }
+        }
+    }
+
+    for floor in FLOORS {
+        assert_eq!(
+            floor_faces.get(*floor),
+            Some(&6),
+            "{floor} lost its room brush"
+        );
+    }
+    assert_eq!(
+        wall_faces, 156,
+        "the Chemistry shell changed material coverage"
+    );
+}
+
 /// The exact walkable registry the authored map contributes at runtime.
 ///
 /// Exposed only to crate tests so cross-system regressions can exercise the
@@ -557,14 +648,80 @@ fn station_v2_keeps_its_department_and_route_footprints() {
     let maintenance = named_bounds("Maintenance V2");
     assert_eq!(
         maintenance.len(),
-        6,
-        "maintenance needs four ring and two cross-route segments"
+        4,
+        "maintenance should be the four-segment outer service ring"
     );
     for bounds in &maintenance {
         let width = (bounds.max_x - bounds.min_x).min(bounds.max_z - bounds.min_z);
         assert!(
             (width - 3.0).abs() < 0.001 || (width - 2.8).abs() < 0.001,
             "maintenance route is {width} m wide: {bounds:?}"
+        );
+    }
+
+    let branches = named_bounds("Public Branch Galleries");
+    assert_eq!(
+        branches.len(),
+        2,
+        "the public grid needs two cross-galleries"
+    );
+    for expected in [
+        Bounds {
+            min_x: -41.5,
+            max_x: -38.7,
+            min_z: -9.0,
+            max_z: 54.0,
+        },
+        Bounds {
+            min_x: -112.5,
+            max_x: 16.5,
+            min_z: 28.6,
+            max_z: 31.4,
+        },
+    ] {
+        assert!(
+            branches
+                .iter()
+                .any(|actual| bounds_are_close(*actual, expected)),
+            "public branch gallery is missing {expected:?}: {branches:?}",
+        );
+    }
+}
+
+#[test]
+fn primary_department_doors_are_distributed_across_public_branches() {
+    let map = parse();
+    let main_gallery = Bounds {
+        min_x: -109.5,
+        max_x: 13.5,
+        min_z: 10.0,
+        max_z: 15.0,
+    };
+    let branch_galleries: Vec<Bounds> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
+        .filter(|entity| property(entity, "room").as_deref() == Some("Public Branch Galleries"))
+        .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
+        .collect();
+
+    for department in ["medical", "bridge", "engineering", "service", "botany"] {
+        let id = format!("door.{department}.public");
+        let door = map
+            .iter()
+            .find(|entity| {
+                classname(entity).as_deref() == Some("door_spot")
+                    && property(entity, "id").as_deref() == Some(id.as_str())
+            })
+            .unwrap_or_else(|| panic!("missing relocated primary door `{id}`"));
+        let (x, z) = origin_xz(door).expect("primary door has a valid origin");
+        let point = Vec3::new(x, 0.0, z);
+        assert!(
+            !main_gallery.holds(point),
+            "{id} still opens onto the single central gallery at {point}",
+        );
+        assert!(
+            branch_galleries.iter().any(|bounds| bounds.holds(point)),
+            "{id} is not served by either public branch gallery: {point}",
         );
     }
 }
@@ -1460,6 +1617,8 @@ fn every_entity_in_the_map_is_a_class_the_game_registers() {
         "department_spot",
         "department_dressing",
         "decoration_spot",
+        "wayfinding_hub",
+        "wayfinding_sign",
         "escape_pod",
         "crisis_spot",
         "room_sign",
@@ -1745,6 +1904,62 @@ fn room_signs_have_visible_text_and_the_lab_entrance_has_one_bridge() {
         entrance_bridges, 1,
         "expected exactly one func_walkable bridge_id=lab_entrance in {MAP}",
     );
+}
+
+#[test]
+fn common_area_wayfinding_marks_the_crossroads_and_every_department() {
+    let map = parse();
+    let hubs: Vec<&Entity> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("wayfinding_hub"))
+        .collect();
+    assert_eq!(hubs.len(), 1, "the station needs one unambiguous route hub");
+    assert_eq!(
+        origin_xz(hubs[0]),
+        Some((-50.0, 12.5)),
+        "the route hub moved away from the central public crossroads",
+    );
+
+    let expected: std::collections::HashSet<&str> = [
+        "Chemistry",
+        "Medical",
+        "Engineering",
+        "Cargo",
+        "Security",
+        "Service",
+        "Bridge",
+        "Botany",
+    ]
+    .into_iter()
+    .collect();
+    let signs: Vec<&Entity> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("wayfinding_sign"))
+        .collect();
+    assert_eq!(signs.len(), expected.len(), "stale wayfinding signs remain");
+
+    let mut found = std::collections::HashSet::new();
+    for sign in signs {
+        let department = property(sign, "department").unwrap_or_default();
+        assert!(
+            expected.contains(department.as_str()),
+            "unknown wayfinding department `{department}`",
+        );
+        assert!(
+            found.insert(department.clone()),
+            "duplicate wayfinding sign for {department}",
+        );
+        assert!(
+            property(sign, "text").is_some_and(|text| !text.trim().is_empty()),
+            "{department} wayfinding sign has no readable text",
+        );
+        assert!(
+            property(sign, "direction")
+                .is_some_and(|direction| matches!(direction.as_str(), "left" | "right")),
+            "{department} wayfinding sign needs a left/right arrow",
+        );
+    }
+    assert_eq!(found.len(), expected.len());
 }
 
 #[test]

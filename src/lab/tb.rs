@@ -451,6 +451,10 @@ fn dress_room_signs(
 }
 
 fn room_sign_text_mesh(text: &str) -> Mesh {
+    pixel_sign_text_mesh(text, SIGN_WIDTH, SIGN_HEIGHT)
+}
+
+fn pixel_sign_text_mesh(text: &str, width: f32, height: f32) -> Mesh {
     let chars: Vec<char> = text.chars().flat_map(char::to_uppercase).collect();
     let columns = chars
         .iter()
@@ -458,7 +462,7 @@ fn room_sign_text_mesh(text: &str) -> Mesh {
         .sum::<usize>()
         .saturating_sub(1)
         .max(1);
-    let cell = ((SIGN_WIDTH - 0.26) / columns as f32).min((SIGN_HEIGHT - 0.20) / 7.0);
+    let cell = ((width - 0.26) / columns as f32).min((height - 0.16) / 7.0);
     let pixel = cell * 0.78;
     let mut cursor = -(columns as f32 * cell) * 0.5;
 
@@ -541,10 +545,503 @@ fn glyph_rows(character: char) -> [u8; 7] {
         '9' => [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110],
         '&' => [0b01100, 0b10010, 0b10100, 0b01000, 0b10101, 0b10010, 0b01101],
         '/' => [0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b00000, 0b00000],
+        '<' => [0b00010, 0b00100, 0b01000, 0b10000, 0b01000, 0b00100, 0b00010],
+        '>' => [0b01000, 0b00100, 0b00010, 0b00001, 0b00010, 0b00100, 0b01000],
         '-' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
         '.' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100],
         _ =>   [0b01110, 0b10001, 0b00010, 0b00100, 0b00100, 0b00000, 0b00100],
     }
+}
+
+/// The station's main public crossroads. Its child meshes are flat, render-only
+/// wayfinding paint: one colored route per department and a segmented ring at
+/// the junction where those routes meet.
+#[point_class(
+    classname("wayfinding_hub"),
+    base(Transform),
+    color(120 220 255),
+    size(-48 -48 0, 48 48 8),
+)]
+#[derive(Debug, Clone, Default)]
+pub struct WayfindingHub;
+
+/// A compact wall plaque that repeats one floor-route color and points along it.
+#[point_class(
+    classname("wayfinding_sign"),
+    base(Transform),
+    color(180 240 255),
+    size(-48 -6 -11, 48 6 11),
+)]
+#[derive(Debug, Clone, Default)]
+pub struct WayfindingSign {
+    pub department: String,
+    pub text: String,
+    /// `left` or `right`, from the perspective of somebody facing the plaque.
+    pub direction: String,
+}
+
+const WAYFINDING_SIGN_WIDTH: f32 = 2.4;
+const WAYFINDING_SIGN_HEIGHT: f32 = 0.52;
+const WAYFINDING_SIGN_DEPTH: f32 = 0.07;
+const ROUTE_WIDTH: f32 = 0.13;
+const ROUTE_BORDER_WIDTH: f32 = 0.23;
+const ROUTE_BORDER_Y: f32 = 0.012;
+const ROUTE_FLOOR_Y: f32 = 0.018;
+const ROUTE_PANEL_REPEAT: f32 = 1.6;
+const ROUTE_PANEL_GAP: f32 = 0.055;
+const HUB_INNER_RADIUS: f32 = 0.72;
+const HUB_PORT_OUTER_RADIUS: f32 = 1.17;
+const HUB_BORDER_INNER_RADIUS: f32 = 0.63;
+const HUB_BORDER_OUTER_RADIUS: f32 = 1.17;
+const HUB_PORT_HALF_ANGLE: f32 = 0.085;
+
+const CHEMISTRY_ROUTE: &[(f32, f32)] = &[(0.95, -0.65), (53.0, -0.65), (53.0, -2.0)];
+const MEDICAL_ROUTE: &[(f32, f32)] = &[
+    (1.00, -0.39),
+    (10.90, -0.39),
+    (10.90, -12.50),
+    (11.30, -12.50),
+];
+const SERVICE_ROUTE: &[(f32, f32)] = &[
+    (1.00, -0.13),
+    (10.10, -0.13),
+    (10.10, 17.10),
+    (15.00, 17.10),
+    (15.00, 16.10),
+];
+const ENGINEERING_ROUTE: &[(f32, f32)] = &[
+    (1.00, 0.13),
+    (9.50, 0.13),
+    (9.50, 16.50),
+    (-30.00, 16.50),
+    (-30.00, 16.10),
+];
+const SECURITY_ROUTE: &[(f32, f32)] = &[(-1.00, 0.39), (-45.2, 0.39), (-45.2, -2.0)];
+const CARGO_ROUTE: &[(f32, f32)] = &[(0.65, 0.95), (0.65, 28.4), (-2.0, 28.4)];
+const BRIDGE_ROUTE: &[(f32, f32)] = &[(0.78, 0.68), (8.90, 0.68), (8.90, -12.50), (8.50, -12.50)];
+const BOTANY_ROUTE: &[(f32, f32)] = &[
+    (0.65, -0.95),
+    (10.70, -0.95),
+    (10.70, 17.70),
+    (50.00, 17.70),
+    (50.00, 16.10),
+];
+
+struct WayfindingSpec {
+    department: &'static str,
+    color: [f32; 3],
+    points: &'static [(f32, f32)],
+}
+
+const WAYFINDING_SPECS: &[WayfindingSpec] = &[
+    WayfindingSpec {
+        department: "Chemistry",
+        color: [0.20, 0.78, 0.82],
+        points: CHEMISTRY_ROUTE,
+    },
+    WayfindingSpec {
+        department: "Medical",
+        color: [0.45, 0.76, 0.96],
+        points: MEDICAL_ROUTE,
+    },
+    WayfindingSpec {
+        department: "Service",
+        color: [0.48, 0.82, 0.43],
+        points: SERVICE_ROUTE,
+    },
+    WayfindingSpec {
+        department: "Engineering",
+        color: [0.94, 0.72, 0.24],
+        points: ENGINEERING_ROUTE,
+    },
+    WayfindingSpec {
+        department: "Security",
+        color: [0.92, 0.34, 0.30],
+        points: SECURITY_ROUTE,
+    },
+    WayfindingSpec {
+        department: "Cargo",
+        color: [0.72, 0.52, 0.29],
+        points: CARGO_ROUTE,
+    },
+    WayfindingSpec {
+        department: "Bridge",
+        color: [0.67, 0.58, 0.86],
+        points: BRIDGE_ROUTE,
+    },
+    WayfindingSpec {
+        department: "Botany",
+        color: [0.63, 0.84, 0.48],
+        points: BOTANY_ROUTE,
+    },
+];
+
+struct WayfindingDepartmentAssets {
+    department: &'static str,
+    floor_material: Handle<StandardMaterial>,
+    sign_material: Handle<StandardMaterial>,
+    route_mesh: Handle<Mesh>,
+    route_border_mesh: Handle<Mesh>,
+    hub_mesh: Handle<Mesh>,
+}
+
+#[derive(Resource)]
+struct WayfindingAssets {
+    plaque_mesh: Handle<Mesh>,
+    plaque_material: Handle<StandardMaterial>,
+    accent_mesh: Handle<Mesh>,
+    inlay_material: Handle<StandardMaterial>,
+    hub_border_mesh: Handle<Mesh>,
+    departments: Vec<WayfindingDepartmentAssets>,
+}
+
+impl WayfindingAssets {
+    fn department(&self, name: &str) -> Option<&WayfindingDepartmentAssets> {
+        self.departments
+            .iter()
+            .find(|asset| asset.department == name.trim())
+    }
+}
+
+#[derive(Component)]
+struct WayfindingDressed;
+
+#[derive(Component)]
+struct WayfindingSignDressed;
+
+fn load_wayfinding_assets(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let departments = WAYFINDING_SPECS
+        .iter()
+        .map(|spec| {
+            let [red, green, blue] = spec.color;
+            let floor_material = materials.add(StandardMaterial {
+                base_color: Color::srgb(red * 0.72, green * 0.72, blue * 0.72),
+                perceptual_roughness: 0.92,
+                metallic: 0.04,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            });
+            let sign_material = materials.add(StandardMaterial {
+                base_color: Color::srgb(red * 0.88, green * 0.88, blue * 0.88),
+                emissive: LinearRgba::new(red * 0.08, green * 0.08, blue * 0.08, 1.0),
+                perceptual_roughness: 0.84,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            });
+            let (start, end) = hub_port_angles(spec);
+            WayfindingDepartmentAssets {
+                department: spec.department,
+                floor_material,
+                sign_material,
+                route_mesh: meshes.add(route_strip_mesh(
+                    spec.points,
+                    ROUTE_WIDTH,
+                    ROUTE_FLOOR_Y,
+                    true,
+                )),
+                route_border_mesh: meshes.add(route_strip_mesh(
+                    spec.points,
+                    ROUTE_BORDER_WIDTH,
+                    ROUTE_BORDER_Y,
+                    false,
+                )),
+                hub_mesh: meshes.add(annulus_segment_mesh(
+                    HUB_INNER_RADIUS,
+                    HUB_PORT_OUTER_RADIUS,
+                    start,
+                    end,
+                    2,
+                    ROUTE_FLOOR_Y,
+                )),
+            }
+        })
+        .collect();
+
+    commands.insert_resource(WayfindingAssets {
+        plaque_mesh: meshes.add(Cuboid::new(
+            WAYFINDING_SIGN_WIDTH,
+            WAYFINDING_SIGN_HEIGHT,
+            WAYFINDING_SIGN_DEPTH,
+        )),
+        plaque_material: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.025, 0.035, 0.045),
+            perceptual_roughness: 0.86,
+            metallic: 0.16,
+            ..default()
+        }),
+        accent_mesh: meshes.add(Cuboid::new(
+            0.12,
+            WAYFINDING_SIGN_HEIGHT,
+            WAYFINDING_SIGN_DEPTH * 1.08,
+        )),
+        inlay_material: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.012, 0.016, 0.021),
+            perceptual_roughness: 0.94,
+            metallic: 0.08,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        }),
+        hub_border_mesh: meshes.add(annulus_segment_mesh(
+            HUB_BORDER_INNER_RADIUS,
+            HUB_BORDER_OUTER_RADIUS,
+            0.0,
+            std::f32::consts::TAU,
+            8,
+            ROUTE_BORDER_Y,
+        )),
+        departments,
+    });
+}
+
+fn hub_port_angles(spec: &WayfindingSpec) -> (f32, f32) {
+    let (x, z) = spec.points[0];
+    let center = z.atan2(x);
+    (center - HUB_PORT_HALF_ANGLE, center + HUB_PORT_HALF_ANGLE)
+}
+
+fn dress_wayfinding_hubs(
+    mut commands: Commands,
+    assets: Option<Res<WayfindingAssets>>,
+    hubs: Query<Entity, (With<WayfindingHub>, Without<WayfindingDressed>)>,
+) {
+    let Some(assets) = assets else {
+        return;
+    };
+    for entity in &hubs {
+        commands
+            .entity(entity)
+            .insert(WayfindingDressed)
+            .with_children(|parent| {
+                parent.spawn((
+                    Name::new("wayfinding hub recessed border"),
+                    Mesh3d(assets.hub_border_mesh.clone()),
+                    MeshMaterial3d(assets.inlay_material.clone()),
+                ));
+                for asset in &assets.departments {
+                    parent.spawn((
+                        Name::new(format!("{} recessed route border", asset.department)),
+                        Mesh3d(asset.route_border_mesh.clone()),
+                        MeshMaterial3d(assets.inlay_material.clone()),
+                    ));
+                    parent.spawn((
+                        Name::new(format!("{} floor route", asset.department)),
+                        Mesh3d(asset.route_mesh.clone()),
+                        MeshMaterial3d(asset.floor_material.clone()),
+                    ));
+                    parent.spawn((
+                        Name::new(format!("{} hub segment", asset.department)),
+                        Mesh3d(asset.hub_mesh.clone()),
+                        MeshMaterial3d(asset.floor_material.clone()),
+                    ));
+                }
+            });
+    }
+}
+
+fn dress_wayfinding_signs(
+    mut commands: Commands,
+    assets: Option<Res<WayfindingAssets>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    signs: Query<(Entity, &WayfindingSign), Without<WayfindingSignDressed>>,
+) {
+    let Some(assets) = assets else {
+        return;
+    };
+    for (entity, sign) in &signs {
+        let department = sign.department.trim();
+        let Some(department_assets) = assets.department(department) else {
+            warn!("wayfinding_sign has unknown department '{department}'");
+            commands.entity(entity).insert(WayfindingSignDressed);
+            continue;
+        };
+        let label = if sign.text.trim().is_empty() {
+            department
+        } else {
+            sign.text.trim()
+        };
+        let label = match sign.direction.trim().to_ascii_lowercase().as_str() {
+            "left" => format!("< {label}"),
+            "right" => format!("{label} >"),
+            _ => label.to_string(),
+        };
+        let lettering = meshes.add(pixel_sign_text_mesh(
+            &label,
+            WAYFINDING_SIGN_WIDTH - 0.24,
+            WAYFINDING_SIGN_HEIGHT,
+        ));
+
+        commands
+            .entity(entity)
+            .insert(WayfindingSignDressed)
+            .with_children(|parent| {
+                parent.spawn((
+                    Name::new("wayfinding sign plaque"),
+                    Mesh3d(assets.plaque_mesh.clone()),
+                    MeshMaterial3d(assets.plaque_material.clone()),
+                ));
+                parent.spawn((
+                    Name::new(format!("{department} route color")),
+                    Mesh3d(assets.accent_mesh.clone()),
+                    MeshMaterial3d(department_assets.sign_material.clone()),
+                    Transform::from_xyz(
+                        -WAYFINDING_SIGN_WIDTH * 0.5 + 0.06,
+                        0.0,
+                        WAYFINDING_SIGN_DEPTH * 0.04,
+                    ),
+                ));
+                parent.spawn((
+                    Name::new(format!("wayfinding sign text: {label}")),
+                    Mesh3d(lettering),
+                    MeshMaterial3d(department_assets.sign_material.clone()),
+                    Transform::from_xyz(0.04, 0.0, WAYFINDING_SIGN_DEPTH * 0.51),
+                ));
+            });
+    }
+}
+
+fn route_strip_mesh(points: &[(f32, f32)], width: f32, floor_y: f32, panelized: bool) -> Mesh {
+    let mut positions = Vec::<[f32; 3]>::new();
+    let mut normals = Vec::<[f32; 3]>::new();
+    let mut indices = Vec::<u32>::new();
+    let mut push_quad = |corners: [[f32; 3]; 4]| {
+        let base = positions.len() as u32;
+        positions.extend(corners);
+        normals.extend([[0.0, 1.0, 0.0]; 4]);
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
+
+    for (segment_index, segment) in points.windows(2).enumerate() {
+        let start = Vec2::new(segment[0].0, segment[0].1);
+        let segment_end = Vec2::new(segment[1].0, segment[1].1);
+        let direction = (segment_end - start).normalize_or_zero();
+        let is_last_segment = segment_index + 1 == points.len() - 1;
+        let end = if is_last_segment {
+            segment_end - direction * route_arrow_length(width)
+        } else {
+            segment_end
+        };
+        let perpendicular = Vec2::new(-direction.y, direction.x) * width * 0.5;
+        let length = start.distance(end);
+        let mut cursor = 0.0;
+        while cursor < length {
+            let paint_end = if panelized {
+                (cursor + ROUTE_PANEL_REPEAT - ROUTE_PANEL_GAP).min(length)
+            } else {
+                length
+            };
+            let painted_start = start + direction * cursor;
+            let painted_end = start + direction * paint_end;
+            push_quad([
+                [
+                    painted_start.x - perpendicular.x,
+                    floor_y,
+                    painted_start.y - perpendicular.y,
+                ],
+                [
+                    painted_start.x + perpendicular.x,
+                    floor_y,
+                    painted_start.y + perpendicular.y,
+                ],
+                [
+                    painted_end.x + perpendicular.x,
+                    floor_y,
+                    painted_end.y + perpendicular.y,
+                ],
+                [
+                    painted_end.x - perpendicular.x,
+                    floor_y,
+                    painted_end.y - perpendicular.y,
+                ],
+            ]);
+            if !panelized {
+                break;
+            }
+            cursor += ROUTE_PANEL_REPEAT;
+        }
+    }
+
+    let joint_radius = width * 0.53;
+    for &(x, z) in points.iter().take(points.len().saturating_sub(1)) {
+        push_quad([
+            [x - joint_radius, floor_y, z - joint_radius],
+            [x - joint_radius, floor_y, z + joint_radius],
+            [x + joint_radius, floor_y, z + joint_radius],
+            [x + joint_radius, floor_y, z - joint_radius],
+        ]);
+    }
+
+    if let [.., previous, end] = points {
+        let end = Vec2::new(end.0, end.1);
+        let direction = (end - Vec2::new(previous.0, previous.1)).normalize_or_zero();
+        let perpendicular = Vec2::new(-direction.y, direction.x) * width * 1.2;
+        let base_center = end - direction * route_arrow_length(width);
+        let base = positions.len() as u32;
+        positions.extend([
+            [end.x, floor_y, end.y],
+            [
+                base_center.x + perpendicular.x,
+                floor_y,
+                base_center.y + perpendicular.y,
+            ],
+            [
+                base_center.x - perpendicular.x,
+                floor_y,
+                base_center.y - perpendicular.y,
+            ],
+        ]);
+        normals.extend([[0.0, 1.0, 0.0]; 3]);
+        indices.extend([base, base + 1, base + 2]);
+    }
+
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_indices(Indices::U32(indices))
+}
+
+fn route_arrow_length(width: f32) -> f32 {
+    width * 2.4
+}
+
+fn annulus_segment_mesh(
+    inner_radius: f32,
+    outer_radius: f32,
+    start: f32,
+    end: f32,
+    steps: usize,
+    floor_y: f32,
+) -> Mesh {
+    let mut positions = Vec::<[f32; 3]>::new();
+    let mut normals = Vec::<[f32; 3]>::new();
+    let mut indices = Vec::<u32>::new();
+    for step in 0..=steps {
+        let angle = start + (end - start) * step as f32 / steps as f32;
+        let (sin, cos) = angle.sin_cos();
+        positions.push([cos * inner_radius, floor_y, sin * inner_radius]);
+        positions.push([cos * outer_radius, floor_y, sin * outer_radius]);
+        normals.extend([[0.0, 1.0, 0.0]; 2]);
+    }
+    for step in 0..steps as u32 {
+        let inner = step * 2;
+        indices.extend([inner, inner + 3, inner + 1, inner, inner + 2, inner + 3]);
+    }
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_indices(Indices::U32(indices))
 }
 
 /// Where a machine stands.
@@ -794,6 +1291,8 @@ impl Plugin for LabTrenchBroomPlugin {
             .register_type::<DepartmentSpot>()
             .register_type::<DepartmentDressing>()
             .register_type::<DecorationSpot>()
+            .register_type::<WayfindingHub>()
+            .register_type::<WayfindingSign>()
             .register_type::<EscapePod>()
             .register_type::<CrisisSpot>()
             .register_type::<DoorSpot>()
@@ -810,6 +1309,7 @@ impl Plugin for LabTrenchBroomPlugin {
                 (
                     reset_map_runtime,
                     load_room_sign_assets,
+                    load_wayfinding_assets,
                     load_department_dressing_assets,
                     load_decoration_assets,
                     spawn_lab_map,
@@ -818,7 +1318,13 @@ impl Plugin for LabTrenchBroomPlugin {
             )
             .add_systems(
                 Update,
-                (dress_room_signs, dress_departments, dress_decorations)
+                (
+                    dress_room_signs,
+                    dress_wayfinding_hubs,
+                    dress_wayfinding_signs,
+                    dress_departments,
+                    dress_decorations,
+                )
                     .run_if(in_state(AppState::Playing)),
             );
     }
@@ -893,6 +1399,104 @@ mod tests {
             "a populated sign should contain visible glyph quads",
         );
         assert_eq!(mesh.primitive_topology(), PrimitiveTopology::TriangleList);
+    }
+
+    #[test]
+    fn wayfinding_routes_cover_every_public_department() {
+        assert!(
+            ROUTE_WIDTH <= 0.13 && ROUTE_BORDER_WIDTH > ROUTE_WIDTH,
+            "floor paint should read as a narrow recessed inlay, not a UI ribbon",
+        );
+        assert!(
+            HUB_PORT_OUTER_RADIUS <= 1.20 && HUB_BORDER_OUTER_RADIUS <= 1.20,
+            "the public hub should stay subordinate to the corridor floor",
+        );
+        assert!(
+            ROUTE_PANEL_GAP > 0.0 && ROUTE_PANEL_GAP < ROUTE_PANEL_REPEAT * 0.1,
+            "route paint should pause subtly at deck-panel cadence",
+        );
+        let departments: std::collections::HashSet<&str> = WAYFINDING_SPECS
+            .iter()
+            .map(|spec| spec.department)
+            .collect();
+        assert_eq!(
+            departments,
+            [
+                "Chemistry",
+                "Medical",
+                "Engineering",
+                "Cargo",
+                "Security",
+                "Service",
+                "Bridge",
+                "Botany",
+            ]
+            .into_iter()
+            .collect(),
+        );
+        for spec in WAYFINDING_SPECS {
+            assert!(spec.points.len() >= 2, "{} has no route", spec.department);
+            let (port_start, port_end) = hub_port_angles(spec);
+            let expected_port_center = spec.points[0].1.atan2(spec.points[0].0);
+            assert!(
+                ((port_start + port_end) * 0.5 - expected_port_center).abs() < f32::EPSILON,
+                "{} hub port must line up with its route origin",
+                spec.department,
+            );
+            let mesh = route_strip_mesh(spec.points, ROUTE_WIDTH, ROUTE_FLOOR_Y, true);
+            assert!(
+                mesh.count_vertices() >= 11,
+                "{} route needs a strip, joints, and endpoint arrow",
+                spec.department,
+            );
+        }
+        assert!(
+            pixel_sign_text_mesh("< MEDICAL", WAYFINDING_SIGN_WIDTH, WAYFINDING_SIGN_HEIGHT)
+                .count_vertices()
+                > 100,
+            "directional plaque arrows must be real world-space glyphs",
+        );
+    }
+
+    #[test]
+    fn wayfinding_hub_is_visual_only_and_keeps_the_map_transform() {
+        let mut app = App::new();
+        app.insert_resource(WayfindingAssets {
+            plaque_mesh: default(),
+            plaque_material: default(),
+            accent_mesh: default(),
+            inlay_material: default(),
+            hub_border_mesh: default(),
+            departments: WAYFINDING_SPECS
+                .iter()
+                .map(|spec| WayfindingDepartmentAssets {
+                    department: spec.department,
+                    floor_material: default(),
+                    sign_material: default(),
+                    route_mesh: default(),
+                    route_border_mesh: default(),
+                    hub_mesh: default(),
+                })
+                .collect(),
+        })
+        .add_systems(Update, dress_wayfinding_hubs);
+
+        let authored = Transform::from_xyz(-25.0, 0.0, 6.25);
+        let marker = app.world_mut().spawn((WayfindingHub, authored)).id();
+        app.update();
+
+        let world = app.world();
+        assert!(world.get::<WayfindingDressed>(marker).is_some());
+        assert!(
+            world.get::<Solid>(marker).is_none(),
+            "painted floor guidance must never become collision",
+        );
+        assert_eq!(world.get::<Transform>(marker), Some(&authored));
+        assert_eq!(
+            world.get::<Children>(marker).map(Children::len),
+            Some(WAYFINDING_SPECS.len() * 3 + 1),
+            "the hub needs inset and painted routes plus one ring segment per department",
+        );
     }
 
     #[test]

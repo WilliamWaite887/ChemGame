@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
   <title id="title">ChemGame Station Layout V2</title>
-  <desc id="desc">A scaled station plan with a bright public loop around Service, a yellow outer maintenance ring and cross-spines, red airlocks, and blue public and Medical Chemistry delivery windows.</desc>
+  <desc id="desc">A scaled station plan with a central public gallery feeding two perpendicular branch galleries, a public loop around Service, a yellow outer maintenance ring, red airlocks, and blue delivery windows.</desc>
   <defs>
     <pattern id="grid" width="50" height="50" patternUnits="userSpaceOnUse">
       <path d="M 50 0 L 0 0 0 50" fill="none" stroke="#d7dde5" stroke-width="1"/>
@@ -27,6 +27,9 @@
       .label { font:600 15px system-ui, sans-serif; fill:#263340; }
       .small { font:500 13px system-ui, sans-serif; fill:#4a5866; }
       .route { fill:none; stroke:#4f5d6b; stroke-width:3; stroke-dasharray:9 7; marker-end:url(#arrow); }
+      .floor-route-border { fill:none; stroke:#18202a; stroke-width:3.8; stroke-linejoin:round; stroke-linecap:round; }
+      .floor-route { fill:none; stroke-width:2.2; stroke-dasharray:15.45 .55; stroke-linejoin:round; stroke-linecap:butt; }
+      .route-label { font:700 11px system-ui, sans-serif; fill:#17202a; paint-order:stroke; stroke:#f8fafc; stroke-width:3px; stroke-linejoin:round; }
     </style>
   </defs>
 
@@ -58,9 +61,9 @@
     <rect class="room" x="700" y="300" width="240" height="240" fill="#f2d8c6"/>
     <rect class="room" x="990" y="300" width="320" height="360" fill="#cce5ba"/>
 
-    <!-- Maintenance cross-spines divide the authored room envelopes into smaller walkable rooms. -->
-    <rect class="maintenance" x="760" y="30" width="28" height="660"/>
-    <rect class="maintenance" x="50" y="436" width="1290" height="28"/>
+    <!-- Public cross-galleries form a second circulation axis through the station. -->
+    <rect class="corridor" x="760" y="30" width="28" height="660"/>
+    <rect class="corridor" x="50" y="436" width="1290" height="28"/>
 
     <!-- Interstitial rooms turn leftover edges into useful buffers between public and service circulation. -->
     <rect class="subroom" x="88" y="142" width="105" height="96"/>
@@ -118,16 +121,17 @@
 
     <!-- Public entrances. -->
     <line class="door" x1="185" y1="250" x2="225" y2="250"/>
-    <line class="door" x1="520" y1="250" x2="560" y2="250"/>
-    <line class="door" x1="855" y1="250" x2="895" y2="250"/>
     <line class="door" x1="1030" y1="250" x2="1070" y2="250"/>
-    <line class="door" x1="650" y1="345" x2="650" y2="385"/>
     <line class="door" x1="650" y1="520" x2="650" y2="560"/>
-    <line class="door" x1="700" y1="365" x2="700" y2="405"/>
     <line class="door" x1="940" y1="365" x2="940" y2="405"/>
     <line class="door" x1="990" y1="350" x2="990" y2="390"/>
+    <line class="door" x1="760" y1="165" x2="760" y2="205"/>
+    <line class="door" x1="788" y1="165" x2="788" y2="205"/>
+    <line class="door" x1="520" y1="436" x2="560" y2="436"/>
+    <line class="door" x1="805" y1="436" x2="845" y2="436"/>
+    <line class="door" x1="1125" y1="436" x2="1165" y2="436"/>
 
-    <!-- Maintenance entrances and spine crossings. -->
+    <!-- Maintenance entrances and secondary service crossings. -->
     <line class="door" x1="185" y1="60" x2="225" y2="60"/>
     <line class="door" x1="520" y1="60" x2="560" y2="60"/>
     <line class="door" x1="855" y1="60" x2="895" y2="60"/>
@@ -148,10 +152,40 @@
     <text class="label" x="1228" y="230" text-anchor="middle">Public delivery counter</text>
 
     <!-- Route annotations. -->
-    <path class="route" d="M1228 275 H720 V350"/>
-    <text class="small" x="950" y="292" text-anchor="middle">bright public route</text>
+    <path class="route" d="M1228 275 H774 V450 H540"/>
+    <text class="small" x="950" y="292" text-anchor="middle">public trunk and branch galleries</text>
     <path class="route" stroke="#8b6b00" d="M1285 185 V445 H820"/>
     <text class="small" x="1115" y="426" text-anchor="middle">risky maintenance shortcut</text>
+
+    <!-- Public floor wayfinding: eight color bands meet at the central gallery hub. -->
+    <g aria-label="colored department floor routes">
+      <path class="floor-route-border" d="M689 266 H1205 V255"/>
+      <path class="floor-route-border" d="M689 270 H772 V185 H788"/>
+      <path class="floor-route-border" d="M689 273 H776 V420 H825"/>
+      <path class="floor-route-border" d="M689 277 H768 V448 H540"/>
+      <path class="floor-route-border" d="M661 281 H223 V255"/>
+      <path class="floor-route-border" d="M684 288 V559 H655"/>
+      <path class="floor-route-border" d="M689 284 H764 V195 H760"/>
+      <path class="floor-route-border" d="M684 262 H780 V452 H1145"/>
+      <path class="floor-route" stroke="#33c7d1" d="M689 266 H1205 V255"/>
+      <path class="floor-route" stroke="#73c2f5" d="M689 270 H772 V185 H788"/>
+      <path class="floor-route" stroke="#7bd16e" d="M689 273 H776 V420 H825"/>
+      <path class="floor-route" stroke="#f0b83d" d="M689 277 H768 V448 H540"/>
+      <path class="floor-route" stroke="#eb574d" d="M661 281 H223 V255"/>
+      <path class="floor-route" stroke="#b8854a" d="M684 288 V559 H655"/>
+      <path class="floor-route" stroke="#aa94db" d="M689 284 H764 V195 H760"/>
+      <path class="floor-route" stroke="#a1d67a" d="M684 262 H780 V452 H1145"/>
+      <circle cx="675" cy="275" r="11.7" fill="none" stroke="#18202a" stroke-width="5.4"/>
+      <circle cx="675" cy="275" r="9" fill="none" stroke="#33c7d1" stroke-width="4.5" stroke-dasharray="2.4 54.15" transform="rotate(-42 675 275)"/>
+      <circle cx="675" cy="275" r="9" fill="none" stroke="#73c2f5" stroke-width="4.5" stroke-dasharray="2.4 54.15" transform="rotate(-29 675 275)"/>
+      <circle cx="675" cy="275" r="9" fill="none" stroke="#7bd16e" stroke-width="4.5" stroke-dasharray="2.4 54.15" transform="rotate(-15 675 275)"/>
+      <circle cx="675" cy="275" r="9" fill="none" stroke="#f0b83d" stroke-width="4.5" stroke-dasharray="2.4 54.15" transform="rotate(0 675 275)"/>
+      <circle cx="675" cy="275" r="9" fill="none" stroke="#eb574d" stroke-width="4.5" stroke-dasharray="2.4 54.15" transform="rotate(151 675 275)"/>
+      <circle cx="675" cy="275" r="9" fill="none" stroke="#b8854a" stroke-width="4.5" stroke-dasharray="2.4 54.15" transform="rotate(48 675 275)"/>
+      <circle cx="675" cy="275" r="9" fill="none" stroke="#aa94db" stroke-width="4.5" stroke-dasharray="2.4 54.15" transform="rotate(34 675 275)"/>
+      <circle cx="675" cy="275" r="9" fill="none" stroke="#a1d67a" stroke-width="4.5" stroke-dasharray="2.4 54.15" transform="rotate(-63 675 275)"/>
+      <text class="route-label" x="675" y="242" text-anchor="middle">WAYFINDING HUB</text>
+    </g>
 
     <!-- Escape marker. -->
     <g transform="translate(95,270)">
@@ -186,7 +220,18 @@
     <line class="window" x1="900" y1="35" x2="955" y2="35"/>
     <text class="label" x="968" y="42">Delivery window</text>
 
-    <text class="small" x="0" y="84">Public corridors are the default NPC route. Maintenance is optional, darker, and intended for shortcuts, hazards, and antagonist pressure.</text>
-    <text class="small" x="0" y="108">Bridge and Botany are accessible geometry in this pass; existing incidents remain in Medical/Quarantine, Engineering/Atmos, Service/Chapel, Maintenance, and Chemistry.</text>
+    <g transform="translate(0,68)">
+      <line x1="0" y1="0" x2="42" y2="0" stroke="#33c7d1" stroke-width="5"/><text class="small" x="50" y="5">Chemistry</text>
+      <line x1="145" y1="0" x2="187" y2="0" stroke="#73c2f5" stroke-width="5"/><text class="small" x="195" y="5">Medical</text>
+      <line x1="270" y1="0" x2="312" y2="0" stroke="#f0b83d" stroke-width="5"/><text class="small" x="320" y="5">Engineering</text>
+      <line x1="440" y1="0" x2="482" y2="0" stroke="#b8854a" stroke-width="5"/><text class="small" x="490" y="5">Cargo</text>
+      <line x1="560" y1="0" x2="602" y2="0" stroke="#eb574d" stroke-width="5"/><text class="small" x="610" y="5">Security</text>
+      <line x1="700" y1="0" x2="742" y2="0" stroke="#7bd16e" stroke-width="5"/><text class="small" x="750" y="5">Service</text>
+      <line x1="830" y1="0" x2="872" y2="0" stroke="#aa94db" stroke-width="5"/><text class="small" x="880" y="5">Bridge</text>
+      <line x1="950" y1="0" x2="992" y2="0" stroke="#a1d67a" stroke-width="5"/><text class="small" x="1000" y="5">Botany</text>
+    </g>
+
+    <text class="small" x="0" y="108">Public corridors are the default NPC route. Maintenance is optional, darker, and intended for shortcuts, hazards, and antagonist pressure.</text>
+    <text class="small" x="0" y="132">Colored floor bands and matching wall plaques lead from the central public hub to all eight accessible departments.</text>
   </g>
 </svg>

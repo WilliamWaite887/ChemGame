@@ -71,13 +71,20 @@ fn main() {
         }
     };
 
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "ChemGame — Chemistry Lab".into(),
-            ..default()
-        }),
-        ..default()
-    }))
+    app.add_plugins(
+        DefaultPlugins
+            // TrenchBroom's station surfaces are deliberately low-resolution
+            // sprite art. Keep their texels crisp instead of blurring panel
+            // seams and hazard marks between pixels.
+            .set(ImagePlugin::default_nearest())
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "ChemGame — Chemistry Lab".into(),
+                    ..default()
+                }),
+                ..default()
+            }),
+    )
     .init_state::<AppState>();
 
     // Before the plugins, so `NetPlugin` sees a mode already chosen and the

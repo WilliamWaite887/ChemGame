@@ -40,6 +40,7 @@ The full department bays are editable moodboards and prop groupings. Matching `*
 - `glb/department_*_starter.glb` — six complete reference/showroom bays
 - `glb/department_*_dressing.glb` — six shell-free runtime furniture groupings
 - `glb/decor_chem_*.glb` — four wall-origin, shell-free chemistry decoration modules
+- `textures/machine_*.png` — four packed, nearest-filtered pixel materials for casing and hardware
 - `station_starter_kit_manifest.json` — coordinate spaces, nominal envelopes, runtime collision sizes, measured visual bounds, and named sockets
 - `preview_machines.png`, `preview_departments.png`, and `preview_chemistry_decor.png` — quick visual catalogs
 - `generate_station_starter_kit.py` — fully procedural source
@@ -63,6 +64,7 @@ Conventions:
 - The Y-up GLB export maps Blender `(x, y, z)` to glTF/Bevy `(x, z, -y)`, so exported assets use `+Y` up and `+Z` as their working/front side.
 - Origins sit at the center of each nominal body footprint on the floor; measured decorative overhangs can be asymmetric.
 - Chemistry decoration origins sit at the floor projection of their wall-mount centre. Geometry stays on the front (`-Y`) side of the mounting plane so a TrenchBroom marker can be placed directly against an interior wall.
+- Machine casing, light casing, dark face panels, and steel hardware use 128 x 128 repeating pixel textures at 64 texels per metre. Generated meshes receive dominant-axis box UVs in local metric space; screens, glass, labels, warning colors, and department accents stay untextured for readability.
 - Bevel modifiers remain editable in the `.blend` and are applied by the GLB exporter.
 - Detailed mesh collision is intentionally omitted; keep ChemGame's existing simple collision boxes.
 
