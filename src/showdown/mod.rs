@@ -69,8 +69,8 @@ impl Plugin for ShowdownPlugin {
                     arm_showdown,
                     run_siege,
                     handle_breach_delivery,
-                    turn_assailant_hostile,
-                    run_assailant,
+                    turn_hostile_on_arrival,
+                    run_pursuers,
                     resolve_showdown,
                 )
                     .chain()
@@ -109,16 +109,41 @@ pub struct Assailant;
 /// Walks toward the nearest chemist. Replaces [`CrewRoute`] rather than
 /// coexisting with it — two systems writing one `Transform` would fight, and
 /// the waypoint route has nothing useful to say about a moving target.
+///
+/// Shared by every hostile-NPC thread in the game, not just the showdown's
+/// own [`Assailant`] — [`crate::cult::Cultist`] rides this exact component
+/// too. Nothing about walking toward the nearest chemist and hitting them is
+/// antagonist-specific; only what inserts `Pursuit` differs per caller.
 #[derive(Component)]
 pub struct Pursuit {
     speed: f32,
     /// Seconds until this one can land another hit.
     cooldown: f32,
+    /// Seconds between hits once in reach — also what `cooldown` resets to.
+    hit_every: f32,
+    /// Brute damage dealt per hit.
+    hit_brute: i32,
     /// Cached portal route to the target's last sampled position.
     path: Vec<Vec3>,
     waypoint: usize,
     /// Seconds until the moving target is sampled and the route is rebuilt.
     repath_in: f32,
+}
+
+impl Pursuit {
+    /// `cooldown` starts equal to `hit_every` — the "off cooldown the moment
+    /// it arrives" behaviour `turn_hostile_on_arrival` always had.
+    pub(crate) fn new(speed: f32, hit_every: f32, hit_brute: i32) -> Self {
+        Self {
+            speed,
+            cooldown: hit_every,
+            hit_every,
+            hit_brute,
+            path: Vec::new(),
+            waypoint: 0,
+            repath_in: 0.0,
+        }
+    }
 }
 
 /// The live showdown. Absent means none is running.
@@ -165,7 +190,11 @@ fn arm_showdown(
 
     match &def.showdown {
         ShowdownForm::Siege {
-            cure_reagent, spot, ..
+            cure_reagent,
+            spot,
+            guard_count,
+            guard_name,
+            ..
         } => {
             let Some(transform) = spots.get(spot) else {
                 if !*missing_spot_reported {
@@ -182,6 +211,30 @@ fn arm_showdown(
                 Replicated,
                 crate::until_we_leave_the_lab(),
             ));
+            // Cult-only in practice — every other siege-form antagonist ships
+            // `guard_count: 0` — but the check is on the count, not the
+            // identity, so any future siege-form antagonist gets this for
+            // free just by authoring one. Ward-scaled the same way the gas
+            // and the cure are, but `.max(1)`: however well the base was
+            // raided, the finale still has "someone to punch."
+            if *guard_count > 0 {
+                let wards = campaign.cult_incidents.iter().filter(|done| **done).count() as i32;
+                let count = (*guard_count as i32 - wards / 3).max(1);
+                for _ in 0..count {
+                    let guard_def = CrewDef {
+                        name: guard_name.clone(),
+                        role: "Cult".to_string(),
+                        color: [0.42, 0.05, 0.10],
+                    };
+                    let entity = spawn_crew_member(&mut commands, &guard_def, 0.0);
+                    commands.entity(entity).insert((
+                        crate::cult::Cultist {
+                            wards_incident: None,
+                        },
+                        Replicated,
+                    ));
+                }
+            }
         }
         ShowdownForm::Assailant { name, color } => {
             // A synthetic identity, never drawn from `station.crew.ron` — the
@@ -401,9 +454,20 @@ fn cure_units(db: &ChemDb, solution: &Solution, cure: chem_sim::ReagentId) -> Un
 // Assailant
 // ---------------------------------------------------------------------------
 
-/// An assailant that has not stopped being an ordinary visitor yet.
-type StillPretending<'w, 's> =
-    Query<'w, 's, (Entity, &'static CrewRoute), (With<Assailant>, Without<Pursuit>)>;
+/// A hostile-to-be that has not stopped being an ordinary visitor yet —
+/// either the showdown's own [`Assailant`] or one of [`crate::cult::Cultist`]'s
+/// finale muscle. Base-guard cultists never match this: they are stationed
+/// directly with `Pursuit` absent and no `CrewRoute` to arrive on, and get
+/// their own proximity-based aggro in `cult::aggro_cultists` instead.
+type StillPretending<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static CrewRoute),
+    (
+        Or<(With<Assailant>, With<crate::cult::Cultist>)>,
+        Without<Pursuit>,
+    ),
+>;
 
 /// Drops the act once it has walked in.
 ///
@@ -411,7 +475,7 @@ type StillPretending<'w, 's> =
 /// counter, on the ordinary `CrewRoute` — and only then stops being one. That
 /// beat is the whole point: for a few seconds it is indistinguishable from
 /// the crew, which is exactly what it has been all game.
-fn turn_assailant_hostile(
+fn turn_hostile_on_arrival(
     mut commands: Commands,
     script: Option<Res<Script>>,
     arrived: StillPretending,
@@ -426,39 +490,35 @@ fn turn_assailant_hostile(
         commands
             .entity(entity)
             .remove::<CrewRoute>()
-            .insert(Pursuit {
-                speed: script.showdown.speed,
-                cooldown: script.showdown.hit_every_seconds,
-                path: Vec::new(),
-                waypoint: 0,
-                repath_in: 0.0,
-            });
+            .insert(Pursuit::new(
+                script.showdown.speed,
+                script.showdown.hit_every_seconds,
+                script.showdown.hit_brute,
+            ));
     }
 }
 
-/// Walks it at whoever is nearest and hits them when it gets there.
+/// Walks every pursuer at whoever is nearest and hits them when it gets
+/// there. Shared by both [`Assailant`] and [`crate::cult::Cultist`] — nothing
+/// here is antagonist-specific; only what inserted the [`Pursuit`] differs.
 ///
 /// The damage call is the second site of the pattern
 /// `rogue_security::expire_rogue_encounters` established — through the
 /// replicated [`Body`], with a `HazardFelt` alongside so `fx` kicks the
 /// victim's camera. Nothing about how a chemist takes damage is new here.
 #[allow(clippy::too_many_arguments)]
-fn run_assailant(
+fn run_pursuers(
     time: Res<Time>,
-    script: Option<Res<Script>>,
     nav: Option<Res<NavGraph>>,
     areas: Option<Res<WalkableAreas>>,
-    mut assailants: Query<(&mut Transform, &mut Pursuit), With<Assailant>>,
-    mut chemists: Query<(Entity, &Transform, &mut Body, &Chemist), Without<Assailant>>,
+    mut pursuers: Query<(&mut Transform, &mut Pursuit)>,
+    mut chemists: Query<(Entity, &Transform, &mut Body, &Chemist), Without<Pursuit>>,
     mut felt: MessageWriter<ToClients<HazardFelt>>,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
-    let Some(script) = script else {
-        return;
-    };
     let dt = time.delta_secs();
 
-    for (mut transform, mut pursuit) in &mut assailants {
+    for (mut transform, mut pursuit) in &mut pursuers {
         pursuit.cooldown -= dt;
         pursuit.repath_in -= dt;
 
@@ -488,10 +548,9 @@ fn run_assailant(
         // Euclidean proximity alone is not enough: two people can be less
         // than arm's reach apart on opposite sides of a wall. The cached route
         // must both end at this sampled target and be short enough to hit.
-        let route_targets_chemist = pursuit
-            .path
-            .last()
-            .is_some_and(|sampled| sampled.distance_squared(target) <= 0.0001);
+        let route_targets_chemist = pursuit.path.last().is_some_and(|sampled| {
+            Vec2::new(sampled.x - target.x, sampled.z - target.z).length_squared() <= 0.0001
+        });
         let route_in_reach = remaining_route_length(transform.translation, &pursuit)
             .is_some_and(|walk| walk <= ASSAILANT_REACH);
         if distance > ASSAILANT_REACH * ASSAILANT_REACH || !route_targets_chemist || !route_in_reach
@@ -504,8 +563,7 @@ fn run_assailant(
                 let Some(waypoint) = pursuit.path.get(pursuit.waypoint).copied() else {
                     break;
                 };
-                let mut step = waypoint - transform.translation;
-                step.y = 0.0;
+                let step = waypoint - transform.translation;
                 let waypoint_distance = step.length();
                 if waypoint_distance <= 0.02 {
                     pursuit.waypoint += 1;
@@ -513,9 +571,9 @@ fn run_assailant(
                 }
                 let walked = remaining.min(waypoint_distance);
                 let candidate = transform.translation + step / waypoint_distance * walked;
-                transform.translation = areas
-                    .as_deref()
-                    .map_or(candidate, |areas| areas.contain(candidate, NAV_RADIUS));
+                transform.translation = areas.as_deref().map_or(candidate, |areas| {
+                    areas.contain_on_surface(candidate, NAV_RADIUS, 0.93)
+                });
                 remaining -= walked;
                 if walked >= waypoint_distance {
                     pursuit.waypoint += 1;
@@ -528,7 +586,7 @@ fn run_assailant(
         if pursuit.cooldown > 0.0 {
             continue;
         }
-        pursuit.cooldown = script.showdown.hit_every_seconds;
+        pursuit.cooldown = pursuit.hit_every;
 
         // In reach and off cooldown: hit whoever is in reach, once.
         for (entity, chemist_transform, mut body, chemist) in &mut chemists {
@@ -541,7 +599,7 @@ fn run_assailant(
             }
             body.0.apply(Damage::of(
                 DamageKind::Brute,
-                Units::whole(script.showdown.hit_brute),
+                Units::whole(pursuit.hit_brute),
             ));
             felt.write(ToClients {
                 targets: SendTargets::Single(chemist.client),
@@ -594,6 +652,7 @@ fn resolve_showdown(
     showdown: Option<ResMut<Showdown>>,
     breaches: Query<Entity, With<Breach>>,
     assailants: Query<(Entity, &Body), With<Assailant>>,
+    cultists: Query<(Entity, &Body, &crate::cult::Cultist)>,
     chemists: Query<&Body, (With<Chemist>, Without<Assailant>)>,
     mut radio: ResMut<RadioLog>,
 ) {
@@ -604,14 +663,26 @@ fn resolve_showdown(
 
     showdown.deadline -= time.delta_secs();
 
-    // Won: the breach is treated, or the assailant is down.
+    // Won: the breach is treated, the assailant is down, or every piece of
+    // finale muscle is (`wards_incident: None` — a base guard still standing
+    // does not block this; see the cleanup below for why that is fine).
     let treated = showdown.treated >= showdown.needed && !breaches.is_empty();
     let put_down = assailants.iter().any(|(_, body)| body.0.collapsed);
+    let mut finale_muscle_exists = false;
+    let mut finale_muscle_down = true;
+    for (_, body, cultist) in &cultists {
+        if cultist.wards_incident.is_some() {
+            continue;
+        }
+        finale_muscle_exists = true;
+        finale_muscle_down &= body.0.collapsed;
+    }
+    let cultists_down = finale_muscle_exists && finale_muscle_down;
     // Lost: the clock ran out, or every chemist in the lab is on the floor.
     let out_of_time = showdown.deadline <= 0.0;
     let overwhelmed = !chemists.is_empty() && chemists.iter().all(|body| body.0.collapsed);
 
-    let outcome = if treated || put_down {
+    let outcome = if treated || put_down || cultists_down {
         ArcOutcome::StoppedDirectly
     } else if out_of_time || overwhelmed {
         ArcOutcome::PlotSucceeded
@@ -626,6 +697,12 @@ fn resolve_showdown(
     }
     for (assailant, _) in &assailants {
         commands.entity(assailant).despawn();
+    }
+    // Unconditional, and not filtered to finale muscle: once the arc ends,
+    // any base guard from earlier escalation that was never put down goes
+    // too — the Cult's presence in the lab is over either way.
+    for (cultist, _, _) in &cultists {
+        commands.entity(cultist).despawn();
     }
     commands.remove_resource::<Showdown>();
 }
@@ -704,8 +781,8 @@ mod tests {
                 (
                     arm_showdown,
                     run_siege,
-                    turn_assailant_hostile,
-                    run_assailant,
+                    turn_hostile_on_arrival,
+                    run_pursuers,
                     resolve_showdown,
                 )
                     .chain(),
@@ -927,11 +1004,92 @@ mod tests {
                 0,
                 "{antag:?} left an assailant standing after its arc ended"
             );
+            assert_eq!(
+                app.world_mut()
+                    .query::<&crate::cult::Cultist>()
+                    .iter(app.world())
+                    .count(),
+                0,
+                "{antag:?} left a cultist standing after its arc ended"
+            );
             assert!(
                 app.world().get_resource::<Showdown>().is_none(),
                 "{antag:?} left its showdown resource live"
             );
         }
+    }
+
+    #[test]
+    fn only_cult_gets_a_finale_cultist() {
+        let mut cult_app = showdown_app(SIEGE);
+        advance(&mut cult_app, 0.1);
+        assert!(
+            cult_app
+                .world_mut()
+                .query::<&crate::cult::Cultist>()
+                .iter(cult_app.world())
+                .count()
+                > 0,
+            "the Cult's own siege authors guard_count > 0"
+        );
+
+        let mut assailant_app = showdown_app(ASSAILANT);
+        advance(&mut assailant_app, 0.1);
+        assert_eq!(
+            assailant_app
+                .world_mut()
+                .query::<&crate::cult::Cultist>()
+                .iter(assailant_app.world())
+                .count(),
+            0,
+            "an Assailant-form antagonist has no Siege block to author guard_count on"
+        );
+    }
+
+    #[test]
+    fn putting_the_finale_cultists_down_wins_the_siege_without_curing_it() {
+        let mut app = showdown_app(SIEGE);
+        advance(&mut app, 0.1);
+
+        let cultists: Vec<Entity> = app
+            .world_mut()
+            .query_filtered::<Entity, With<crate::cult::Cultist>>()
+            .iter(app.world())
+            .collect();
+        assert!(!cultists.is_empty());
+        for entity in cultists {
+            app.world_mut().get_mut::<Body>(entity).unwrap().0.collapsed = true;
+        }
+        advance(&mut app, 0.1);
+
+        let campaign = app.world().resource::<Campaign>();
+        assert_eq!(campaign.outcome, Some(ArcOutcome::StoppedDirectly));
+        assert_eq!(campaign.player_won(), Some(true));
+    }
+
+    #[test]
+    fn wards_still_reduce_the_finale_cultist_count() {
+        let mut unwarded = showdown_app(SIEGE);
+        let mut warded = showdown_app(SIEGE);
+        warded.world_mut().resource_mut::<Campaign>().cult_incidents = vec![true; 10];
+        advance(&mut unwarded, 0.1);
+        advance(&mut warded, 0.1);
+
+        let plain = unwarded
+            .world_mut()
+            .query::<&crate::cult::Cultist>()
+            .iter(unwarded.world())
+            .count();
+        let safer = warded
+            .world_mut()
+            .query::<&crate::cult::Cultist>()
+            .iter(warded.world())
+            .count();
+        assert!(safer <= plain);
+        assert!(
+            safer >= 1,
+            "a fully-warded save must still have someone to fight"
+        );
     }
 
     #[test]
@@ -944,6 +1102,8 @@ mod tests {
                     spot,
                     gas_reagent,
                     cure_reagent,
+                    guard_count,
+                    guard_name,
                 } => {
                     assert!(
                         !spot.trim().is_empty(),
@@ -965,6 +1125,19 @@ mod tests {
                         gas, cure,
                         "a siege you cure with the thing it is gassing you with is a joke"
                     );
+                    if *guard_count > 0 {
+                        assert!(
+                            !guard_name.trim().is_empty(),
+                            "a siege with guards needs a name for them"
+                        );
+                        let roster: Vec<CrewDef> =
+                            ron::from_str(include_str!("../../assets/data/station.crew.ron"))
+                                .unwrap();
+                        assert!(
+                            roster.iter().all(|member| member.name != *guard_name),
+                            "'{guard_name}' is on the ordinary roster, so a legitimate order could pick it"
+                        );
+                    }
                 }
                 ShowdownForm::Assailant { name, .. } => {
                     assert!(!name.trim().is_empty());
@@ -1004,7 +1177,7 @@ mod tests {
             .insert_resource(areas)
             .init_resource::<Time>()
             .add_message::<ToClients<HazardFelt>>()
-            .add_systems(Update, run_assailant);
+            .add_systems(Update, run_pursuers);
         app
     }
 
@@ -1014,13 +1187,7 @@ mod tests {
             .spawn((
                 Assailant,
                 Transform::from_translation(hunter),
-                Pursuit {
-                    speed: 3.0,
-                    cooldown: 10.0,
-                    path: Vec::new(),
-                    waypoint: 0,
-                    repath_in: 0.0,
-                },
+                Pursuit::new(3.0, 10.0, 8),
             ))
             .id();
         let chemist = app
@@ -1096,7 +1263,7 @@ mod tests {
         advance(&mut app, 0.16);
         assert_eq!(
             app.world().get::<Pursuit>(assailant).unwrap().path.last(),
-            Some(&moved_target)
+            Some(&moved_target.with_y(0.93))
         );
     }
 

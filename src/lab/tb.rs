@@ -43,8 +43,8 @@ use crate::AppState;
 use crate::crew::Departments;
 
 use super::{
-    machine_kind_named, Bounds, CrisisSpots, DoorSpots, LabLight, MachineSpots, MapReady, Solid,
-    WalkableAreas, TB_SCALE,
+    machine_kind_named, Bounds, CrisisSpots, DoorSpots, FloorProfile, LabLight, MachineSpots,
+    MapReady, Solid, WalkableAreas, WalkableSurface, TB_SCALE,
 };
 
 /// The only world asset allowed to replace the station's map-derived state.
@@ -77,25 +77,12 @@ fn is_scenery(texture: &str) -> bool {
     texture.starts_with("floor_") || matches!(texture, "ceiling" | "stripe")
 }
 
-/// A brush whose underside clears this gets no collider.
-///
-/// `push_out` resolves in the XZ plane only, on the stated assumption that
-/// every `Solid` is tall enough to block at eye height. Door headers break that
-/// assumption badly: a header's footprint *is* the doorway, so giving one a
-/// collider bricks up the door it sits above, at floor level, invisibly. The
-/// hand-built lab never hit this because headers went through `decor_box` and
-/// never became `Solid` at all — the map has no such distinction, so the height
-/// check has to live here.
-///
-/// This also covers anything else hung overhead in TrenchBroom — pipework, a
-/// sign, a mezzanine — which would otherwise be an invisible wall.
-const HEAD_ROOM: f32 = crate::player::EYE_HEIGHT + 0.25;
-
 /// Whether a brush spanning `min_y..max_y` is something a body can walk into.
 fn blocks_a_body(min_y: f32, max_y: f32) -> bool {
-    // `max_y` is only here to reject brushes with no height at all, which a
-    // degenerate volume in the map could otherwise turn into a phantom wall.
-    max_y > min_y && min_y < HEAD_ROOM
+    // Vertical overlap is resolved per body at movement time. Keeping every
+    // structural brush is what lets underfloor tunnel walls collide without
+    // making an overhead doorway header block the floor beneath it.
+    max_y > min_y
 }
 
 /// The lab's worldspawn: the static shell, plus a collider per brush.
@@ -188,27 +175,55 @@ pub struct Walkable {
 #[derive(Component, Reflect, Default)]
 #[reflect(Component)]
 pub struct WalkableFootprints {
-    pub bounds: Vec<Bounds>,
+    pub surfaces: Vec<WalkableSurface>,
 }
 
 impl Walkable {
     fn measure(view: &mut QuakeClassSpawnView) -> bevy_trenchbroom::anyhow::Result<()> {
-        let bounds = view
+        let slope_axis = view
+            .src_entity
+            .properties
+            .get("slope_axis")
+            .map(|axis| axis.trim().to_ascii_lowercase());
+        let slope_min = view
+            .src_entity
+            .properties
+            .get("floor_min")
+            .and_then(|value| value.parse::<f32>().ok());
+        let slope_max = view
+            .src_entity
+            .properties
+            .get("floor_max")
+            .and_then(|value| value.parse::<f32>().ok());
+
+        let surfaces = view
             .src_entity
             .brushes
             .iter()
             .filter_map(brush_extents)
-            .map(|(min, max)| Bounds {
-                min_x: min.x,
-                max_x: max.x,
-                min_z: min.z,
-                max_z: max.z,
+            .map(|(min, max)| {
+                let bounds = Bounds {
+                    min_x: min.x,
+                    max_x: max.x,
+                    min_z: min.z,
+                    max_z: max.z,
+                };
+                let floor = match (slope_axis.as_deref(), slope_min, slope_max) {
+                    (Some("x"), Some(at_min), Some(at_max)) => {
+                        FloorProfile::LinearX { at_min, at_max }
+                    }
+                    (Some("z"), Some(at_min), Some(at_max)) => {
+                        FloorProfile::LinearZ { at_min, at_max }
+                    }
+                    _ => FloorProfile::Flat(min.y),
+                };
+                WalkableSurface { bounds, floor }
             })
             .collect();
 
         view.world
             .entity_mut(view.entity)
-            .insert(WalkableFootprints { bounds });
+            .insert(WalkableFootprints { surfaces });
 
         Ok(())
     }
@@ -258,8 +273,13 @@ fn collect_loaded_map(
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
                 .map(str::to_string);
-            for bounds in &footprints.bounds {
-                areas.push_with_bridge(*bounds, room.clone(), bridge_id.clone());
+            for surface in &footprints.surfaces {
+                areas.push_surface(
+                    surface.bounds,
+                    room.clone(),
+                    bridge_id.clone(),
+                    surface.floor,
+                );
             }
         }
 
@@ -1301,6 +1321,8 @@ impl Plugin for LabTrenchBroomPlugin {
             // scene world. The scene spawner panics on any component it cannot
             // find in the registry, so they have to be here too.
             .register_type::<Solid>()
+            .register_type::<FloorProfile>()
+            .register_type::<WalkableSurface>()
             .register_type::<WalkableFootprints>();
 
         app.add_observer(collect_loaded_map)
@@ -1364,13 +1386,13 @@ mod tests {
     // not this feature is on — the map is in the repo either way.
 
     #[test]
-    fn a_door_header_never_walls_up_the_door_beneath_it() {
-        // The bug: `push_out` is flat, so a collider on the header above a
-        // doorway blocks the doorway itself, at floor level, with nothing to
-        // see. Headers run from DOOR_HEIGHT (2.3) to ROOM_HEIGHT (3.2).
+    fn every_nondegenerate_structural_brush_gets_a_height_aware_collider() {
+        // Movement now checks vertical overlap per body, so keeping a header's
+        // collider cannot wall up the doorway beneath it. Retaining it matters
+        // for stacked geometry such as the underfloor maintenance tunnels.
         assert!(
-            !blocks_a_body(2.3, 3.2),
-            "the header above a door must not collide",
+            blocks_a_body(2.3, 3.2),
+            "the header remains represented for height-aware collision",
         );
 
         // A full-height wall still must.

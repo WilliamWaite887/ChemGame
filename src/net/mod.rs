@@ -28,6 +28,7 @@ use crate::body::{Bloodstream, Body};
 use crate::chem_world::ChemicalPuddle;
 use crate::containers::{Container, HeldBy, InSlot, InSlotB, Stored};
 use crate::crew::{AtCounter, CrewMember, NeedsMedicalEvacuation};
+use crate::cult::{Cultist, RitualAnchor};
 use crate::door::{Corroded, Door};
 use crate::hazards::{ActiveHazard, SmokeCloud, SmokeOwner, SmokePayload};
 use crate::interaction::Interactable;
@@ -583,7 +584,18 @@ fn register_replication(app: &mut App) {
         // so a guest is not watching an ordinary-looking crew member walk
         // through the lab taking chemical damage for no visible reason.
         .replicate::<Breach>()
-        .replicate::<Assailant>();
+        .replicate::<Assailant>()
+        // A ritual manifestation's own data — `index`/`name`/`clue`/
+        // `treatment`/`amount`. The entity itself already replicates (it is
+        // spawned `Replicated`), but without this line a joining guest never
+        // received the component, leaving them an unlabeled interactable
+        // with nothing to read or reason about. A pre-existing gap, fixed
+        // alongside the Cultist work below since the same audit found it.
+        .replicate::<RitualAnchor>()
+        // Same reasoning as `Assailant`: without this a guest watches an
+        // ordinary-looking crew member idle in the chapel or take chemical
+        // damage for no visible reason.
+        .replicate::<Cultist>();
 }
 
 fn start_hosting(mut commands: Commands, channels: Res<RepliconChannels>) {

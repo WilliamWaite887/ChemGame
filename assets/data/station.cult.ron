@@ -33,6 +33,11 @@
                     amount: 10,
                 ),
             ],
+            guard: (
+                name: "A Watching Acolyte",
+                clue: "CHAPEL: Someone is standing very still in the nave, facing the wall. They do not turn around when the door opens.",
+                spot: "cult.base_guard_1",
+            ),
         ),
         (
             reagent: "mindbreaker_toxin",
@@ -58,6 +63,11 @@
                     amount: 10,
                 ),
             ],
+            guard: (
+                name: "A Silent Acolyte",
+                clue: "QUIET ROOM: A masked figure has taken up post beside the inner door. It has not moved in an hour, and it is watching the corridor.",
+                spot: "cult.base_guard_2",
+            ),
         ),
         (
             reagent: "flash_powder",
@@ -82,6 +92,18 @@
                     amount: 12,
                 ),
             ],
+            guard: (
+                name: "A Blooded Acolyte",
+                clue: "CHAPEL: The one guarding the altar now carries something sharp. It stopped pretending to be a parishioner some time ago.",
+                spot: "cult.base_guard_3",
+            ),
         ),
     ],
+    altar: (
+        name: "The Chapel altar",
+        clue: "CHAPEL: Something has been rebuilt back where the nave meets the wall. It was not there when the station shipped, and it is already stained.",
+        spot: "cult.altar",
+        treatment: "space_cleaner",
+        amount: 15,
+    ),
 )

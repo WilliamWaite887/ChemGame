@@ -382,7 +382,8 @@ pub struct AntagDef {
 /// name and a colour, and neither has any use for the other's.
 #[derive(Clone, Debug, Deserialize)]
 pub enum ShowdownForm {
-    /// The lab itself turns on you. There is nothing to punch.
+    /// The lab itself turns on you — and, if `guard_count` is authored above
+    /// zero, so does whoever it sent along with the breach.
     Siege {
         /// Semantic map marker where the breach opens.
         spot: String,
@@ -391,6 +392,16 @@ pub enum ShowdownForm {
         /// The *reference* reagent for what stops it — any member of its
         /// category counts, the same leniency an ordinary order has.
         cure_reagent: String,
+        /// Hostile muscle spawned alongside the breach, on the ordinary
+        /// `CrewRoute` like any other showdown arrival. `#[serde(default)]`
+        /// so a siege-form antagonist with nothing to send (there is none
+        /// today, but the field is antagonist-agnostic) can simply omit it.
+        #[serde(default)]
+        guard_count: u32,
+        /// Kept off `station.crew.ron`, same reason the Assailant form's own
+        /// `name` is. Only meaningful when `guard_count > 0`.
+        #[serde(default)]
+        guard_name: String,
     },
     /// A body walks in and comes for you.
     Assailant {

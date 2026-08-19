@@ -441,6 +441,17 @@ pub struct Ambient {
     dwell: f32,
 }
 
+impl Ambient {
+    /// A dwell of `0.0` is a legitimate value, not a footgun: `ambient_behaviour`
+    /// needs `&mut CrewRoute` to do anything, so a caller that also strips
+    /// `CrewRoute` (a stationed guard, say) gets a component that only ever
+    /// does the one job callers actually want from it here — being excluded
+    /// from [`NotResident`] — with zero risk of triggering wander behaviour.
+    pub(crate) fn new(dwell: f32) -> Self {
+        Self { dwell }
+    }
+}
+
 /// Query filter for crew who are *visiting* the lab, excluding the residents
 /// who simply live on the station.
 ///
@@ -836,8 +847,7 @@ fn walk_route(
             continue;
         };
 
-        let flat_target = Vec3::new(target.x, transform.translation.y, target.z);
-        let to_target = flat_target - transform.translation;
+        let to_target = target - transform.translation;
         if to_target.length() <= ARRIVE_EPSILON {
             route.index += 1;
             continue;
@@ -1583,7 +1593,7 @@ mod tests {
 
         let heading_for = destination(&app, medic);
         assert!(
-            heading_for.distance(hurt) < 0.01,
+            heading_for.distance(hurt.with_y(0.93)) < 0.01,
             "a medic headed for {heading_for:?} instead of the casualty at {hurt:?}",
         );
     }
@@ -1599,7 +1609,7 @@ mod tests {
         tick(&mut app, 0.01);
 
         let heading_for = destination(&app, hauler);
-        let home = Vec3::new(-5.0, 0.0, 18.0);
+        let home = Vec3::new(-5.0, 0.93, 18.0);
         assert!(
             heading_for.distance(home) < 0.01,
             "a hauler headed for {heading_for:?} instead of home to Cargo",

@@ -13,7 +13,7 @@
 use bevy::prelude::Vec3;
 use quake_map::Entity;
 
-use crate::lab::{Bounds, WalkableAreas, COUNTER_SPOT, TB_SCALE};
+use crate::lab::{Bounds, FloorProfile, WalkableAreas, COUNTER_SPOT, TB_SCALE};
 use crate::machines::MachineKind;
 use crate::nav::{NavGraph, NAV_RADIUS};
 
@@ -226,8 +226,22 @@ pub(crate) fn authored_walkable_areas() -> WalkableAreas {
     {
         let room = property(&entity, "room").filter(|room| !room.trim().is_empty());
         let bridge_id = property(&entity, "bridge_id").filter(|bridge| !bridge.trim().is_empty());
+        let floor = match (
+            property(&entity, "slope_axis").as_deref(),
+            property(&entity, "floor_min").and_then(|value| value.parse::<f32>().ok()),
+            property(&entity, "floor_max").and_then(|value| value.parse::<f32>().ok()),
+        ) {
+            (Some("x"), Some(at_min), Some(at_max)) => {
+                Some(FloorProfile::LinearX { at_min, at_max })
+            }
+            (Some("z"), Some(at_min), Some(at_max)) => {
+                Some(FloorProfile::LinearZ { at_min, at_max })
+            }
+            _ => None,
+        };
         for brush in &entity.brushes {
-            areas.push_with_bridge(footprint(brush), room.clone(), bridge_id.clone());
+            let profile = floor.unwrap_or_else(|| FloorProfile::Flat(vertical_span(brush).0));
+            areas.push_surface(footprint(brush), room.clone(), bridge_id.clone(), profile);
         }
     }
     areas
@@ -255,8 +269,8 @@ fn every_brush_encloses_a_volume() {
     // into nothing at all.
     let mut brushes = 0;
 
-    for entity in parse() {
-        for brush in &entity.brushes {
+    for (entity_index, entity) in parse().into_iter().enumerate() {
+        for (brush_index, brush) in entity.brushes.iter().enumerate() {
             assert!(
                 brush.len() >= 4,
                 "a brush needs at least four faces to enclose anything",
@@ -299,7 +313,7 @@ fn every_brush_encloses_a_volume() {
 
                 assert!(
                     side < 0.0,
-                    "a brush is inside out: its centre sits outside one of its own faces",
+                    "entity {entity_index} brush {brush_index} is inside out: its centre sits outside one of its own faces",
                 );
             }
 
@@ -659,22 +673,22 @@ fn station_v2_keeps_its_department_and_route_footprints() {
         );
     }
 
-    let branches = named_bounds("Public Branch Galleries");
+    let branches = named_bounds("Maintenance Lower");
     assert_eq!(
         branches.len(),
         2,
-        "the public grid needs two cross-galleries"
+        "the lower maintenance deck needs two cross-routes"
     );
     for expected in [
         Bounds {
             min_x: -41.5,
             max_x: -38.7,
-            min_z: -9.0,
-            max_z: 54.0,
+            min_z: -1.5,
+            max_z: 43.5,
         },
         Bounds {
-            min_x: -112.5,
-            max_x: 16.5,
+            min_x: -102.0,
+            max_x: 6.0,
             min_z: 28.6,
             max_z: 31.4,
         },
@@ -683,13 +697,132 @@ fn station_v2_keeps_its_department_and_route_footprints() {
             branches
                 .iter()
                 .any(|actual| bounds_are_close(*actual, expected)),
-            "public branch gallery is missing {expected:?}: {branches:?}",
+            "lower maintenance route is missing {expected:?}: {branches:?}",
         );
+    }
+
+    for entity in map
+        .iter()
+        .filter(|entity| property(entity, "room").as_deref() == Some("Maintenance Lower"))
+    {
+        for brush in &entity.brushes {
+            let (min_y, max_y) = vertical_span(brush);
+            assert!((min_y + 3.6).abs() < 0.001 && (max_y + 3.1).abs() < 0.001);
+        }
+    }
+
+    for (room, axis, floor_min, floor_max) in [
+        ("Maintenance Stair North", "z", "0", "-3.6"),
+        ("Maintenance Stair South", "z", "-3.6", "0"),
+        ("Maintenance Stair West", "x", "0", "-3.6"),
+        ("Maintenance Stair East", "x", "-3.6", "0"),
+    ] {
+        let stair = map
+            .iter()
+            .find(|entity| property(entity, "room").as_deref() == Some(room))
+            .unwrap_or_else(|| panic!("missing {room}"));
+        assert_eq!(property(stair, "slope_axis").as_deref(), Some(axis));
+        assert_eq!(property(stair, "floor_min").as_deref(), Some(floor_min));
+        assert_eq!(property(stair, "floor_max").as_deref(), Some(floor_max));
     }
 }
 
 #[test]
-fn primary_department_doors_are_distributed_across_public_branches() {
+fn maintenance_cross_has_visible_lower_floors_and_four_twelve_step_descents() {
+    let map = parse();
+    let world = map.first().expect("worldspawn");
+    let uses = |brush: &[quake_map::Surface], texture: &str| {
+        brush
+            .iter()
+            .all(|surface| surface.texture.to_string_lossy() == texture)
+    };
+
+    for expected in [
+        Bounds {
+            min_x: -41.5,
+            max_x: -38.7,
+            min_z: -1.5,
+            max_z: 43.5,
+        },
+        Bounds {
+            min_x: -102.0,
+            max_x: 6.0,
+            min_z: 28.6,
+            max_z: 31.4,
+        },
+    ] {
+        let floor = world.brushes.iter().find(|brush| {
+            uses(brush, "floor_corridor") && bounds_are_close(footprint(brush), expected) && {
+                let (min_y, max_y) = vertical_span(brush);
+                (min_y + 4.0).abs() < 0.001 && (max_y + 3.6).abs() < 0.001
+            }
+        });
+        assert!(
+            floor.is_some(),
+            "lower route has no visible floor: {expected:?}"
+        );
+    }
+
+    for (name, envelope) in [
+        (
+            "north",
+            Bounds {
+                min_x: -41.5,
+                max_x: -38.7,
+                min_z: -8.1,
+                max_z: -1.5,
+            },
+        ),
+        (
+            "south",
+            Bounds {
+                min_x: -41.5,
+                max_x: -38.7,
+                min_z: 43.5,
+                max_z: 50.1,
+            },
+        ),
+        (
+            "west",
+            Bounds {
+                min_x: -108.6,
+                max_x: -102.0,
+                min_z: 28.6,
+                max_z: 31.4,
+            },
+        ),
+        (
+            "east",
+            Bounds {
+                min_x: 6.0,
+                max_x: 12.6,
+                min_z: 28.6,
+                max_z: 31.4,
+            },
+        ),
+    ] {
+        let steps = world
+            .brushes
+            .iter()
+            .filter(|brush| uses(brush, "floor_corridor"))
+            .filter(|brush| {
+                let bounds = footprint(brush);
+                bounds.min_x >= envelope.min_x - 0.001
+                    && bounds.max_x <= envelope.max_x + 0.001
+                    && bounds.min_z >= envelope.min_z - 0.001
+                    && bounds.max_z <= envelope.max_z + 0.001
+            })
+            .filter(|brush| {
+                let (min_y, max_y) = vertical_span(brush);
+                ((max_y - min_y) - 0.2).abs() < 0.001 && max_y <= 0.001
+            })
+            .count();
+        assert_eq!(steps, 12, "{name} maintenance stair is incomplete");
+    }
+}
+
+#[test]
+fn primary_department_doors_open_onto_the_ground_floor_public_loop() {
     let map = parse();
     let main_gallery = Bounds {
         min_x: -109.5,
@@ -697,10 +830,10 @@ fn primary_department_doors_are_distributed_across_public_branches() {
         min_z: 10.0,
         max_z: 15.0,
     };
-    let branch_galleries: Vec<Bounds> = map
+    let public_loop: Vec<Bounds> = map
         .iter()
         .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
-        .filter(|entity| property(entity, "room").as_deref() == Some("Public Branch Galleries"))
+        .filter(|entity| property(entity, "room").as_deref() == Some("Public Loop"))
         .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
         .collect();
 
@@ -716,12 +849,8 @@ fn primary_department_doors_are_distributed_across_public_branches() {
         let (x, z) = origin_xz(door).expect("primary door has a valid origin");
         let point = Vec3::new(x, 0.0, z);
         assert!(
-            !main_gallery.holds(point),
-            "{id} still opens onto the single central gallery at {point}",
-        );
-        assert!(
-            branch_galleries.iter().any(|bounds| bounds.holds(point)),
-            "{id} is not served by either public branch gallery: {point}",
+            main_gallery.holds(point) && public_loop.iter().any(|bounds| bounds.holds(point)),
+            "{id} is not served by the ground-floor northern gallery: {point}",
         );
     }
 }
@@ -1596,6 +1725,26 @@ fn the_station_is_one_connected_space() {
         0,
         "{stranded} of {} walkable regions cannot be walked to from the first",
         inset.len(),
+    );
+}
+
+#[test]
+fn the_lower_cross_is_reached_through_a_stair_not_a_vertical_teleport() {
+    let graph = NavGraph::build(&authored_walkable_areas(), NAV_RADIUS);
+    let ground = Vec3::new(-40.1, 0.0, -10.5);
+    let lower = Vec3::new(-40.1, -3.6, 30.0);
+    let path = graph
+        .path(ground, lower)
+        .expect("the ground ring should connect to the lower maintenance cross");
+
+    assert!(
+        path.iter().any(|point| point.y < -0.01 && point.y > -3.59),
+        "route skipped the stair's intermediate elevations: {path:?}",
+    );
+    assert!(
+        path.last()
+            .is_some_and(|point| (point.y + 3.6).abs() < 0.01),
+        "route did not arrive on the lower deck: {path:?}",
     );
 }
 

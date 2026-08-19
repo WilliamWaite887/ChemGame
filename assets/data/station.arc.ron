@@ -78,12 +78,16 @@
         (
             id: Cult,
             display: "The Blood Cult",
-            // The ritual completes in your lab. There is no one to punch —
-            // the room is what turns on you.
+            // The ritual completes in your lab, and it did not come alone:
+            // the breach is guarded. Ward count (`cult_incidents`) shrinks
+            // the guard count same as it shrinks the gas, but never to zero
+            // — there is always at least one to put down.
             showdown: Siege(
                 spot: "showdown.breach",
                 gas_reagent: "chloral_hydrate",
                 cure_reagent: "dylovene",
+                guard_count: 2,
+                guard_name: "A Masked Acolyte",
             ),
             showdown_line: "It's HERE. The marks are burning through the lab wall and the air is going wrong.",
             suspected_line: "Chapel's reporting graffiti again. Third time this week, same symbol.",

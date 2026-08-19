@@ -20,7 +20,7 @@ use std::collections::BinaryHeap;
 
 use bevy::prelude::*;
 
-use crate::lab::{Bounds, MapReady, WalkableAreas};
+use crate::lab::{Bounds, FloorProfile, MapReady, WalkableAreas};
 use crate::AppState;
 
 /// The body radius paths are planned for.
@@ -31,10 +31,22 @@ use crate::AppState;
 /// crew member gives doorframes a few more centimetres than they need.
 pub const NAV_RADIUS: f32 = 0.35;
 
+/// Maximum mismatch between two surfaces at a portal. Stair runs meet their
+/// flat landings within this tolerance; stacked decks remain separate.
+const MAX_PORTAL_STEP: f32 = 0.45;
+
 /// A walkable rectangle and the ways out of it.
 struct Node {
     bounds: Bounds,
+    profile_bounds: Bounds,
+    floor: FloorProfile,
     edges: Vec<Edge>,
+}
+
+impl Node {
+    fn floor_at(&self, point: Vec3) -> f32 {
+        self.floor.height_at(self.profile_bounds, point)
+    }
 }
 
 struct Edge {
@@ -59,27 +71,32 @@ impl NavGraph {
         // Inset first, then join. Doing it the other way round would connect two
         // regions that only touch along an edge a body cannot actually fit
         // through — a path that exists on paper and wedges someone in a doorway.
-        let bounds: Vec<Bounds> = areas
+        let mut nodes: Vec<Node> = areas
             .regions()
             .iter()
-            .map(|region| region.bounds.inset(radius))
-            .filter(|bounds| bounds.is_standable())
-            .collect();
-
-        let mut nodes: Vec<Node> = bounds
-            .iter()
-            .map(|bounds| Node {
-                bounds: *bounds,
-                edges: Vec::new(),
+            .filter_map(|region| {
+                let bounds = region.bounds.inset(radius);
+                bounds.is_standable().then_some(Node {
+                    bounds,
+                    profile_bounds: region.open_bounds,
+                    floor: region.floor,
+                    edges: Vec::new(),
+                })
             })
             .collect();
 
-        for i in 0..bounds.len() {
-            for j in (i + 1)..bounds.len() {
-                let Some(shared) = bounds[i].intersection(&bounds[j]) else {
+        for i in 0..nodes.len() {
+            for j in (i + 1)..nodes.len() {
+                let Some(shared) = nodes[i].bounds.intersection(&nodes[j].bounds) else {
                     continue;
                 };
-                let portal = shared.center();
+                let mut portal = shared.center();
+                let a_y = nodes[i].floor_at(portal);
+                let b_y = nodes[j].floor_at(portal);
+                if (a_y - b_y).abs() > MAX_PORTAL_STEP {
+                    continue;
+                }
+                portal.y = (a_y + b_y) * 0.5;
                 nodes[i].edges.push(Edge { to: j, portal });
                 nodes[j].edges.push(Edge { to: i, portal });
             }
@@ -94,7 +111,17 @@ impl NavGraph {
     /// body nudged a few centimetres into a wall by a collision still has to be
     /// able to ask for a route home.
     fn locate(&self, point: Vec3) -> Option<usize> {
-        if let Some(index) = self.nodes.iter().position(|node| node.bounds.holds(point)) {
+        if let Some((index, _)) = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.bounds.holds(point))
+            .min_by(|(_, a), (_, b)| {
+                (a.floor_at(point) - point.y)
+                    .abs()
+                    .total_cmp(&(b.floor_at(point) - point.y).abs())
+            })
+        {
             return Some(index);
         }
 
@@ -102,8 +129,10 @@ impl NavGraph {
             .iter()
             .enumerate()
             .min_by(|(_, a), (_, b)| {
-                let a = a.bounds.nearest(point).distance_squared(point);
-                let b = b.bounds.nearest(point).distance_squared(point);
+                let a_xz = a.bounds.nearest(point);
+                let b_xz = b.bounds.nearest(point);
+                let a = Vec3::new(a_xz.x, a.floor_at(a_xz), a_xz.z).distance_squared(point);
+                let b = Vec3::new(b_xz.x, b.floor_at(b_xz), b_xz.z).distance_squared(point);
                 a.total_cmp(&b)
             })
             .map(|(index, _)| index)
@@ -117,15 +146,18 @@ impl NavGraph {
     pub fn path(&self, from: Vec3, to: Vec3) -> Option<Vec<Vec3>> {
         let start = self.locate(from)?;
         let goal = self.locate(to)?;
+        let body_offset = from.y - self.nodes[start].floor_at(from);
+        let normalized_goal = Vec3::new(to.x, self.nodes[goal].floor_at(to) + body_offset, to.z);
         if start == goal {
-            return Some(vec![to]);
+            return Some(vec![normalized_goal]);
         }
 
         // Dijkstra over regions, measuring the walk portal-to-portal rather than
         // centre-to-centre. Centres would send a body into the middle of a room
         // it is only passing through the corner of.
         let mut cheapest = vec![f32::INFINITY; self.nodes.len()];
-        let mut entered_at = vec![from; self.nodes.len()];
+        let start_floor = Vec3::new(from.x, self.nodes[start].floor_at(from), from.z);
+        let mut entered_at = vec![start_floor; self.nodes.len()];
         let mut came_from: Vec<Option<(usize, Vec3)>> = vec![None; self.nodes.len()];
         let mut queue = BinaryHeap::new();
 
@@ -161,7 +193,7 @@ impl NavGraph {
             return None;
         }
 
-        let mut waypoints = vec![to];
+        let mut waypoints = vec![normalized_goal];
         let mut current = goal;
         while let Some((previous, portal)) = came_from[current] {
             waypoints.push(portal);
@@ -171,6 +203,10 @@ impl NavGraph {
             }
         }
         waypoints.reverse();
+        let portals = waypoints.len().saturating_sub(1);
+        for waypoint in &mut waypoints[..portals] {
+            waypoint.y += body_offset;
+        }
         Some(waypoints)
     }
 }

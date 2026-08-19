@@ -634,7 +634,6 @@ fn apply_move_input(
         let local = Vec3::new(intent.direction.x, 0.0, intent.direction.y);
         let step = Quat::from_rotation_y(intent.yaw) * local;
         let mut position = transform.translation + step * speed * time.delta_secs();
-        position.y = EYE_HEIGHT;
 
         for (solid_transform, solid) in &solids {
             position = push_out(position, solid_transform.translation, solid.half_extents);
@@ -644,7 +643,7 @@ fn apply_move_input(
         // correct while the lab was a single room: against the five-room suite
         // it would have snapped anyone who stepped through a doorway straight
         // back into the hall.
-        position = areas.contain(position, PLAYER_RADIUS);
+        position = areas.contain_on_surface(position, PLAYER_RADIUS, EYE_HEIGHT);
 
         transform.translation = position;
     }
@@ -728,11 +727,10 @@ fn predict_local_movement(
     let local = Vec3::new(direction.x, 0.0, direction.y);
     let step = Quat::from_rotation_y(look.yaw) * local;
     let mut position = predicted.translation + step * speed * time.delta_secs();
-    position.y = EYE_HEIGHT;
     for (solid_transform, solid) in &solids {
         position = push_out(position, solid_transform.translation, solid.half_extents);
     }
-    predicted.translation = areas.contain(position, PLAYER_RADIUS);
+    predicted.translation = areas.contain_on_surface(position, PLAYER_RADIUS, EYE_HEIGHT);
 }
 
 /// Keeps the camera on the chemist's shoulders, aimed by local yaw and pitch.
@@ -775,10 +773,18 @@ pub(crate) fn follow_chemist(
 /// Pushes `position` out of an axis-aligned box, along whichever horizontal
 /// axis it has penetrated least.
 ///
-/// Only the XZ plane matters: the floor is flat and everything in the lab is
-/// tall enough to block at eye height, so vertical resolution would only add
-/// ways to get stuck.
+/// Resolution remains horizontal, but only boxes overlapping the player's
+/// current vertical body span participate. That keeps door headers harmless
+/// and separates the ground floor from underfloor tunnel structure.
 fn push_out(position: Vec3, center: Vec3, half_extents: Vec3) -> Vec3 {
+    let body_min_y = position.y - EYE_HEIGHT;
+    let body_max_y = position.y + 0.15;
+    let solid_min_y = center.y - half_extents.y;
+    let solid_max_y = center.y + half_extents.y;
+    if body_max_y <= solid_min_y || body_min_y >= solid_max_y {
+        return position;
+    }
+
     let dx = position.x - center.x;
     let dz = position.z - center.z;
     let overlap_x = half_extents.x + PLAYER_RADIUS - dx.abs();
@@ -806,6 +812,28 @@ mod tests {
     use bevy_replicon::test_app::{ServerTestAppExt, TestClientEntity};
 
     use super::*;
+
+    #[test]
+    fn collision_ignores_structure_on_the_other_station_level() {
+        let ground = Vec3::new(0.2, EYE_HEIGHT, 0.0);
+        let header = push_out(ground, Vec3::new(0.0, 2.75, 0.0), Vec3::new(0.5, 0.45, 0.5));
+        assert_eq!(header, ground, "an overhead header blocked the doorway");
+
+        let lower_wall = Vec3::new(0.0, -2.0, 0.0);
+        let lower_half = Vec3::new(0.5, 1.6, 0.5);
+        assert_eq!(
+            push_out(ground, lower_wall, lower_half),
+            ground,
+            "underfloor structure blocked the ground floor",
+        );
+
+        let lower_body = Vec3::new(0.2, -3.6 + EYE_HEIGHT, 0.0);
+        assert_ne!(
+            push_out(lower_body, lower_wall, lower_half),
+            lower_body,
+            "the lower tunnel wall did not block a body on its own level",
+        );
+    }
 
     /// A chemist as a joining client receives one: replication delivers the
     /// components on the wire and nothing else. `Look`, `Focus` and

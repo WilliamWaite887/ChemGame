@@ -15,8 +15,10 @@ use bevy_replicon::prelude::*;
 use chem_sim::Units;
 use serde::{Deserialize, Serialize};
 
+use crate::body::Body;
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, HeldBy};
+use crate::crew::{spawn_crew_member, Ambient, CrewDef, CrewRoute};
 use crate::interaction::{InteractRequested, Interactable};
 use crate::lab::{CrisisSpots, MapReady};
 use crate::machines::chemist_entity;
@@ -50,6 +52,8 @@ impl Plugin for CultPlugin {
                     generate_cult_visit,
                     handle_cult_resolution,
                     handle_incident_delivery,
+                    aggro_cultists,
+                    credit_defeated_guards,
                 )
                     .chain()
                     .run_if(is_authority)
@@ -88,6 +92,48 @@ pub struct CultScript {
     /// stage. Declining or failing a stage simply grades like any other
     /// unfulfilled order and the ritual never advances.
     pub stages: Vec<CultStageDef>,
+    /// The base's permanent focus — present from the moment the map loads,
+    /// gated on no stage, treated exactly like any other
+    /// [`CultIncidentDef`]. The one manifestation a diligent chemist could
+    /// find and neutralise before Corwin ever makes a single ask.
+    pub altar: CultIncidentDef,
+}
+
+impl CultScript {
+    /// Every discoverable manifestation of the ritual — anchors, guards, and
+    /// the altar alike — has one persistent slot in
+    /// [`crate::arc::Campaign::cult_incidents`], indexed so the vector always
+    /// grows in exactly the order things actually appear for the player. The
+    /// standing board reads its raw length as "how many have been found so
+    /// far" (see `ui::arc_headline`), so an index scheme that reserved a
+    /// later stage's slot before an earlier one existed would make the case
+    /// file's total jump ahead of what the player could have discovered —
+    /// this ordering is what keeps that from happening.
+    ///
+    /// The altar is unconditional — present in the world from the moment the
+    /// map loads, gated on no stage — so it is also the very first slot.
+    fn altar_ward_index() -> usize {
+        0
+    }
+
+    /// Where a stage's own block starts: one slot after the altar, then
+    /// every earlier stage's own incident count plus its one guard slot,
+    /// summed in order. Deliberately **not** `1 + stage_index * 3` — this
+    /// crate never assumes a stage carries exactly two incidents (see
+    /// `save_restore_waits_for_the_map_and_never_wraps_incident_spots`,
+    /// which authors more to prove positions stay stable regardless), so the
+    /// block size has to come from what a stage actually declares.
+    fn stage_ward_base(&self, stage_index: usize) -> usize {
+        1 + self.stages[..stage_index]
+            .iter()
+            .map(|stage| stage.incidents.len() + 1)
+            .sum::<usize>()
+    }
+
+    /// Where this stage's guard is credited — right after its own anchors.
+    fn guard_ward_index(&self, stage_index: usize) -> usize {
+        self.stage_ward_base(stage_index) + self.stages[stage_index].incidents.len()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -103,6 +149,9 @@ pub struct CultStageDef {
     pub reward_reagent: String,
     pub reward_amount: u32,
     pub incidents: Vec<CultIncidentDef>,
+    /// The cult member stationed at the base once this stage is fulfilled —
+    /// mid-escalation combat, not just another passive anchor to treat.
+    pub guard: CultGuardDef,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -120,6 +169,15 @@ pub struct CultIncidentDef {
     pub amount: u32,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct CultGuardDef {
+    pub name: String,
+    /// Aired the moment the guard is placed — the same discovery convention
+    /// as [`CultIncidentDef::clue`].
+    pub clue: String,
+    pub spot: String,
+}
+
 /// A physical, treatable consequence of an accepted Cult request.
 #[derive(Component, Serialize, Deserialize)]
 pub struct RitualAnchor {
@@ -128,6 +186,18 @@ pub struct RitualAnchor {
     pub clue: String,
     treatment: String,
     amount: Units,
+}
+
+/// A hostile cult member. Reuses `showdown::Pursuit` wholesale for
+/// movement/combat — there is nothing cult-specific to duplicate there, so
+/// defeating one is exactly like defeating `showdown::Assailant`: any dose
+/// that flips `Body.collapsed` wins.
+#[derive(Component, Serialize, Deserialize)]
+pub struct Cultist {
+    /// `Some(index)` credits `Campaign.cult_incidents[index]` as a ward on
+    /// collapse — a base guard defending Chapel/Quiet Room. `None` marks
+    /// finale muscle, scored directly by `showdown::resolve_showdown` instead.
+    pub wards_incident: Option<usize>,
 }
 
 #[derive(Resource)]
@@ -170,12 +240,14 @@ fn promote_script(
     commands.remove_resource::<PendingCultScript>();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn restore_incidents(
     mut commands: Commands,
     script: Option<Res<Script>>,
     campaign: Option<Res<crate::arc::Campaign>>,
     spots: Res<CrisisSpots>,
     anchors: Query<&RitualAnchor>,
+    guards: Query<&Cultist>,
     mut restored: ResMut<CultIncidentsRestored>,
     mut radio: ResMut<RadioLog>,
 ) {
@@ -190,8 +262,9 @@ fn restore_incidents(
         return;
     }
     for (stage_index, stage) in script.stages.iter().enumerate() {
+        let base = script.stage_ward_base(stage_index);
         for (offset, incident) in stage.incidents.iter().enumerate() {
-            let index = stage_index * 2 + offset;
+            let index = base + offset;
             if campaign.cult_incidents.get(index) != Some(&false)
                 || anchors.iter().any(|anchor| anchor.index == index)
             {
@@ -228,6 +301,69 @@ fn restore_incidents(
                 )
                 .negative()
                 .urgent(),
+            );
+        }
+    }
+    // Guards — a live guard is a session entity exactly like an anchor; only
+    // the ward flag persists. Gated on `Some(&false)` the same way anchors
+    // are, so a stage that has never been reached (its slot never eagerly
+    // grown into existence, see `spawn_stage_consequences`) is correctly
+    // skipped rather than restored early.
+    for (stage_index, stage) in script.stages.iter().enumerate() {
+        let index = script.guard_ward_index(stage_index);
+        if campaign.cult_incidents.get(index) != Some(&false)
+            || guards
+                .iter()
+                .any(|cultist| cultist.wards_incident == Some(index))
+        {
+            continue;
+        }
+        let Some(transform) = spots.get(&stage.guard.spot) else {
+            error!(
+                "cult guard '{}' names missing crisis spot '{}' during restore; skipping",
+                stage.guard.name, stage.guard.spot
+            );
+            continue;
+        };
+        place_guard(&mut commands, &stage.guard, index, transform);
+        radio.push(
+            RadioEntry::new(crate::radio::RadioChannel::Lab, stage.guard.clue.clone())
+                .negative()
+                .urgent(),
+        );
+    }
+    // The altar — unconditional, so it restores whenever it is not already
+    // resolved, whether or not any stage has ever been reached. `!=
+    // Some(&true)` deliberately accepts `None` (a fresh save, vector not yet
+    // grown that far) as "should exist", unlike the stage-gated checks above.
+    let altar_index = CultScript::altar_ward_index();
+    if campaign.cult_incidents.get(altar_index) != Some(&true)
+        && !anchors.iter().any(|anchor| anchor.index == altar_index)
+    {
+        if let Some(transform) = spots.get(&script.altar.spot) {
+            commands.spawn((
+                RitualAnchor {
+                    index: altar_index,
+                    name: script.altar.name.clone(),
+                    clue: script.altar.clue.clone(),
+                    treatment: script.altar.treatment.clone(),
+                    amount: Units::whole(script.altar.amount as i32),
+                },
+                transform,
+                Visibility::default(),
+                Interactable::new(format!("{} — examine and treat", script.altar.name)),
+                Replicated,
+                crate::until_we_leave_the_lab(),
+            ));
+            radio.push(
+                RadioEntry::new(crate::radio::RadioChannel::Lab, script.altar.clue.clone())
+                    .negative()
+                    .urgent(),
+            );
+        } else {
+            error!(
+                "cult altar names missing crisis spot '{}'; skipping",
+                script.altar.spot
             );
         }
     }
@@ -309,6 +445,7 @@ fn generate_cult_visit(
 /// the same reason `obsessed::handle_obsessed_resolution` is. Declining or
 /// botching a stage falls through to the ordinary reputation penalty and
 /// the ritual simply never moves.
+#[allow(clippy::too_many_arguments)]
 fn handle_cult_resolution(
     mut commands: Commands,
     db: Option<Res<ChemDb>>,
@@ -341,6 +478,7 @@ fn handle_cult_resolution(
                     &mut commands,
                     db,
                     spots,
+                    &script,
                     stage,
                     stage_index,
                     &mut campaign,
@@ -360,21 +498,24 @@ fn handle_cult_resolution(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_stage_consequences(
     commands: &mut Commands,
     db: &ChemDb,
     spots: &CrisisSpots,
+    script: &CultScript,
     stage: &CultStageDef,
     stage_index: usize,
     campaign: &mut Option<ResMut<crate::arc::Campaign>>,
     radio: &mut RadioLog,
 ) {
-    let base = stage_index * 2;
+    let base = script.stage_ward_base(stage_index);
+    let guard_index = script.guard_ward_index(stage_index);
+    // The guard's slot is always the last of this stage's three, so reserving
+    // up to it also reserves the two anchors — one resize covers the block.
     if let Some(campaign) = campaign.as_mut() {
-        if campaign.cult_incidents.len() < base + stage.incidents.len() {
-            campaign
-                .cult_incidents
-                .resize(base + stage.incidents.len(), false);
+        if campaign.cult_incidents.len() < guard_index + 1 {
+            campaign.cult_incidents.resize(guard_index + 1, false);
         }
     }
     for (offset, incident) in stage.incidents.iter().enumerate() {
@@ -429,6 +570,159 @@ fn spawn_stage_consequences(
             Replicated,
             crate::until_we_leave_the_lab(),
         ));
+    }
+    spawn_stage_guard(commands, spots, &stage.guard, guard_index, campaign, radio);
+}
+
+/// Stations this stage's guard at its authored spot, unless it is already
+/// down. Mirrors the anchor loop's own "already resolved" skip above.
+fn spawn_stage_guard(
+    commands: &mut Commands,
+    spots: &CrisisSpots,
+    guard: &CultGuardDef,
+    ward_index: usize,
+    campaign: &Option<ResMut<crate::arc::Campaign>>,
+    radio: &mut RadioLog,
+) {
+    if campaign
+        .as_ref()
+        .is_some_and(|c| c.cult_incidents.get(ward_index) == Some(&true))
+    {
+        return;
+    }
+    let Some(transform) = spots.get(&guard.spot) else {
+        error!(
+            "cult guard '{}' names missing crisis spot '{}'; skipping",
+            guard.name, guard.spot
+        );
+        return;
+    };
+    place_guard(commands, guard, ward_index, transform);
+    radio.push(
+        RadioEntry::new(crate::radio::RadioChannel::Lab, guard.clue.clone())
+            .negative()
+            .urgent(),
+    );
+}
+
+/// Builds the stationed cult member itself — shared by a freshly-completed
+/// stage and by save restore. A guard arrives like any other crew member
+/// (`spawn_crew_member` gives it a `Body`/`Bloodstream`/`Replicated`/route),
+/// then immediately stops being one: the arrival route is removed so it
+/// stays put rather than walking to the counter, and `Ambient` excludes it
+/// from every "how busy is the counter" count the same way a department
+/// resident already is (see `crew::Ambient::new`'s own doc).
+fn place_guard(
+    commands: &mut Commands,
+    guard: &CultGuardDef,
+    ward_index: usize,
+    transform: Transform,
+) -> Entity {
+    let def = CrewDef {
+        name: guard.name.clone(),
+        // Deliberately not a real department — `Department::from_role`
+        // returns `None` for it everywhere that matters (standing/order
+        // grading), and a guard is never routed through either, so this only
+        // ever shows up as harmless "unrecognised role" behaviour, never a
+        // panic. See the callers of `Department::from_role` across the crate.
+        role: "Cult".to_string(),
+        color: [0.42, 0.05, 0.10],
+    };
+    let entity = spawn_crew_member(commands, &def, 0.0);
+    commands.entity(entity).remove::<CrewRoute>().insert((
+        transform,
+        Cultist {
+            wards_incident: Some(ward_index),
+        },
+        Ambient::new(0.0),
+    ));
+    entity
+}
+
+/// How close a chemist has to wander before a stationed guard notices and
+/// gives chase. A guard has no `CrewRoute` arrival beat to key off — it is
+/// placed directly, never walked in — so this is its own trigger, distinct
+/// from `showdown::turn_hostile_on_arrival`'s route-phase check.
+const GUARD_AGGRO_RADIUS: f32 = 6.0;
+
+/// A cultist that has not noticed anyone yet.
+type IdleCultists<'w, 's> =
+    Query<'w, 's, (Entity, &'static Transform), (With<Cultist>, Without<crate::showdown::Pursuit>)>;
+
+fn aggro_cultists(
+    mut commands: Commands,
+    arc_script: Option<Res<crate::arc::Script>>,
+    idle: IdleCultists,
+    chemists: Query<&Transform, With<Chemist>>,
+) {
+    let Some(arc_script) = arc_script else {
+        return;
+    };
+    let tuning = arc_script.showdown;
+    for (entity, transform) in &idle {
+        let noticed = chemists.iter().any(|chemist_transform| {
+            transform
+                .translation
+                .distance_squared(chemist_transform.translation)
+                <= GUARD_AGGRO_RADIUS * GUARD_AGGRO_RADIUS
+        });
+        if noticed {
+            commands
+                .entity(entity)
+                .insert(crate::showdown::Pursuit::new(
+                    tuning.speed,
+                    tuning.hit_every_seconds,
+                    tuning.hit_brute,
+                ));
+        }
+    }
+}
+
+/// Puts down a base guard exactly like `showdown::Assailant` — any dose that
+/// flips `Body.collapsed` wins — and credits its ward. Finale muscle
+/// (`wards_incident: None`) is deliberately skipped here;
+/// `showdown::resolve_showdown` scores those instead. Because `place_guard`
+/// removed `CrewRoute` at spawn, `crew::handle_crew_collapse` (which needs
+/// `&mut CrewRoute`) never fires for a guard — no spurious Medical-standing
+/// penalty, matching how `Assailant`'s own collapse already never triggers
+/// that either.
+fn credit_defeated_guards(
+    mut commands: Commands,
+    mut campaign: Option<ResMut<crate::arc::Campaign>>,
+    mut radio: ResMut<RadioLog>,
+    // Unconditional, same as `showdown::resolve_showdown`'s own
+    // `body.0.collapsed` check — a handful of live guards is cheap enough
+    // that a `Changed<Body>` filter would only add a class of "did this fire
+    // on the very frame the body actually collapsed" timing edge cases for
+    // no real payoff.
+    fallen: Query<(Entity, &Cultist, &Body)>,
+) {
+    let Some(campaign) = campaign.as_mut() else {
+        return;
+    };
+    for (entity, cultist, body) in &fallen {
+        let Some(index) = cultist.wards_incident else {
+            continue;
+        };
+        if !body.0.collapsed {
+            continue;
+        }
+        if campaign.cult_incidents.len() <= index {
+            campaign.cult_incidents.resize(index + 1, false);
+        }
+        if campaign.cult_incidents[index] {
+            continue;
+        }
+        campaign.cult_incidents[index] = true;
+        commands.entity(entity).despawn();
+        radio.push(
+            RadioEntry::new(
+                crate::radio::RadioChannel::Lab,
+                "The guard goes down. Whatever it was protecting is exposed now.".to_string(),
+            )
+            .positive()
+            .urgent(),
+        );
     }
 }
 
@@ -597,7 +891,30 @@ mod tests {
                 assert!(data.reagents.id_of(&incident.treatment).is_some());
                 assert!(incident.amount > 0);
             }
+            assert!(!stage.guard.name.trim().is_empty());
+            assert!(!stage.guard.clue.trim().is_empty());
+            assert!(!stage.guard.spot.trim().is_empty());
+            assert!(
+                spots.insert(stage.guard.spot.as_str()),
+                "'{}' is reused; the guard needs its own authored place",
+                stage.guard.spot
+            );
+            assert!(
+                roster.iter().all(|member| member.name != stage.guard.name),
+                "'{}' is on the ordinary roster, so a legitimate order could pick it",
+                stage.guard.name
+            );
         }
+        assert!(!script.altar.name.trim().is_empty());
+        assert!(!script.altar.clue.trim().is_empty());
+        assert!(!script.altar.spot.trim().is_empty());
+        assert!(
+            spots.insert(script.altar.spot.as_str()),
+            "'{}' is reused; the altar needs its own authored place",
+            script.altar.spot
+        );
+        assert!(data.reagents.id_of(&script.altar.treatment).is_some());
+        assert!(script.altar.amount > 0);
     }
 
     #[test]
@@ -704,8 +1021,9 @@ mod tests {
             .counter_steps
             .len();
 
+        let cult_script = script();
         let mut spots = CrisisSpots::default();
-        for (index, incident) in script()
+        for (index, incident) in cult_script
             .stages
             .iter()
             .flat_map(|stage| &stage.incidents)
@@ -716,6 +1034,16 @@ mod tests {
                 Transform::from_xyz(index as f32 * 3.0, 1.0, index as f32 * -2.0),
             );
         }
+        for (index, stage) in cult_script.stages.iter().enumerate() {
+            spots.insert(
+                stage.guard.spot.clone(),
+                Transform::from_xyz(100.0 + index as f32 * 3.0, 1.0, -100.0),
+            );
+        }
+        spots.insert(
+            cult_script.altar.spot.clone(),
+            Transform::from_xyz(200.0, 1.0, 200.0),
+        );
 
         let mut app = resolution_app();
         app.insert_resource(crate::arc::Script(arc_script))
@@ -771,8 +1099,8 @@ mod tests {
         assert_eq!(
             placed,
             vec![
-                (0, Vec3::new(0.0, 1.0, 0.0)),
-                (1, Vec3::new(3.0, 1.0, -2.0))
+                (1, Vec3::new(0.0, 1.0, 0.0)),
+                (2, Vec3::new(3.0, 1.0, -2.0))
             ]
         );
         assert_eq!(
@@ -786,7 +1114,11 @@ mod tests {
             app.world()
                 .resource::<crate::arc::Campaign>()
                 .cult_incidents,
-            vec![false, false]
+            // Index 0 is the altar's reserved slot — see
+            // `CultScript::stage_ward_base` — resized-into alongside stage
+            // 0's own two anchors and guard even though nothing has spawned
+            // there yet.
+            vec![false, false, false, false]
         );
     }
 
@@ -811,12 +1143,12 @@ mod tests {
             .iter(app.world())
             .map(|(anchor, transform)| (anchor.index, transform.translation))
             .collect();
-        assert_eq!(spawned, vec![(0, Vec3::new(9.0, 1.0, 4.0))]);
+        assert_eq!(spawned, vec![(1, Vec3::new(9.0, 1.0, 4.0))]);
         assert_eq!(
             app.world()
                 .resource::<crate::arc::Campaign>()
                 .cult_incidents,
-            vec![false, false],
+            vec![false, false, false, false],
             "the skipped flag stays unresolved so a later session can restore it"
         );
     }
@@ -850,7 +1182,13 @@ mod tests {
             .collect();
         let mut campaign =
             crate::arc::Campaign::new(crate::arc::AntagId::Cult, crate::arc::Mode::Chemist, 0);
-        campaign.cult_incidents = vec![false; incidents.len()];
+        // Not `incidents.len()`: the ward vector also reserves the altar's
+        // slot and one guard slot per stage (see `CultScript::guard_ward_index`),
+        // and the padded last stage means its block is wider than the
+        // shipped content's. The guard slot of the last stage is always the
+        // highest index in the whole scheme.
+        let vector_len = content.guard_ward_index(content.stages.len() - 1) + 1;
+        campaign.cult_incidents = vec![false; vector_len];
 
         let mut app = App::new();
         app.insert_resource(Script(content))
@@ -901,6 +1239,220 @@ mod tests {
         let _ = invalid.add(water, Units::whole(10));
         assert_eq!(incident_units(&db, &valid, cure), Units::whole(10));
         assert!(!incident_units(&db, &invalid, cure).is_positive());
+    }
+
+    // -- guards and the altar -----------------------------------------------
+
+    #[test]
+    fn a_fulfilled_stage_spawns_a_guard_at_its_authored_ward_index() {
+        let mut app = campaign_app();
+        app.insert_resource(ChemDb(data()));
+        let name = app.world().resource::<Script>().0.name.clone();
+        let expected_index = app.world().resource::<Script>().0.guard_ward_index(0);
+
+        resolve(&mut app, &name, Outcome::Success);
+        app.world_mut().flush();
+
+        let mut guards = app.world_mut().query::<&Cultist>();
+        let wards: Vec<Option<usize>> =
+            guards.iter(app.world()).map(|c| c.wards_incident).collect();
+        assert_eq!(wards, vec![Some(expected_index)]);
+    }
+
+    #[test]
+    fn a_missing_guard_spot_skips_only_that_guard() {
+        let mut app = campaign_app();
+        app.insert_resource(ChemDb(data()));
+        // A registry with the stage's two anchor spots but not its guard's.
+        let cult_script = script();
+        let mut spots = CrisisSpots::default();
+        for incident in &cult_script.stages[0].incidents {
+            spots.insert(incident.spot.clone(), Transform::from_xyz(1.0, 1.0, 1.0));
+        }
+        app.insert_resource(spots);
+        let name = app.world().resource::<Script>().0.name.clone();
+        let guard_index = cult_script.guard_ward_index(0);
+
+        resolve(&mut app, &name, Outcome::Success);
+        app.world_mut().flush();
+
+        assert_eq!(
+            app.world_mut()
+                .query::<&Cultist>()
+                .iter(app.world())
+                .count(),
+            0,
+            "no map spot, no guard — but the anchors it did have a place for should still land"
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&RitualAnchor>()
+                .iter(app.world())
+                .count(),
+            2
+        );
+        assert_eq!(
+            app.world()
+                .resource::<crate::arc::Campaign>()
+                .cult_incidents
+                .get(guard_index),
+            Some(&false),
+            "the skipped guard's ward stays unresolved so a later session can restore it"
+        );
+    }
+
+    #[test]
+    fn putting_a_guard_down_credits_its_ward_and_despawns_it() {
+        let mut app = campaign_app();
+        app.add_systems(Update, credit_defeated_guards);
+        let index = app.world().resource::<Script>().0.guard_ward_index(0);
+        app.world_mut()
+            .resource_mut::<crate::arc::Campaign>()
+            .cult_incidents = vec![false; index + 1];
+        let entity = app
+            .world_mut()
+            .spawn((
+                Cultist {
+                    wards_incident: Some(index),
+                },
+                Body::default(),
+            ))
+            .id();
+        app.world_mut().get_mut::<Body>(entity).unwrap().0.collapsed = true;
+
+        app.update();
+
+        assert!(
+            app.world()
+                .resource::<crate::arc::Campaign>()
+                .cult_incidents[index]
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&Cultist>()
+                .iter(app.world())
+                .count(),
+            0,
+            "a defeated guard should be gone, not left standing"
+        );
+    }
+
+    #[test]
+    fn an_idle_guard_notices_a_nearby_chemist_and_gives_chase() {
+        let mut app = campaign_app();
+        app.add_systems(Update, aggro_cultists);
+        let near = app
+            .world_mut()
+            .spawn((
+                Cultist {
+                    wards_incident: Some(3),
+                },
+                Transform::from_xyz(0.0, 0.0, 0.0),
+            ))
+            .id();
+        let far = app
+            .world_mut()
+            .spawn((
+                Cultist {
+                    wards_incident: Some(6),
+                },
+                Transform::from_xyz(0.0, 0.0, GUARD_AGGRO_RADIUS * 10.0),
+            ))
+            .id();
+        app.world_mut().spawn((
+            Chemist {
+                client: bevy_replicon::prelude::ClientId::Server,
+            },
+            Transform::from_xyz(1.0, 0.0, 0.0),
+        ));
+
+        app.update();
+
+        assert!(
+            app.world().get::<crate::showdown::Pursuit>(near).is_some(),
+            "a chemist standing right next to it should be noticed"
+        );
+        assert!(
+            app.world().get::<crate::showdown::Pursuit>(far).is_none(),
+            "nothing should chase from clear across the map"
+        );
+    }
+
+    #[test]
+    fn the_altar_is_restored_like_any_other_incident() {
+        let mut app = campaign_app();
+        app.insert_resource(MapReady);
+        app.init_resource::<CultIncidentsRestored>();
+        app.add_systems(Update, restore_incidents);
+
+        app.update();
+        app.world_mut().flush();
+
+        let altar_index = CultScript::altar_ward_index();
+        let mut anchors = app.world_mut().query::<&RitualAnchor>();
+        let placed: Vec<usize> = anchors
+            .iter(app.world())
+            .map(|anchor| anchor.index)
+            .collect();
+        assert_eq!(
+            placed,
+            vec![altar_index],
+            "the altar should exist from the start, unlike any stage-gated anchor"
+        );
+    }
+
+    #[test]
+    fn treating_the_altar_grants_its_own_ward() {
+        let mut app = campaign_app();
+        app.insert_resource(ChemDb(data()));
+        app.insert_resource(MapReady);
+        app.init_resource::<CultIncidentsRestored>();
+        app.add_systems(
+            Update,
+            (restore_incidents, handle_incident_delivery).chain(),
+        );
+        app.add_message::<FromClient<InteractRequested>>();
+
+        app.update();
+        app.world_mut().flush();
+
+        let altar_index = CultScript::altar_ward_index();
+        let altar_entity = app
+            .world_mut()
+            .query::<(Entity, &RitualAnchor)>()
+            .iter(app.world())
+            .find(|(_, anchor)| anchor.index == altar_index)
+            .map(|(entity, _)| entity)
+            .expect("the altar should already be in the world");
+
+        let cult_script = script();
+        let treatment = data().reagents.id_of(&cult_script.altar.treatment).unwrap();
+        let mut solution = chem_sim::Solution::unbounded();
+        let _ = solution.add(treatment, Units::whole(cult_script.altar.amount as i32));
+        let mut vial = Container::new(ContainerKind::Bottle);
+        vial.solution = solution;
+        let player = app
+            .world_mut()
+            .spawn(Chemist {
+                client: bevy_replicon::prelude::ClientId::Server,
+            })
+            .id();
+        app.world_mut().spawn((vial, HeldBy(player)));
+        app.world_mut().write_message(FromClient {
+            client_id: bevy_replicon::prelude::ClientId::Server,
+            message: InteractRequested {
+                target: altar_entity,
+            },
+        });
+
+        app.update();
+
+        assert!(
+            app.world()
+                .resource::<crate::arc::Campaign>()
+                .cult_incidents[altar_index],
+            "a properly-dosed altar should credit its ward exactly like any other incident"
+        );
     }
 
     #[test]

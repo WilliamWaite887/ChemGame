@@ -882,6 +882,50 @@ fn doorway_bridge_bounds(run: &WallRun, center: f32) -> Bounds {
 }
 
 /// A rectangle of standable floor.
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
+pub enum FloorProfile {
+    Flat(f32),
+    LinearX { at_min: f32, at_max: f32 },
+    LinearZ { at_min: f32, at_max: f32 },
+}
+
+impl Default for FloorProfile {
+    fn default() -> Self {
+        Self::Flat(0.0)
+    }
+}
+
+impl FloorProfile {
+    pub fn height_at(self, bounds: Bounds, point: Vec3) -> f32 {
+        let interpolate = |value: f32, min: f32, max: f32, at_min: f32, at_max: f32| {
+            let span = max - min;
+            if span.abs() <= f32::EPSILON {
+                at_min
+            } else {
+                let t = ((value - min) / span).clamp(0.0, 1.0);
+                at_min + (at_max - at_min) * t
+            }
+        };
+        match self {
+            Self::Flat(y) => y,
+            Self::LinearX { at_min, at_max } => {
+                interpolate(point.x, bounds.min_x, bounds.max_x, at_min, at_max)
+            }
+            Self::LinearZ { at_min, at_max } => {
+                interpolate(point.z, bounds.min_z, bounds.max_z, at_min, at_max)
+            }
+        }
+    }
+}
+
+/// One map-authored walkable brush and the height of its standing surface.
+#[derive(Debug, Clone, Copy, Reflect)]
+pub struct WalkableSurface {
+    pub bounds: Bounds,
+    pub floor: FloorProfile,
+}
+
+/// A rectangle of standable floor.
 #[derive(Debug, Clone)]
 pub struct Region {
     pub bounds: Bounds,
@@ -895,6 +939,15 @@ pub struct Region {
     /// Stable map-authored identity for a dynamic bridge, if this is one.
     #[cfg_attr(not(test), allow(dead_code))]
     pub bridge_id: Option<String>,
+    /// The elevation of this floor. Sloped profiles are used by stair runs;
+    /// ordinary rooms and corridors remain flat.
+    pub floor: FloorProfile,
+}
+
+impl Region {
+    pub fn floor_at(&self, point: Vec3) -> f32 {
+        self.floor.height_at(self.bounds, point)
+    }
 }
 
 /// Every place a body may stand.
@@ -951,11 +1004,23 @@ impl WalkableAreas {
         room: Option<String>,
         bridge_id: Option<String>,
     ) {
+        self.push_surface(bounds, room, bridge_id, FloorProfile::default());
+    }
+
+    /// Adds an authored region at a particular elevation or along a stair.
+    pub fn push_surface(
+        &mut self,
+        bounds: Bounds,
+        room: Option<String>,
+        bridge_id: Option<String>,
+        floor: FloorProfile,
+    ) {
         self.regions.push(Region {
             bounds,
             open_bounds: bounds,
             room,
             bridge_id,
+            floor,
         });
     }
 
@@ -1015,7 +1080,13 @@ impl WalkableAreas {
     /// the body to the origin — under the map backend there is a frame or two
     /// before the scene has loaded, and a chemist must not be flung across the
     /// station while waiting for it.
-    pub fn contain(&self, position: Vec3, radius: f32) -> Vec3 {
+    /// Keeps a body on the vertically nearest authored floor.
+    ///
+    /// `body_offset` is the distance from the standing surface to the entity's
+    /// origin (eye height for a player, root height for a crew model). It lets
+    /// ground-floor and underfloor regions overlap in XZ without teleporting a
+    /// body between them, while a stair profile provides the continuous link.
+    pub fn contain_on_surface(&self, position: Vec3, radius: f32, body_offset: f32) -> Vec3 {
         let mut best: Option<(f32, Vec3)> = None;
 
         for region in &self.regions {
@@ -1023,10 +1094,13 @@ impl WalkableAreas {
             if !inset.is_standable() {
                 continue;
             }
-            if inset.holds(position) {
-                return position;
-            }
-            let candidate = inset.nearest(position);
+            let horizontal = if inset.holds(position) {
+                position
+            } else {
+                inset.nearest(position)
+            };
+            let floor_y = region.floor_at(horizontal);
+            let candidate = Vec3::new(horizontal.x, floor_y + body_offset, horizontal.z);
             let distance = candidate.distance_squared(position);
             if best.is_none_or(|(nearest, _)| distance < nearest) {
                 best = Some((distance, candidate));
@@ -1043,7 +1117,12 @@ impl WalkableAreas {
     pub fn room_at(&self, point: Vec3) -> Option<&str> {
         self.regions
             .iter()
-            .find(|region| region.room.is_some() && region.bounds.holds(point))
+            .filter(|region| region.room.is_some() && region.bounds.holds(point))
+            .min_by(|a, b| {
+                (a.floor_at(point) - point.y)
+                    .abs()
+                    .total_cmp(&(b.floor_at(point) - point.y).abs())
+            })
             .and_then(|region| region.room.as_deref())
     }
 }
