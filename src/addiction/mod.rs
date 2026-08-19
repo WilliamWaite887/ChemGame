@@ -63,7 +63,7 @@ use crate::orders::{
 };
 use crate::player::Chemist;
 use crate::radio::{RadioEntry, RadioLog};
-use crate::shift::current_rules;
+use crate::shift::{self, current_rules};
 use crate::AppState;
 
 pub struct AddictionPlugin;
@@ -226,16 +226,17 @@ fn promote_script(
     commands.remove_resource::<PendingAddictionScript>();
 }
 
-/// Arms the return-visit clock for a fresh session.
-///
-/// See the identical note on every other thread's own `arm_spawner`: a spent
-/// `TimerMode::Once` never fires again, so leaving this to `promote_script` —
-/// which runs once per *process* — would silently kill the thread for every
-/// save opened after the first.
+/// See `shift::arm_first_visit` for why this has to re-run on
+/// `OnEnter(AppState::Playing)` every session rather than only once at
+/// process start. Not actually a range — every save's first return visit
+/// lands at exactly `FIRST_VISIT_SECONDS`, unlike every other thread's
+/// randomised initial gap.
 fn arm_spawner(mut commands: Commands) {
-    commands.insert_resource(AddictSpawner {
-        timer: Timer::from_seconds(FIRST_VISIT_SECONDS, TimerMode::Once),
-    });
+    shift::arm_first_visit(
+        &mut commands,
+        (FIRST_VISIT_SECONDS, FIRST_VISIT_SECONDS),
+        |timer| AddictSpawner { timer },
+    );
 }
 
 /// How long after the first habit forms before anyone comes back. Their own

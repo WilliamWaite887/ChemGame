@@ -689,6 +689,14 @@ fn handle_thermostat_controls(
     }
 }
 
+/// Matches `ui::panel_temperature`'s own rounding, so replication wakes up
+/// exactly as often as the panel readout can actually show — no coarser
+/// (which would visibly lag the display) and no finer (which would just be
+/// wire traffic for a digit nobody sees change).
+fn temperature_bucket(kelvin: Kelvin) -> i32 {
+    (kelvin.0 / 5.0).round() as i32
+}
+
 /// Drives a loaded container toward its chamber's target temperature.
 ///
 /// Nothing here knows what a recipe is. Every change goes through
@@ -724,9 +732,19 @@ fn apply_thermostats(
             continue;
         }
 
-        let (_, report) = container.mutate(&db, |solution| solution.temperature = next);
+        // `mutate` still runs at full precision every frame, so a reaction
+        // threshold is crossed on the exact frame it happens — only whether
+        // the *component* gets marked changed (and so re-replicated) is
+        // throttled, down to the same 5K bucket the panel already rounds to.
+        let bucket_before = temperature_bucket(current);
+        let quiet = container.bypass_change_detection();
+        let (_, report) = quiet.mutate(&db, |solution| solution.temperature = next);
+        let reacted = report.reacted() || !report.effects.is_empty();
         if let Some(message) = ReactionsFired::from_report(target, &report) {
             fired.write(message);
+        }
+        if reacted || temperature_bucket(next) != bucket_before {
+            container.set_changed();
         }
     }
 }
@@ -762,9 +780,19 @@ fn cool_to_ambient(
             continue;
         }
 
-        let (_, report) = container.mutate(&db, |solution| solution.temperature = next);
+        // Same reasoning as `apply_thermostats`: this runs for every
+        // not-yet-ambient container in the lab, so an idle beaker slowly
+        // cooling on a shelf would otherwise wake replication every frame
+        // for a value the panel doesn't render any finer than 5K anyway.
+        let bucket_before = temperature_bucket(current);
+        let quiet = container.bypass_change_detection();
+        let (_, report) = quiet.mutate(&db, |solution| solution.temperature = next);
+        let reacted = report.reacted() || !report.effects.is_empty();
         if let Some(message) = ReactionsFired::from_report(entity, &report) {
             fired.write(message);
+        }
+        if reacted || temperature_bucket(next) != bucket_before {
+            container.set_changed();
         }
     }
 }
@@ -910,30 +938,49 @@ fn tick_reactions(
             continue;
         }
 
-        run.elapsed_secs += dt;
-        run.chemistry_accumulator_secs += dt;
+        // The panel only ever compares `AgitationRun` at 0.1s resolution (see
+        // `PanelSignature`'s own `elapsed_secs * 10.0`), so the clock advance
+        // below is authority-only bookkeeping — same reasoning as
+        // `apply_thermostats` applies to `Container`'s temperature. Marking
+        // the whole component changed every frame would otherwise wake
+        // replication for the full 4-8s of every batch for no visible gain.
+        let displayed_tenths_before = (run.elapsed_secs * 10.0).floor() as i32;
+        let state = run.bypass_change_detection();
+        state.elapsed_secs += dt;
+        state.chemistry_accumulator_secs += dt;
         let mut finished = false;
         let mut changed = false;
-        while run.chemistry_accumulator_secs + CHEMISTRY_QUANTUM_EPSILON >= CHEMISTRY_QUANTUM_SECS {
-            run.chemistry_accumulator_secs =
-                (run.chemistry_accumulator_secs - CHEMISTRY_QUANTUM_SECS).max(0.0);
+        while state.chemistry_accumulator_secs + CHEMISTRY_QUANTUM_EPSILON >= CHEMISTRY_QUANTUM_SECS
+        {
+            state.chemistry_accumulator_secs =
+                (state.chemistry_accumulator_secs - CHEMISTRY_QUANTUM_SECS).max(0.0);
             let solution = &mut container.bypass_change_detection().solution;
             let report = chem_sim::resolve_step_with_activation(
                 solution,
                 &db.reactions,
                 CHEMISTRY_QUANTUM_SECS,
-                &run.activation,
+                &state.activation,
             );
-            let state: &mut AgitationRun = &mut run;
             changed |= accumulate_reaction_report(&mut state.reactions, &mut state.effects, report);
             finished =
-                !chem_sim::is_reacting_with_activation(solution, &db.reactions, &run.activation);
+                !chem_sim::is_reacting_with_activation(solution, &db.reactions, &state.activation);
             if finished {
                 break;
             }
         }
         if changed {
             container.set_changed();
+        }
+        // Wake replication only when something a client can actually see
+        // moved: a reaction fired/finished, or the displayed tenths-of-a-
+        // second advanced.
+        if changed || finished {
+            run.set_changed();
+        } else {
+            let displayed_tenths_after = (run.elapsed_secs * 10.0).floor() as i32;
+            if displayed_tenths_after != displayed_tenths_before {
+                run.set_changed();
+            }
         }
         if finished {
             if !run.reactions.is_empty() || !run.effects.is_empty() {

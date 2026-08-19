@@ -1368,10 +1368,22 @@ fn expire_orders(
         if route.phase != CrewPhase::Waiting {
             continue;
         }
-        order.waited += dt;
-        if order.waited < order.patience {
+        // The queue only ever shows `remaining()` truncated to whole seconds
+        // (`update_order_queue`'s `MM:SS` readout), so replicate the tick
+        // only when that displayed second actually moves — not on every one
+        // of the many frames in between, which would otherwise resend the
+        // whole `Order` (plea text included) for every crew member currently
+        // waiting at the counter.
+        let displayed_before = order.remaining() as u32;
+        let quiet = order.bypass_change_detection();
+        quiet.waited += dt;
+        if quiet.waited < quiet.patience {
+            if order.remaining() as u32 != displayed_before {
+                order.set_changed();
+            }
             continue;
         }
+        order.set_changed();
 
         // Nobody ever delivered anything, so there is nothing to match — an
         // illicit or specific order still names its (already-known-to-the-

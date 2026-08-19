@@ -18,19 +18,16 @@
 
 use bevy::prelude::*;
 use bevy_common_assets::ron::RonAssetPlugin;
-use rand::prelude::*;
 use serde::Deserialize;
 
 use crate::chem_data::ChemDb;
 use crate::containers::{spawn_container, ContainerKind};
-use crate::crew::{spawn_crew_member, CrewDef};
-use crate::interaction::Interactable;
 use crate::lab::{DeliveryLane, DeliveryStations};
 use crate::net::is_authority;
-use crate::orders::{deliverable_amount, Order, OrderResolved, Shift, StationData};
+use crate::orders::{OrderResolved, Shift, StationData};
 use crate::player::Chemist;
 use crate::radio::{channel_for, RadioEntry, RadioLog};
-use crate::shift::current_rules;
+use crate::shift::{self, current_rules};
 use crate::AppState;
 
 /// Seconds before the very first possible visit. Long — this is meant to be
@@ -136,17 +133,12 @@ fn promote_script(
     commands.remove_resource::<PendingObsessedScript>();
 }
 
-/// Arms this thread's visit clock for a fresh session.
-///
-/// `OnEnter(AppState::Playing)` rather than inside `promote_script`, which
-/// runs exactly once per process: quitting to the menu and opening another
-/// save would otherwise leave a spent `TimerMode::Once` behind, and a spent
-/// `Once` timer never reports `just_finished` again — the whole thread would
-/// be silently dead for the rest of the session with nothing to show for it.
+/// See `shift::arm_first_visit` for why this has to re-run on
+/// `OnEnter(AppState::Playing)` every session rather than only once at
+/// process start.
 fn arm_spawner(mut commands: Commands) {
-    let gap = rand::rng().random_range(INITIAL_GAP_SECONDS.0..=INITIAL_GAP_SECONDS.1);
-    commands.insert_resource(ObsessedSpawner {
-        timer: Timer::from_seconds(gap, TimerMode::Once),
+    shift::arm_first_visit(&mut commands, INITIAL_GAP_SECONDS, |timer| {
+        ObsessedSpawner { timer }
     });
 }
 
@@ -180,9 +172,7 @@ fn generate_obsessed_visit(
 
     let mut rng = rand::rng();
     let rules = current_rules(&station.config, &shift, chemists.iter().count());
-    let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
-    let multiplier = rng.random_range(script.gap_multiplier.0..=script.gap_multiplier.1);
-    spawner.timer = Timer::from_seconds(legit_gap * multiplier, TimerMode::Once);
+    spawner.timer = shift::roll_next_gap(&mut rng, &rules, script.gap_multiplier);
 
     let Some(visit) = script
         .visits
@@ -195,30 +185,20 @@ fn generate_obsessed_visit(
         return;
     };
 
-    let identity = CrewDef {
-        name: script.name.clone(),
-        role: script.role.clone(),
-        color: script.color,
-    };
-    let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
-    let crew = spawn_crew_member(&mut commands, &identity, 0.0);
-
-    let reagent_name = db.reagents.get(reagent).name.clone();
-    let amount = deliverable_amount(&db, reagent, chem_sim::Units::whole(visit.amount as i32));
-    commands.entity(crew).insert((
-        Order {
+    shift::spawn_scripted_visit(
+        &mut commands,
+        &db,
+        &mut rng,
+        &rules,
+        shift::ScriptedVisit {
+            name: &script.name,
+            role: &script.role,
+            color: script.color,
             reagent,
-            specific: true,
-            amount,
+            amount_units: visit.amount,
             plea: visit.plea.clone(),
-            patience,
-            waited: 0.0,
         },
-        Interactable::new(format!(
-            "{} — hand over {} {}",
-            script.name, amount, reagent_name
-        )),
-    ));
+    );
 
     let channel = channel_for(&script.role);
     radio.push(

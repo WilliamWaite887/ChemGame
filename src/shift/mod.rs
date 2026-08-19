@@ -192,6 +192,101 @@ fn scale_for_chemists(rules: ShiftRules, chemist_count: usize, ramp: &RampDef) -
 }
 
 // ---------------------------------------------------------------------------
+// Threat-thread spawners
+// ---------------------------------------------------------------------------
+
+/// Arms a fresh save's first visit-thread spawn timer.
+///
+/// Every threat-thread module (`obsessed`, `smuggler`, `saboteur`, `quack`,
+/// `cult`, `rogue_security`, `antagonist`, `addiction`) used to hand-copy an
+/// identical three-line body under its own `arm_spawner` system, each
+/// registered on `OnEnter(AppState::Playing)` rather than only once at
+/// process start: quitting to the menu and opening another save would
+/// otherwise leave a spent `TimerMode::Once` behind, and a spent `Once`
+/// timer never reports `just_finished` again — the whole thread would be
+/// silently dead for the rest of the session with nothing to show for it.
+pub fn arm_first_visit<S: Resource>(
+    commands: &mut Commands,
+    gap_range: (f32, f32),
+    make: impl FnOnce(Timer) -> S,
+) {
+    let gap = rand::rng().random_range(gap_range.0..=gap_range.1);
+    commands.insert_resource(make(Timer::from_seconds(gap, TimerMode::Once)));
+}
+
+/// Rolls the next arrival gap for a scripted visit thread and returns the
+/// timer to re-arm its spawner with.
+///
+/// Every "recurring identity" thread (`obsessed`, `smuggler`, `saboteur`,
+/// `quack`, `cult`) and `rogue_security` rolled this identically: the shared
+/// legitimate-order gap from [`current_rules`], scaled by the thread's own
+/// `gap_multiplier` so each keeps its own separate pacing personality.
+pub fn roll_next_gap(
+    rng: &mut impl Rng,
+    rules: &ShiftRules,
+    multiplier_range: (f32, f32),
+) -> Timer {
+    let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
+    let multiplier = rng.random_range(multiplier_range.0..=multiplier_range.1);
+    Timer::from_seconds(legit_gap * multiplier, TimerMode::Once)
+}
+
+/// The fields a scripted visit needs from its own thread's authored data —
+/// see [`spawn_scripted_visit`].
+pub struct ScriptedVisit<'a> {
+    pub name: &'a str,
+    pub role: &'a str,
+    pub color: [f32; 3],
+    pub reagent: chem_sim::ReagentId,
+    pub amount_units: u32,
+    pub plea: String,
+}
+
+/// Spawns one crew member for a scripted "recurring identity" visit — the
+/// common tail every such thread (`obsessed`, `smuggler`, `saboteur`,
+/// `quack`, `cult`) reaches once its own script and gap logic have already
+/// decided a visit is happening. Reuses the ordinary `Order`/`Interactable`
+/// pipeline unmodified — see `obsessed`'s own module doc for why that
+/// matters.
+pub fn spawn_scripted_visit(
+    commands: &mut Commands,
+    db: &ChemDb,
+    rng: &mut impl Rng,
+    rules: &ShiftRules,
+    visit: ScriptedVisit,
+) -> Entity {
+    let identity = crate::crew::CrewDef {
+        name: visit.name.to_string(),
+        role: visit.role.to_string(),
+        color: visit.color,
+    };
+    let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
+    let crew = crate::crew::spawn_crew_member(commands, &identity, 0.0);
+
+    let reagent_name = db.reagents.get(visit.reagent).name.clone();
+    let amount = crate::orders::deliverable_amount(
+        db,
+        visit.reagent,
+        chem_sim::Units::whole(visit.amount_units as i32),
+    );
+    commands.entity(crew).insert((
+        crate::orders::Order {
+            reagent: visit.reagent,
+            specific: true,
+            amount,
+            plea: visit.plea.clone(),
+            patience,
+            waited: 0.0,
+        },
+        crate::interaction::Interactable::new(format!(
+            "{} — hand over {} {}",
+            visit.name, amount, reagent_name
+        )),
+    ));
+    crew
+}
+
+// ---------------------------------------------------------------------------
 // Forecast
 // ---------------------------------------------------------------------------
 

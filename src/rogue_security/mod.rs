@@ -43,7 +43,7 @@ use crate::net::is_authority;
 use crate::orders::{Department, Shift, StationData};
 use crate::player::Chemist;
 use crate::radio::{RadioEntry, RadioLog};
-use crate::shift::current_rules;
+use crate::shift::{self, current_rules};
 use crate::AppState;
 
 /// Seconds before the very first check, before `Shift` has moved at all.
@@ -188,17 +188,12 @@ fn promote_script(
     commands.remove_resource::<PendingRogueSecurityScript>();
 }
 
-/// Arms this thread's visit clock for a fresh session.
-///
-/// `OnEnter(AppState::Playing)` rather than inside `promote_script`, which
-/// runs exactly once per process: quitting to the menu and opening another
-/// save would otherwise leave a spent `TimerMode::Once` behind, and a spent
-/// `Once` timer never reports `just_finished` again — the whole thread would
-/// be silently dead for the rest of the session with nothing to show for it.
+/// See `shift::arm_first_visit` for why this has to re-run on
+/// `OnEnter(AppState::Playing)` every session rather than only once at
+/// process start.
 fn arm_spawner(mut commands: Commands) {
-    let gap = rand::rng().random_range(INITIAL_GAP_SECONDS.0..=INITIAL_GAP_SECONDS.1);
-    commands.insert_resource(RogueSpawner {
-        timer: Timer::from_seconds(gap, TimerMode::Once),
+    shift::arm_first_visit(&mut commands, INITIAL_GAP_SECONDS, |timer| RogueSpawner {
+        timer,
     });
 }
 
@@ -252,9 +247,7 @@ fn schedule_rogue_encounter(
 
     let mut rng = rand::rng();
     let rules = current_rules(&station.config, &shift, chemists.iter().count());
-    let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
-    let multiplier = rng.random_range(script.gap_multiplier.0..=script.gap_multiplier.1);
-    spawner.timer = Timer::from_seconds(legit_gap * multiplier, TimerMode::Once);
+    spawner.timer = shift::roll_next_gap(&mut rng, &rules, script.gap_multiplier);
 
     // The gate: silence unless Security standing has actually soured.
     if shift.standing(Department::Security) > script.hostile_below {
