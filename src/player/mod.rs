@@ -1327,6 +1327,93 @@ mod tests {
         );
     }
 
+    // -- movement against the real map's geometry ----------------------------
+
+    /// An app whose walls and floor plan are the *authored* `lab.map`, not the
+    /// const-table fallback `move_app` uses — the only way to catch a chemist
+    /// getting physically stuck on real collision geometry, since an empty
+    /// solids query can never disagree with itself.
+    fn map_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .insert_resource(lab::tb_map::authored_walkable_areas())
+            .add_systems(Update, apply_move_input);
+        for (center, half_extents) in lab::tb_map::authored_solid_colliders() {
+            app.world_mut().spawn((
+                Transform::from_translation(center),
+                Solid { half_extents },
+            ));
+        }
+        app
+    }
+
+    fn walking_chemist(app: &mut App, at: Vec3, direction: Vec2) -> Entity {
+        app.world_mut()
+            .spawn((
+                Chemist {
+                    client: ClientId::Server,
+                },
+                MoveIntent {
+                    direction,
+                    yaw: 0.0,
+                    sprint: false,
+                },
+                Look::default(),
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_translation(at),
+            ))
+            .id()
+    }
+
+    /// Walks a chemist for `seconds` of simulated time in fixed sub-steps,
+    /// returning their final `Transform::translation`.
+    fn walk(app: &mut App, chemist: Entity, seconds: f32) -> Vec3 {
+        let steps = (seconds / 0.05).round() as u32;
+        for i in 0..steps {
+            tick(app, 0.05);
+            if std::env::var("WALK_TRACE").is_ok() {
+                let t = app.world().get::<Transform>(chemist).unwrap().translation;
+                eprintln!("step {i}: {t}");
+            }
+        }
+        app.world().get::<Transform>(chemist).unwrap().translation
+    }
+
+    #[test]
+    fn a_chemist_can_walk_down_every_maintenance_stair() {
+        // The bug this pins lived in `WalkableAreas::contain_on_surface`: its
+        // "nearest candidate wins" region pick compared full 3D distance,
+        // including height, to decide which walkable region a body is in.
+        // Partway down a slope a flat neighbour (a landing, or a stray flat
+        // tile) always offers a *smaller* distance than the slope's own,
+        // correctly-changing candidate, simply because holding height
+        // constant costs nothing and following the slope does — so the flat
+        // region won every frame and pinned a descending body at its entry
+        // height forever. Neither `every_brush_encloses_a_volume` nor
+        // `physical_walls_match_walkable_routes_and_airlock_gaps` can see
+        // this — both reason about brushes in isolation from a moving body's
+        // height. Only actually walking a body down each stair can.
+        const LOWER_DECK_FLOOR: f32 = -3.6;
+        for (name, start, direction) in [
+            ("north", Vec3::new(-40.1, EYE_HEIGHT, -10.0), Vec2::new(0.0, 1.0)),
+            ("south", Vec3::new(-40.1, EYE_HEIGHT, 53.0), Vec2::new(0.0, -1.0)),
+            ("west", Vec3::new(-111.0, EYE_HEIGHT, 30.0), Vec2::new(1.0, 0.0)),
+            ("east", Vec3::new(15.0, EYE_HEIGHT, 30.0), Vec2::new(-1.0, 0.0)),
+        ] {
+            let mut app = map_app();
+            let chemist = walking_chemist(&mut app, start, direction);
+            let end = walk(&mut app, chemist, 8.0);
+            let floor_y = end.y - EYE_HEIGHT;
+            assert!(
+                (floor_y - LOWER_DECK_FLOOR).abs() < 0.2,
+                "{name} stair: chemist ended standing at floor height {floor_y} \
+                 after walking from {start}, expected to reach the lower deck \
+                 near {LOWER_DECK_FLOOR}",
+            );
+        }
+    }
+
     // -- client-side prediction ---------------------------------------------
 
     fn predict_app() -> App {

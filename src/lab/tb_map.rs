@@ -247,6 +247,45 @@ pub(crate) fn authored_walkable_areas() -> WalkableAreas {
     areas
 }
 
+/// The exact collider set `LabWorldspawn::spawn_brush_colliders` builds at
+/// runtime, as (center, half_extents) pairs.
+///
+/// Mirrors that function's own `is_scenery`/`blocks_a_body` filtering exactly
+/// rather than importing it, since it lives behind `feature = "trenchbroom"`
+/// and this needs to run unconditionally like the rest of this module. Exposed
+/// so movement regressions can exercise real collision against the real map
+/// instead of an empty solids query, which would silently stop testing
+/// collision at all.
+pub(crate) fn authored_solid_colliders() -> Vec<(Vec3, Vec3)> {
+    fn is_scenery(texture: &str) -> bool {
+        texture.starts_with("floor_") || matches!(texture, "ceiling" | "stripe")
+    }
+
+    let mut colliders = Vec::new();
+    for entity in parse()
+        .into_iter()
+        .filter(|entity| classname(entity).as_deref() == Some("worldspawn"))
+    {
+        for brush in &entity.brushes {
+            if brush
+                .iter()
+                .all(|surface| is_scenery(&surface.texture.to_string_lossy()))
+            {
+                continue;
+            }
+            let bounds = footprint(brush);
+            let (min_y, max_y) = vertical_span(brush);
+            if max_y <= min_y {
+                continue;
+            }
+            let min = Vec3::new(bounds.min_x, min_y, bounds.min_z);
+            let max = Vec3::new(bounds.max_x, max_y, bounds.max_z);
+            colliders.push(((min + max) * 0.5, (max - min) * 0.5));
+        }
+    }
+    colliders
+}
+
 /// Position of one authored department marker, in Bevy world coordinates.
 pub(crate) fn authored_department_home(role: &str) -> Vec3 {
     let entity = parse()

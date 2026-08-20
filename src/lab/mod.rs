@@ -1087,27 +1087,75 @@ impl WalkableAreas {
     /// ground-floor and underfloor regions overlap in XZ without teleporting a
     /// body between them, while a stair profile provides the continuous link.
     pub fn contain_on_surface(&self, position: Vec3, radius: f32, body_offset: f32) -> Vec3 {
-        let mut best: Option<(f32, Vec3)> = None;
+        // Two tiers, not one flat contest. A region whose inset genuinely
+        // *holds* (x, z) is somewhere the body is actually standing; a region
+        // that only offers its *nearest boundary point* is a fallback for
+        // when nothing holds at all (the dead strip between two regions'
+        // insets, narrower than `radius` on each side). Held candidates must
+        // always beat clamped ones regardless of raw distance.
+        //
+        // The bug this tier split fixes: on a stair mid-slope, the stair's
+        // own region holds (x, z) exactly, but a merely-clamped neighbour —
+        // a flat landing or a stray flat tile — can still report a *smaller*
+        // 3D distance, because clamping never has to pay for a height
+        // change and the slope does. Comparing flat/held candidates as one
+        // pool let the flat one win every time, permanently pinning a
+        // descending body at its entry height. See
+        // `player::tests::a_chemist_can_walk_down_every_maintenance_stair`.
+        //
+        // The clamped tier compares *horizontal* distance only, for the same
+        // reason: it exists for the dead strip between two regions' insets
+        // (up to `radius` on each side, so up to `2 * radius` wide) where
+        // neither one holds yet, and nothing has been entered there for a
+        // height to matter to.
+        //
+        // The held tier has a subtler version of the same problem: two
+        // regions both holding the same (x, z) is a real, wanted case (a
+        // sloped landing sitting on top of the corridor it bridges to), and
+        // *there* a flat region's "zero height change" is a permanent,
+        // structural advantage over a sloped one's "correct, non-zero
+        // change" — not a coincidence of one frame's numbers. So slope beats
+        // flat outright when both hold; height distance from the current
+        // position is the tiebreaker only when both candidates are equally
+        // flat or equally sloped, which is what keeps a body on the floor it
+        // is already standing near instead of snapping through it into an
+        // underfloor region that overlaps the same (x, z) — the case the
+        // body_offset doc comment above describes.
+        let mut best_held: Option<(f32, bool, Vec3)> = None;
+        let mut best_clamped: Option<(f32, Vec3)> = None;
 
         for region in &self.regions {
             let inset = region.bounds.inset(radius);
             if !inset.is_standable() {
                 continue;
             }
-            let horizontal = if inset.holds(position) {
-                position
-            } else {
-                inset.nearest(position)
-            };
+            let holds = inset.holds(position);
+            let horizontal = if holds { position } else { inset.nearest(position) };
             let floor_y = region.floor_at(horizontal);
             let candidate = Vec3::new(horizontal.x, floor_y + body_offset, horizontal.z);
-            let distance = candidate.distance_squared(position);
-            if best.is_none_or(|(nearest, _)| distance < nearest) {
-                best = Some((distance, candidate));
+            if holds {
+                let sloped = !matches!(region.floor, FloorProfile::Flat(_));
+                let distance = candidate.distance_squared(position);
+                let better = match best_held {
+                    None => true,
+                    Some((_, nearest_sloped, _)) if sloped != nearest_sloped => sloped,
+                    Some((nearest, _, _)) => distance < nearest,
+                };
+                if better {
+                    best_held = Some((distance, sloped, candidate));
+                }
+            } else {
+                let distance = (horizontal.x - position.x).powi(2) + (horizontal.z - position.z).powi(2);
+                if best_clamped.is_none_or(|(nearest, _)| distance < nearest) {
+                    best_clamped = Some((distance, candidate));
+                }
             }
         }
 
-        best.map_or(position, |(_, point)| point)
+        best_held
+            .map(|(_, _, point)| point)
+            .or(best_clamped.map(|(_, point)| point))
+            .unwrap_or(position)
     }
 
     /// Which room a point stands in, if any.

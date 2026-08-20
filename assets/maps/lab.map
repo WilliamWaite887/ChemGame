@@ -2227,72 +2227,6 @@
 ( -1256 740 -16 ) ( -1144 740 -16 ) ( -1256 740 0 ) floor_corridor [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( -1144 -240 -16 ) ( -1144 -240 0 ) ( -1144 740 -16 ) floor_corridor [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
-// North stair, west side wall: contains the stairwell so it reads as a proper shaft
-// rather than an open trench in the floor. Stops short of the top and
-// bottom thresholds so it cannot re-block the entrance.
-{
-( 80 1655 0 ) ( 80 1665 0 ) ( 80 1655 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 80 1655 0 ) ( 80 1655 120 ) ( 332 1655 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 80 1655 0 ) ( 332 1655 0 ) ( 80 1665 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( 80 1655 120 ) ( 80 1665 120 ) ( 332 1655 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( 80 1665 0 ) ( 332 1665 0 ) ( 80 1665 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 332 1655 0 ) ( 332 1655 120 ) ( 332 1665 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
-// North stair, east side wall: contains the stairwell so it reads as a proper shaft
-// rather than an open trench in the floor. Stops short of the top and
-// bottom thresholds so it cannot re-block the entrance.
-{
-( 80 1543 0 ) ( 80 1553 0 ) ( 80 1543 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 80 1543 0 ) ( 80 1543 120 ) ( 332 1543 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 80 1543 0 ) ( 332 1543 0 ) ( 80 1553 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( 80 1543 120 ) ( 80 1553 120 ) ( 332 1543 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( 80 1553 0 ) ( 332 1553 0 ) ( 80 1553 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 332 1543 0 ) ( 332 1543 120 ) ( 332 1553 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
-// West stair, north side wall: contains the stairwell so it reads as a proper shaft
-// rather than an open trench in the floor. Stops short of the top and
-// bottom thresholds so it cannot re-block the entrance.
-{
-( -1149 4100 0 ) ( -1149 4356 0 ) ( -1149 4100 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1149 4100 0 ) ( -1149 4100 120 ) ( -1139 4100 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1149 4100 0 ) ( -1139 4100 0 ) ( -1149 4356 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1149 4100 120 ) ( -1149 4356 120 ) ( -1139 4100 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1149 4356 0 ) ( -1139 4356 0 ) ( -1149 4356 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1139 4100 0 ) ( -1139 4100 120 ) ( -1139 4356 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
-// West stair, south side wall: contains the stairwell so it reads as a proper shaft
-// rather than an open trench in the floor. Stops short of the top and
-// bottom thresholds so it cannot re-block the entrance.
-{
-( -1261 4100 0 ) ( -1261 4356 0 ) ( -1261 4100 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1261 4100 0 ) ( -1261 4100 120 ) ( -1251 4100 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1261 4100 0 ) ( -1251 4100 0 ) ( -1261 4356 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1261 4100 120 ) ( -1261 4356 120 ) ( -1251 4100 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1261 4356 0 ) ( -1251 4356 0 ) ( -1261 4356 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1251 4100 0 ) ( -1251 4100 120 ) ( -1251 4356 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
-// East stair, north side wall: contains the stairwell so it reads as a proper shaft
-// rather than an open trench in the floor. Stops short of the top and
-// bottom thresholds so it cannot re-block the entrance.
-{
-( -1149 -516 0 ) ( -1149 -260 0 ) ( -1149 -516 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1149 -516 0 ) ( -1149 -516 120 ) ( -1139 -516 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1149 -516 0 ) ( -1139 -516 0 ) ( -1149 -260 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1149 -516 120 ) ( -1149 -260 120 ) ( -1139 -516 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1149 -260 0 ) ( -1139 -260 0 ) ( -1149 -260 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1139 -516 0 ) ( -1139 -516 120 ) ( -1139 -260 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
-// East stair, south side wall: contains the stairwell so it reads as a proper shaft
-// rather than an open trench in the floor. Stops short of the top and
-// bottom thresholds so it cannot re-block the entrance.
-{
-( -1261 -516 0 ) ( -1261 -260 0 ) ( -1261 -516 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1261 -516 0 ) ( -1261 -516 120 ) ( -1251 -516 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1261 -516 0 ) ( -1251 -516 0 ) ( -1261 -260 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1261 -516 120 ) ( -1261 -260 120 ) ( -1251 -516 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1261 -260 0 ) ( -1251 -260 0 ) ( -1261 -260 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1251 -516 0 ) ( -1251 -516 120 ) ( -1251 -260 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
 }
 // entity 1
 {
@@ -4301,15 +4235,13 @@
 ( 328 -568 0 ) ( 392 -568 0 ) ( 328 -568 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( 392 -632 0 ) ( 392 -632 20 ) ( 392 -568 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
-// brush 5
-{
-( 328 1572 0 ) ( 328 1636 0 ) ( 328 1572 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 328 1572 0 ) ( 328 1572 20 ) ( 392 1572 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 328 1572 0 ) ( 392 1572 0 ) ( 328 1636 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( 328 1572 20 ) ( 328 1636 20 ) ( 392 1572 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( 328 1636 0 ) ( 392 1636 0 ) ( 328 1636 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 392 1572 0 ) ( 392 1572 20 ) ( 392 1636 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
+// brush 5 removed -- unnamed flat clip tile at the North stair's own entrance
+// (bevy x -40.9..-39.3, z -9.8..-8.2). It out-competed the stair's own
+// sloped region in contain_on_surface's nearest-candidate pick (a flat
+// candidate a little further away in XZ beats a correctly-sloped one that's
+// exact in XZ but differs in Y, since Y counts toward "distance" too),
+// permanently trapping a descending chemist at y=0. See the regression test
+// player::tests::a_chemist_can_walk_down_every_maintenance_stair.
 // brush 6
 {
 ( -2072 4408 0 ) ( -2072 4472 0 ) ( -2072 4408 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
@@ -4328,15 +4260,8 @@
 ( -2072 -568 0 ) ( -2008 -568 0 ) ( -2072 -568 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( -2008 -632 0 ) ( -2008 -632 20 ) ( -2008 -568 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
-// brush 8
-{
-( -2072 1572 0 ) ( -2072 1636 0 ) ( -2072 1572 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2072 1572 0 ) ( -2072 1572 20 ) ( -2008 1572 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2072 1572 0 ) ( -2008 1572 0 ) ( -2072 1636 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2072 1572 20 ) ( -2072 1636 20 ) ( -2008 1572 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2072 1636 0 ) ( -2008 1636 0 ) ( -2072 1636 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2008 1572 0 ) ( -2008 1572 20 ) ( -2008 1636 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
+// brush 8 removed -- unnamed flat clip tile at the South stair's own
+// entrance (bevy x -40.9..-39.3, z 50.2..51.8), the same trap as brush 5.
 }
 // entity 182
 {
