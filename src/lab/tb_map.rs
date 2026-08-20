@@ -588,11 +588,15 @@ fn station_v2_keeps_its_department_and_route_footprints() {
         assert!(bounds_are_close(found[0], expected), "{room}: {found:?}");
     }
 
+    // Service and Botany each used to be cut in two by the old at-grade
+    // maintenance hallway; now that it's underground, both are one
+    // continuous room again, stitched across the old gap by a third,
+    // connector brush (the two original halves plus the bridge between them).
     let service = named_bounds("Service");
     assert_eq!(
         service.len(),
-        2,
-        "the technical spine should divide Service"
+        3,
+        "Service should be its two original halves plus the connector across the old spine gap"
     );
     for expected in [
         Bounds {
@@ -604,6 +608,12 @@ fn station_v2_keeps_its_department_and_route_footprints() {
         Bounds {
             min_x: -38.7,
             max_x: -23.5,
+            min_z: 15.0,
+            max_z: 28.6,
+        },
+        Bounds {
+            min_x: -41.5,
+            max_x: -38.7,
             min_z: 15.0,
             max_z: 28.6,
         },
@@ -619,8 +629,8 @@ fn station_v2_keeps_its_department_and_route_footprints() {
     let botany = named_bounds("Botany");
     assert_eq!(
         botany.len(),
-        2,
-        "the maintenance spine should divide Botany"
+        3,
+        "Botany should be its two original halves plus the connector across the old spine gap"
     );
     for expected in [
         Bounds {
@@ -634,6 +644,12 @@ fn station_v2_keeps_its_department_and_route_footprints() {
             max_x: 13.5,
             min_z: 31.4,
             max_z: 42.0,
+        },
+        Bounds {
+            min_x: -18.5,
+            max_x: 6.0,
+            min_z: 28.6,
+            max_z: 31.4,
         },
     ] {
         assert!(
