@@ -1381,6 +1381,32 @@ mod tests {
     }
 
     #[test]
+    fn a_chemist_can_walk_up_every_maintenance_stair() {
+        // The other direction. Walking down only has to keep finding a lower
+        // surface; walking up has to *enter* the stair from the lower deck and
+        // then leave it onto the landing at the top, and either transition can
+        // strand a body that the descent handles fine.
+        const GROUND_FLOOR: f32 = 0.0;
+        for (name, start, direction) in [
+            ("north", Vec3::new(-40.1, -3.6 + EYE_HEIGHT, 1.0), Vec2::new(0.0, -1.0)),
+            ("south", Vec3::new(-40.1, -3.6 + EYE_HEIGHT, 41.0), Vec2::new(0.0, 1.0)),
+            ("west", Vec3::new(-100.0, -3.6 + EYE_HEIGHT, 30.0), Vec2::new(-1.0, 0.0)),
+            ("east", Vec3::new(4.0, -3.6 + EYE_HEIGHT, 30.0), Vec2::new(1.0, 0.0)),
+        ] {
+            let mut app = map_app();
+            let chemist = walking_chemist(&mut app, start, direction);
+            let end = walk(&mut app, chemist, 10.0);
+            let floor_y = end.y - EYE_HEIGHT;
+            assert!(
+                (floor_y - GROUND_FLOOR).abs() < 0.6,
+                "{name} stair: chemist ended standing at floor height {floor_y} \
+                 after walking up from {start}, expected to reach the ground floor \
+                 near {GROUND_FLOOR}",
+            );
+        }
+    }
+
+    #[test]
     fn a_chemist_can_walk_down_every_maintenance_stair() {
         // The bug this pins lived in `WalkableAreas::contain_on_surface`: its
         // "nearest candidate wins" region pick compared full 3D distance,

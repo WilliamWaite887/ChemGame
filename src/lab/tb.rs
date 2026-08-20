@@ -26,6 +26,8 @@
 //! were square; that is a real limit of reusing `Solid` rather than a physics
 //! engine, and it is fine for a station made of corridors.
 
+use std::collections::HashMap;
+
 use bevy::asset::RenderAssetUsages;
 use bevy::gltf::GltfAssetLabel;
 use bevy::math::DVec3;
@@ -1211,23 +1213,140 @@ pub struct DecorationSpot {
     pub kind: String,
 }
 
+/// Every decoration kind a map may name, and the export it dresses with.
+///
+/// A table rather than one field per kind: the set is open-ended — every
+/// department will want its own modules eventually — and a struct that grows a
+/// field, a match arm and a loader line for each one is three places to forget.
+/// The closed-list property that matters is preserved either way, since a
+/// `kind` outside this table resolves to nothing.
+///
+/// Chemistry modules mount on chemistry walls and medical ones on medical
+/// walls, but nothing enforces that: the prefix is a naming convention for
+/// whoever is authoring the map, not a rule.
+const DECORATION_KINDS: &[(&str, &str)] = &[
+    (
+        "chem.supply_shelf",
+        "3dassets/station_starter_kit/glb/decor_chem_supply_shelf.glb",
+    ),
+    (
+        "chem.analysis_panel",
+        "3dassets/station_starter_kit/glb/decor_chem_analysis_panel.glb",
+    ),
+    (
+        "chem.emergency_station",
+        "3dassets/station_starter_kit/glb/decor_chem_emergency_station.glb",
+    ),
+    (
+        "chem.service_board",
+        "3dassets/station_starter_kit/glb/decor_chem_service_board.glb",
+    ),
+    (
+        "med.supply_shelf",
+        "3dassets/station_starter_kit/glb/decor_med_supply_shelf.glb",
+    ),
+    (
+        "med.vitals_panel",
+        "3dassets/station_starter_kit/glb/decor_med_vitals_panel.glb",
+    ),
+    (
+        "med.crash_station",
+        "3dassets/station_starter_kit/glb/decor_med_crash_station.glb",
+    ),
+    (
+        "med.triage_board",
+        "3dassets/station_starter_kit/glb/decor_med_triage_board.glb",
+    ),
+    (
+        "med.quarantine_seal",
+        "3dassets/station_starter_kit/glb/decor_med_quarantine_seal.glb",
+    ),
+    (
+        "med.ward_bay",
+        "3dassets/station_starter_kit/glb/decor_med_ward_bay.glb",
+    ),
+    (
+        "med.waiting_row",
+        "3dassets/station_starter_kit/glb/decor_med_waiting_row.glb",
+    ),
+    (
+        "med.specimen_cold",
+        "3dassets/station_starter_kit/glb/decor_med_specimen_cold.glb",
+    ),
+    (
+        "eng.breaker_panel",
+        "3dassets/station_starter_kit/glb/decor_eng_breaker_panel.glb",
+    ),
+    (
+        "eng.tool_board",
+        "3dassets/station_starter_kit/glb/decor_eng_tool_board.glb",
+    ),
+    (
+        "eng.pipe_manifold",
+        "3dassets/station_starter_kit/glb/decor_eng_pipe_manifold.glb",
+    ),
+    (
+        "eng.safety_station",
+        "3dassets/station_starter_kit/glb/decor_eng_safety_station.glb",
+    ),
+    (
+        "cargo.manifest_board",
+        "3dassets/station_starter_kit/glb/decor_cargo_manifest_board.glb",
+    ),
+    (
+        "cargo.parcel_shelf",
+        "3dassets/station_starter_kit/glb/decor_cargo_parcel_shelf.glb",
+    ),
+    (
+        "cargo.dispatch_panel",
+        "3dassets/station_starter_kit/glb/decor_cargo_dispatch_panel.glb",
+    ),
+    (
+        "cargo.weigh_station",
+        "3dassets/station_starter_kit/glb/decor_cargo_weigh_station.glb",
+    ),
+    (
+        "sec.notice_board",
+        "3dassets/station_starter_kit/glb/decor_sec_notice_board.glb",
+    ),
+    (
+        "sec.camera_bank",
+        "3dassets/station_starter_kit/glb/decor_sec_camera_bank.glb",
+    ),
+    (
+        "sec.armory_rack",
+        "3dassets/station_starter_kit/glb/decor_sec_armory_rack.glb",
+    ),
+    (
+        "sec.evidence_wall",
+        "3dassets/station_starter_kit/glb/decor_sec_evidence_wall.glb",
+    ),
+    (
+        "svc.menu_board",
+        "3dassets/station_starter_kit/glb/decor_svc_menu_board.glb",
+    ),
+    (
+        "svc.crockery_shelf",
+        "3dassets/station_starter_kit/glb/decor_svc_crockery_shelf.glb",
+    ),
+    (
+        "svc.pass_hatch",
+        "3dassets/station_starter_kit/glb/decor_svc_pass_hatch.glb",
+    ),
+    (
+        "svc.drinks_board",
+        "3dassets/station_starter_kit/glb/decor_svc_drinks_board.glb",
+    ),
+];
+
 #[derive(Resource)]
 struct DecorationAssets {
-    supply_shelf: Handle<WorldAsset>,
-    analysis_panel: Handle<WorldAsset>,
-    emergency_station: Handle<WorldAsset>,
-    service_board: Handle<WorldAsset>,
+    scenes: HashMap<&'static str, Handle<WorldAsset>>,
 }
 
 impl DecorationAssets {
     fn scene(&self, kind: &str) -> Option<&Handle<WorldAsset>> {
-        match kind.trim() {
-            "chem.supply_shelf" => Some(&self.supply_shelf),
-            "chem.analysis_panel" => Some(&self.analysis_panel),
-            "chem.emergency_station" => Some(&self.emergency_station),
-            "chem.service_board" => Some(&self.service_board),
-            _ => None,
-        }
+        self.scenes.get(kind.trim())
     }
 }
 
@@ -1235,14 +1354,13 @@ impl DecorationAssets {
 struct DecorationDressed;
 
 fn load_decoration_assets(mut commands: Commands, assets: Res<AssetServer>) {
-    let scene = |path: &'static str| assets.load(GltfAssetLabel::Scene(0).from_asset(path));
     commands.insert_resource(DecorationAssets {
-        supply_shelf: scene("3dassets/station_starter_kit/glb/decor_chem_supply_shelf.glb"),
-        analysis_panel: scene("3dassets/station_starter_kit/glb/decor_chem_analysis_panel.glb"),
-        emergency_station: scene(
-            "3dassets/station_starter_kit/glb/decor_chem_emergency_station.glb",
-        ),
-        service_board: scene("3dassets/station_starter_kit/glb/decor_chem_service_board.glb"),
+        scenes: DECORATION_KINDS
+            .iter()
+            .map(|(kind, path)| {
+                (*kind, assets.load(GltfAssetLabel::Scene(0).from_asset(*path)))
+            })
+            .collect(),
     });
 }
 
@@ -1566,10 +1684,10 @@ mod tests {
     fn modular_decoration_is_visual_only_and_keeps_the_map_transform() {
         let mut app = App::new();
         app.insert_resource(DecorationAssets {
-            supply_shelf: default(),
-            analysis_panel: default(),
-            emergency_station: default(),
-            service_board: default(),
+            scenes: DECORATION_KINDS
+                .iter()
+                .map(|(kind, _)| (*kind, default()))
+                .collect(),
         })
         .add_systems(Update, dress_decorations);
 

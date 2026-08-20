@@ -1315,6 +1315,82 @@
 ( -1144 1548 -144 ) ( 60 1548 -144 ) ( -1144 1548 -16 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( 60 1538 -144 ) ( 60 1538 -16 ) ( 60 1548 -144 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
+// Maintenance Stair North: the trench arm's two retaining walls stopped
+// where the stair starts, leaving the descent open to the void down both
+// of its long sides. These two close it.
+{
+( 60 1538 -144 ) ( 60 1548 -144 ) ( 60 1538 -16 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 60 1538 -144 ) ( 60 1538 -16 ) ( 324 1538 -144 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 60 1538 -144 ) ( 324 1538 -144 ) ( 60 1548 -144 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 60 1538 -16 ) ( 60 1548 -16 ) ( 324 1538 -16 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 60 1548 -144 ) ( 324 1548 -144 ) ( 60 1548 -16 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 324 1538 -144 ) ( 324 1538 -16 ) ( 324 1548 -144 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+{
+( 60 1660 -144 ) ( 60 1670 -144 ) ( 60 1660 -16 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 60 1660 -144 ) ( 60 1660 -16 ) ( 324 1660 -144 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 60 1660 -144 ) ( 324 1660 -144 ) ( 60 1670 -144 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 60 1660 -16 ) ( 60 1670 -16 ) ( 324 1660 -16 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 60 1670 -144 ) ( 324 1670 -144 ) ( 60 1670 -16 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 324 1660 -144 ) ( 324 1660 -16 ) ( 324 1670 -144 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// Maintenance Stair South: the trench arm's two retaining walls stopped
+// where the stair starts, leaving the descent open to the void down both
+// of its long sides. These two close it.
+{
+( -2004 1538 -144 ) ( -2004 1548 -144 ) ( -2004 1538 -16 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2004 1538 -144 ) ( -2004 1538 -16 ) ( -1740 1538 -144 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2004 1538 -144 ) ( -1740 1538 -144 ) ( -2004 1548 -144 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2004 1538 -16 ) ( -2004 1548 -16 ) ( -1740 1538 -16 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2004 1548 -144 ) ( -1740 1548 -144 ) ( -2004 1548 -16 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1740 1538 -144 ) ( -1740 1538 -16 ) ( -1740 1548 -144 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+{
+( -2004 1660 -144 ) ( -2004 1670 -144 ) ( -2004 1660 -16 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2004 1660 -144 ) ( -2004 1660 -16 ) ( -1740 1660 -144 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2004 1660 -144 ) ( -1740 1660 -144 ) ( -2004 1670 -144 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2004 1660 -16 ) ( -2004 1670 -16 ) ( -1740 1660 -16 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2004 1670 -144 ) ( -1740 1670 -144 ) ( -2004 1670 -16 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1740 1660 -144 ) ( -1740 1660 -16 ) ( -1740 1670 -144 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// Maintenance Stair West: the trench arm's two retaining walls stopped
+// where the stair starts, leaving the descent open to the void down both
+// of its long sides. These two close it.
+{
+( -1266 4080 -144 ) ( -1266 4344 -144 ) ( -1266 4080 -16 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1266 4080 -144 ) ( -1266 4080 -16 ) ( -1256 4080 -144 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1266 4080 -144 ) ( -1256 4080 -144 ) ( -1266 4344 -144 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1266 4080 -16 ) ( -1266 4344 -16 ) ( -1256 4080 -16 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1266 4344 -144 ) ( -1256 4344 -144 ) ( -1266 4344 -16 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1256 4080 -144 ) ( -1256 4080 -16 ) ( -1256 4344 -144 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+{
+( -1144 4080 -144 ) ( -1144 4344 -144 ) ( -1144 4080 -16 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 4080 -144 ) ( -1144 4080 -16 ) ( -1134 4080 -144 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 4080 -144 ) ( -1134 4080 -144 ) ( -1144 4344 -144 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1144 4080 -16 ) ( -1144 4344 -16 ) ( -1134 4080 -16 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1144 4344 -144 ) ( -1134 4344 -144 ) ( -1144 4344 -16 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1134 4080 -144 ) ( -1134 4080 -16 ) ( -1134 4344 -144 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// Maintenance Stair East: the trench arm's two retaining walls stopped
+// where the stair starts, leaving the descent open to the void down both
+// of its long sides. These two close it.
+{
+( -1266 -504 -144 ) ( -1266 -240 -144 ) ( -1266 -504 -16 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1266 -504 -144 ) ( -1266 -504 -16 ) ( -1256 -504 -144 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1266 -504 -144 ) ( -1256 -504 -144 ) ( -1266 -240 -144 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1266 -504 -16 ) ( -1266 -240 -16 ) ( -1256 -504 -16 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1266 -240 -144 ) ( -1256 -240 -144 ) ( -1266 -240 -16 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1256 -504 -144 ) ( -1256 -504 -16 ) ( -1256 -240 -144 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+{
+( -1144 -504 -144 ) ( -1144 -240 -144 ) ( -1144 -504 -16 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 -504 -144 ) ( -1144 -504 -16 ) ( -1134 -504 -144 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 -504 -144 ) ( -1134 -504 -144 ) ( -1144 -240 -144 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1144 -504 -16 ) ( -1144 -240 -16 ) ( -1134 -504 -16 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1144 -240 -144 ) ( -1134 -240 -144 ) ( -1144 -240 -16 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1134 -504 -144 ) ( -1134 -504 -16 ) ( -1134 -240 -144 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
 // brush 178
 {
 ( -1740 1660 -144 ) ( -1740 1670 -144 ) ( -1740 1660 -16 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
@@ -2055,6 +2131,33 @@
 ( -40 1553 0 ) ( 40 1553 0 ) ( -40 1553 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( 40 1543 0 ) ( 40 1543 120 ) ( 40 1553 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
+// Maintenance Stair North, south face -- closes Medical (x 40-120) and
+// Quarantine (x 120-360) off from the stairwell. The wall line stopped at
+// x 40 and the stair descends from x 60 to 352, so both rooms looked straight
+// down the steps. The south stair already has the matching pair of walls at
+// x -2040..-1760; this is the same fix at the other end. Runs to x 360, the
+// centreline of the east wall, so it butts into it without poking out into
+// the Maintenance V2 ring beyond.
+{
+( 40 1543 0 ) ( 40 1553 0 ) ( 40 1543 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 40 1543 0 ) ( 40 1543 120 ) ( 360 1543 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 40 1543 0 ) ( 360 1543 0 ) ( 40 1553 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 40 1543 120 ) ( 40 1553 120 ) ( 360 1543 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 40 1553 0 ) ( 360 1553 0 ) ( 40 1553 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 360 1543 0 ) ( 360 1543 120 ) ( 360 1553 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// Maintenance Stair North, north face -- the same hole on the far side, where
+// Bridge (x 40-120) and Bridge Operations (x 120-360) open onto the stair.
+// The stair is meant to be entered from the Maintenance V2 ring through the
+// landing at x 320-392, and now that is the only way in.
+{
+( 40 1655 0 ) ( 40 1665 0 ) ( 40 1655 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 40 1655 0 ) ( 40 1655 120 ) ( 360 1655 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 40 1655 0 ) ( 360 1655 0 ) ( 40 1665 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 40 1655 120 ) ( 40 1665 120 ) ( 360 1655 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 40 1665 0 ) ( 360 1665 0 ) ( 40 1665 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 360 1655 0 ) ( 360 1655 120 ) ( 360 1665 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
 // restored: Bridge/Medical boundary
 {
 ( -400 1655 0 ) ( -400 1665 0 ) ( -400 1655 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
@@ -2163,14 +2266,25 @@
 ( -1149 1900 0 ) ( -1139 1900 0 ) ( -1149 1900 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( -1139 1660 0 ) ( -1139 1660 120 ) ( -1139 1900 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
-// restored: Service/Quiet Room boundary
+// restored: Service/Quiet Room boundary, split to leave a gap at tb.y
+// 1740-1820 for door.service.quiet_room -- mirrors how the Service/Chapel
+// boundary below is split for door.service.chapel.
 {
-( -1261 1660 0 ) ( -1261 1900 0 ) ( -1261 1660 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1261 1660 0 ) ( -1261 1740 0 ) ( -1261 1660 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( -1261 1660 0 ) ( -1261 1660 120 ) ( -1251 1660 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1261 1660 0 ) ( -1251 1660 0 ) ( -1261 1900 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1261 1660 120 ) ( -1261 1900 120 ) ( -1251 1660 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1261 1660 0 ) ( -1251 1660 0 ) ( -1261 1740 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1261 1660 120 ) ( -1261 1740 120 ) ( -1251 1660 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1261 1740 0 ) ( -1251 1740 0 ) ( -1261 1740 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1251 1660 0 ) ( -1251 1660 120 ) ( -1251 1740 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// restored: Service/Quiet Room boundary (east of the door gap)
+{
+( -1261 1820 0 ) ( -1261 1900 0 ) ( -1261 1820 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1261 1820 0 ) ( -1261 1820 120 ) ( -1251 1820 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1261 1820 0 ) ( -1251 1820 0 ) ( -1261 1900 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1261 1820 120 ) ( -1261 1900 120 ) ( -1251 1820 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
 ( -1261 1900 0 ) ( -1251 1900 0 ) ( -1261 1900 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1251 1660 0 ) ( -1251 1660 120 ) ( -1251 1900 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1251 1820 0 ) ( -1251 1820 120 ) ( -1251 1900 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 // restored: Service/Chapel boundary
 {
@@ -2216,6 +2330,29 @@
 ( -1261 940 120 ) ( -1261 1360 120 ) ( -1251 940 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
 ( -1261 1360 0 ) ( -1251 1360 0 ) ( -1261 1360 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( -1251 940 0 ) ( -1251 940 120 ) ( -1251 1360 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// Botany/Maintenance Stair East boundary -- Botany's room floor reaches all
+// the way to the stair on both its north and south sides with no wall
+// between them, so the stair was walkable straight out of Botany. The only
+// entrance is meant to be the gap already cut into the outer perimeter wall
+// (tb.y -545/-535) at the stair's east end. Two new walls, no door: north
+// side first.
+{
+( -1149 -540 0 ) ( -1149 -240 0 ) ( -1149 -540 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1149 -540 0 ) ( -1149 -540 120 ) ( -1139 -540 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1149 -540 0 ) ( -1139 -540 0 ) ( -1149 -240 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1149 -540 120 ) ( -1149 -240 120 ) ( -1139 -540 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1149 -240 0 ) ( -1139 -240 0 ) ( -1149 -240 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1139 -540 0 ) ( -1139 -540 120 ) ( -1139 -240 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// Botany/Maintenance Stair East boundary, south side.
+{
+( -1261 -540 0 ) ( -1261 -240 0 ) ( -1261 -540 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1261 -540 0 ) ( -1261 -540 120 ) ( -1251 -540 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1261 -540 0 ) ( -1251 -540 0 ) ( -1261 -240 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1261 -540 120 ) ( -1261 -240 120 ) ( -1251 -540 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1261 -240 0 ) ( -1251 -240 0 ) ( -1261 -240 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1251 -540 0 ) ( -1251 -540 120 ) ( -1251 -240 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 // brush 264 -- Botany connector floor patch: the old-hallway floor here
 // was deleted; Botany now walks continuously through this gap.
@@ -2722,15 +2859,20 @@
 // entity 53
 {
 "classname" "func_walkable"
+// Stops 100 units (2.5 m) short of the Bridge-facing wall at y 1543. That
+// strip is the ward furniture: `med.ward_bay` and `med.waiting_row` stand in
+// it. Decorations carry no collider, and crew never consult one anyway, so
+// the walkable volume is the only thing that keeps a body out of a bed --
+// pulling this edge back is the collision.
 "room" "Medical"
 // brush 0
 {
-( -400 660 0 ) ( -400 1548 0 ) ( -400 660 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -400 660 0 ) ( -400 1448 0 ) ( -400 660 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( -400 660 0 ) ( -400 660 20 ) ( 120 660 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -400 660 0 ) ( 120 660 0 ) ( -400 1548 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -400 660 20 ) ( -400 1548 20 ) ( 120 660 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -400 1548 0 ) ( 120 1548 0 ) ( -400 1548 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 120 660 0 ) ( 120 660 20 ) ( 120 1548 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -400 660 0 ) ( 120 660 0 ) ( -400 1448 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -400 660 20 ) ( -400 1448 20 ) ( 120 660 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -400 1448 0 ) ( 120 1448 0 ) ( -400 1448 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 120 660 0 ) ( 120 660 20 ) ( 120 1448 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 }
 // entity 54
@@ -2843,20 +2985,20 @@
 // brush 0
 {
 ( -2040 1900 0 ) ( -2040 2100 0 ) ( -2040 1900 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2040 1900 0 ) ( -2040 1900 20 ) ( -600 1900 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2040 1900 0 ) ( -600 1900 0 ) ( -2040 2100 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2040 1900 20 ) ( -2040 2100 20 ) ( -600 1900 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2040 2100 0 ) ( -600 2100 0 ) ( -2040 2100 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -600 1900 0 ) ( -600 1900 20 ) ( -600 2100 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 1900 0 ) ( -2040 1900 20 ) ( -540 1900 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 1900 0 ) ( -540 1900 0 ) ( -2040 2100 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 1900 20 ) ( -2040 2100 20 ) ( -540 1900 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 2100 0 ) ( -540 2100 0 ) ( -2040 2100 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -540 1900 0 ) ( -540 1900 20 ) ( -540 2100 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 // brush 1
 {
 ( -2040 740 0 ) ( -2040 940 0 ) ( -2040 740 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2040 740 0 ) ( -2040 740 20 ) ( -600 740 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2040 740 0 ) ( -600 740 0 ) ( -2040 940 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2040 740 20 ) ( -2040 940 20 ) ( -600 740 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2040 940 0 ) ( -600 940 0 ) ( -2040 940 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -600 740 0 ) ( -600 740 20 ) ( -600 940 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 740 0 ) ( -2040 740 20 ) ( -540 740 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 740 0 ) ( -540 740 0 ) ( -2040 940 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 740 20 ) ( -2040 940 20 ) ( -540 740 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 940 0 ) ( -540 940 0 ) ( -2040 940 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -540 740 0 ) ( -540 740 20 ) ( -540 940 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 // brush 2
 {
@@ -2869,11 +3011,11 @@
 }
 // brush 3
 {
-( -400 -200 0 ) ( -400 -120 0 ) ( -400 -200 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -400 -200 0 ) ( -400 -200 20 ) ( -240 -200 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -400 -200 0 ) ( -240 -200 0 ) ( -400 -120 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -400 -200 20 ) ( -400 -120 20 ) ( -240 -200 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -400 -120 0 ) ( -240 -120 0 ) ( -400 -120 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -460 -200 0 ) ( -460 -120 0 ) ( -460 -200 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -460 -200 0 ) ( -460 -200 20 ) ( -240 -200 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -460 -200 0 ) ( -240 -200 0 ) ( -460 -120 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -460 -200 20 ) ( -460 -120 20 ) ( -240 -200 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -460 -120 0 ) ( -240 -120 0 ) ( -460 -120 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( -240 -200 0 ) ( -240 -200 20 ) ( -240 -120 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 // brush 4
@@ -2902,20 +3044,20 @@
 // brush 1
 {
 ( -2160 4380 0 ) ( -2160 4500 0 ) ( -2160 4380 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2160 4380 0 ) ( -2160 4380 20 ) ( 360 4380 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2160 4380 0 ) ( 360 4380 0 ) ( -2160 4500 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2160 4380 20 ) ( -2160 4500 20 ) ( 360 4380 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2160 4500 0 ) ( 360 4500 0 ) ( -2160 4500 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 360 4380 0 ) ( 360 4380 20 ) ( 360 4500 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2160 4380 0 ) ( -2160 4380 20 ) ( 420 4380 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2160 4380 0 ) ( 420 4380 0 ) ( -2160 4500 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2160 4380 20 ) ( -2160 4500 20 ) ( 420 4380 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2160 4500 0 ) ( 420 4500 0 ) ( -2160 4500 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 420 4380 0 ) ( 420 4380 20 ) ( 420 4500 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 // brush 2
 {
 ( -2160 -660 0 ) ( -2160 -540 0 ) ( -2160 -660 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2160 -660 0 ) ( -2160 -660 20 ) ( 360 -660 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2160 -660 0 ) ( 360 -660 0 ) ( -2160 -540 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2160 -660 20 ) ( -2160 -540 20 ) ( 360 -660 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2160 -540 0 ) ( 360 -540 0 ) ( -2160 -540 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 360 -660 0 ) ( 360 -660 20 ) ( 360 -540 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2160 -660 0 ) ( -2160 -660 20 ) ( 420 -660 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2160 -660 0 ) ( 420 -660 0 ) ( -2160 -540 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2160 -660 20 ) ( -2160 -540 20 ) ( 420 -660 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2160 -540 0 ) ( 420 -540 0 ) ( -2160 -540 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 420 -660 0 ) ( 420 -660 20 ) ( 420 -540 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 // brush 3
 {
@@ -3161,15 +3303,16 @@
 // entity 76
 {
 "classname" "func_walkable"
+// Same carve as Medical, 48 units (1.2 m) deep, for `med.specimen_cold`.
 "room" "Quarantine"
 // brush 0
 {
-( 120 660 0 ) ( 120 1548 0 ) ( 120 660 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 120 660 0 ) ( 120 1500 0 ) ( 120 660 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( 120 660 0 ) ( 120 660 20 ) ( 360 660 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 120 660 0 ) ( 360 660 0 ) ( 120 1548 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( 120 660 20 ) ( 120 1548 20 ) ( 360 660 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( 120 1548 0 ) ( 360 1548 0 ) ( 120 1548 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 360 660 0 ) ( 360 660 20 ) ( 360 1548 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 120 660 0 ) ( 360 660 0 ) ( 120 1500 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 120 660 20 ) ( 120 1500 20 ) ( 360 660 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 120 1500 0 ) ( 360 1500 0 ) ( 120 1500 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 360 660 0 ) ( 360 660 20 ) ( 360 1500 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 }
 // entity 77
@@ -4322,98 +4465,13 @@
 "bridge_id" "service.public"
 "angles" "0 0 0"
 }
-// entity 188
-{
-"classname" "func_walkable"
-"room" ""
-"bridge_id" "service.spine.west"
-// brush 0
-{
-( -1240 1868 0 ) ( -1240 1932 0 ) ( -1240 1868 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1240 1868 0 ) ( -1240 1868 20 ) ( -1160 1868 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1240 1868 0 ) ( -1160 1868 0 ) ( -1240 1932 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1240 1868 20 ) ( -1240 1932 20 ) ( -1160 1868 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1240 1932 0 ) ( -1160 1932 0 ) ( -1240 1932 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1160 1868 0 ) ( -1160 1868 20 ) ( -1160 1932 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
-}
-// entity 189
-{
-"classname" "door_spot"
-"origin" "-1200 1900 0"
-"id" "door.service.spine.west"
-"bridge_id" "service.spine.west"
-"angles" "0 90 0"
-}
-// entity 190
-{
-"classname" "func_walkable"
-"room" ""
-"bridge_id" "service.spine.east"
-// brush 0
-{
-( -1240 908 0 ) ( -1240 972 0 ) ( -1240 908 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1240 908 0 ) ( -1240 908 20 ) ( -1160 908 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1240 908 0 ) ( -1160 908 0 ) ( -1240 972 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1240 908 20 ) ( -1240 972 20 ) ( -1160 908 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1240 972 0 ) ( -1160 972 0 ) ( -1240 972 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1160 908 0 ) ( -1160 908 20 ) ( -1160 972 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
-}
-// entity 191
-{
-"classname" "door_spot"
-"origin" "-1200 940 0"
-"id" "door.service.spine.east"
-"bridge_id" "service.spine.east"
-"angles" "0 90 0"
-}
-// entity 192
-{
-"classname" "func_walkable"
-"room" ""
-"bridge_id" "botany.spine.west"
-// brush 0
-{
-( -1240 708 0 ) ( -1240 772 0 ) ( -1240 708 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1240 708 0 ) ( -1240 708 20 ) ( -1160 708 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1240 708 0 ) ( -1160 708 0 ) ( -1240 772 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1240 708 20 ) ( -1240 772 20 ) ( -1160 708 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1240 772 0 ) ( -1160 772 0 ) ( -1240 772 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1160 708 0 ) ( -1160 708 20 ) ( -1160 772 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
-}
-// entity 193
-{
-"classname" "door_spot"
-"origin" "-1200 740 0"
-"id" "door.botany.spine.west"
-"bridge_id" "botany.spine.west"
-"angles" "0 90 0"
-}
-// entity 194
-{
-"classname" "func_walkable"
-"room" ""
-"bridge_id" "botany.spine.east"
-// brush 0
-{
-( -1240 -572 0 ) ( -1240 -508 0 ) ( -1240 -572 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1240 -572 0 ) ( -1240 -572 20 ) ( -1160 -572 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1240 -572 0 ) ( -1160 -572 0 ) ( -1240 -508 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1240 -572 20 ) ( -1240 -508 20 ) ( -1160 -572 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1240 -508 0 ) ( -1160 -508 0 ) ( -1240 -508 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1160 -572 0 ) ( -1160 -572 20 ) ( -1160 -508 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
-}
-// entity 195
-{
-"classname" "door_spot"
-"origin" "-1200 -540 0"
-"id" "door.botany.spine.east"
-"bridge_id" "botany.spine.east"
-"angles" "0 90 0"
-}
+// entities 188-195 removed -- door.service.spine.west/east and
+// door.botany.spine.west/east, each with its matching nameless func_walkable
+// bridge. Leftover punch-through doors into the old at-grade N/S and E/W
+// maintenance corridor, from before it moved underground. Service and Botany
+// are each now bridged across that old gap by their own full-width connector
+// brush (see "entity connector" below), so these tiny doorway slivers are
+// fully redundant with no remaining gap to fill.
 // entity 196
 {
 "classname" "func_walkable"
@@ -4437,29 +4495,10 @@
 "bridge_id" "botany.public"
 "angles" "0 0 0"
 }
-// entity 198
-{
-"classname" "func_walkable"
-"room" ""
-"bridge_id" "botany.spine.south"
-// brush 0
-{
-( -1288 -40 0 ) ( -1288 40 0 ) ( -1288 -40 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1288 -40 0 ) ( -1288 -40 20 ) ( -1224 -40 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1288 -40 0 ) ( -1224 -40 0 ) ( -1288 40 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1288 -40 20 ) ( -1288 40 20 ) ( -1224 -40 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1288 40 0 ) ( -1224 40 0 ) ( -1288 40 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1224 -40 0 ) ( -1224 -40 20 ) ( -1224 40 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
-}
-// entity 199
-{
-"classname" "door_spot"
-"origin" "-1256 0 0"
-"id" "door.botany.spine.south"
-"bridge_id" "botany.spine.south"
-"angles" "0 0 0"
-}
+// entities 198-199 removed -- door.botany.spine.south and its matching
+// nameless func_walkable bridge. Same leftover-doorway story as the
+// entities-188-195 comment above: Botany's own connector brush already
+// bridges the old at-grade gap end to end.
 // entity 200
 {
 "classname" "func_walkable"
@@ -4589,98 +4628,38 @@
 ( -1256 1660 0 ) ( -1256 1660 20 ) ( -1256 1900 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 }
-// entity 211
+// entity -- door.service.quiet_room, mirroring door.service.chapel below at
+// the same z gap (Service's south wall / the old E-W arm's footprint), but
+// under Service's west half instead of its east half. Quiet Room lost its
+// only connection to the station when the leftover door.service.spine.sw
+// was removed, since that leftover happened to be its sole real door too.
 {
 "classname" "func_walkable"
 "room" ""
-"bridge_id" "service.spine.nw"
+"bridge_id" "service.quiet_room"
 // brush 0
 {
-( -960 1628 0 ) ( -960 1692 0 ) ( -960 1628 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -960 1628 0 ) ( -960 1628 20 ) ( -880 1628 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -960 1628 0 ) ( -880 1628 0 ) ( -960 1692 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -960 1628 20 ) ( -960 1692 20 ) ( -880 1628 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -960 1692 0 ) ( -880 1692 0 ) ( -960 1692 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -880 1628 0 ) ( -880 1628 20 ) ( -880 1692 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1288 1740 0 ) ( -1288 1820 0 ) ( -1288 1740 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1288 1740 0 ) ( -1288 1740 20 ) ( -1224 1740 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1288 1740 0 ) ( -1224 1740 0 ) ( -1288 1820 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1288 1740 20 ) ( -1288 1820 20 ) ( -1224 1740 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1288 1820 0 ) ( -1224 1820 0 ) ( -1288 1820 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1224 1740 0 ) ( -1224 1740 20 ) ( -1224 1820 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 }
-// entity 212
 {
 "classname" "door_spot"
-"origin" "-920 1660 0"
-"id" "door.service.spine.nw"
-"bridge_id" "service.spine.nw"
-"angles" "0 90 0"
+"origin" "-1256 1780 0"
+"id" "door.service.quiet_room"
+"bridge_id" "service.quiet_room"
+"angles" "0 0 0"
 }
-// entity 213
-{
-"classname" "func_walkable"
-"room" ""
-"bridge_id" "service.spine.ne"
-// brush 0
-{
-( -960 1516 0 ) ( -960 1580 0 ) ( -960 1516 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -960 1516 0 ) ( -960 1516 20 ) ( -880 1516 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -960 1516 0 ) ( -880 1516 0 ) ( -960 1580 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -960 1516 20 ) ( -960 1580 20 ) ( -880 1516 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -960 1580 0 ) ( -880 1580 0 ) ( -960 1580 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -880 1516 0 ) ( -880 1516 20 ) ( -880 1580 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
-}
-// entity 214
-{
-"classname" "door_spot"
-"origin" "-920 1548 0"
-"id" "door.service.spine.ne"
-"bridge_id" "service.spine.ne"
-"angles" "0 90 0"
-}
-// entity 215
-{
-"classname" "func_walkable"
-"room" ""
-"bridge_id" "service.spine.sw"
-// brush 0
-{
-( -1480 1628 0 ) ( -1480 1692 0 ) ( -1480 1628 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1480 1628 0 ) ( -1480 1628 20 ) ( -1400 1628 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1480 1628 0 ) ( -1400 1628 0 ) ( -1480 1692 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1480 1628 20 ) ( -1480 1692 20 ) ( -1400 1628 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1480 1692 0 ) ( -1400 1692 0 ) ( -1480 1692 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1400 1628 0 ) ( -1400 1628 20 ) ( -1400 1692 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
-}
-// entity 216
-{
-"classname" "door_spot"
-"origin" "-1440 1660 0"
-"id" "door.service.spine.sw"
-"bridge_id" "service.spine.sw"
-"angles" "0 90 0"
-}
-// entity 217
-{
-"classname" "func_walkable"
-"room" ""
-"bridge_id" "service.spine.se"
-// brush 0
-{
-( -1480 1516 0 ) ( -1480 1580 0 ) ( -1480 1516 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1480 1516 0 ) ( -1480 1516 20 ) ( -1400 1516 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1480 1516 0 ) ( -1400 1516 0 ) ( -1480 1580 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1480 1516 20 ) ( -1480 1580 20 ) ( -1400 1516 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1480 1580 0 ) ( -1400 1580 0 ) ( -1480 1580 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1400 1516 0 ) ( -1400 1516 20 ) ( -1400 1580 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-}
-}
-// entity 218
-{
-"classname" "door_spot"
-"origin" "-1440 1548 0"
-"id" "door.service.spine.se"
-"bridge_id" "service.spine.se"
-"angles" "0 90 0"
-}
+// entities 211-218 removed -- door.service.spine.nw/ne/sw/se and their
+// matching nameless func_walkable bridges. These four framed the old
+// at-grade crossroads where the N/S and E/W maintenance corridors used to
+// intersect, before the whole cross moved underground. Same story as the
+// other spine entities: Service's own connector brush already spans the
+// gap they used to punch through.
 // entity 219
 {
 "classname" "room_sign"
@@ -4907,12 +4886,12 @@
 "classname" "func_walkable"
 "room" "Service"
 {
-( -1144 1548 0 ) ( -1144 1660 0 ) ( -1144 1548 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1144 1548 0 ) ( -1144 1548 20 ) ( -600 1548 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1144 1548 0 ) ( -600 1548 0 ) ( -1144 1660 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1144 1548 20 ) ( -1144 1660 20 ) ( -600 1548 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1144 1660 0 ) ( -600 1660 0 ) ( -1144 1660 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -600 1548 0 ) ( -600 1548 20 ) ( -600 1660 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 1488 0 ) ( -1144 1720 0 ) ( -1144 1488 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 1488 0 ) ( -1144 1488 20 ) ( -600 1488 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 1488 0 ) ( -600 1488 0 ) ( -1144 1720 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1144 1488 20 ) ( -1144 1720 20 ) ( -600 1488 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1144 1720 0 ) ( -600 1720 0 ) ( -1144 1720 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -600 1488 0 ) ( -600 1488 20 ) ( -600 1720 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 }
 // entity connector -- bridges Botany's north/south halves through the old E/W arm gap
@@ -4920,11 +4899,244 @@
 "classname" "func_walkable"
 "room" "Botany"
 {
-( -1256 -240 0 ) ( -1256 740 0 ) ( -1256 -240 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1256 -240 0 ) ( -1256 -240 20 ) ( -1144 -240 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1256 -240 0 ) ( -1144 -240 0 ) ( -1256 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1256 -240 20 ) ( -1256 740 20 ) ( -1144 -240 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1256 740 0 ) ( -1144 740 0 ) ( -1256 740 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1144 -240 0 ) ( -1144 -240 20 ) ( -1144 740 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1316 -240 0 ) ( -1316 740 0 ) ( -1316 -240 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1316 -240 0 ) ( -1316 -240 20 ) ( -1084 -240 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1316 -240 0 ) ( -1084 -240 0 ) ( -1316 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1316 -240 20 ) ( -1316 740 20 ) ( -1084 -240 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1316 740 0 ) ( -1084 740 0 ) ( -1316 740 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1084 -240 0 ) ( -1084 -240 20 ) ( -1084 740 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
+}
+// entity 247 -- Medical decoration modules.
+// Wall modules mount on the interior wall face and face into the room:
+//   y 665  = Chemistry-facing wall, room is at lower world x  -> angles 0 -90 0
+//   x -395 = public-door wall,      room is at lower world z  -> angles 0 180 0
+//   x 115  = Quarantine-side wall,  room is at higher world z -> angles 0 0 0
+{
+"classname" "decoration_spot"
+"origin" "-260 665 0"
+"kind" "med.supply_shelf"
+"angles" "0 -90 0"
+}
+// entity 248
+{
+"classname" "decoration_spot"
+"origin" "-20 665 0"
+"kind" "med.vitals_panel"
+"angles" "0 -90 0"
+}
+// entity 249
+{
+"classname" "decoration_spot"
+"origin" "115 1320 0"
+"kind" "med.crash_station"
+"angles" "0 0 0"
+}
+// entity 250 -- by the public door, where the clinical queue forms.
+{
+"classname" "decoration_spot"
+"origin" "-395 840 0"
+"kind" "med.triage_board"
+"angles" "0 180 0"
+}
+// entity 251 -- Quarantine side of the shared wall, beside door.medical.quarantine.
+{
+"classname" "decoration_spot"
+"origin" "125 1200 0"
+"kind" "med.quarantine_seal"
+"angles" "0 180 0"
+}
+// entity 252 -- Floor fixtures. Unlike the wall modules these are centred on
+// their own footprint, so the origin sits half a depth off the wall. All three
+// stand in the strip carved out of the walkable volume above; nothing else
+// keeps a body out of them.
+{
+"classname" "decoration_spot"
+"origin" "-180 1499 0"
+"kind" "med.ward_bay"
+"angles" "0 90 0"
+}
+// entity 253
+{
+"classname" "decoration_spot"
+"origin" "-336 1529 0"
+"kind" "med.waiting_row"
+"angles" "0 90 0"
+}
+// entity 254
+{
+"classname" "decoration_spot"
+"origin" "240 1529 0"
+"kind" "med.specimen_cold"
+"angles" "0 90 0"
+}
+// entity 255 -- Medical and Quarantine lighting. Two lights for 289 m2 left the
+// whole northern half of the ward dark. Same clinical tint and falloff as the
+// two that were already here; every one is non-shadowed, which this side of the
+// station requires.
+{
+"classname" "light_point"
+"origin" "-272 1400 114"
+"color" "0.82 0.94 1"
+"intensity" "360000"
+"range" "14"
+"shadows_enabled" "false"
+}
+// entity 256
+{
+"classname" "light_point"
+"origin" "-272 1160 114"
+"color" "0.82 0.94 1"
+"intensity" "360000"
+"range" "14"
+"shadows_enabled" "false"
+}
+// entity 257
+{
+"classname" "light_point"
+"origin" "-272 920 114"
+"color" "0.82 0.94 1"
+"intensity" "360000"
+"range" "14"
+"shadows_enabled" "false"
+}
+// entity 258
+{
+"classname" "light_point"
+"origin" "48 1080 114"
+"color" "0.82 0.94 1"
+"intensity" "360000"
+"range" "14"
+"shadows_enabled" "false"
+}
+// entity 259
+{
+"classname" "light_point"
+"origin" "240 1320 114"
+"color" "0.82 0.94 1"
+"intensity" "360000"
+"range" "14"
+"shadows_enabled" "false"
+}
+// entity 260
+{
+"classname" "light_point"
+"origin" "240 840 114"
+"color" "0.82 0.94 1"
+"intensity" "360000"
+"range" "14"
+"shadows_enabled" "false"
+}
+// entity 261 -- Engineering decoration modules. Mounted on the interior wall
+// face and facing into the room, same convention as Chemistry and Medical.
+{
+"classname" "decoration_spot"
+"origin" "-1139 3800 0"
+"kind" "eng.breaker_panel"
+"angles" "0 180 0"
+}
+// entity 262
+{
+"classname" "decoration_spot"
+"origin" "-1139 3520 0"
+"kind" "eng.tool_board"
+"angles" "0 180 0"
+}
+// entity 263
+{
+"classname" "decoration_spot"
+"origin" "-605 2800 0"
+"kind" "eng.pipe_manifold"
+"angles" "0 0 0"
+}
+// entity 264
+{
+"classname" "decoration_spot"
+"origin" "-1000 4375 0"
+"kind" "eng.safety_station"
+"angles" "0 90 0"
+}
+// entity 265 -- Cargo decoration modules.
+{
+"classname" "decoration_spot"
+"origin" "-2035 2800 0"
+"kind" "cargo.manifest_board"
+"angles" "0 180 0"
+}
+// entity 266
+{
+"classname" "decoration_spot"
+"origin" "-2035 2520 0"
+"kind" "cargo.parcel_shelf"
+"angles" "0 180 0"
+}
+// entity 267
+{
+"classname" "decoration_spot"
+"origin" "-1261 2640 0"
+"kind" "cargo.dispatch_panel"
+"angles" "0 0 0"
+}
+// entity 268
+{
+"classname" "decoration_spot"
+"origin" "-1840 2105 0"
+"kind" "cargo.weigh_station"
+"angles" "0 -90 0"
+}
+// entity 269 -- Security decoration modules.
+{
+"classname" "decoration_spot"
+"origin" "-395 4120 0"
+"kind" "sec.notice_board"
+"angles" "0 180 0"
+}
+// entity 270
+{
+"classname" "decoration_spot"
+"origin" "-395 3560 0"
+"kind" "sec.camera_bank"
+"angles" "0 180 0"
+}
+// entity 271
+{
+"classname" "decoration_spot"
+"origin" "-200 3345 0"
+"kind" "sec.armory_rack"
+"angles" "0 -90 0"
+}
+// entity 272
+{
+"classname" "decoration_spot"
+"origin" "-80 4375 0"
+"kind" "sec.evidence_wall"
+"angles" "0 90 0"
+}
+// entity 273 -- Service decoration modules.
+{
+"classname" "decoration_spot"
+"origin" "-1139 1200 0"
+"kind" "svc.menu_board"
+"angles" "0 180 0"
+}
+// entity 274
+{
+"classname" "decoration_spot"
+"origin" "-1139 1060 0"
+"kind" "svc.crockery_shelf"
+"angles" "0 180 0"
+}
+// entity 275
+{
+"classname" "decoration_spot"
+"origin" "-605 1120 0"
+"kind" "svc.pass_hatch"
+"angles" "0 0 0"
+}
+// entity 276
+{
+"classname" "decoration_spot"
+"origin" "-760 945 0"
+"kind" "svc.drinks_board"
+"angles" "0 -90 0"
 }

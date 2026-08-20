@@ -443,6 +443,64 @@ fn the_maps_walkable_rooms_match_the_floor_plan() {
 }
 
 #[test]
+fn no_room_is_split_by_an_invisible_seam() {
+    // A room drawn as several brushes has to have them *overlap*, not merely
+    // meet. `WalkableAreas::contain_on_surface` insets every region by the
+    // body radius before asking which one holds a position, so two rectangles
+    // that share an edge leave a dead strip `2 * radius` wide down the middle
+    // that neither inset covers. A body walking into that strip gets clamped
+    // back to the edge it came from, every frame, and the seam becomes an
+    // invisible wall in the middle of an apparently open floor.
+    //
+    // Nothing else notices: the brushes enclose volumes, they are axis
+    // aligned, no wall intrudes on them, and `the_station_is_one_connected_space`
+    // passes because `NavGraph` routes crew the long way round instead. Only
+    // this comparison, or walking into it, finds it.
+    const RADIUS: f32 = 0.35;
+
+    let map = parse();
+    let mut by_room: std::collections::BTreeMap<String, Vec<Bounds>> = Default::default();
+    for entity in map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
+    {
+        let Some(room) = property(entity, "room").filter(|room| !room.trim().is_empty()) else {
+            continue;
+        };
+        by_room
+            .entry(room)
+            .or_default()
+            .extend(entity.brushes.iter().map(|brush| footprint(brush)));
+    }
+
+    for (room, parts) in by_room {
+        for (i, first) in parts.iter().enumerate() {
+            for second in parts.iter().skip(i + 1) {
+                // Only pairs that are adjacent or overlapping: two parts of a
+                // room at opposite ends are separated by walls, not a seam.
+                if first.intersection(second).is_none()
+                    && !(first.max_x >= second.min_x - 0.001
+                        && second.max_x >= first.min_x - 0.001
+                        && first.max_z >= second.min_z - 0.001
+                        && second.max_z >= first.min_z - 0.001)
+                {
+                    continue;
+                }
+                assert!(
+                    first
+                        .inset(RADIUS)
+                        .intersection(&second.inset(RADIUS))
+                        .is_some(),
+                    "{room} is drawn as pieces that only touch: {first:?} and {second:?} \
+                     leave a {} m dead strip a body cannot cross. Overlap them instead.",
+                    2.0 * RADIUS,
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn every_room_in_the_floor_plan_has_a_walkable_volume_drawn_for_it() {
     // The other direction: a room nobody drew a volume over is a room the map
     // backend cannot let anyone stand in, however solid its walls look.
@@ -495,9 +553,11 @@ fn selective_subrooms_are_inside_their_parent_departments() {
             },
         ),
         (
+            // Carved back 1.2 m for the specimen cabinet, as Medical is for
+            // the ward bay.
             "Quarantine",
             Bounds {
-                min_x: -38.7,
+                min_x: -37.5,
                 max_x: -16.5,
                 min_z: -9.0,
                 max_z: -3.0,
@@ -595,9 +655,12 @@ fn station_v2_keeps_its_department_and_route_footprints() {
             },
         ),
         (
+            // Stops 2.5 m short of the Bridge-facing wall: that strip is the
+            // ward furniture, and a walkable volume that reached the wall
+            // would route crew straight through two beds.
             "Medical",
             Bounds {
-                min_x: -38.7,
+                min_x: -36.2,
                 max_x: -16.5,
                 min_z: -3.0,
                 max_z: 10.0,
@@ -650,9 +713,10 @@ fn station_v2_keeps_its_department_and_route_footprints() {
             min_z: 15.0,
             max_z: 28.6,
         },
+        // Overhangs both halves by 1.5 m, as Botany's connector does.
         Bounds {
-            min_x: -41.5,
-            max_x: -38.7,
+            min_x: -43.0,
+            max_x: -37.2,
             min_z: 15.0,
             max_z: 28.6,
         },
@@ -684,11 +748,13 @@ fn station_v2_keeps_its_department_and_route_footprints() {
             min_z: 31.4,
             max_z: 42.0,
         },
+        // Deliberately overhangs both halves by 1.5 m rather than butting up
+        // against them — see `no_room_is_split_by_an_invisible_seam`.
         Bounds {
             min_x: -18.5,
             max_x: 6.0,
-            min_z: 28.6,
-            max_z: 31.4,
+            min_z: 27.1,
+            max_z: 32.9,
         },
     ] {
         assert!(
@@ -1314,21 +1380,98 @@ fn every_department_dressing_marker_has_an_exported_glb() {
 }
 
 #[test]
-fn chemistry_decoration_markers_have_known_assets_and_fit_their_rooms() {
+fn decoration_markers_have_known_assets_and_fit_their_rooms() {
+    /// How a module's envelope relates to its marker origin.
+    ///
+    /// The two categories in the starter kit place their origin differently, so
+    /// the same `origin`/`angles` pair means different things depending on
+    /// which one a `kind` names.
+    #[derive(PartialEq)]
+    enum Mount {
+        /// Origin on the wall face, geometry entirely in front of it.
+        Wall,
+        /// Origin at the centre of the footprint, geometry all around it. A
+        /// fixture stands on the floor, so it must also sit in ground the map
+        /// has carved *out* of the walkable volume — decorations carry no
+        /// collider, and crew path by walkable area alone.
+        Floor,
+    }
+
     struct Placement {
         kind: &'static str,
         origin: &'static str,
         angles: &'static str,
+        mount: Mount,
+        /// For a wall module, the walkable room the envelope must stay inside.
+        /// For a floor fixture, the room's *full* floor area including the
+        /// carved-out strip.
         room: Bounds,
         width: f32,
         depth: f32,
     }
+
+    // The two rooms whose walkable rectangle is deliberately smaller than their
+    // floor, so a fixture has somewhere to stand that nothing walks through.
+    const MEDICAL_WALKABLE: Bounds = Bounds {
+        min_x: -36.2,
+        max_x: -16.5,
+        min_z: -3.0,
+        max_z: 10.0,
+    };
+    const MEDICAL_FLOOR: Bounds = Bounds {
+        min_x: -38.7,
+        max_x: -16.5,
+        min_z: -3.0,
+        max_z: 10.0,
+    };
+    const QUARANTINE_WALKABLE: Bounds = Bounds {
+        min_x: -37.5,
+        max_x: -16.5,
+        min_z: -9.0,
+        max_z: -3.0,
+    };
+    const QUARANTINE_FLOOR: Bounds = Bounds {
+        min_x: -38.7,
+        max_x: -16.5,
+        min_z: -9.0,
+        max_z: -3.0,
+    };
+
+    // The other four departments take wall modules only, so their walkable
+    // rectangle and their floor are the same thing.
+    const ENGINEERING: Bounds = Bounds {
+        min_x: -109.5,
+        max_x: -66.0,
+        min_z: 15.0,
+        max_z: 28.6,
+    };
+    const CARGO: Bounds = Bounds {
+        min_x: -94.0,
+        max_x: -52.5,
+        min_z: 31.4,
+        max_z: 51.0,
+    };
+    const SECURITY: Bounds = Bounds {
+        min_x: -109.5,
+        max_x: -83.5,
+        min_z: -2.0,
+        max_z: 10.0,
+    };
+    // Service is drawn as three brushes; every module here sits in the wide
+    // eastern one.
+    const SERVICE_EAST: Bounds = Bounds {
+        min_x: -38.7,
+        max_x: -23.5,
+        min_z: 15.0,
+        max_z: 28.6,
+    };
 
     const PLACEMENTS: &[Placement] = &[
         Placement {
             kind: "chem.supply_shelf",
             origin: "-176 296 0",
             angles: "0 90 0",
+            mount: Mount::Wall,
             room: Bounds {
                 min_x: -7.5,
                 max_x: 0.5,
@@ -1342,6 +1485,7 @@ fn chemistry_decoration_markers_have_known_assets_and_fit_their_rooms() {
             kind: "chem.analysis_panel",
             origin: "104 -536 0",
             angles: "0 -90 0",
+            mount: Mount::Wall,
             room: Bounds {
                 min_x: 7.5,
                 max_x: 13.5,
@@ -1355,6 +1499,7 @@ fn chemistry_decoration_markers_have_known_assets_and_fit_their_rooms() {
             kind: "chem.emergency_station",
             origin: "64 416 0",
             angles: "0 180 0",
+            mount: Mount::Wall,
             room: Bounds {
                 min_x: -13.5,
                 max_x: -7.5,
@@ -1368,6 +1513,7 @@ fn chemistry_decoration_markers_have_known_assets_and_fit_their_rooms() {
             kind: "chem.service_board",
             origin: "-216 -296 0",
             angles: "0 -90 0",
+            mount: Mount::Wall,
             room: Bounds {
                 min_x: 0.5,
                 max_x: 7.5,
@@ -1381,6 +1527,7 @@ fn chemistry_decoration_markers_have_known_assets_and_fit_their_rooms() {
             kind: "chem.service_board",
             origin: "-64 480 0",
             angles: "0 0 0",
+            mount: Mount::Wall,
             room: Bounds {
                 min_x: -16.25,
                 max_x: -7.5,
@@ -1389,6 +1536,222 @@ fn chemistry_decoration_markers_have_known_assets_and_fit_their_rooms() {
             },
             width: 1.35,
             depth: 0.22,
+        },
+        Placement {
+            kind: "med.supply_shelf",
+            origin: "-260 665 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: MEDICAL_WALKABLE,
+            width: 1.65,
+            depth: 0.38,
+        },
+        Placement {
+            kind: "med.vitals_panel",
+            origin: "-20 665 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: MEDICAL_WALKABLE,
+            width: 1.55,
+            depth: 0.24,
+        },
+        Placement {
+            kind: "med.crash_station",
+            origin: "115 1320 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: MEDICAL_WALKABLE,
+            width: 1.25,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "med.triage_board",
+            origin: "-395 840 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: MEDICAL_WALKABLE,
+            width: 1.35,
+            depth: 0.22,
+        },
+        Placement {
+            kind: "med.quarantine_seal",
+            origin: "125 1200 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: QUARANTINE_WALKABLE,
+            width: 1.15,
+            depth: 0.30,
+        },
+        Placement {
+            kind: "med.ward_bay",
+            origin: "-180 1499 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: MEDICAL_FLOOR,
+            width: 4.50,
+            depth: 2.20,
+        },
+        Placement {
+            kind: "med.waiting_row",
+            origin: "-336 1529 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: MEDICAL_FLOOR,
+            width: 3.10,
+            depth: 0.70,
+        },
+        Placement {
+            kind: "med.specimen_cold",
+            origin: "240 1529 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: QUARANTINE_FLOOR,
+            width: 1.00,
+            depth: 0.70,
+        },
+        Placement {
+            kind: "eng.breaker_panel",
+            origin: "-1139 3800 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: ENGINEERING,
+            width: 1.55,
+            depth: 0.24,
+        },
+        Placement {
+            kind: "eng.tool_board",
+            origin: "-1139 3520 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: ENGINEERING,
+            width: 1.65,
+            depth: 0.38,
+        },
+        Placement {
+            kind: "eng.pipe_manifold",
+            origin: "-605 2800 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: ENGINEERING,
+            width: 1.45,
+            depth: 0.35,
+        },
+        Placement {
+            kind: "eng.safety_station",
+            origin: "-1000 4375 0",
+            angles: "0 90 0",
+            mount: Mount::Wall,
+            room: ENGINEERING,
+            width: 1.25,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "cargo.manifest_board",
+            origin: "-2035 2800 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: CARGO,
+            width: 1.35,
+            depth: 0.22,
+        },
+        Placement {
+            kind: "cargo.parcel_shelf",
+            origin: "-2035 2520 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: CARGO,
+            width: 1.65,
+            depth: 0.38,
+        },
+        Placement {
+            kind: "cargo.dispatch_panel",
+            origin: "-1261 2640 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: CARGO,
+            width: 1.55,
+            depth: 0.24,
+        },
+        Placement {
+            kind: "cargo.weigh_station",
+            origin: "-1840 2105 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: CARGO,
+            width: 1.25,
+            depth: 0.40,
+        },
+        Placement {
+            kind: "sec.notice_board",
+            origin: "-395 4120 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: SECURITY,
+            width: 1.35,
+            depth: 0.22,
+        },
+        Placement {
+            kind: "sec.camera_bank",
+            origin: "-395 3560 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: SECURITY,
+            width: 1.30,
+            depth: 0.26,
+        },
+        Placement {
+            kind: "sec.armory_rack",
+            origin: "-200 3345 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: SECURITY,
+            width: 1.55,
+            depth: 0.36,
+        },
+        Placement {
+            kind: "sec.evidence_wall",
+            origin: "-80 4375 0",
+            angles: "0 90 0",
+            mount: Mount::Wall,
+            room: SECURITY,
+            width: 1.45,
+            depth: 0.34,
+        },
+        Placement {
+            kind: "svc.menu_board",
+            origin: "-1139 1200 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: SERVICE_EAST,
+            width: 1.40,
+            depth: 0.22,
+        },
+        Placement {
+            kind: "svc.crockery_shelf",
+            origin: "-1139 1060 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: SERVICE_EAST,
+            width: 1.55,
+            depth: 0.36,
+        },
+        Placement {
+            kind: "svc.pass_hatch",
+            origin: "-605 1120 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: SERVICE_EAST,
+            width: 1.60,
+            depth: 0.44,
+        },
+        Placement {
+            kind: "svc.drinks_board",
+            origin: "-760 945 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: SERVICE_EAST,
+            width: 1.35,
+            depth: 0.28,
         },
     ];
 
@@ -1421,28 +1784,34 @@ fn chemistry_decoration_markers_have_known_assets_and_fit_their_rooms() {
 
         let (x, z) = origin_xz(matches[0]).expect("decoration_spot has a valid origin");
         let half_width = placement.width * 0.5;
+        // A wall module grows forwards out of its mounting plane; a floor
+        // fixture grows both ways out of its footprint centre.
+        let (behind, ahead) = match placement.mount {
+            Mount::Wall => (0.0, placement.depth),
+            Mount::Floor => (placement.depth * 0.5, placement.depth * 0.5),
+        };
         let bounds = match placement.angles {
             "0 0 0" => Bounds {
                 min_x: x - half_width,
                 max_x: x + half_width,
-                min_z: z,
-                max_z: z + placement.depth,
+                min_z: z - behind,
+                max_z: z + ahead,
             },
             "0 90 0" => Bounds {
-                min_x: x,
-                max_x: x + placement.depth,
+                min_x: x - behind,
+                max_x: x + ahead,
                 min_z: z - half_width,
                 max_z: z + half_width,
             },
             "0 180 0" => Bounds {
                 min_x: x - half_width,
                 max_x: x + half_width,
-                min_z: z - placement.depth,
-                max_z: z,
+                min_z: z - ahead,
+                max_z: z + behind,
             },
             "0 -90 0" => Bounds {
-                min_x: x - placement.depth,
-                max_x: x,
+                min_x: x - ahead,
+                max_x: x + behind,
                 min_z: z - half_width,
                 max_z: z + half_width,
             },
@@ -1457,6 +1826,29 @@ fn chemistry_decoration_markers_have_known_assets_and_fit_their_rooms() {
             placement.kind,
             placement.room,
         );
+
+        // The invariant that makes a floor fixture safe. A wall module can
+        // overhang walkable floor — you brush past a shelf. A bed cannot: with
+        // no collider on the scene and no `Solid` for crew to consult, standing
+        // in walkable ground is the same as not being there.
+        if placement.mount == Mount::Floor {
+            let walkable: Vec<Bounds> = map
+                .iter()
+                .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
+                .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
+                .collect();
+            if let Some(overlap) = walkable
+                .iter()
+                .find(|area| area.intersection(&bounds).is_some())
+            {
+                panic!(
+                    "floor fixture {} at {bounds:?} stands in walkable floor {overlap:?}; \
+                     carve the walkable volume around it or bodies will walk through it",
+                    placement.kind,
+                );
+            }
+        }
+
         visual_envelopes.push((placement.origin, bounds));
     }
 
@@ -1503,6 +1895,91 @@ fn chemistry_decoration_markers_have_known_assets_and_fit_their_rooms() {
             min_z: 2.0,
             max_z: 4.5,
         },
+        // `delivery.medical`: the Medical side of the shared handoff window,
+        // and the one thing in this room a decoration must never sit on.
+        Bounds {
+            min_x: -16.85,
+            max_x: -16.15,
+            min_z: 1.55,
+            max_z: 4.95,
+        },
+        // The three Medical/Quarantine airlocks and the crew standing spot,
+        // each a doorway's width of floor that has to stay clear.
+        Bounds {
+            min_x: -28.0,
+            max_x: -26.0,
+            min_z: 9.2,
+            max_z: 10.8,
+        },
+        Bounds {
+            min_x: -28.0,
+            max_x: -26.0,
+            min_z: -3.8,
+            max_z: -2.2,
+        },
+        Bounds {
+            min_x: -28.0,
+            max_x: -26.0,
+            min_z: -9.8,
+            max_z: -8.2,
+        },
+        Bounds {
+            min_x: -27.8,
+            max_x: -26.2,
+            min_z: 7.7,
+            max_z: 9.3,
+        },
+        // The four remaining department dressing bays and the crew standing
+        // spot in each: a module dropped on top of either would look placed
+        // and read as a bug.
+        Bounds {
+            min_x: -82.3,
+            max_x: -77.7,
+            min_z: 16.2,
+            max_z: 19.8,
+        },
+        Bounds {
+            min_x: -80.8,
+            max_x: -79.2,
+            min_z: 25.2,
+            max_z: 26.8,
+        },
+        Bounds {
+            min_x: -82.3,
+            max_x: -77.7,
+            min_z: 33.2,
+            max_z: 36.8,
+        },
+        Bounds {
+            min_x: -54.8,
+            max_x: -53.2,
+            min_z: 41.2,
+            max_z: 42.8,
+        },
+        Bounds {
+            min_x: -98.3,
+            max_x: -93.7,
+            min_z: 2.2,
+            max_z: 5.8,
+        },
+        Bounds {
+            min_x: -96.8,
+            max_x: -95.2,
+            min_z: 7.7,
+            max_z: 9.3,
+        },
+        Bounds {
+            min_x: -37.3,
+            max_x: -32.7,
+            min_z: 16.2,
+            max_z: 19.8,
+        },
+        Bounds {
+            min_x: -35.8,
+            max_x: -34.2,
+            min_z: 15.7,
+            max_z: 17.3,
+        },
     ];
     let overlaps = |a: Bounds, b: Bounds| {
         a.min_x < b.max_x && a.max_x > b.min_x && a.min_z < b.max_z && a.max_z > b.min_z
@@ -1518,7 +1995,10 @@ fn chemistry_decoration_markers_have_known_assets_and_fit_their_rooms() {
 }
 
 #[test]
-fn every_chemistry_decoration_kind_has_an_exported_glb() {
+fn every_decoration_kind_has_an_exported_glb() {
+    // Written out again rather than read from `tb::DECORATION_KINDS`: that
+    // table only exists behind the `trenchbroom` feature, and a test that
+    // shares its list with the code under test proves nothing about it.
     for (kind, path) in [
         (
             "chem.supply_shelf",
@@ -1535,6 +2015,102 @@ fn every_chemistry_decoration_kind_has_an_exported_glb() {
         (
             "chem.service_board",
             "assets/3dassets/station_starter_kit/glb/decor_chem_service_board.glb",
+        ),
+        (
+            "med.supply_shelf",
+            "assets/3dassets/station_starter_kit/glb/decor_med_supply_shelf.glb",
+        ),
+        (
+            "med.vitals_panel",
+            "assets/3dassets/station_starter_kit/glb/decor_med_vitals_panel.glb",
+        ),
+        (
+            "med.crash_station",
+            "assets/3dassets/station_starter_kit/glb/decor_med_crash_station.glb",
+        ),
+        (
+            "med.triage_board",
+            "assets/3dassets/station_starter_kit/glb/decor_med_triage_board.glb",
+        ),
+        (
+            "med.quarantine_seal",
+            "assets/3dassets/station_starter_kit/glb/decor_med_quarantine_seal.glb",
+        ),
+        (
+            "med.ward_bay",
+            "assets/3dassets/station_starter_kit/glb/decor_med_ward_bay.glb",
+        ),
+        (
+            "med.waiting_row",
+            "assets/3dassets/station_starter_kit/glb/decor_med_waiting_row.glb",
+        ),
+        (
+            "med.specimen_cold",
+            "assets/3dassets/station_starter_kit/glb/decor_med_specimen_cold.glb",
+        ),
+        (
+            "eng.breaker_panel",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_breaker_panel.glb",
+        ),
+        (
+            "eng.tool_board",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_tool_board.glb",
+        ),
+        (
+            "eng.pipe_manifold",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_pipe_manifold.glb",
+        ),
+        (
+            "eng.safety_station",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_safety_station.glb",
+        ),
+        (
+            "cargo.manifest_board",
+            "assets/3dassets/station_starter_kit/glb/decor_cargo_manifest_board.glb",
+        ),
+        (
+            "cargo.parcel_shelf",
+            "assets/3dassets/station_starter_kit/glb/decor_cargo_parcel_shelf.glb",
+        ),
+        (
+            "cargo.dispatch_panel",
+            "assets/3dassets/station_starter_kit/glb/decor_cargo_dispatch_panel.glb",
+        ),
+        (
+            "cargo.weigh_station",
+            "assets/3dassets/station_starter_kit/glb/decor_cargo_weigh_station.glb",
+        ),
+        (
+            "sec.notice_board",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_notice_board.glb",
+        ),
+        (
+            "sec.camera_bank",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_camera_bank.glb",
+        ),
+        (
+            "sec.armory_rack",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_armory_rack.glb",
+        ),
+        (
+            "sec.evidence_wall",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_evidence_wall.glb",
+        ),
+        (
+            "svc.menu_board",
+            "assets/3dassets/station_starter_kit/glb/decor_svc_menu_board.glb",
+        ),
+        (
+            "svc.crockery_shelf",
+            "assets/3dassets/station_starter_kit/glb/decor_svc_crockery_shelf.glb",
+        ),
+        (
+            "svc.pass_hatch",
+            "assets/3dassets/station_starter_kit/glb/decor_svc_pass_hatch.glb",
+        ),
+        (
+            "svc.drinks_board",
+            "assets/3dassets/station_starter_kit/glb/decor_svc_drinks_board.glb",
         ),
     ] {
         let bytes = std::fs::read(path)
@@ -1563,7 +2139,7 @@ fn every_station_kit_glb_parses_with_bevys_gltf_parser() {
             panic!("{} is not Bevy-compatible glTF: {error}", path.display())
         });
     }
-    assert_eq!(count, 24, "the station starter kit should contain 24 GLBs");
+    assert_eq!(count, 48, "the station starter kit should contain 48 GLBs");
 }
 
 #[test]

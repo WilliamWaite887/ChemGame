@@ -13,6 +13,12 @@ progress.ron
 # from the client itself.
 /steam_appid.txt
 .cargo/config.toml
-assets/3dassets/station_starter_kit/generate_station_starter_kit.py
 assets/textures/IMAGEGEN_PROMPTS.md
 assets/textures/README.md
+assets/3dassets/station_starter_kit/station_starter_kit_manifest.json
+assets/3dassets/station_starter_kit/station_starter_kit.blend
+assets/3dassets/station_starter_kit/validate_station_starter_kit.py
+assets/3dassets/station_starter_kit/README.md
+assets/3dassets/station_starter_kit/generate_decor_modules.py
+assets/3dassets/station_starter_kit/station_starter_kit.blend1
+assets/3dassets/station_starter_kit/preview_*.png
