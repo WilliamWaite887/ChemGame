@@ -700,25 +700,26 @@ fn station_v2_keeps_its_department_and_route_footprints() {
         3,
         "Service should be its two original halves plus the connector across the old spine gap"
     );
+    // Both halves now run north over the roofed maintenance tunnel to meet the
+    // Chapel wall, and the connector runs the full depth of the room.
     for expected in [
         Bounds {
             min_x: -47.5,
             max_x: -41.5,
             min_z: 15.0,
-            max_z: 28.6,
+            max_z: 31.4,
         },
         Bounds {
             min_x: -38.7,
-            max_x: -23.5,
+            max_x: -23.625,
             min_z: 15.0,
-            max_z: 28.6,
+            max_z: 31.4,
         },
-        // Overhangs both halves by 1.5 m, as Botany's connector does.
         Bounds {
-            min_x: -43.0,
+            min_x: -43.4,
             max_x: -37.2,
             min_z: 15.0,
-            max_z: 28.6,
+            max_z: 39.0,
         },
     ] {
         assert!(
@@ -2457,7 +2458,7 @@ fn every_airlock_has_unique_semantic_ids_and_a_matching_nav_bridge() {
 #[test]
 fn physical_walls_match_walkable_routes_and_airlock_gaps() {
     let map = parse();
-    let blocking_walls: Vec<Bounds> = map
+    let blocking_walls: Vec<(Bounds, (f32, f32))> = map
         .iter()
         .filter(|entity| classname(entity).as_deref() == Some("worldspawn"))
         .flat_map(|entity| &entity.brushes)
@@ -2468,19 +2469,29 @@ fn physical_walls_match_walkable_routes_and_airlock_gaps() {
                 && vertical_span(brush).0 <= 0.01
                 && vertical_span(brush).1 >= 1.0
         })
-        .map(|brush| footprint(brush))
+        .map(|brush| (footprint(brush), vertical_span(brush)))
         .collect();
 
-    for area in map
+    // Compared in three dimensions, not two. The station has two decks now:
+    // the ground floor runs directly over the lower maintenance tunnel for
+    // most of its length, so every ground-floor wall shares a footprint with
+    // some stretch of tunnel below it. Only a wall standing in the same band
+    // of height a body occupies on that floor is actually in the way.
+    for (area, floor) in map
         .iter()
         .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
-        .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
+        .flat_map(|entity| {
+            entity
+                .brushes
+                .iter()
+                .map(|brush| (footprint(brush), vertical_span(brush)))
+        })
     {
         let standing = area.inset(NAV_RADIUS);
-        if let Some(wall) = blocking_walls
-            .iter()
-            .find(|wall| wall.intersection(&standing).is_some())
-        {
+        let head = floor.0 + 1.0;
+        if let Some((wall, _)) = blocking_walls.iter().find(|(wall, span)| {
+            wall.intersection(&standing).is_some() && span.1 > floor.0 + 0.01 && span.0 < head
+        }) {
             panic!("floor-height wall {wall:?} intrudes into walkable area {area:?}");
         }
     }
@@ -2494,7 +2505,7 @@ fn physical_walls_match_walkable_routes_and_airlock_gaps() {
         let (x, z) = origin_xz(door).expect("door_spot with a valid origin");
         let point = Vec3::new(x, 0.0, z);
         assert!(
-            blocking_walls.iter().all(|wall| !wall.holds(point)),
+            blocking_walls.iter().all(|(wall, _)| !wall.holds(point)),
             "door_spot `{id}` is embedded in a floor-height wall",
         );
 
