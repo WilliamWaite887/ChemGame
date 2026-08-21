@@ -33,6 +33,9 @@
             // irradiated chemist, so the sphere and the symptom read as the
             // same event.
             color: (0.45, 0.95, 0.35),
+            // The one incident that trips the lab's rad klaxon, which runs for
+            // as long as the leak does.
+            radiological: true,
         ),
         (
             id: "coolant_vent",
@@ -49,6 +52,9 @@
             // Cold blue-white, so a vent is never mistaken for the rad leak at
             // a glance across the hall.
             color: (0.55, 0.80, 1.0),
+            // Stated rather than defaulted: a vent still hurts you, and the
+            // reason it is silent is that it is not radiation, not oversight.
+            radiological: false,
         ),
     ],
 )

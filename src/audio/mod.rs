@@ -23,6 +23,8 @@ use serde::{Deserialize, Serialize};
 use crate::body::{Bloodstream, Body};
 use crate::containers::{HeldBy, InSlot, InSlotB};
 use crate::door::Door;
+use crate::ending::FinishedArc;
+use crate::hazards::ActiveHazard;
 use crate::machines::{AgitationRun, Machine, MachineKind, ReactionsFired, Thermostat};
 use crate::net::is_authority;
 use crate::orders::{CrisisOrder, Shift};
@@ -57,6 +59,12 @@ const TENSE_AMBIENCE: [&str; 2] = [
 /// Quieter than any one-shot — this is a bed, not a cue.
 const AMBIENCE_VOLUME: f32 = 0.35;
 
+/// The rad klaxon runs for the whole length of a leak — forty seconds, on a
+/// seven-second loop — so it is mixed well under a one-shot. It is there to
+/// keep the room feeling wrong while you dose up, not to drown out the radio
+/// telling you what to do about it.
+const RADIATION_ALARM_VOLUME: f32 = 0.4;
+
 pub struct SfxPlugin;
 
 impl Plugin for SfxPlugin {
@@ -89,7 +97,9 @@ impl Plugin for SfxPlugin {
                     play_collapse_sfx.run_if(is_authority),
                     play_status_sfx.run_if(is_authority),
                     sync_machine_loops,
+                    sync_radiation_alarm,
                     play_crisis_alarm_sfx,
+                    play_evacuation_sfx,
                     play_radio_sfx,
                     play_ui_click_sfx,
                     play_door_sfx.run_if(is_authority),
@@ -124,6 +134,9 @@ pub enum Sfx {
     RadioBridge,
     RadioUrgent,
     BridgePriority,
+    Announce,
+    RedAlert,
+    ShuttleCalled,
     RequisitionConfirm,
     UiClick,
     UiRefused,
@@ -179,6 +192,13 @@ impl Sfx {
             | Sfx::RadiationPulse
             | Sfx::AssaultImpact => 0.8,
             Sfx::Slip => 0.7,
+            // The full-length station announcements. Held under the one-shots
+            // because each runs for several seconds over whatever else the
+            // room is doing, and each lands in the same frame as the radio
+            // card that explains it. The PA fanfare sits lowest of the three:
+            // it fronts a joke, not an emergency.
+            Sfx::RedAlert | Sfx::ShuttleCalled => 0.85,
+            Sfx::Announce => 0.6,
             _ => 1.0,
         }
     }
@@ -257,6 +277,14 @@ struct SfxAssets {
     door_closed: Handle<AudioSource>,
     order_success: Handle<AudioSource>,
     radio_blip: Handle<AudioSource>,
+    /// The two-tone chime in front of a station-wide announcement.
+    attention: Handle<AudioSource>,
+    /// The full PA fanfare, for the station's own bulletins.
+    announce: Handle<AudioSource>,
+    red_alert: Handle<AudioSource>,
+    shuttle_called: Handle<AudioSource>,
+    /// Looped, not one-shot — see [`sync_radiation_alarm`].
+    radiation_alarm: Handle<AudioSource>,
     requisition_confirm: Handle<AudioSource>,
     ui_click: Handle<AudioSource>,
     ui_refused: Handle<AudioSource>,
@@ -303,7 +331,10 @@ impl SfxAssets {
             Sfx::RadioService => &self.package_pop,
             Sfx::RadioBridge => &self.ui_click,
             Sfx::RadioUrgent => &self.ui_refused,
-            Sfx::BridgePriority => &self.major_alarm,
+            Sfx::BridgePriority => &self.attention,
+            Sfx::Announce => &self.announce,
+            Sfx::RedAlert => &self.red_alert,
+            Sfx::ShuttleCalled => &self.shuttle_called,
             Sfx::RequisitionConfirm => &self.requisition_confirm,
             Sfx::UiClick => &self.ui_click,
             Sfx::UiRefused => &self.ui_refused,
@@ -346,6 +377,11 @@ fn load_sfx(mut commands: Commands, assets: Res<AssetServer>) {
         door_closed: assets.load("sounds/door_closed.ogg"),
         order_success: assets.load("sounds/order_success.ogg"),
         radio_blip: assets.load("sounds/radio_blip.ogg"),
+        attention: assets.load("sounds/attention.ogg"),
+        announce: assets.load("sounds/announce_syndi.ogg"),
+        red_alert: assets.load("sounds/redalert.ogg"),
+        shuttle_called: assets.load("sounds/shuttlecalled.ogg"),
+        radiation_alarm: assets.load("sounds/radiation.ogg"),
         requisition_confirm: assets.load("sounds/requisition_confirm.ogg"),
         ui_click: assets.load("sounds/ui_click.ogg"),
         ui_refused: assets.load("sounds/ui_refused.ogg"),
@@ -657,6 +693,75 @@ fn play_crisis_alarm_sfx(
     }
 }
 
+/// Marks the looping rad klaxon, so [`sync_radiation_alarm`] can tell whether
+/// one is already going — the same shape [`MachineLoop`] uses, minus the owner,
+/// because the lab has one alarm however many leaks are open at once.
+#[derive(Component)]
+struct RadiationAlarm;
+
+/// Sounds the rad klaxon for exactly as long as something radiological is
+/// leaking into the lab, and cuts it the moment the last one expires.
+///
+/// Presentation read straight off replicated state, so it needs no message and
+/// no authority gate: `ActiveHazard` is an entity on every peer (see its own
+/// doc), which means a guest working the same room hears the same alarm start
+/// and stop, and one who joins mid-leak walks into an alarm already running.
+///
+/// Distinct from [`Sfx::RadiationPulse`], which is the geiger counter by the
+/// dispenser — positional, per metabolism tick, and about *where* the source
+/// is. This is the room's alarm, and is deliberately not spatial.
+fn sync_radiation_alarm(
+    mut commands: Commands,
+    assets: Res<SfxAssets>,
+    hazards: Query<&ActiveHazard>,
+    playing: Query<Entity, With<RadiationAlarm>>,
+) {
+    if hazards.iter().any(|hazard| hazard.radiological) {
+        if playing.is_empty() {
+            commands.spawn((
+                RadiationAlarm,
+                AudioPlayer::new(assets.radiation_alarm.clone()),
+                PlaybackSettings::LOOP.with_volume(Volume::Linear(RADIATION_ALARM_VOLUME)),
+                crate::until_we_leave_the_lab(),
+            ));
+        }
+        return;
+    }
+    for entity in &playing {
+        commands.entity(entity).despawn();
+    }
+}
+
+/// Calls the shuttle the moment a run is lost.
+///
+/// Reads `ending::FinishedArc` rather than `arc::Campaign` directly, which
+/// buys the one rule that module already had to get right: an arc that
+/// resolved in some *earlier* session and is only being loaded back in has
+/// already finished, and must not be announced again — see
+/// `ending::notice_the_ending`. Going through the same resource means there is
+/// one answer to "did this run just end, in front of this player", not two
+/// that can disagree.
+///
+/// The `Local` needs no reset of its own: `crate::session` puts `FinishedArc`
+/// back to `None` on the way out of the lab, so the first frame of the next
+/// save clears it before any ending can be raised.
+fn play_evacuation_sfx(
+    finished: Res<FinishedArc>,
+    mut announced: Local<bool>,
+    mut play: MessageWriter<PlaySfx>,
+) {
+    let ending = finished.showing();
+    // `won`, not a particular `ArcOutcome`: the same outcome is a victory from
+    // one chair and a defeat from the other, and it is the side that lost who
+    // has somewhere to be.
+    if let Some(ending) = ending {
+        if !*announced && !ending.won() {
+            play.write(PlaySfx(Sfx::ShuttleCalled));
+        }
+    }
+    *announced = ending.is_some();
+}
+
 /// Baseline for [`play_radio_sfx`] — `None` means "not seen a frame since
 /// entering the lab yet", which is what tells that system to baseline
 /// silently instead of replaying old history as fresh blips.
@@ -699,11 +804,25 @@ fn play_radio_sfx(
         .iter()
         .filter(|entry| last.is_none_or(|last| entry.sequence > last))
     {
-        play.write(PlaySfx(radio_channel_sfx(entry.channel)));
+        // A bulletin over the PA opens with the station's own fanfare instead
+        // of a department ident — it is not coming down one channel, and the
+        // joke lands better with something in front of it.
+        play.write(PlaySfx(if entry.announcement {
+            Sfx::Announce
+        } else {
+            radio_channel_sfx(entry.channel)
+        }));
         if entry.tone == RadioTone::Positive {
             play.write(PlaySfx(Sfx::OrderSuccess));
         }
         match entry.priority {
+            // The alert level going up, which the station announces with its
+            // klaxon rather than the ordinary chime — so this is an `else`
+            // against `StationWide`, not an addition on top of it. Only
+            // `showdown::arm_showdown` airs at this level.
+            RadioPriority::RedAlert => {
+                play.write(PlaySfx(Sfx::RedAlert));
+            }
             RadioPriority::StationWide => {
                 play.write(PlaySfx(Sfx::BridgePriority));
             }
@@ -866,6 +985,99 @@ mod tests {
         assert_eq!(app.world().resource::<HeardRadio>().0, [Sfx::RadioCargo]);
     }
 
+    /// Drives [`play_radio_sfx`] over a fresh log, baselining first so the
+    /// pushed entries are the only thing it hears.
+    fn heard_from(entries: Vec<crate::radio::RadioEntry>) -> Vec<Sfx> {
+        let mut app = App::new();
+        app.init_resource::<RadioLog>()
+            .init_resource::<RadioCursor>()
+            .init_resource::<HeardRadio>()
+            .add_message::<PlaySfx>()
+            .add_systems(Update, (play_radio_sfx, collect_radio_sfx).chain());
+        app.update();
+        for entry in entries {
+            app.world_mut().resource_mut::<RadioLog>().push(entry);
+            app.update();
+        }
+        app.world().resource::<HeardRadio>().0.clone()
+    }
+
+    #[test]
+    fn the_alert_level_going_up_sounds_the_klaxon_instead_of_the_chime() {
+        // `showdown::arm_showdown` is the only line in the game that airs at
+        // `RedAlert`, and the whole reason it has its own priority rather than
+        // a second cue stacked on `StationWide` is that they must not both
+        // play over the one announcement.
+        let heard = heard_from(vec![
+            crate::radio::RadioEntry::new(RadioChannel::Bridge, "an ordinary bridge priority")
+                .station_wide(),
+            crate::radio::RadioEntry::new(RadioChannel::Bridge, "it is coming here").red_alert(),
+        ]);
+        assert_eq!(
+            heard,
+            [
+                Sfx::RadioBridge,
+                Sfx::BridgePriority,
+                Sfx::RadioBridge,
+                Sfx::RedAlert
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pa_bulletin_opens_with_the_fanfare_rather_than_its_channel_ident() {
+        // And the same line *without* the flag stays an ordinary bridge blip —
+        // the Bridge talking to one department is not an announcement.
+        let heard = heard_from(vec![
+            crate::radio::RadioEntry::new(RadioChannel::Bridge, "morale remains mandatory")
+                .ambient()
+                .over_the_pa(),
+            crate::radio::RadioEntry::new(RadioChannel::Bridge, "security, status on the thing")
+                .ambient(),
+        ]);
+        assert_eq!(heard, [Sfx::Announce, Sfx::RadioBridge]);
+    }
+
+    #[test]
+    fn every_pa_bulletin_in_the_data_is_actually_addressed_to_the_station() {
+        // The fanfare is nine seconds long. Setting the flag on a line that
+        // reads as one department talking to another would make the station
+        // sound like it is interrupting itself, so the data is checked rather
+        // than trusted.
+        let script: crate::radio::RadioScript =
+            ron::from_str(include_str!("../../assets/data/station.radio.ron")).unwrap();
+        let announcements = script
+            .ambient_lines
+            .iter()
+            .filter(|line| line.announcement)
+            .count();
+        assert!(announcements > 0, "nothing is read over the PA at all");
+        for line in script.ambient_lines.iter().filter(|line| line.announcement) {
+            assert_eq!(
+                line.channel,
+                RadioChannel::Bridge,
+                "'{}' is announced from a department channel",
+                line.text
+            );
+        }
+        for exchange in &script.exchanges {
+            for line in &exchange.lines {
+                assert!(
+                    !line.announcement,
+                    "'{}' is half of a two-hander, not a bulletin",
+                    line.text
+                );
+            }
+        }
+        // The fanfare should stay an event. Everything else in the quiet-period
+        // pool — department chatter and two-handers alike — has to outnumber it.
+        let pool = script.ambient_lines.len() + script.exchanges.len();
+        assert!(
+            announcements * 2 < pool,
+            "{announcements} of {pool} quiet-period picks would open with the fanfare"
+        );
+    }
+
     const SS14_FILES: [&str; 31] = [
         "bottle_clunk.ogg",
         "bottle_clunk_2.ogg",
@@ -900,7 +1112,12 @@ mod tests {
         "splash.ogg",
     ];
 
-    const ORIGINAL_ONE_SHOTS: [&str; 16] = [
+    const ORIGINAL_ONE_SHOTS: [&str; 21] = [
+        "sounds/attention.ogg",
+        "sounds/announce_syndi.ogg",
+        "sounds/redalert.ogg",
+        "sounds/shuttlecalled.ogg",
+        "sounds/radiation.ogg",
         "sounds/dispense_pour.ogg",
         "sounds/eject.ogg",
         "sounds/buffer_transfer.ogg",

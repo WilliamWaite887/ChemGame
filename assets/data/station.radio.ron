@@ -231,18 +231,87 @@
         (channel: Service, speaker: "Chef Dubois", text: "Dinner service begins at nineteen hundred, assuming dinner remains containable."),
         (channel: Service, speaker: "Botanist Ivy", text: "The ficus in the lobby has been promoted. Address complaints to the ficus."),
 
-        (channel: Bridge, speaker: "Duty Officer", text: "Station announcement: morale remains mandatory. Quality remains subject to availability."),
-        (channel: Bridge, speaker: "Duty Officer", text: "The owner of a small moon in docking bay two should contact Cargo before it develops tides."),
-        (channel: Bridge, speaker: "Duty Officer", text: "Reminder: the emergency exits are for emergencies. Curiosity is no longer categorized as one."),
-        (channel: Bridge, speaker: "Duty Officer", text: "Today's evacuation drill is postponed due to an evacuation."),
-        (channel: Bridge, speaker: "Duty Officer", text: "Corporate has approved Casual Friday. Pressure suits remain compulsory."),
-        (channel: Bridge, speaker: "Duty Officer", text: "The station suggestion box has achieved escape velocity. Suggestions may be shouted upward."),
-        (channel: Bridge, speaker: "Duty Officer", text: "All personnel are reminded that 'the AI said it was fine' is not a valid work order."),
-        (channel: Bridge, speaker: "Duty Officer", text: "A moment of silence will be observed for the coffee machine, followed by immediate rioting."),
-        (channel: Bridge, speaker: "Duty Officer", text: "Unscheduled gravity remains scheduled until further notice."),
-        (channel: Bridge, speaker: "Duty Officer", text: "The bridge has reviewed the incident. The incident has declined our findings."),
-        (channel: Bridge, speaker: "Duty Officer", text: "Please disregard the previous announcement. If you cannot, report to Medical for selective forgetting."),
-        (channel: Bridge, speaker: "Duty Officer", text: "Station clocks are synchronized. Personnel are not."),
+        // Second pass of department chatter. Kept comfortably larger than the
+        // PA pool below so the fanfare stays an event rather than the station's
+        // resting sound.
+        (channel: Medical, speaker: "Dr. Vance", text: "Medbay reminder: the phrase 'I looked it up' is not a differential diagnosis."),
+        (channel: Medical, speaker: "Nurse Okonkwo", text: "Someone has returned a borrowed scalpel. It is longer than the one we lent out."),
+        (channel: Medical, speaker: "Dr. Vance", text: "We have run out of the good bandages and are now issuing the bandages with opinions on you."),
+        (channel: Medical, speaker: "Nurse Okonkwo", text: "Bed two would like it noted that he walked in. He would also like a wheelchair."),
+        (channel: Medical, speaker: "Dr. Vance", text: "Chemistry, whatever is in the blue bottle, Medical would like more and fewer questions."),
+
+        (channel: Security, speaker: "Officer Reyes", text: "Be advised: a suspect has been apprehended in Maintenance. He was the one who reported it."),
+        (channel: Security, speaker: "Warden Bex", text: "The brig has a waiting list. This is not a queue, it is an aspiration."),
+        (channel: Security, speaker: "Officer Reyes", text: "Security reminder: contraband stops being contraband the moment I am holding it. Do not test this."),
+        (channel: Security, speaker: "Warden Bex", text: "Whoever taught the security camera to follow people dramatically: excellent, never again."),
+        (channel: Security, speaker: "Officer Reyes", text: "We have recovered the missing toolbox. It was in Engineering, where it lives, which is the crime."),
+
+        (channel: Engineering, speaker: "Tech Lindqvist", text: "Atmospherics are perfect. I want that on record before anyone opens anything."),
+        (channel: Engineering, speaker: "Tech Lindqvist", text: "The lift is working again. It was never broken; it was sulking about the weight limit."),
+        (channel: Engineering, speaker: "Tech Lindqvist", text: "Please stop patching the pipes with things that were previously food."),
+        (channel: Engineering, speaker: "Tech Lindqvist", text: "Engineering has isolated the smell. Engineering is not going to say where."),
+        (channel: Engineering, speaker: "Tech Lindqvist", text: "Reminder: the fuse box is not a light switch, no matter how well that worked yesterday."),
+
+        (channel: Cargo, speaker: "Miner Sato", text: "Cargo has received a crate addressed to 'whoever is brave'. It is available for collection."),
+        (channel: Cargo, speaker: "Miner Sato", text: "The requisition backlog is down to nine hundred. Thank you for not looking at it."),
+        (channel: Cargo, speaker: "Miner Sato", text: "Whoever ordered a second station: it will not fit, and we are not signing for it."),
+        (channel: Cargo, speaker: "Miner Sato", text: "Cargo reminder: 'urgent' is a feeling, not a shipping class."),
+        (channel: Cargo, speaker: "Miner Sato", text: "We have located the missing pallet. It has been rebranded as furniture and is doing well."),
+
+        (channel: Service, speaker: "Chef Dubois", text: "The special today is the special from yesterday, rested and much angrier."),
+        (channel: Service, speaker: "Botanist Ivy", text: "Botany has grown something the manual describes only as 'do not'."),
+        (channel: Service, speaker: "Chef Dubois", text: "Please return the good knife. The kitchen is currently working with the honest knife."),
+        (channel: Service, speaker: "Botanist Ivy", text: "The hydroponics tray has started keeping a schedule. It is a better one than mine."),
+        (channel: Service, speaker: "Chef Dubois", text: "Service reminds the crew that the bar is self-service, not self-supervising."),
+
+        // ---- Over the PA ---------------------------------------------------
+        // `announcement: true` is what fronts a line with the station fanfare
+        // instead of a department ident, so it is only ever set on something
+        // actually being read to the whole station — never on the Bridge
+        // talking to one department, which is what `exchanges` is for.
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "Station announcement: morale remains mandatory. Quality remains subject to availability."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "The owner of a small moon in docking bay two should contact Cargo before it develops tides."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "Reminder: the emergency exits are for emergencies. Curiosity is no longer categorized as one."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "Today's evacuation drill is postponed due to an evacuation."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "Corporate has approved Casual Friday. Pressure suits remain compulsory."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "The station suggestion box has achieved escape velocity. Suggestions may be shouted upward."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "All personnel are reminded that 'the AI said it was fine' is not a valid work order."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "A moment of silence will be observed for the coffee machine, followed by immediate rioting."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "Unscheduled gravity remains scheduled until further notice."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "The bridge has reviewed the incident. The incident has declined our findings."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "Please disregard the previous announcement. If you cannot, report to Medical for selective forgetting."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "Station clocks are synchronized. Personnel are not."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "The lost and found has been merged with the evidence locker to reduce walking."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "Reminder: the airlock cycle is not a ride. Repeat offenders will be issued a longer ride."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "Hull integrity is nominal. 'Nominal' has been redefined this quarter for your convenience."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "Would the person storing a live animal in a locker please store a live animal in a different locker."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "The department of the month is Chemistry, by default, following disqualification of the others."),
+        (channel: Bridge, speaker: "Duty Officer", announcement: true, text: "Please do not thank the vending machines. It encourages negotiation."),
+
+        // The Captain is a PA voice only — no walk-in visitor is drawn from
+        // this file, so nobody in the lab has to be able to hand them a beaker.
+        (channel: Bridge, speaker: "Captain Halloran", announcement: true, text: "This is your captain. I have been informed there is a rumour I am missing. I am not missing. I am delegating."),
+        (channel: Bridge, speaker: "Captain Halloran", announcement: true, text: "This is the captain. Whoever moved my chair to Cargo: I found it. I am staying here now."),
+        (channel: Bridge, speaker: "Captain Halloran", announcement: true, text: "Captain speaking. Effective immediately, the phrase 'it's fine' requires a second signature."),
+        (channel: Bridge, speaker: "Captain Halloran", announcement: true, text: "Crew, this is your captain. Morale is up four percent. We have not identified the cause and are containing it."),
+        (channel: Bridge, speaker: "Captain Halloran", announcement: true, text: "This is the captain. Chemistry, whatever you did at oh-nine-hundred, do it again. Nobody knows why the lights are better."),
+        (channel: Bridge, speaker: "Captain Halloran", announcement: true, text: "Captain here. I would like to remind everyone that I read every incident report, in the sense that I am aware they exist."),
+        (channel: Bridge, speaker: "Captain Halloran", announcement: true, text: "This is your captain, broadcasting from a meeting I am winning."),
+        (channel: Bridge, speaker: "Captain Halloran", announcement: true, text: "Captain speaking. Corporate has asked what we are doing about the noise. I have told them we are doing it loudly."),
+
+        // The station AI, which the Bridge would rather it did not have.
+        (channel: Bridge, speaker: "Station AI", announcement: true, text: "Attention crew. I have completed a full systems check. I am choosing not to share the results yet."),
+        (channel: Bridge, speaker: "Station AI", announcement: true, text: "Reminder from your station AI: I am legally required to announce shift changes and morally free to editorialize."),
+        (channel: Bridge, speaker: "Station AI", announcement: true, text: "Attention. Someone has asked me to open a door I do not have. I have opened a different door, for balance."),
+        (channel: Bridge, speaker: "Station AI", announcement: true, text: "Announcement: atmospherics are stable in every room where anyone is currently looking."),
+        (channel: Bridge, speaker: "Station AI", announcement: true, text: "Crew notice. I have counted you. There are the correct number of you, give or take Cargo."),
+
+        // Corporate, whose bulletins are read out verbatim and against advice.
+        (channel: Bridge, speaker: "Corporate Relay", announcement: true, text: "Central Command bulletin: your station has been rated 'operational' by an inspector who did not disembark."),
+        (channel: Bridge, speaker: "Corporate Relay", announcement: true, text: "Corporate notice: overtime is now voluntary, mandatory, and unpaid, in that order."),
+        (channel: Bridge, speaker: "Corporate Relay", announcement: true, text: "Central Command reminds staff that the company values you at replacement cost plus shipping."),
+        (channel: Bridge, speaker: "Corporate Relay", announcement: true, text: "Bulletin: the employee wellness survey results are in and have been sealed for one hundred years."),
+        (channel: Bridge, speaker: "Corporate Relay", announcement: true, text: "Corporate advisory: rumours of a bonus are unfounded, unauthorized, and under investigation."),
     ],
 
     exchanges: [
@@ -285,6 +354,30 @@
         (lines: [
             (channel: Cargo, speaker: "Miner Sato", text: "Service, your produce requisition lists one hostile melon."),
             (channel: Service, speaker: "Botanist Ivy", text: "That is an assessment, not a quantity."),
+        ]),
+        (lines: [
+            (channel: Bridge, speaker: "Captain Halloran", text: "Engineering, the bridge lights are flickering in a pattern."),
+            (channel: Engineering, speaker: "Tech Lindqvist", text: "Yes. Do not reply to it."),
+        ]),
+        (lines: [
+            (channel: Medical, speaker: "Dr. Vance", text: "Chemistry, is there a reason the sample is warm?"),
+            (channel: Engineering, speaker: "Tech Lindqvist", text: "There is a reason for everything on this station. That is the problem."),
+        ]),
+        (lines: [
+            (channel: Security, speaker: "Officer Reyes", text: "Cargo, we have a crate here breathing."),
+            (channel: Cargo, speaker: "Miner Sato", text: "Then it is alive, which means it is Botany's, which means it is your problem now."),
+        ]),
+        (lines: [
+            (channel: Service, speaker: "Chef Dubois", text: "Bridge, the kitchen requires a ruling. Is soup a beverage."),
+            (channel: Bridge, speaker: "Captain Halloran", text: "Not today. Ask me again after the inspection."),
+        ]),
+        (lines: [
+            (channel: Engineering, speaker: "Tech Lindqvist", text: "Medical, quick one — how many fingers is normal."),
+            (channel: Medical, speaker: "Nurse Okonkwo", text: "Come to Medbay. Do not bring the wall with you."),
+        ]),
+        (lines: [
+            (channel: Bridge, speaker: "Captain Halloran", text: "Security, status on the thing."),
+            (channel: Security, speaker: "Warden Bex", text: "The thing is contained. The thing has a lawyer."),
         ]),
     ],
 )

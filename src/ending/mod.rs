@@ -84,6 +84,16 @@ pub struct Ending {
 }
 
 impl Ending {
+    /// Whether the run this screen is reporting was a win *for the player*.
+    ///
+    /// Already baked in at construction from `Campaign::player_won`, so this
+    /// is the settled answer rather than one re-derived from an [`ArcOutcome`]
+    /// that means opposite things from the two chairs. `crate::audio` reads it
+    /// to decide whether the shuttle is being called.
+    pub(crate) fn won(&self) -> bool {
+        self.won
+    }
+
     /// The banner. Deliberately different per side: the same [`ArcOutcome`]
     /// is a victory from one chair and a defeat from the other, which is the
     /// one place the two modes actually diverge.

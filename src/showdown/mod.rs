@@ -264,7 +264,10 @@ fn arm_showdown(
         ),
     });
     // Immediate, not delayed: this is the one moment in the game where the
-    // player needs to know *now*.
+    // player needs to know *now*. `red_alert` rather than `station_wide` for
+    // the same reason — it is the station's alert level going up, and it is
+    // what puts the klaxon on every peer's speakers (`audio::play_radio_sfx`)
+    // without this module needing a cue of its own.
     radio.push(
         RadioEntry::new(
             crate::radio::RadioChannel::Bridge,
@@ -272,7 +275,7 @@ fn arm_showdown(
         )
         .speaker("Duty Officer")
         .negative()
-        .station_wide(),
+        .red_alert(),
     );
     info!("showdown armed: {:?}", campaign.antag);
 }

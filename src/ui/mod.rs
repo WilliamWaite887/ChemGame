@@ -931,8 +931,10 @@ fn draw_radio_history(panel: &mut ChildSpawnerCommands, radio: &RadioLog) {
             RadioTone::Neutral => TEXT,
         };
         let marker = match entry.priority {
+            RadioPriority::RedAlert => "  ·  RED ALERT",
             RadioPriority::StationWide => "  ·  STATION-WIDE",
             RadioPriority::Urgent => "  ·  URGENT",
+            _ if entry.announcement => "  ·  ANNOUNCEMENT",
             _ => "",
         };
         let speaker = entry.speaker.as_deref().unwrap_or("Open carrier");
@@ -3524,7 +3526,7 @@ struct DispatchItem {
 impl DispatchItem {
     fn new(entry: RadioEntry) -> Self {
         Self {
-            remaining: dispatch_seconds(entry.priority),
+            remaining: dispatch_seconds(&entry),
             entry,
         }
     }
@@ -3611,12 +3613,24 @@ impl RadioDispatchQueue {
     }
 }
 
-fn dispatch_seconds(priority: RadioPriority) -> f32 {
-    match priority {
+fn dispatch_seconds(entry: &RadioEntry) -> f32 {
+    let base: f32 = match entry.priority {
         RadioPriority::Ambient => 5.0,
         RadioPriority::Routine => 7.0,
         RadioPriority::Urgent => 9.0,
         RadioPriority::StationWide => 10.0,
+        // The klaxon behind it runs a little over eight seconds; the card
+        // should still be up when it finishes.
+        RadioPriority::RedAlert => 12.0,
+    };
+    // A PA bulletin is the *least* urgent thing on the radio and the longest
+    // thing to listen to — the fanfare in front of it runs nearly nine
+    // seconds. Taking the card away four seconds into the jingle would leave
+    // the player listening to a punchline they can no longer read.
+    if entry.announcement {
+        base.max(11.0)
+    } else {
+        base
     }
 }
 
@@ -3671,13 +3685,17 @@ fn spawn_radio_dispatch_card(commands: &mut Commands, entry: &RadioEntry) {
         RadioTone::Negative => Color::srgb(0.96, 0.78, 0.70),
         RadioTone::Neutral => TEXT,
     };
-    let heading = if entry.priority == RadioPriority::StationWide {
-        "BRIDGE PRIORITY".to_string()
-    } else {
-        format!("{}  ·  {}", entry.channel.tag(), entry.channel.label())
+    let heading = match entry.priority {
+        RadioPriority::RedAlert => "RED ALERT".to_string(),
+        RadioPriority::StationWide => "BRIDGE PRIORITY".to_string(),
+        _ if entry.announcement => "STATION ANNOUNCEMENT".to_string(),
+        _ => format!("{}  ·  {}", entry.channel.tag(), entry.channel.label()),
     };
     let speaker = entry.speaker.as_deref().unwrap_or("Open carrier");
-    let background = if entry.priority == RadioPriority::StationWide {
+    // `>=`, not `==`: a red alert is station-wide traffic too, and reading it
+    // as an ordinary department line would be the one card in the game that
+    // most needs the treatment losing it.
+    let background = if entry.priority >= RadioPriority::StationWide {
         Color::srgba(0.20, 0.07, 0.06, 0.96)
     } else if entry.priority == RadioPriority::Urgent {
         Color::srgba(0.18, 0.10, 0.07, 0.95)
@@ -3758,7 +3776,7 @@ fn animate_radio_dispatch(
     else {
         return;
     };
-    let duration = dispatch_seconds(current.entry.priority);
+    let duration = dispatch_seconds(&current.entry);
     let elapsed = duration - current.remaining;
     let alpha = (elapsed / 0.2).clamp(0.0, 1.0) * (current.remaining / 0.5).clamp(0.0, 1.0);
     if current.entry.priority >= RadioPriority::Urgent {

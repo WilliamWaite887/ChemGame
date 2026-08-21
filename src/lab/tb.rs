@@ -617,36 +617,66 @@ const HUB_BORDER_INNER_RADIUS: f32 = 0.63;
 const HUB_BORDER_OUTER_RADIUS: f32 = 1.17;
 const HUB_PORT_HALF_ANGLE: f32 = 0.085;
 
-const CHEMISTRY_ROUTE: &[(f32, f32)] = &[(0.95, -0.65), (53.0, -0.65), (53.0, -2.0)];
-const MEDICAL_ROUTE: &[(f32, f32)] = &[
-    (1.00, -0.39),
-    (10.90, -0.39),
-    (10.90, -12.50),
-    (11.30, -12.50),
-];
-const SERVICE_ROUTE: &[(f32, f32)] = &[
-    (1.00, -0.13),
-    (10.10, -0.13),
-    (10.10, 17.10),
-    (15.00, 17.10),
-    (15.00, 16.10),
+// Routes are polylines in the hub's own frame, in metres, and the hub stands in
+// the middle of Service at world (-35, 27). Every route therefore reads the same
+// way: leave the ring heading north, run to the public door at world z 15 as one
+// bundle of parallel lanes 0.26 m apart, and only fan out once past it.
+//
+// Lanes are ordered so nothing ever crosses anything else. The four westbound
+// routes take the western lanes and the three eastbound ones the east, so the
+// bundle splits cleanly at the door. Within each side, whichever route peels off
+// nearest sits on the outermost lane, and routes turning north toward the loop's
+// far wall are kept north of routes turning south, so a departing line never has
+// to cut across a lane that is still running.
+//
+// Local z of -14.24 .. -15.80 is world z 12.76 .. 11.20, all inside the public
+// loop corridor (world z 10..15). Each route ends at its department's public
+// door, and every turn lands in a real gap in the wall.
+
+// Westbound: peels off first, so it takes the outermost west lane.
+const CARGO_ROUTE: &[(f32, f32)] = &[
+    (-0.78, -0.70),
+    (-0.78, -14.24),
+    (-15.00, -14.24),
+    (-15.00, 15.00),
+    (-17.50, 15.00),
 ];
 const ENGINEERING_ROUTE: &[(f32, f32)] = &[
-    (1.00, 0.13),
-    (9.50, 0.13),
-    (9.50, 16.50),
-    (-30.00, 16.50),
-    (-30.00, 16.10),
+    (-0.52, -0.91),
+    (-0.52, -14.50),
+    (-45.00, -14.50),
+    (-45.00, -12.00),
 ];
-const SECURITY_ROUTE: &[(f32, f32)] = &[(-1.00, 0.39), (-45.2, 0.39), (-45.2, -2.0)];
-const CARGO_ROUTE: &[(f32, f32)] = &[(0.65, 0.95), (0.65, 28.4), (-2.0, 28.4)];
-const BRIDGE_ROUTE: &[(f32, f32)] = &[(0.78, 0.68), (8.90, 0.68), (8.90, -12.50), (8.50, -12.50)];
+const SECURITY_ROUTE: &[(f32, f32)] = &[
+    (-0.26, -1.02),
+    (-0.26, -15.54),
+    (-61.00, -15.54),
+    (-61.00, -17.00),
+];
+const BRIDGE_ROUTE: &[(f32, f32)] = &[
+    (0.00, -1.05),
+    (0.00, -15.80),
+    (-25.00, -15.80),
+    (-25.00, -17.00),
+];
+// Eastbound.
+const MEDICAL_ROUTE: &[(f32, f32)] = &[
+    (0.26, -1.02),
+    (0.26, -15.28),
+    (8.00, -15.28),
+    (8.00, -17.00),
+];
+const CHEMISTRY_ROUTE: &[(f32, f32)] = &[
+    (0.52, -0.91),
+    (0.52, -15.02),
+    (39.00, -15.02),
+    (39.00, -19.90),
+];
 const BOTANY_ROUTE: &[(f32, f32)] = &[
-    (0.65, -0.95),
-    (10.70, -0.95),
-    (10.70, 17.70),
-    (50.00, 17.70),
-    (50.00, 16.10),
+    (0.78, -0.70),
+    (0.78, -14.76),
+    (35.00, -14.76),
+    (35.00, -12.00),
 ];
 
 struct WayfindingSpec {
@@ -665,11 +695,6 @@ const WAYFINDING_SPECS: &[WayfindingSpec] = &[
         department: "Medical",
         color: [0.45, 0.76, 0.96],
         points: MEDICAL_ROUTE,
-    },
-    WayfindingSpec {
-        department: "Service",
-        color: [0.48, 0.82, 0.43],
-        points: SERVICE_ROUTE,
     },
     WayfindingSpec {
         department: "Engineering",
@@ -1559,6 +1584,8 @@ mod tests {
             .iter()
             .map(|spec| spec.department)
             .collect();
+        // Service is deliberately absent: the hub stands inside Service, so a
+        // route leading to it would start and end in the same room.
         assert_eq!(
             departments,
             [
@@ -1567,7 +1594,6 @@ mod tests {
                 "Engineering",
                 "Cargo",
                 "Security",
-                "Service",
                 "Bridge",
                 "Botany",
             ]

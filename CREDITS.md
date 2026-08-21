@@ -35,8 +35,9 @@ Freesound page that had since been deleted) were excluded rather than guessed at
 | `ui_click.ogg` | `sound/machines/click.ogg` | CC BY-SA 3.0 (tgstation project default) | tgstation contributors | https://github.com/tgstation/tgstation/blob/master/sound/machines/click.ogg |
 | `ui_refused.ogg` | `sound/machines/buzz/buzz-sigh.ogg` | CC BY-SA 3.0 (tgstation project default) | tgstation contributors | https://github.com/tgstation/tgstation/blob/master/sound/machines/buzz/buzz-sigh.ogg |
 | `ambience/ambigen1.ogg` – `ambigen4.ogg`, `ambigen9.ogg`, `ambigen10.ogg`–`ambigen13.ogg`, `shipambience.ogg` | `sound/ambience/general/` (same filenames) | CC BY-SA 3.0 (tgstation project default — no attribution file in that folder) | tgstation contributors | https://github.com/tgstation/tgstation/tree/master/sound/ambience/general |
+| `announce_syndi.ogg` | `sound/announcer/announcement/announce_syndi.ogg` | CC BY-SA 3.0 (tgstation project default — that folder has no attribution file, and `sound/attributions.txt` does not name it) | tgstation contributors | https://github.com/tgstation/tgstation/blob/436ba869ebcd0b60b63973fb7562f447ee655205/sound/announcer/announcement/announce_syndi.ogg |
 
-The radio channel-ident palette reuses the credited one-shots above: Medical uses the scanner finish, Security the refused buzz, Engineering the buffer bubbles, Cargo the requisition coin, Service the package pop, Bridge the UI click, and station-wide priority traffic the major alarm. No additional uncredited audio asset is introduced by that palette.
+The radio channel-ident palette reuses the credited one-shots above: Medical uses the scanner finish, Security the refused buzz, Engineering the buffer bubbles, Cargo the requisition coin, Service the package pop, and Bridge the UI click. Traffic that carries a station-wide cue instead of a channel ident — the announcement chime, the PA fanfare, the alert klaxon, the evacuation call — uses the announcement stings credited in their own rows. No additional uncredited audio asset is introduced by that palette.
 
 **Compliance notes:**
 - CC0 files need no credit and carry no restriction — this table lists them anyway for traceability.
@@ -46,6 +47,10 @@ The radio channel-ident palette reuses the credited one-shots above: Medical use
 ## Sound effects — sourced from Space Station 14
 
 These are unmodified copies from [Space Station 14](https://github.com/space-wizards/space-station-14) revision [`f76827c45504f263fc540bc11a1ec7cde6c16977`](https://github.com/space-wizards/space-station-14/tree/f76827c45504f263fc540bc11a1ec7cde6c16977/Resources/Audio). SS14's default for assets not named by an attribution manifest is CC BY-SA 3.0; the license-basis column distinguishes that default from explicit per-file metadata. CC0 files are included for traceability.
+
+Every row was confirmed by **content, not filename**: each local file's git blob SHA-1 was compared against the SS14 blob at the pinned revision, and all 35 matched exactly. That check also settled a near-miss — the `ambience/` files share SS14's filenames (`ambigen1.ogg` and friends) but none of the ten match SS14's blobs, so they are tgstation's and are credited in the tgstation table above, not here.
+
+Most of these live in [assets/sounds/ss14/](assets/sounds/ss14/). The four announcement and alert stings sit at the root of `assets/sounds/` alongside the tgstation one-shots, so they are listed with bare filenames below.
 
 | File | SS14 source | License | License basis | Original author / credit | Original source |
 |---|---|---|---|---|---|
@@ -80,7 +85,23 @@ These are unmodified copies from [Space Station 14](https://github.com/space-wiz
 | `ss14/male_cough_1.ogg` | `Resources/Audio/Voice/Human/male_cough_1.ogg` | CC0 1.0 | Explicit `Voice/Human/attributions.yml` | dastudiospr | [Freesound 537150](https://freesound.org/people/dastudiospr/sounds/537150/) |
 | `ss14/male_cough_2.ogg` | `Resources/Audio/Voice/Human/male_cough_2.ogg` | CC0 1.0 | Explicit `Voice/Human/attributions.yml` | qubodup | [Freesound 743360](https://freesound.org/people/qubodup/sounds/743360/) |
 | `ss14/soft_thump.ogg` | `Resources/Audio/Effects/soft_thump.ogg` | CC BY 4.0 | Explicit `Effects/attributions.yml` | CheChoDj; clipped by FairlySadPanda | [Freesound 609353](https://freesound.org/people/CheChoDj/sounds/609353/) |
+| `attention.ogg` | `Resources/Audio/Announcements/attention.ogg` | CC BY-SA 3.0 | Explicit `Announcements/attributions.yml` | "Taken from tgstation" — SS14 credits it upstream | [tgstation `sound/ai/default/attention.ogg`](https://github.com/tgstation/tgstation/blob/40d89d11ea4a5cb81d61dc1018b46f4e7d32c62a/sound/ai/default/attention.ogg) |
+| `radiation.ogg` | `Resources/Audio/Announcements/radiation.ogg` | CC BY-SA 3.0 | SS14 project default — not named by `Announcements/attributions.yml` | Space Station 14 contributors | [Pinned SS14 file](https://github.com/space-wizards/space-station-14/blob/f76827c45504f263fc540bc11a1ec7cde6c16977/Resources/Audio/Announcements/radiation.ogg) |
+| `shuttlecalled.ogg` | `Resources/Audio/Announcements/shuttlecalled.ogg` | CC BY-SA 3.0 | SS14 project default — not named by `Announcements/attributions.yml` | Space Station 14 contributors | [Pinned SS14 file](https://github.com/space-wizards/space-station-14/blob/f76827c45504f263fc540bc11a1ec7cde6c16977/Resources/Audio/Announcements/shuttlecalled.ogg) |
+| `redalert.ogg` | `Resources/Audio/Misc/redalert.ogg` | CC BY-SA 3.0 | Explicit `Misc/attributions.yml` | "Taken from Citadel Station 13" | [Skyrat-SS13 commit](https://github.com/Skyrat-SS13/Skyrat13/commit/2d4f2d1b489590b559e4073f41b126cef56f4c50) |
 
 **Compliance notes:**
 - No CC-BY-NC, custom-license, or attribution-conflicted SS14 candidate was copied. In particular, `alien_spitacid.ogg`, `pill_insert.ogg`, `pill_remove.ogg`, `ice_crit.ogg`, and `jet_injector.ogg` were excluded.
 - CC BY-SA files remain available as their original, unmodified `.ogg` assets under CC BY-SA 3.0. This share-alike requirement applies to those assets, not to ChemGame's Rust source code.
+
+## Artwork and models — original work
+
+Nothing in [assets/textures/](assets/textures/) or [assets/3dassets/](assets/3dassets/) is third-party and none of it needs crediting here. The surface sprites and the station starter kit are original, SS13-*inspired* work: no SS13 sprite or model was copied or converted. The conventions each set is authored to are recorded in their own READMEs — [assets/textures/README.md](assets/textures/README.md) and [assets/3dassets/station_starter_kit/README.md](assets/3dassets/station_starter_kit/README.md) — which are build documentation, not attribution.
+
+## Code — vendored dependency
+
+[crates/bevy_replicon_renet2_patched/](crates/bevy_replicon_renet2_patched/) is a patched vendored copy of a third-party crate and keeps its upstream dual licence in place, as `LICENSE-APACHE` and `LICENSE-MIT` beside the code. Those files are the licence grant itself, so they stay where they are rather than being folded in here. Ordinary Cargo dependencies are not vendored and are not enumerated in this file; `cargo tree` and each crate's own manifest are the source of truth for those.
+
+## Scope of this file
+
+This is the single place third-party asset credits live. Everything shipped in [assets/sounds/](assets/sounds/) is accounted for above — 62 `.ogg` files, all of them either tgstation or Space Station 14 in origin — so a reader looking for the provenance of any audio asset needs only this document. Adding a sound means adding a row here, in the table matching its upstream project.

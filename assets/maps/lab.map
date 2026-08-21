@@ -2245,16 +2245,26 @@
 // x -52.5. With the arm roofed the band is Engineering's floor, so only the
 // south fence at z 31.4 survives, as the Engineering/Cargo party wall.
 //
-// One stretch of the north fence does have to stay: Atmos/Utility used it as
-// its south wall, and without it that room opens onto the band and you can
-// walk in without passing door.engineering.atmos. This is that stretch only,
-// from Atmos's west wall to its east wall.
+// Behind Atmos/Utility the band is filled solid, world x -66.125..-52.375 and
+// the full 2.8 m depth from Atmos's south face to the Cargo party wall.
+//
+// A thin fence here instead left a hallway: Atmos's back wall on one side, the
+// party wall on the other, and the last remnant of the old at-grade
+// maintenance corridor between them. Worse, it was a hole you fell through.
+// `contain_on_surface` insets every walkable volume by the body radius and
+// prefers any volume that *holds* you over one that merely clamps, so the
+// 0.18 m strip along the corridor's north edge -- inside the floor, outside
+// its inset -- was held by nothing at grade and by `Maintenance Lower` at
+// -3.6 m. Walking there dropped you onto the lower deck.
+//
+// Filling it removes the hallway, the hole and the seam at once, and gives
+// Engineering and Cargo the solid bulkhead the layout wants between them.
 {
-( -1149 2095 0 ) ( -1149 2645 0 ) ( -1149 2095 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1149 2095 0 ) ( -1149 2095 120 ) ( -1139 2095 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1149 2095 0 ) ( -1139 2095 0 ) ( -1149 2645 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1149 2095 120 ) ( -1149 2645 120 ) ( -1139 2095 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1149 2645 0 ) ( -1139 2645 0 ) ( -1149 2645 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1260.8 2095 0 ) ( -1260.8 2645 0 ) ( -1260.8 2095 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1260.8 2095 0 ) ( -1260.8 2095 120 ) ( -1139 2095 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1260.8 2095 0 ) ( -1139 2095 0 ) ( -1260.8 2645 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1260.8 2095 120 ) ( -1260.8 2645 120 ) ( -1139 2095 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1260.8 2645 0 ) ( -1139 2645 0 ) ( -1260.8 2645 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( -1139 2095 0 ) ( -1139 2095 120 ) ( -1139 2645 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 // brush 238
@@ -2270,12 +2280,12 @@
 // (and so did its eastern half, from x -79 to x -52.5)
 // brush 241
 {
-( -1261 2100 0 ) ( -1261 3160 0 ) ( -1261 2100 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1261 2100 0 ) ( -1261 2100 120 ) ( -1251 2100 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1261 2100 0 ) ( -1251 2100 0 ) ( -1261 3160 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1261 2100 120 ) ( -1261 3160 120 ) ( -1251 2100 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1261 2645 0 ) ( -1261 3160 0 ) ( -1261 2645 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1261 2645 0 ) ( -1261 2645 120 ) ( -1251 2645 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1261 2645 0 ) ( -1251 2645 0 ) ( -1261 3160 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1261 2645 120 ) ( -1261 3160 120 ) ( -1251 2645 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
 ( -1261 3160 0 ) ( -1251 3160 0 ) ( -1261 3160 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1251 2100 0 ) ( -1251 2100 120 ) ( -1251 3160 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1251 2645 0 ) ( -1251 2645 120 ) ( -1251 3160 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 // brush 242
 {
@@ -2890,14 +2900,22 @@
 // bottom step to the Public Loop leg at x -52.5. It used to be an open trench
 // with nothing standable in it; now that it is roofed it is Engineering's
 // southern floor, running past the back of Atmos/Utility to the party wall.
+//
+// It runs north to z 27.6 so it overlaps the main Engineering rectangle by a
+// metre. Volumes that merely touch leave a seam 0.7 m wide that a body cannot
+// cross, and over the tunnel that seam is worse than dead: `contain_on_surface`
+// would find nothing holding you at grade and drop you to the lower deck.
+//
+// It stops at Atmos's west wall because the band east of there is filled solid
+// now -- there is no floor left to stand on behind Atmos.
 // brush 1
 {
-( -1256 2100 0 ) ( -1256 4080 0 ) ( -1256 2100 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1256 2100 0 ) ( -1256 2100 20 ) ( -1144 2100 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1256 2100 0 ) ( -1144 2100 0 ) ( -1256 4080 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1256 2100 20 ) ( -1256 4080 20 ) ( -1144 2100 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1256 4080 0 ) ( -1144 4080 0 ) ( -1256 4080 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1144 2100 0 ) ( -1144 2100 20 ) ( -1144 4080 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1256 2640 0 ) ( -1256 4080 0 ) ( -1256 2640 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1256 2640 0 ) ( -1256 2640 20 ) ( -1104 2640 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1256 2640 0 ) ( -1104 2640 0 ) ( -1256 4080 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1256 2640 20 ) ( -1256 4080 20 ) ( -1104 2640 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1256 4080 0 ) ( -1104 4080 0 ) ( -1256 4080 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1104 2640 0 ) ( -1104 2640 20 ) ( -1104 4080 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 }
 // entity 56
@@ -4682,7 +4700,7 @@
 // entity 210
 {
 "classname" "wayfinding_hub"
-"origin" "-500 2000 0"
+"origin" "-1080 1400 0"
 "angles" "0 0 0"
 }
 // entity 211
@@ -4721,15 +4739,9 @@
 "direction" "left"
 "angles" "0 0 0"
 }
-// entity 215
-{
-"classname" "wayfinding_sign"
-"origin" "-600 1760 84"
-"department" "Service"
-"text" "SERVICE"
-"direction" "right"
-"angles" "0 180 0"
-}
+// The SERVICE plaque stood here, repeating a green floor route out of the old
+// crossroads. The hub is inside Service now, so there is no Service route left
+// to point along and no plaque to hang.
 // entity 216
 {
 "classname" "wayfinding_sign"

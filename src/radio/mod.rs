@@ -97,6 +97,12 @@ pub struct AmbientLineDef {
     pub channel: RadioChannel,
     pub speaker: String,
     pub text: String,
+    /// This one goes out over the PA — see [`RadioEntry::announcement`]. Opt
+    /// in per line rather than derived from the channel: the Bridge talks to
+    /// departments on the radio like anyone else (see `exchanges`), and only
+    /// some of what it says is an announcement to the whole station.
+    #[serde(default)]
+    pub announcement: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -182,6 +188,15 @@ pub enum RadioPriority {
     Routine,
     Urgent,
     StationWide,
+    /// The station's alert level itself going up.
+    ///
+    /// Above [`StationWide`](Self::StationWide) rather than beside it: it
+    /// outranks every other line for the dispatch card, and it is the one
+    /// priority that sounds the alert klaxon instead of the ordinary
+    /// announcement chime. Exactly one line in the game airs at this level —
+    /// `showdown::arm_showdown`'s, the moment the main antagonist stops
+    /// working through other people.
+    RedAlert,
 }
 
 /// One delivered transmission. `sequence` is assigned only by `RadioLog`,
@@ -194,6 +209,16 @@ pub struct RadioEntry {
     pub text: String,
     pub tone: RadioTone,
     pub priority: RadioPriority,
+    /// Went out over the station's public-address system rather than as
+    /// traffic on a department channel, so it opens with the PA jingle instead
+    /// of the channel ident (`audio::play_radio_sfx`).
+    ///
+    /// Orthogonal to [`priority`](Self::priority), and deliberately so: the
+    /// morale bulletins and the suggestion-box updates are the *least* urgent
+    /// lines in the game — [`RadioPriority::Ambient`] — and are exactly what
+    /// the PA is for. The two priorities that outrank an announcement already
+    /// carry a cue of their own and do not want a second one in front of it.
+    pub announcement: bool,
 }
 
 impl RadioEntry {
@@ -205,6 +230,7 @@ impl RadioEntry {
             text: text.into(),
             tone: RadioTone::Neutral,
             priority: RadioPriority::Routine,
+            announcement: false,
         }
     }
 
@@ -239,8 +265,20 @@ impl RadioEntry {
         self.priority(RadioPriority::StationWide)
     }
 
+    /// See [`RadioPriority::RedAlert`] for why this is not just a louder
+    /// [`station_wide`](Self::station_wide).
+    pub fn red_alert(self) -> Self {
+        self.priority(RadioPriority::RedAlert)
+    }
+
     pub fn ambient(self) -> Self {
         self.priority(RadioPriority::Ambient)
+    }
+
+    /// See [`RadioEntry::announcement`].
+    pub fn over_the_pa(mut self) -> Self {
+        self.announcement = true;
+        self
     }
 }
 
@@ -497,17 +535,11 @@ fn tick_ambient_radio(
     }
     let choice = ambient.bag.pop().unwrap_or_default();
     if let Some(line) = script.ambient_lines.get(choice) {
-        log.push(
-            RadioEntry::new(line.channel, line.text.clone())
-                .speaker(&line.speaker)
-                .ambient(),
-        );
+        log.push(ambient_entry(line));
     } else if let Some(exchange) = script.exchanges.get(choice - script.ambient_lines.len()) {
         let mut delay = 0.0;
         for line in &exchange.lines {
-            let entry = RadioEntry::new(line.channel, line.text.clone())
-                .speaker(&line.speaker)
-                .ambient();
+            let entry = ambient_entry(line);
             if delay == 0.0 {
                 log.push(entry);
             } else {
@@ -519,6 +551,20 @@ fn tick_ambient_radio(
 
     let gap = script.ambient_gap_seconds.unwrap_or((75.0, 120.0));
     ambient.timer = Timer::from_seconds(rng.random_range(gap.0..=gap.1), TimerMode::Once);
+}
+
+/// One authored quiet-period line, as it lands in the log. Shared by the
+/// standalone lines and the exchanges so a two-hander can front its opening
+/// line with the PA jingle exactly like a standalone bulletin does.
+fn ambient_entry(line: &AmbientLineDef) -> RadioEntry {
+    let entry = RadioEntry::new(line.channel, line.text.clone())
+        .speaker(&line.speaker)
+        .ambient();
+    if line.announcement {
+        entry.over_the_pa()
+    } else {
+        entry
+    }
 }
 
 fn deliver_broadcasts(

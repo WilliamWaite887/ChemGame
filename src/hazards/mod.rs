@@ -108,6 +108,16 @@ pub struct IncidentDef {
     /// radio. Defaulted so an incident that omits it still parses.
     #[serde(default = "default_hazard_color")]
     pub color: (f32, f32, f32),
+    /// Whether this is a *radiation* incident, which is what trips the lab's
+    /// rad klaxon (`audio::sync_radiation_alarm`) for as long as it runs.
+    ///
+    /// Narrower than "does it hurt you": every incident doses whoever stands
+    /// in it, the coolant vent included, and that is deliberately untouched
+    /// here. Only the leak sets off a counter. Defaulted to `false` so a new
+    /// incident is silent until its data says otherwise, rather than
+    /// inheriting an alarm nobody authored.
+    #[serde(default)]
+    pub radiological: bool,
 }
 
 /// Hazard amber, for an incident whose data does not pick a colour.
@@ -150,6 +160,10 @@ pub struct ActiveHazard {
     /// it has no `IncidentDef` to consult, and the authority is the only peer
     /// that ever reads the hazard script.
     pub color: (f32, f32, f32),
+    /// See [`IncidentDef::radiological`]. Carried across the wire for the same
+    /// reason `color` is: the klaxon is presentation, both chemists are in the
+    /// same room, and the client has no script to ask.
+    pub radiological: bool,
 }
 
 fn start_loading_hazards(mut commands: Commands, assets: Res<AssetServer>) {
@@ -214,6 +228,7 @@ fn schedule_incidents(
                 remaining: def.duration,
                 intensity: def.intensity,
                 color: def.color,
+                radiological: def.radiological,
             },
             transform,
             Visibility::default(),
@@ -1170,6 +1185,39 @@ mod tests {
     }
 
     #[test]
+    fn only_a_radiological_incident_arms_the_klaxon() {
+        // Both authored incidents dose whoever stands in one — that is not the
+        // question the flag answers. The alarm belongs to the leak, and a
+        // coolant line weeping in the reaction bay sounding a rad klaxon would
+        // teach the player to stop trusting it.
+        let script: HazardScript =
+            ron::from_str(include_str!("../../assets/data/station.hazards.ron")).unwrap();
+        let radiological: Vec<&str> = script
+            .incidents
+            .iter()
+            .filter(|incident| incident.radiological)
+            .map(|incident| incident.id.as_str())
+            .collect();
+        assert_eq!(radiological, ["rad_leak"]);
+
+        // And the flag has to survive onto the spawned entity, which is the
+        // only thing a client ever sees — `scheduled_incident_app` primes the
+        // first authored incident, the leak.
+        let mut spots = CrisisSpots::default();
+        spots.insert("hazard.rad_leak", Transform::default());
+        let mut app = scheduled_incident_app(spots);
+
+        advance(&mut app, 0.1);
+
+        let mut hazards = app.world_mut().query::<&ActiveHazard>();
+        let hazard = hazards
+            .iter(app.world())
+            .next()
+            .expect("the pending incident should start");
+        assert!(hazard.radiological);
+    }
+
+    #[test]
     fn a_scripted_incident_with_a_missing_spot_is_skipped() {
         let mut app = scheduled_incident_app(CrisisSpots::default());
 
@@ -1202,6 +1250,7 @@ mod tests {
                 remaining: 40.0,
                 intensity: 2.0,
                 color: default_hazard_color(),
+                radiological: true,
             },
             Transform::default(),
         ));
@@ -1234,6 +1283,7 @@ mod tests {
                 remaining: 2.0,
                 intensity: 2.0,
                 color: default_hazard_color(),
+                radiological: true,
             },
             Transform::default(),
         ));
@@ -1270,6 +1320,7 @@ mod tests {
                     remaining: 40.0,
                     intensity: 2.0,
                     color: (0.45, 0.95, 0.35),
+                    radiological: true,
                 },
                 Transform::default(),
             ))

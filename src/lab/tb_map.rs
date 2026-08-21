@@ -591,12 +591,17 @@ fn selective_subrooms_are_inside_their_parent_departments() {
             },
         ),
         (
+            // Chapel and Quiet Room are the two walled compartments either
+            // side of the south stairwell, where the reference layout puts
+            // them. They spent a while at z 31.4..39 -- an open alcove off
+            // Service with no walls of its own -- because the walls moved
+            // south and these volumes did not.
             "Chapel",
             Bounds {
                 min_x: -38.7,
                 max_x: -23.5,
-                min_z: 31.4,
-                max_z: 39.0,
+                min_z: 44.0,
+                max_z: 51.0,
             },
         ),
         (
@@ -604,8 +609,8 @@ fn selective_subrooms_are_inside_their_parent_departments() {
             Bounds {
                 min_x: -47.5,
                 max_x: -41.5,
-                min_z: 31.4,
-                max_z: 39.0,
+                min_z: 44.0,
+                max_z: 51.0,
             },
         ),
         (
@@ -667,15 +672,6 @@ fn station_v2_keeps_its_department_and_route_footprints() {
             },
         ),
         (
-            "Engineering",
-            Bounds {
-                min_x: -109.5,
-                max_x: -66.0,
-                min_z: 15.0,
-                max_z: 28.6,
-            },
-        ),
-        (
             "Cargo",
             Bounds {
                 min_x: -94.0,
@@ -690,6 +686,38 @@ fn station_v2_keeps_its_department_and_route_footprints() {
         assert!(bounds_are_close(found[0], expected), "{room}: {found:?}");
     }
 
+    // Engineering is two brushes: the workshop proper, plus the strip over the
+    // roofed maintenance arm that is now its southern floor. The strip stops at
+    // Atmos/Utility's west wall -- the band behind Atmos is filled solid, so
+    // there is nothing to stand on between there and the Public Loop leg.
+    let engineering = named_bounds("Engineering");
+    assert_eq!(
+        engineering.len(),
+        2,
+        "Engineering should be the workshop plus the band strip west of Atmos"
+    );
+    for expected in [
+        Bounds {
+            min_x: -109.5,
+            max_x: -66.0,
+            min_z: 15.0,
+            max_z: 28.6,
+        },
+        Bounds {
+            min_x: -102.0,
+            max_x: -66.0,
+            min_z: 27.6,
+            max_z: 31.4,
+        },
+    ] {
+        assert!(
+            engineering
+                .iter()
+                .any(|actual| bounds_are_close(*actual, expected)),
+            "Engineering is missing {expected:?}: {engineering:?}",
+        );
+    }
+
     // Service and Botany each used to be cut in two by the old at-grade
     // maintenance hallway; now that it's underground, both are one
     // continuous room again, stitched across the old gap by a third,
@@ -700,20 +728,21 @@ fn station_v2_keeps_its_department_and_route_footprints() {
         3,
         "Service should be its two original halves plus the connector across the old spine gap"
     );
-    // Both halves now run north over the roofed maintenance tunnel to meet the
-    // Chapel wall, and the connector runs the full depth of the room.
+    // All three now run the full depth of the room, to the wall at z 39. The
+    // halves used to stop at z 31.4 because Chapel and Quiet Room claimed the
+    // band beyond; those rooms have since moved to their own walls at z 44..51.
     for expected in [
         Bounds {
             min_x: -47.5,
             max_x: -41.5,
             min_z: 15.0,
-            max_z: 31.4,
+            max_z: 39.0,
         },
         Bounds {
             min_x: -38.7,
             max_x: -23.625,
             min_z: 15.0,
-            max_z: 31.4,
+            max_z: 39.0,
         },
         Bounds {
             min_x: -43.4,
@@ -2707,17 +2736,18 @@ fn common_area_wayfinding_marks_the_crossroads_and_every_department() {
     assert_eq!(hubs.len(), 1, "the station needs one unambiguous route hub");
     assert_eq!(
         origin_xz(hubs[0]),
-        Some((-50.0, 12.5)),
-        "the route hub moved away from the central public crossroads",
+        Some((-35.0, 27.0)),
+        "the route hub moved out of the middle of Service",
     );
 
+    // No Service entry: the hub stands in Service, so that department has no
+    // route of its own and no plaque pointing along one.
     let expected: std::collections::HashSet<&str> = [
         "Chemistry",
         "Medical",
         "Engineering",
         "Cargo",
         "Security",
-        "Service",
         "Bridge",
         "Botany",
     ]
