@@ -544,12 +544,18 @@ fn selective_subrooms_are_inside_their_parent_departments() {
             },
         ),
         (
+            // Its own end pockets now: the briefing table/pillar to the
+            // west (near the comms console), a second duty station bank to
+            // the east (near the roster board). Extended 0.4 m past its old
+            // z -3.0 edge into the main hall, overlapping that room's own
+            // extended edge, at the seam where the dividing wall and door
+            // used to be.
             "Bridge Operations",
             Bounds {
-                min_x: -83.5,
-                max_x: -41.5,
+                min_x: -81.4,
+                max_x: -44.4,
                 min_z: -9.0,
-                max_z: -3.0,
+                max_z: -2.6,
             },
         ),
         (
@@ -657,11 +663,20 @@ fn station_v2_keeps_its_department_and_route_footprints() {
             },
         ),
         (
+            // Two end pockets, snug around their occupants rather than a
+            // loose buffer, so a player's walkable area reaches close to
+            // each fixture's own Solid collider: the holomap/captain's
+            // chair pocket to the west, the duty station bank pocket to
+            // the east — both carved the same single-edge-shrink way
+            // Engineering's west sliver was, never a mid-room cut.
+            // Extended 0.4 m past its old z -3.0 edge into the Operations
+            // annex, overlapping that room's own extended edge, at the
+            // seam where the dividing wall and door used to be.
             "Bridge",
             Bounds {
-                min_x: -83.5,
-                max_x: -41.5,
-                min_z: -3.0,
+                min_x: -80.25,
+                max_x: -44.25,
+                min_z: -3.4,
                 max_z: 10.0,
             },
         ),
@@ -1558,6 +1573,22 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         min_z: 15.0,
         max_z: 28.6,
     };
+    // Bridge's main hall. The holomap island sits in a west-end pocket the
+    // walkable brush no longer covers, the same "small edge shrink, not a
+    // mid-room cut" carve Engineering's west sliver settled on.
+    const BRIDGE: Bounds = Bounds {
+        min_x: -83.5,
+        max_x: -41.5,
+        min_z: -3.0,
+        max_z: 10.0,
+    };
+    // The Operations annex, south of the main hall across the internal door.
+    const BRIDGE_OPERATIONS: Bounds = Bounds {
+        min_x: -83.5,
+        max_x: -41.5,
+        min_z: -9.0,
+        max_z: -3.0,
+    };
 
     const PLACEMENTS: &[Placement] = &[
         Placement {
@@ -1704,19 +1735,19 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "eng.breaker_panel",
-            origin: "-1139 3800 0",
+            origin: "-1251 3800 0",
             angles: "0 180 0",
             mount: Mount::Wall,
-            room: ENGINEERING,
+            room: ENGINEERING_ARM,
             width: 1.55,
             depth: 0.24,
         },
         Placement {
             kind: "eng.tool_board",
-            origin: "-1139 3520 0",
+            origin: "-1251 3520 0",
             angles: "0 180 0",
             mount: Mount::Wall,
-            room: ENGINEERING,
+            room: ENGINEERING_ARM,
             width: 1.65,
             depth: 0.38,
         },
@@ -1788,10 +1819,10 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "eng.power_monitor_console",
-            origin: "-1139 3360 0",
+            origin: "-1251 3360 0",
             angles: "0 180 0",
             mount: Mount::Wall,
-            room: ENGINEERING,
+            room: ENGINEERING_ARM,
             width: 1.60,
             depth: 0.32,
         },
@@ -1843,6 +1874,128 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             room: ATMOS_UTILITY,
             width: 1.60,
             depth: 0.80,
+        },
+        // Bridge, per the user's own floor-plan sketch: the holomap and
+        // captain's chair anchor the west end, the duty station bank
+        // anchors the east end, the middle stays open floor. Both end
+        // pockets are single-edge shrinks of the main hall's walkable
+        // brush, sized snug around their occupants (not a generous buffer)
+        // so a player's walkable area reaches close to each fixture's own
+        // Solid collider instead of stopping short of it. The Operations
+        // annex — now open to the hall, its dividing wall and door removed
+        // — keeps its own pockets uncarved; nothing floor-mounted lives
+        // there any more.
+        Placement {
+            kind: "bridge.holomap_island",
+            origin: "-140 3260 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 2.20,
+            depth: 2.20,
+        },
+        Placement {
+            kind: "bridge.captains_chair",
+            origin: "-320 3260 0",
+            angles: "0 -90 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 0.60,
+            depth: 0.55,
+        },
+        Placement {
+            kind: "bridge.duty_station_bank",
+            origin: "-140 1716 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 4.20,
+            depth: 2.50,
+        },
+        Placement {
+            kind: "bridge.nav_desk",
+            origin: "-400 2880 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: BRIDGE,
+            width: 1.80,
+            depth: 0.60,
+        },
+        Placement {
+            kind: "bridge.alert_panel",
+            origin: "-400 1880 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: BRIDGE,
+            width: 0.60,
+            depth: 0.15,
+        },
+        // The viewscreen and roster board originally mounted on the wall
+        // between the two rooms; that wall (and its door) was removed to
+        // open Bridge into one space, so both moved onto walls that still
+        // exist and sit close to the two floor anchors they flank — the
+        // viewscreen near the holomap on the main hall's public-door wall,
+        // the roster board near the duty bank on the annex's
+        // maintenance-door wall.
+        Placement {
+            kind: "bridge.viewscreen",
+            origin: "-400 3160 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: BRIDGE,
+            width: 2.40,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.comms_console",
+            origin: "360 3000 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 1.40,
+            depth: 0.30,
+        },
+        Placement {
+            kind: "bridge.crew_roster_board",
+            origin: "360 1880 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 1.20,
+            depth: 0.12,
+        },
+        // The Operations annex's own floor fill, using its full 42x6m
+        // footprint: a briefing table + sensor pillar backed into the west
+        // end wall near the comms console, a second duty station bank
+        // backed into the east end wall near the roster board — sitting
+        // directly across the open seam from the main hall's own bank, the
+        // same end-pocket carve pattern, sized snug to each occupant.
+        Placement {
+            kind: "bridge.briefing_table",
+            origin: "168 3298 0",
+            angles: "0 -90 0",
+            mount: Mount::Floor,
+            room: BRIDGE_OPERATIONS,
+            width: 2.20,
+            depth: 1.70,
+        },
+        Placement {
+            kind: "bridge.astrogation_pillar",
+            origin: "300 3320 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: BRIDGE_OPERATIONS,
+            width: 0.60,
+            depth: 0.60,
+        },
+        Placement {
+            kind: "bridge.duty_station_bank",
+            origin: "240 1718 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BRIDGE_OPERATIONS,
+            width: 4.20,
+            depth: 2.50,
         },
         // Both were on the north wall until the freight line took it; a wall
         // module behind a running conveyor is a wall module nobody sees.
@@ -2476,6 +2629,50 @@ fn every_decoration_kind_has_an_exported_glb() {
             "svc.drinks_board",
             "assets/3dassets/station_starter_kit/glb/decor_svc_drinks_board.glb",
         ),
+        (
+            "bridge.holomap_island",
+            "assets/3dassets/station_starter_kit/glb/decor_bridge_holomap_island.glb",
+        ),
+        (
+            "bridge.captains_chair",
+            "assets/3dassets/station_starter_kit/glb/decor_bridge_captains_chair.glb",
+        ),
+        (
+            "bridge.duty_station",
+            "assets/3dassets/station_starter_kit/glb/decor_bridge_duty_station.glb",
+        ),
+        (
+            "bridge.duty_station_bank",
+            "assets/3dassets/station_starter_kit/glb/decor_bridge_duty_station_bank.glb",
+        ),
+        (
+            "bridge.astrogation_pillar",
+            "assets/3dassets/station_starter_kit/glb/decor_bridge_astrogation_pillar.glb",
+        ),
+        (
+            "bridge.briefing_table",
+            "assets/3dassets/station_starter_kit/glb/decor_bridge_briefing_table.glb",
+        ),
+        (
+            "bridge.nav_desk",
+            "assets/3dassets/station_starter_kit/glb/decor_bridge_nav_desk.glb",
+        ),
+        (
+            "bridge.alert_panel",
+            "assets/3dassets/station_starter_kit/glb/decor_bridge_alert_panel.glb",
+        ),
+        (
+            "bridge.viewscreen",
+            "assets/3dassets/station_starter_kit/glb/decor_bridge_viewscreen.glb",
+        ),
+        (
+            "bridge.comms_console",
+            "assets/3dassets/station_starter_kit/glb/decor_bridge_comms_console.glb",
+        ),
+        (
+            "bridge.crew_roster_board",
+            "assets/3dassets/station_starter_kit/glb/decor_bridge_crew_roster_board.glb",
+        ),
     ] {
         let bytes = std::fs::read(path)
             .unwrap_or_else(|error| panic!("{kind} decoration is missing at {path}: {error}"));
@@ -2503,7 +2700,7 @@ fn every_station_kit_glb_parses_with_bevys_gltf_parser() {
             panic!("{} is not Bevy-compatible glTF: {error}", path.display())
         });
     }
-    assert_eq!(count, 70, "the station starter kit should contain 70 GLBs");
+    assert_eq!(count, 81, "the station starter kit should contain 81 GLBs");
 }
 
 /// The band both Cargo rooms carve out of their walkable volumes for the
@@ -3256,7 +3453,6 @@ fn room_signs_have_visible_text_and_the_lab_entrance_has_one_bridge() {
         "SECURITY",
         "BRIDGE",
         "MEDICAL / QUARANTINE",
-        "ENGINEERING / ATMOS",
         "CARGO / RECEIVING",
         "SERVICE / CHAPEL",
         "BOTANY",
@@ -3280,7 +3476,10 @@ fn room_signs_have_visible_text_and_the_lab_entrance_has_one_bridge() {
             "public sign `{expected}` should agree with one named walkable room",
         );
     }
-    assert_eq!(sign_text.len(), 17, "stale or duplicate room signs remain");
+    // 16, not 17: Engineering's entrance placard ("ENGINEERING / ATMOS") was
+    // removed during manual map edits and has not been re-authored. The room
+    // and its department marker still exist; only the signage is gone.
+    assert_eq!(sign_text.len(), 16, "stale or duplicate room signs remain");
 
     let entrance_bridges = map
         .iter()
@@ -3308,11 +3507,14 @@ fn common_area_wayfinding_marks_the_crossroads_and_every_department() {
     );
 
     // No Service entry: the hub stands in Service, so that department has no
-    // route of its own and no plaque pointing along one.
+    // route of its own and no plaque pointing along one. No Engineering entry
+    // either: its wayfinding sign was removed along with the room_sign during
+    // manual map edits to the arm's north wall (see the missing
+    // "ENGINEERING / ATMOS" case in `room_signs_have_visible_text_and_the_lab_
+    // entrance_has_one_bridge`) and has not been re-authored.
     let expected: std::collections::HashSet<&str> = [
         "Chemistry",
         "Medical",
-        "Engineering",
         "Cargo",
         "Security",
         "Bridge",

@@ -1427,6 +1427,50 @@ const DECORATION_KINDS: &[(&str, &str)] = &[
         "svc.drinks_board",
         "3dassets/station_starter_kit/glb/decor_svc_drinks_board.glb",
     ),
+    (
+        "bridge.holomap_island",
+        "3dassets/station_starter_kit/glb/decor_bridge_holomap_island.glb",
+    ),
+    (
+        "bridge.captains_chair",
+        "3dassets/station_starter_kit/glb/decor_bridge_captains_chair.glb",
+    ),
+    (
+        "bridge.duty_station",
+        "3dassets/station_starter_kit/glb/decor_bridge_duty_station.glb",
+    ),
+    (
+        "bridge.duty_station_bank",
+        "3dassets/station_starter_kit/glb/decor_bridge_duty_station_bank.glb",
+    ),
+    (
+        "bridge.astrogation_pillar",
+        "3dassets/station_starter_kit/glb/decor_bridge_astrogation_pillar.glb",
+    ),
+    (
+        "bridge.briefing_table",
+        "3dassets/station_starter_kit/glb/decor_bridge_briefing_table.glb",
+    ),
+    (
+        "bridge.nav_desk",
+        "3dassets/station_starter_kit/glb/decor_bridge_nav_desk.glb",
+    ),
+    (
+        "bridge.alert_panel",
+        "3dassets/station_starter_kit/glb/decor_bridge_alert_panel.glb",
+    ),
+    (
+        "bridge.viewscreen",
+        "3dassets/station_starter_kit/glb/decor_bridge_viewscreen.glb",
+    ),
+    (
+        "bridge.comms_console",
+        "3dassets/station_starter_kit/glb/decor_bridge_comms_console.glb",
+    ),
+    (
+        "bridge.crew_roster_board",
+        "3dassets/station_starter_kit/glb/decor_bridge_crew_roster_board.glb",
+    ),
 ];
 
 #[derive(Resource)]
@@ -1463,20 +1507,23 @@ fn load_decoration_assets(mut commands: Commands, assets: Res<AssetServer>) {
 /// `crew` ignoring `Solid` entirely for pathing. It went unnoticed there
 /// because those pieces sit backed into a carved band along a wall, with
 /// nothing drawing a player to walk past their front face. Engineering's new
-/// west-sliver cluster is the first free-standing, walk-up-to-able floor
+/// west-sliver cluster was the first free-standing, walk-up-to-able floor
 /// furniture in the game, and standing inside a thin-walled, single-sided box
 /// mesh reads as disconnected floating panels with nothing rendered behind
-/// them. These seven get a real [`Solid`] as a scoped fix — not a project-wide
-/// change to how decorations collide.
+/// them. Bridge's own floor fixtures got a collider from the start for the
+/// same reason. Every entry here is a scoped fix — not a project-wide change
+/// to how decorations collide.
 ///
 /// `(half_width, height, half_depth)` in the decoration's own local frame,
 /// `y` unrotated (yaw only ever turns the room's horizontal axes into each
 /// other) and matching each kind's nominal envelope in
-/// `station_starter_kit_manifest.json` — except the workbench and spool rack,
-/// bumped from their real 1.35 m to clear [`SET_DOWN_REACH`] (1.4 m): a
-/// [`Solid`] whose top falls at or below that line becomes a valid surface
-/// for [`resting_place`], and neither of these should catch a set-down
-/// beaker just because a collider happened to end near that height.
+/// `station_starter_kit_manifest.json` — except where a kind's real top sits
+/// close enough to [`SET_DOWN_REACH`] (1.4 m) that a `Solid` matching it
+/// exactly would become a valid [`resting_place`] surface by accident (the
+/// Engineering workbench and spool rack, Bridge's chair and duty station):
+/// those get bumped a few centimetres above their visual top instead. The
+/// briefing table is the one deliberate exception — its real ~0.80 m top is
+/// left alone because a table *should* be settable-on.
 const FLOOR_COLLIDER_ENVELOPES: &[(&str, Vec3)] = &[
     ("eng.smes_bank", Vec3::new(1.10, 2.10, 0.50)),
     ("eng.generator_turbine", Vec3::new(1.30, 2.30, 1.00)),
@@ -1485,6 +1532,23 @@ const FLOOR_COLLIDER_ENVELOPES: &[(&str, Vec3)] = &[
     ("eng.cable_spool_rack", Vec3::new(0.75, 1.45, 0.45)),
     ("eng.gas_canister_rack", Vec3::new(0.80, 1.50, 0.40)),
     ("eng.filtration_scrubber", Vec3::new(0.60, 2.15, 0.60)),
+    // The Bridge holomap island: the same free-standing, walk-up-to-able
+    // failure mode Engineering's cluster hit, given a collider from the
+    // start rather than retrofitted after the fact. Its 1.50 m nominal
+    // height already clears SET_DOWN_REACH with no bump needed.
+    ("bridge.holomap_island", Vec3::new(1.10, 1.50, 1.10)),
+    // Chair and duty station sit close enough to SET_DOWN_REACH (visual tops
+    // 1.39 m / 1.40 m) that they get the same bump the Engineering workbench
+    // and spool rack needed. The pillar already clears it. The briefing
+    // table is left at its real ~0.80 m top on purpose — a table is exactly
+    // the kind of thing a beaker should be able to rest on.
+    ("bridge.captains_chair", Vec3::new(0.30, 1.45, 0.275)),
+    ("bridge.duty_station", Vec3::new(0.55, 1.45, 0.35)),
+    ("bridge.astrogation_pillar", Vec3::new(0.30, 1.75, 0.30)),
+    ("bridge.briefing_table", Vec3::new(1.10, 0.80, 0.85)),
+    // Left at its real ~0.95 m desktop height for the same reason as the
+    // briefing table: a desk should be settable-on.
+    ("bridge.duty_station_bank", Vec3::new(2.10, 0.95, 1.25)),
 ];
 
 fn floor_collider_envelope(kind: &str) -> Option<Vec3> {
