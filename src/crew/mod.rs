@@ -971,8 +971,13 @@ mod tests {
         // counter. Building an already-open graph directly would let that bug
         // escape the test.
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::state::app::StatesPlugin,
+            AssetPlugin::default(),
+        ))
             .init_state::<AppState>()
+            .init_asset::<Image>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Departments>()

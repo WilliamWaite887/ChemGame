@@ -1276,6 +1276,7 @@ mod tests {
                     open: false,
                     bridge_id: "test.door".into(),
                     along_x: true,
+                    skin: crate::door::DoorSkin::Maintenance,
                 },
                 Transform::from_xyz(0.4, 0.0, 0.0),
             ))

@@ -476,7 +476,12 @@ fn room_sign_text_mesh(text: &str) -> Mesh {
     pixel_sign_text_mesh(text, SIGN_WIDTH, SIGN_HEIGHT)
 }
 
-fn pixel_sign_text_mesh(text: &str, width: f32, height: f32) -> Mesh {
+/// Lettering as real world-space geometry, fitted into `width` x `height`.
+///
+/// `pub(crate)` for `freight`, which labels its chutes with the same five-by-
+/// seven pixel font the room signs use — a chute reading "BOTANY" should look
+/// like the same signwriter did it as the door it is named after.
+pub(crate) fn pixel_sign_text_mesh(text: &str, width: f32, height: f32) -> Mesh {
     let chars: Vec<char> = text.chars().flat_map(char::to_uppercase).collect();
     let columns = chars
         .iter()
@@ -1331,6 +1336,26 @@ const DECORATION_KINDS: &[(&str, &str)] = &[
         "3dassets/station_starter_kit/glb/decor_cargo_weigh_station.glb",
     ),
     (
+        "cargo.storage_rack",
+        "3dassets/station_starter_kit/glb/decor_cargo_storage_rack.glb",
+    ),
+    (
+        "cargo.crate_stack",
+        "3dassets/station_starter_kit/glb/decor_cargo_crate_stack.glb",
+    ),
+    (
+        "cargo.pallet_row",
+        "3dassets/station_starter_kit/glb/decor_cargo_pallet_row.glb",
+    ),
+    (
+        "cargo.forklift_bay",
+        "3dassets/station_starter_kit/glb/decor_cargo_forklift_bay.glb",
+    ),
+    (
+        "cargo.requisitions_desk",
+        "3dassets/station_starter_kit/glb/decor_cargo_requisitions_desk.glb",
+    ),
+    (
         "sec.notice_board",
         "3dassets/station_starter_kit/glb/decor_sec_notice_board.glb",
     ),
@@ -1411,6 +1436,52 @@ fn dress_decorations(
     }
 }
 
+/// One piece of a conveyor line: where it starts, how far it runs, where it
+/// sorts, and where a parcel finally drops out of the world.
+///
+/// One class for all four roles rather than four classes, for the same reason
+/// [`DECORATION_KINDS`] is a table: the set is small, every role shares the
+/// same "which line, in what order" spine, and one class means the map
+/// validation lives in one test instead of four.
+///
+/// `angles` is the **direction of travel**, not a facing — `"0 90 0"` is `+x`.
+/// A `run` grows `length` metres that way from its origin; a `chute` sits off
+/// to one side of the line and is fed by a short diverter stub.
+///
+/// Like every other decoration these never get [`Solid`] or replicated state.
+/// Nothing stops a body walking into a belt except the map carving the floor
+/// out from under it, which is what `no_conveyor_marker_stands_in_walkable_floor`
+/// in `lab::tb_map` exists to keep true.
+#[point_class(
+    classname("conveyor_spot"),
+    base(Transform),
+    color(255 170 0),
+    size(-16 -16 0, 16 16 48),
+)]
+#[derive(Debug, Clone, Default)]
+pub struct ConveyorSpot {
+    /// Which line this belongs to. Pieces sharing a `line` are one belt.
+    pub line: String,
+    /// Order along the line. Runs are walked in this order to build the path.
+    pub index: i32,
+    /// `"intake"`, `"run"`, `"sorter"` or `"chute"`.
+    pub role: String,
+    /// Metres of belt, `run` only — measured **in plan**, not up the slope.
+    pub length: f32,
+    /// Metres this run climbs over its `length`, `run` only. Negative descends.
+    ///
+    /// Plan length plus a rise, rather than a slope length and an angle,
+    /// because a `.map` is authored in plan view: an author drawing a conveyor
+    /// over a walkway knows how far across the gap is and how high it has to
+    /// clear, and should not have to do trigonometry to say so.
+    ///
+    /// A run starts wherever the previous one ended, height included, so only
+    /// the climb itself is stated here — see `freight::Line::assemble`.
+    pub rise: f32,
+    /// Destination signage over a `chute`.
+    pub label: String,
+}
+
 /// The way off the station. Eventually the end of a run; for now, a place on
 /// the far side of the map that everything can be routed to.
 #[point_class(
@@ -1454,6 +1525,7 @@ impl Plugin for LabTrenchBroomPlugin {
             .register_type::<DepartmentSpot>()
             .register_type::<DepartmentDressing>()
             .register_type::<DecorationSpot>()
+            .register_type::<ConveyorSpot>()
             .register_type::<WayfindingHub>()
             .register_type::<WayfindingSign>()
             .register_type::<EscapePod>()

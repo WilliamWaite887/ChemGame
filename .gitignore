@@ -22,3 +22,8 @@ assets/3dassets/station_starter_kit/README.md
 assets/3dassets/station_starter_kit/generate_decor_modules.py
 assets/3dassets/station_starter_kit/station_starter_kit.blend1
 assets/3dassets/station_starter_kit/preview_*.png
+tools/gen_door_sprites.py
+tools/__pycache__/gen_door_sprites.cpython-314.pyc
+tools/gen_belt_texture.py
+assets/3dassets/station_starter_kit/generate_conveyor_modules.py
+assets/3dassets/station_starter_kit/__pycache__/generate_decor_modules.cpython-313.pyc

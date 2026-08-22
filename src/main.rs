@@ -13,6 +13,9 @@ mod crisis;
 mod cult;
 mod door;
 mod ending;
+/// Cargo's conveyor line. Map-driven, so it has nothing to build without one.
+#[cfg(feature = "trenchbroom")]
+mod freight;
 mod fx;
 mod hazards;
 mod interaction;
@@ -189,6 +192,13 @@ fn main() {
             audio::SfxPlugin,
         ),
     ));
+
+    // Also kept out of the tuple above, because a tuple element cannot carry a
+    // `#[cfg]`. Everything it draws is assembled from `conveyor_spot` markers,
+    // so a `--no-default-features` build has nothing for it to do and does not
+    // compile it in at all.
+    #[cfg(feature = "trenchbroom")]
+    app.add_plugins(freight::FreightPlugin);
 
     // Kept out of the tuple above (already near Bevy's 16-plugin limit) and
     // added only when Steam actually initialised — its systems assume

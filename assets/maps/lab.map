@@ -285,12 +285,12 @@
 }
 // brush 31
 {
-( -285 -196 92 ) ( -285 -124 92 ) ( -285 -196 128 ) wall_chemistry [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 0.625 0.625
-( -285 -196 92 ) ( -285 -196 128 ) ( -275 -196 92 ) wall_chemistry [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 0.625 0.625
-( -285 -196 92 ) ( -275 -196 92 ) ( -285 -124 92 ) wall_chemistry [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 0.625 0.625
+( -285 -196 120 ) ( -285 -124 120 ) ( -285 -196 128 ) wall_chemistry [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 0.625 0.625
+( -285 -196 120 ) ( -285 -196 128 ) ( -275 -196 120 ) wall_chemistry [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 0.625 0.625
+( -285 -196 120 ) ( -275 -196 120 ) ( -285 -124 120 ) wall_chemistry [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 0.625 0.625
 ( -285 -196 128 ) ( -285 -124 128 ) ( -275 -196 128 ) wall_chemistry [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 0.625 0.625
-( -285 -124 92 ) ( -275 -124 92 ) ( -285 -124 128 ) wall_chemistry [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 0.625 0.625
-( -275 -196 92 ) ( -275 -196 128 ) ( -275 -124 92 ) wall_chemistry [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 0.625 0.625
+( -285 -124 120 ) ( -275 -124 120 ) ( -285 -124 128 ) wall_chemistry [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 0.625 0.625
+( -275 -196 120 ) ( -275 -196 128 ) ( -275 -124 120 ) wall_chemistry [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 0.625 0.625
 }
 // brush 32
 {
@@ -1001,14 +1001,47 @@
 ( -1400 3765 0 ) ( -1256 3765 0 ) ( -1400 3765 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( -1256 3755 0 ) ( -1256 3755 120 ) ( -1256 3765 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
-// brush 103
+// The Receiving/Cargo party wall, north of the receiving airlock. It used to
+// be one slab from world z 37 to the wall at z 51; it is now three pieces
+// around a 1.8 m opening at z 48.9..50.7, so the freight belt runs through the
+// wall instead of being severed by it.
+//
+// Cut to the floor rather than left as a window with a sill: a conveyor stands
+// on legs, and a sill would bury them. The header above it starts at y 2.05, so
+// `physical_walls_match_walkable_routes_and_airlock_gaps` does not count it as
+// a floor-height wall and it needs no door_spot to justify itself the way a
+// real airlock gap does.
+//
+// Nobody can walk through it either, which is why it does not need one: both
+// rooms carve this whole band out of their walkable volumes, so no body can
+// reach the opening from either side.
+//
+// brush 103 -- west jamb, from the opening to the wall at z 51.
 {
 ( -2040 3755 0 ) ( -2040 3765 0 ) ( -2040 3755 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2040 3755 0 ) ( -2040 3755 120 ) ( -1480 3755 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2040 3755 0 ) ( -1480 3755 0 ) ( -2040 3765 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2040 3755 120 ) ( -2040 3765 120 ) ( -1480 3755 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2040 3765 0 ) ( -1480 3765 0 ) ( -2040 3765 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 3755 0 ) ( -2040 3755 120 ) ( -2028 3755 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 3755 0 ) ( -2028 3755 0 ) ( -2040 3765 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 3755 120 ) ( -2040 3765 120 ) ( -2028 3755 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 3765 0 ) ( -2028 3765 0 ) ( -2040 3765 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2028 3755 0 ) ( -2028 3755 120 ) ( -2028 3765 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 103a -- east jamb, from the opening down to the receiving airlock.
+{
+( -1956 3755 0 ) ( -1956 3765 0 ) ( -1956 3755 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1956 3755 0 ) ( -1956 3755 120 ) ( -1480 3755 0 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1956 3755 0 ) ( -1480 3755 0 ) ( -1956 3765 0 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1956 3755 120 ) ( -1956 3765 120 ) ( -1480 3755 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1956 3765 0 ) ( -1480 3765 0 ) ( -1956 3765 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( -1480 3755 0 ) ( -1480 3755 120 ) ( -1480 3765 0 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 103b -- the header over the opening, from y 2.05 to the ceiling.
+{
+( -2028 3755 82 ) ( -2028 3765 82 ) ( -2028 3755 120 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2028 3755 82 ) ( -2028 3755 120 ) ( -1956 3755 82 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2028 3755 82 ) ( -1956 3755 82 ) ( -2028 3765 82 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2028 3755 120 ) ( -2028 3765 120 ) ( -1956 3755 120 ) wall [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2028 3765 82 ) ( -1956 3765 82 ) ( -2028 3765 120 ) wall [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1956 3755 82 ) ( -1956 3755 120 ) ( -1956 3765 82 ) wall [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 // brush 104
 {
@@ -2355,6 +2388,58 @@
 ( -24 -300 -16 ) ( 20 -300 -16 ) ( -24 -300 0 ) floor_corridor [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( 20 -540 -16 ) ( 20 -540 0 ) ( 20 -300 -16 ) floor_corridor [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
+// entity 315 -- painted floor markings. `stripe` is already the map's floor
+// decal texture -- it paints the door thresholds -- and `is_scenery` gives it
+// no collider, so these are pure paint. Two edge lines where the working floor
+// meets the belt and the racking, and the cross lane picked out wall to wall.
+{
+( -2040 3258 -3.2 ) ( -2040 3262 -3.2 ) ( -2040 3258 0.8 ) stripe [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 3258 -3.2 ) ( -2040 3258 0.8 ) ( -1256 3258 -3.2 ) stripe [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 3258 -3.2 ) ( -1256 3258 -3.2 ) ( -2040 3262 -3.2 ) stripe [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 3258 0.8 ) ( -2040 3262 0.8 ) ( -1256 3258 0.8 ) stripe [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 3262 -3.2 ) ( -1256 3262 -3.2 ) ( -2040 3262 0.8 ) stripe [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1256 3258 -3.2 ) ( -1256 3258 0.8 ) ( -1256 3262 -3.2 ) stripe [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+{
+( -2040 3138 -3.2 ) ( -2040 3142 -3.2 ) ( -2040 3138 0.8 ) stripe [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 3138 -3.2 ) ( -2040 3138 0.8 ) ( -1256 3138 -3.2 ) stripe [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 3138 -3.2 ) ( -1256 3138 -3.2 ) ( -2040 3142 -3.2 ) stripe [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 3138 0.8 ) ( -2040 3142 0.8 ) ( -1256 3138 0.8 ) stripe [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 3142 -3.2 ) ( -1256 3142 -3.2 ) ( -2040 3142 0.8 ) stripe [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1256 3138 -3.2 ) ( -1256 3138 0.8 ) ( -1256 3142 -3.2 ) stripe [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+{
+( -1906 3260 -3.2 ) ( -1906 3760 -3.2 ) ( -1906 3260 0.8 ) stripe [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1906 3260 -3.2 ) ( -1906 3260 0.8 ) ( -1902 3260 -3.2 ) stripe [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1906 3260 -3.2 ) ( -1902 3260 -3.2 ) ( -1906 3760 -3.2 ) stripe [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1906 3260 0.8 ) ( -1906 3760 0.8 ) ( -1902 3260 0.8 ) stripe [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1906 3760 -3.2 ) ( -1902 3760 -3.2 ) ( -1906 3760 0.8 ) stripe [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1902 3260 -3.2 ) ( -1902 3260 0.8 ) ( -1902 3760 -3.2 ) stripe [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+{
+( -1906 2100 -3.2 ) ( -1906 3140 -3.2 ) ( -1906 2100 0.8 ) stripe [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1906 2100 -3.2 ) ( -1906 2100 0.8 ) ( -1902 2100 -3.2 ) stripe [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1906 2100 -3.2 ) ( -1902 2100 -3.2 ) ( -1906 3140 -3.2 ) stripe [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1906 2100 0.8 ) ( -1906 3140 0.8 ) ( -1902 2100 0.8 ) stripe [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1906 3140 -3.2 ) ( -1902 3140 -3.2 ) ( -1906 3140 0.8 ) stripe [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1902 2100 -3.2 ) ( -1902 2100 0.8 ) ( -1902 3140 -3.2 ) stripe [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+{
+( -1382 3260 -3.2 ) ( -1382 3760 -3.2 ) ( -1382 3260 0.8 ) stripe [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1382 3260 -3.2 ) ( -1382 3260 0.8 ) ( -1378 3260 -3.2 ) stripe [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1382 3260 -3.2 ) ( -1378 3260 -3.2 ) ( -1382 3760 -3.2 ) stripe [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1382 3260 0.8 ) ( -1382 3760 0.8 ) ( -1378 3260 0.8 ) stripe [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1382 3760 -3.2 ) ( -1378 3760 -3.2 ) ( -1382 3760 0.8 ) stripe [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1378 3260 -3.2 ) ( -1378 3260 0.8 ) ( -1378 3760 -3.2 ) stripe [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+{
+( -1382 2100 -3.2 ) ( -1382 3140 -3.2 ) ( -1382 2100 0.8 ) stripe [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1382 2100 -3.2 ) ( -1382 2100 0.8 ) ( -1378 2100 -3.2 ) stripe [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1382 2100 -3.2 ) ( -1378 2100 -3.2 ) ( -1382 3140 -3.2 ) stripe [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1382 2100 0.8 ) ( -1382 3140 0.8 ) ( -1378 2100 0.8 ) stripe [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1382 3140 -3.2 ) ( -1378 3140 -3.2 ) ( -1382 3140 0.8 ) stripe [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1378 2100 -3.2 ) ( -1378 2100 0.8 ) ( -1378 3140 -3.2 ) stripe [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
 }
 // entity 1
 {
@@ -2733,8 +2818,12 @@
 }
 // entity 38
 {
+// Moved off (-80, 35): that is now the cross lane between Cargo's two
+// long-wall airlocks, and a 4.6 x 3.6 m furniture bay parked across the only
+// route between them is a wall. It stands along the north side of the working
+// floor instead, with the freight line behind it.
 "classname" "department_dressing"
-"origin" "-1400 3200 0"
+"origin" "-1800 2800 0"
 "department" "Cargo"
 "angles" "0 180 0"
 }
@@ -2922,14 +3011,43 @@
 {
 "classname" "func_walkable"
 "room" "Cargo"
-// brush 0
+// Two overlapping rectangles rather than the one this used to be. The hall is
+// 41.5 x 19.6 m and both of its long walls are now built against: the freight
+// line runs the length of the north band (world z 47.6..51) and storage racking
+// fills the south one (z 31.4..34.5). Nothing in either carries a collider and
+// crew ignore `Solid` entirely, so carving the floor back is the only thing
+// that stops a body walking through a running belt -- the same reason Medical
+// stops short of its ward bay.
+//
+// The shape is dictated by where the doors are. Cargo's two long-wall airlocks
+// -- technical at (-80, 31.4) and maintenance at (-80, 51) -- sit at the *same*
+// x, so one north-south lane through the middle serves both, and it is the one
+// strip of floor that has to run wall to wall. Everything else is the open
+// working floor between the two bands.
+//
+// The other two doors need no spur: the receiving airlock's bridge reaches
+// z 37 and the public one's reaches x -53.3, so both already overlap the main
+// rectangle.
+//
+// brush 0 -- the working floor, between the belt and the racking.
 {
-( -2040 2100 0 ) ( -2040 3760 0 ) ( -2040 2100 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2040 2100 0 ) ( -2040 2100 20 ) ( -1256 2100 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2040 2100 0 ) ( -1256 2100 0 ) ( -2040 3760 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2040 2100 20 ) ( -2040 3760 20 ) ( -1256 2100 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2040 3760 0 ) ( -1256 3760 0 ) ( -2040 3760 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1256 2100 0 ) ( -1256 2100 20 ) ( -1256 3760 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1904 2100 0 ) ( -1904 3760 0 ) ( -1904 2100 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1904 2100 0 ) ( -1904 2100 20 ) ( -1380 2100 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1904 2100 0 ) ( -1380 2100 0 ) ( -1904 3760 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1904 2100 20 ) ( -1904 3760 20 ) ( -1380 2100 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1904 3760 0 ) ( -1380 3760 0 ) ( -1904 3760 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1380 2100 0 ) ( -1380 2100 20 ) ( -1380 3760 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 1 -- the cross lane, wall to wall, serving both long-wall airlocks.
+// 3 m wide so a body still has 2.3 m of standing room once inset, and set
+// clear of the trestle legs that hold the belt bridge up over it.
+{
+( -2040 3140 0 ) ( -2040 3260 0 ) ( -2040 3140 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 3140 0 ) ( -2040 3140 20 ) ( -1256 3140 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 3140 0 ) ( -1256 3140 0 ) ( -2040 3260 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 3140 20 ) ( -2040 3260 20 ) ( -1256 3140 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 3260 0 ) ( -1256 3260 0 ) ( -2040 3260 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1256 3140 0 ) ( -1256 3140 20 ) ( -1256 3260 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 }
 // entity 57
@@ -3336,13 +3454,16 @@
 {
 "classname" "func_walkable"
 "room" "Cargo Receiving"
+// Stops at world z 47.6 rather than the wall at z 51: the 3.4 m band beyond is
+// the freight line's intake run. Still one rectangle -- the belt hugs a wall
+// with no door in it, so nothing has to be routed around.
 // brush 0
 {
-( -2040 3760 0 ) ( -2040 4380 0 ) ( -2040 3760 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2040 3760 0 ) ( -2040 3760 20 ) ( -1256 3760 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2040 3760 0 ) ( -1256 3760 0 ) ( -2040 4380 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2040 3760 20 ) ( -2040 4380 20 ) ( -1256 3760 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2040 4380 0 ) ( -1256 4380 0 ) ( -2040 4380 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1904 3760 0 ) ( -1904 4380 0 ) ( -1904 3760 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1904 3760 0 ) ( -1904 3760 20 ) ( -1256 3760 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1904 3760 0 ) ( -1256 3760 0 ) ( -1904 4380 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1904 3760 20 ) ( -1904 4380 20 ) ( -1256 3760 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1904 4380 0 ) ( -1256 4380 0 ) ( -1904 4380 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( -1256 3760 0 ) ( -1256 3760 20 ) ( -1256 4380 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 }
@@ -5007,16 +5128,16 @@
 // entity 248
 {
 "classname" "decoration_spot"
-"origin" "-2035 2800 0"
+"origin" "-1520 2105 0"
 "kind" "cargo.manifest_board"
-"angles" "0 180 0"
+"angles" "0 -90 0"
 }
 // entity 249
 {
 "classname" "decoration_spot"
-"origin" "-2035 2520 0"
+"origin" "-1760 2105 0"
 "kind" "cargo.parcel_shelf"
-"angles" "0 180 0"
+"angles" "0 -90 0"
 }
 // entity 250
 {
@@ -5105,4 +5226,325 @@
 "text" "BOTANY"
 "direction" "right"
 "angles" "0 0 0"
+}
+// Cargo's freight line. One line, `cargo.main`, running west to east along
+// world z 49.8 -- out of a hatch in Receiving's exterior wall, the length of
+// Receiving, through the window cut in the party wall, and into the Cargo
+// hall's north-west alcove, where a sorter drops parcels down three chutes.
+//
+// Everything here stands in the band both rooms carve out of their walkable
+// volumes (world z 47.6..51, and x -94..-83 in the hall). `angles` is the
+// direction of travel, not a facing: "0 90 0" is +x, the way the line runs.
+//
+// entity 279 -- the intake head, bolted to the inside face of Receiving's west
+// exterior wall at map y 4375. That wall is *not* cut: the maintenance ring
+// corridor runs directly behind it, so an opening would look into a corridor
+// rather than into "more station". The head is a proud housing instead, and
+// parcels are spawned inside it and slide out of its mouth.
+{
+"classname" "conveyor_spot"
+"origin" "-1992 4375 0"
+"line" "cargo.main"
+"index" "0"
+"role" "intake"
+"angles" "0 90 0"
+}
+// entity 280 -- the Receiving run, long enough to clear the party wall.
+{
+"classname" "conveyor_spot"
+"origin" "-1992 4375 0"
+"line" "cargo.main"
+"index" "1"
+"role" "run"
+"length" "16.0"
+"angles" "0 90 0"
+}
+// entity 281 -- the west bay, as far as the foot of the bridge.
+{
+"classname" "conveyor_spot"
+"origin" "-1992 3735 0"
+"line" "cargo.main"
+"index" "2"
+"role" "run"
+"length" "7.175"
+"angles" "0 90 0"
+}
+// entities 282-284 -- the bridge over the cross lane.
+//
+// Both of the hall's long-wall airlocks sit at x -80, so the one strip of
+// floor that has to run wall to wall is right where a belt down the north wall
+// wants to be. The belt climbs over it instead: 1.55 m up over 4 m of plan
+// (about 21 degrees, which is a slope freight actually stays on), 4.4 m across
+// at a 2.5 m deck, and back down. That leaves 2.33 m under the frame, and the
+// trestles that hold it up stand outside the lane on either side.
+{
+"classname" "conveyor_spot"
+"origin" "-1992 3448 0"
+"line" "cargo.main"
+"index" "3"
+"role" "run"
+"length" "4.0"
+"rise" "1.55"
+"angles" "0 90 0"
+}
+{
+"classname" "conveyor_spot"
+"origin" "-1992 3288 0"
+"line" "cargo.main"
+"index" "4"
+"role" "run"
+"length" "4.4"
+"angles" "0 90 0"
+}
+{
+"classname" "conveyor_spot"
+"origin" "-1992 3112 0"
+"line" "cargo.main"
+"index" "5"
+"role" "run"
+"length" "4.0"
+"rise" "-1.55"
+"angles" "0 90 0"
+}
+// entity 285 -- the east bay, the length of the hall to 2 m past the last chute.
+{
+"classname" "conveyor_spot"
+"origin" "-1992 2952 0"
+"line" "cargo.main"
+"index" "6"
+"role" "run"
+"length" "14.8"
+"angles" "0 90 0"
+}
+// entity 286 -- the scanner arch. One, at the head of the line, because a real
+// sortation line reads a parcel once on induction and the diverters do the
+// rest; it is upstream of all five.
+{
+"classname" "conveyor_spot"
+"origin" "-1992 3680 0"
+"line" "cargo.main"
+"index" "7"
+"role" "sorter"
+"angles" "0 90 0"
+}
+// entities 287-291 -- the five destination chutes, spread the length of the
+// hall rather than bunched at one end. Seven departments between them; Cargo
+// is not on the list because this is Cargo.
+{
+"classname" "conveyor_spot"
+"origin" "-1940 3600 0"
+"line" "cargo.main"
+"index" "8"
+"role" "chute"
+"label" "MEDICAL / CHEM"
+"angles" "0 90 0"
+}
+{
+"classname" "conveyor_spot"
+"origin" "-1940 3480 0"
+"line" "cargo.main"
+"index" "9"
+"role" "chute"
+"label" "BRIDGE / SECURITY"
+"angles" "0 90 0"
+}
+{
+"classname" "conveyor_spot"
+"origin" "-1940 2840 0"
+"line" "cargo.main"
+"index" "10"
+"role" "chute"
+"label" "ENGINEERING"
+"angles" "0 90 0"
+}
+{
+"classname" "conveyor_spot"
+"origin" "-1940 2640 0"
+"line" "cargo.main"
+"index" "11"
+"role" "chute"
+"label" "SERVICE / CHAPEL"
+"angles" "0 90 0"
+}
+{
+"classname" "conveyor_spot"
+"origin" "-1940 2440 0"
+"line" "cargo.main"
+"index" "12"
+"role" "chute"
+"label" "BOTANY"
+"angles" "0 90 0"
+}
+// entities 292-303 -- lighting.
+//
+// Cargo was the worst-lit room on the station by a wide margin: two point
+// lights for 813 m2, against Medical's six for 256. That is most of why the
+// hall read as an empty box -- you could not see the far wall, never mind
+// anything standing against it. Three rows now: warm task lighting over the
+// belt, and the station's usual cool white over the working floor and the
+// racking. Every one is non-shadowed, which the lighting test requires of
+// anything this far west.
+//
+// Warm, over the line. Two of these are in Cargo Receiving.
+{
+"classname" "light_point"
+"origin" "-1980 4080 114"
+"color" "0.96 0.90 0.74"
+"intensity" "300000"
+"range" "12"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-1980 3520 114"
+"color" "0.96 0.90 0.74"
+"intensity" "300000"
+"range" "12"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-1980 3200 114"
+"color" "0.96 0.90 0.74"
+"intensity" "300000"
+"range" "12"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-1980 2800 114"
+"color" "0.96 0.90 0.74"
+"intensity" "300000"
+"range" "12"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-1980 2400 114"
+"color" "0.96 0.90 0.74"
+"intensity" "300000"
+"range" "12"
+"shadows_enabled" "false"
+}
+// Cool white, down the middle of the working floor.
+{
+"classname" "light_point"
+"origin" "-1640 3520 114"
+"color" "0.82 0.94 1"
+"intensity" "320000"
+"range" "14"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-1640 3120 114"
+"color" "0.82 0.94 1"
+"intensity" "320000"
+"range" "14"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-1640 2280 114"
+"color" "0.82 0.94 1"
+"intensity" "320000"
+"range" "14"
+"shadows_enabled" "false"
+}
+// Cool white, over the racking on the south wall.
+{
+"classname" "light_point"
+"origin" "-1360 3440 114"
+"color" "0.82 0.94 1"
+"intensity" "320000"
+"range" "14"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-1360 2960 114"
+"color" "0.82 0.94 1"
+"intensity" "320000"
+"range" "14"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-1360 2480 114"
+"color" "0.82 0.94 1"
+"intensity" "320000"
+"range" "14"
+"shadows_enabled" "false"
+}
+// entities 304-314 -- the freight bay itself. Racking down the south wall,
+// staged pallets between the bays, a lift on its charger at the east end, and
+// the requisitions counter past where the belt stops. Every one is a floor
+// fixture, so every one stands in floor carved out of the walkable volume --
+// see the two rectangles above. The gap at x -66 is the dispatch panel, and
+// the one at x -81.5..-78.5 is the cross lane.
+{
+"classname" "decoration_spot"
+"origin" "-1292 3680 0"
+"kind" "cargo.storage_rack"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1292 3540 0"
+"kind" "cargo.storage_rack"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1292 3400 0"
+"kind" "cargo.storage_rack"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1292 3060 0"
+"kind" "cargo.storage_rack"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1292 2928 0"
+"kind" "cargo.crate_stack"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1292 2840 0"
+"kind" "cargo.crate_stack"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1292 2740 0"
+"kind" "cargo.pallet_row"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1292 2500 0"
+"kind" "cargo.storage_rack"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1292 2360 0"
+"kind" "cargo.storage_rack"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1320 2220 0"
+"kind" "cargo.forklift_bay"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1936 2220 0"
+"kind" "cargo.requisitions_desk"
+"angles" "0 180 0"
 }

@@ -2,12 +2,20 @@
 //! maintenance crossovers. Each door keeps a stable semantic identity and a
 //! matching navigation bridge across hot reload and replication.
 //!
-//! Placeholder geometry — two flat-shaded slabs, the same "scaled unit cube"
-//! style as the rest of the lab (there is no glTF/scene-loading pipeline in
-//! this codebase to load a modelled one from) — but real state: a closed
-//! door blocks the player like a wall, not just looks shut. The powered
-//! proximity entrance remains traversable to route planning so approaching
-//! crew can reach its sensor and open it themselves.
+//! Two sprite-faced slabs, the same "scaled unit cube" style as the rest of
+//! the lab (there is no glTF/scene-loading pipeline in this codebase to load a
+//! modelled one from) — but real state: a closed door blocks the player like a
+//! wall, not just looks shut. The powered proximity entrance remains
+//! traversable to route planning so approaching crew can reach its sensor and
+//! open it themselves.
+//!
+//! A door is exactly as tall as its opening, so a shut one seals the doorway
+//! to the ceiling rather than leaving a strip of the next room over the top.
+//! Its face comes from one `assets/textures/door_*.png` per department, each
+//! the whole closed double door; the two leaves show the left and right halves
+//! of it through a UV transform, so the parting line drawn down the middle of
+//! the sprite lands on the joint between them. See [`DoorSkin`] for why a
+//! maintenance crossover is the one door that wears no department color.
 //!
 //! [`Door`] follows the exact shape `machines::Thermostat` already
 //! established for "a bool that must read the same on every peer": a plain
@@ -18,6 +26,7 @@
 //! unguarded system, the same "presentation reads replicated state, nothing
 //! reads it back" split `crisis::pulse_alert_lighting` and `fx` already use.
 
+use bevy::math::Affine2;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -74,6 +83,87 @@ pub struct Door {
     pub open: bool,
     pub bridge_id: String,
     pub along_x: bool,
+    pub skin: DoorSkin,
+}
+
+/// Which paint a door wears.
+///
+/// Part of the replicated [`Door`] rather than read from [`DoorSpotId`],
+/// because that id stays on the authority: a client is handed the `Door`
+/// component and has nothing else to look a department up from.
+///
+/// A department's door matches the floor route and the sign that lead to it —
+/// the colors are `lab::tb`'s `WAYFINDING_SPECS`, and the sprites are
+/// generated from the same list by `tools/gen_door_sprites.py`. Maintenance
+/// is the deliberate exception: a crossover belongs to no department, so it
+/// withholds the one cue every other door leads with and wears bare steel
+/// whichever department it happens to open off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DoorSkin {
+    Chemistry,
+    Medical,
+    Engineering,
+    Security,
+    Cargo,
+    Bridge,
+    Botany,
+    Service,
+    Maintenance,
+}
+
+impl DoorSkin {
+    const ALL: [Self; 9] = [
+        Self::Chemistry,
+        Self::Medical,
+        Self::Engineering,
+        Self::Security,
+        Self::Cargo,
+        Self::Bridge,
+        Self::Botany,
+        Self::Service,
+        Self::Maintenance,
+    ];
+
+    /// Reads the skin out of a `door_spot` id.
+    ///
+    /// Every id in `lab.map` is `door.<department>.<purpose>`, so the map
+    /// already says which department a door belongs to and there is no second
+    /// registry to keep in step with it. Purpose is checked first: a
+    /// `door.security.maintenance` is a maintenance door, not a Security one.
+    /// Anything unrecognised falls back to the neutral skin, which is the
+    /// honest answer for a door whose department nobody has declared.
+    pub(crate) fn from_spot_id(id: &str) -> Self {
+        let mut parts = id.split('.').skip(1);
+        let department = parts.next().unwrap_or_default();
+        if parts.next() == Some("maintenance") {
+            return Self::Maintenance;
+        }
+        match department {
+            "chemistry" => Self::Chemistry,
+            "medical" => Self::Medical,
+            "engineering" => Self::Engineering,
+            "security" => Self::Security,
+            "cargo" => Self::Cargo,
+            "bridge" => Self::Bridge,
+            "botany" => Self::Botany,
+            "service" => Self::Service,
+            _ => Self::Maintenance,
+        }
+    }
+
+    fn texture_path(self) -> &'static str {
+        match self {
+            Self::Chemistry => "textures/door_chemistry.png",
+            Self::Medical => "textures/door_medical.png",
+            Self::Engineering => "textures/door_engineering.png",
+            Self::Security => "textures/door_security.png",
+            Self::Cargo => "textures/door_cargo.png",
+            Self::Bridge => "textures/door_bridge.png",
+            Self::Botany => "textures/door_botany.png",
+            Self::Service => "textures/door_service.png",
+            Self::Maintenance => "textures/door_maintenance.png",
+        }
+    }
 }
 
 /// Chemical corrosion has defeated this door. Keeping this as replicated
@@ -86,26 +176,70 @@ pub struct Corroded {
 
 /// Meshes and materials every leaf is drawn from. Its own small resource
 /// rather than reaching into `lab`'s private `MachineAssets` — doors are not
-/// machines, and this is one shared cube handle either way.
+/// machines, and this is one shared mesh handle either way.
 #[derive(Resource)]
 struct DoorAssets {
-    cube: Handle<Mesh>,
-    leaf: Handle<StandardMaterial>,
+    leaf_mesh: Handle<Mesh>,
+    /// Per skin, the material for the leaf on each side: the same sprite with
+    /// a UV transform selecting its left or right half. Indexed by the `side`
+    /// order `dress_door` spawns in, so `[0]` is the leaf at -X.
+    leaves: std::collections::HashMap<DoorSkin, [Handle<StandardMaterial>; 2]>,
+}
+
+/// A unit cube whose UV mapping comes from each vertex's own local position
+/// rather than which of the six faces it belongs to.
+///
+/// `Cuboid`'s stock mesh mirrors u between its +Z and -Z faces (correct for a
+/// texture meant to wrap a physical object seamlessly) and puts v=0 at the
+/// *bottom*, not the top — both fine for the flat color the door leaf used to
+/// carry, and both wrong now that it carries `door_*.png`: a leaf shows one
+/// half of a single unique sprite (see `DoorAssets::leaves`), and it has to
+/// read right-side up, without mirroring, from either room a shut door
+/// separates.
+fn door_leaf_mesh() -> Mesh {
+    let mut mesh = Mesh::from(Cuboid::new(1.0, 1.0, 1.0));
+    let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+        Some(bevy::render::mesh::VertexAttributeValues::Float32x3(positions)) => positions.clone(),
+        _ => unreachable!("Cuboid always stores Float32x3 positions"),
+    };
+    let uvs: Vec<[f32; 2]> = positions.iter().map(|&[x, y, _z]| [x + 0.5, 0.5 - y]).collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh
 }
 
 fn load_door_assets(
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let mut leaves = std::collections::HashMap::new();
+    for skin in DoorSkin::ALL {
+        let sprite: Handle<Image> = asset_server.load(skin.texture_path());
+        // Half the sprite across, all of it down. `ImagePlugin::default_nearest`
+        // in `main` already keeps these hard-edged, like every other surface.
+        let mut half = |u: f32| {
+            materials.add(StandardMaterial {
+                base_color_texture: Some(sprite.clone()),
+                uv_transform: Affine2::from_scale_angle_translation(
+                    Vec2::new(0.5, 1.0),
+                    0.0,
+                    Vec2::new(u, 0.0),
+                ),
+                // Painted plate, not bare metal: the sprite supplies the panel
+                // seams and department color, so the surface only has to not
+                // fight the station's lighting.
+                perceptual_roughness: 0.62,
+                metallic: 0.2,
+                ..default()
+            })
+        };
+        leaves.insert(skin, [half(0.0), half(0.5)]);
+    }
+
     commands.insert_resource(DoorAssets {
-        cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-        leaf: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.58, 0.62, 0.68),
-            perceptual_roughness: 0.35,
-            metallic: 0.8,
-            ..default()
-        }),
+        leaf_mesh: meshes.add(door_leaf_mesh()),
+        leaves,
     });
 }
 
@@ -128,6 +262,7 @@ fn spawn_door_at(commands: &mut Commands, id: &str, placement: &DoorPlacement) {
             open: false,
             bridge_id: placement.bridge_id.clone(),
             along_x: along_x(placement.transform),
+            skin: DoorSkin::from_spot_id(id),
         },
         placement.transform,
         Visibility::default(),
@@ -183,19 +318,30 @@ fn dress_door(
     let Some(assets) = assets else {
         return;
     };
-    for (entity, _door) in &doors {
+    for (entity, door) in &doors {
+        // A door whose skin somehow has no materials would otherwise spawn
+        // invisible leaves that still block the player, which is far worse to
+        // meet in game than a door in the wrong paint.
+        let Some(leaves) = assets.leaves.get(&door.skin) else {
+            warn!("no door materials loaded for {:?}", door.skin);
+            continue;
+        };
         // Meeting at the centre (closed) or slid a full leaf-width into
         // where the flanking wall segment already stands (open) — the same
         // gap `WallRun::segments()` cuts, worked out from the same axis.
         let axis = Vec3::X;
         let size = Vec3::new(DOOR_WIDTH * 0.5, DOOR_HEIGHT, LEAF_THICKNESS);
-        for side in [-1.0f32, 1.0] {
+        for (index, side) in [-1.0f32, 1.0].into_iter().enumerate() {
             let closed_local = axis * (side * DOOR_WIDTH * 0.25) + Vec3::Y * DOOR_HEIGHT * 0.5;
             let open_local = closed_local + axis * (side * DOOR_WIDTH * 0.5);
+            // A cuboid's front face runs u from -X to +X, so the leaf at -X
+            // takes the sprite's left half and the two meet on the seam drawn
+            // down the middle of it.
+            let material = leaves[index].clone();
             commands.entity(entity).with_children(|parent| {
                 parent.spawn((
-                    Mesh3d(assets.cube.clone()),
-                    MeshMaterial3d(assets.leaf.clone()),
+                    Mesh3d(assets.leaf_mesh.clone()),
+                    MeshMaterial3d(material),
                     Transform::from_translation(closed_local).with_scale(size),
                     DoorLeaf {
                         door: entity,
@@ -299,6 +445,7 @@ mod tests {
                     open: false,
                     bridge_id: format!("test.{doorway_index}"),
                     along_x: run.along_x,
+                    skin: DoorSkin::Chemistry,
                 },
                 Transform::from_translation(run.point(center)),
             ))
@@ -400,6 +547,72 @@ mod tests {
         assert!(
             is_open(&app, weak),
             "structural acid did not breach the door"
+        );
+    }
+
+    #[test]
+    fn a_door_takes_its_department_from_its_map_id() {
+        assert_eq!(
+            DoorSkin::from_spot_id("door.chemistry.public"),
+            DoorSkin::Chemistry
+        );
+        assert_eq!(
+            DoorSkin::from_spot_id("door.botany.nursery"),
+            DoorSkin::Botany
+        );
+        assert_eq!(
+            DoorSkin::from_spot_id("door.service.chapel"),
+            DoorSkin::Service
+        );
+        assert_eq!(
+            DoorSkin::from_spot_id("door.engineering.atmos"),
+            DoorSkin::Engineering
+        );
+    }
+
+    #[test]
+    fn a_maintenance_crossover_stays_neutral_whichever_department_it_opens_off() {
+        for id in [
+            "door.security.maintenance",
+            "door.bridge.maintenance",
+            "door.medical.maintenance",
+            "door.cargo.maintenance",
+        ] {
+            assert_eq!(
+                DoorSkin::from_spot_id(id),
+                DoorSkin::Maintenance,
+                "`{id}` should wear no department color",
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreadable_id_falls_back_to_the_neutral_skin() {
+        for id in ["", "door", "door.xenobiology.public", "nonsense"] {
+            assert_eq!(DoorSkin::from_spot_id(id), DoorSkin::Maintenance, "`{id}`");
+        }
+    }
+
+    #[test]
+    fn every_skin_has_its_sprite_on_disk() {
+        for skin in DoorSkin::ALL {
+            let path = std::path::Path::new("assets").join(skin.texture_path());
+            assert!(
+                path.exists(),
+                "{skin:?} has no sprite at {} -- run tools/gen_door_sprites.py",
+                path.display(),
+            );
+        }
+    }
+
+    #[test]
+    fn a_shut_door_seals_its_opening_to_the_ceiling() {
+        // Station walls in `lab.map` are cut the full way up for a doorway, so
+        // a leaf shorter than the opening leaves a strip of the next room
+        // visible over the top of a closed airlock.
+        assert_eq!(
+            DOOR_HEIGHT, 3.0,
+            "a door must match the station's floor-to-ceiling height",
         );
     }
 

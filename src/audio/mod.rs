@@ -97,6 +97,8 @@ impl Plugin for SfxPlugin {
                     play_collapse_sfx.run_if(is_authority),
                     play_status_sfx.run_if(is_authority),
                     sync_machine_loops,
+                    voice_conveyor_hums,
+                    voice_parcel_drops,
                     sync_radiation_alarm,
                     play_crisis_alarm_sfx,
                     play_evacuation_sfx,
@@ -304,6 +306,8 @@ struct SfxAssets {
     assault_impact: Handle<AudioSource>,
     agitation_loop: Handle<AudioSource>,
     heater_loop: Handle<AudioSource>,
+    conveyor_loop: Handle<AudioSource>,
+    parcel_drop: Handle<AudioSource>,
     calm_ambience: Vec<Handle<AudioSource>>,
     tense_ambience: Vec<Handle<AudioSource>>,
 }
@@ -422,6 +426,12 @@ fn load_sfx(mut commands: Commands, assets: Res<AssetServer>) {
         assault_impact: assets.load("sounds/ss14/soft_thump.ogg"),
         agitation_loop: assets.load("sounds/ss14/bubbles.ogg"),
         heater_loop: assets.load("sounds/ss14/buzz_loop.ogg"),
+        // The same loop the heaters use, deliberately: it is the right
+        // texture of noise for a running belt, and shipping a placeholder we
+        // already have beats shipping a conveyor line that runs in silence.
+        // Swap this for a dedicated file when one turns up.
+        conveyor_loop: assets.load("sounds/ss14/buzz_loop.ogg"),
+        parcel_drop: assets.load("sounds/ss14/soft_thump.ogg"),
         calm_ambience: CALM_AMBIENCE
             .iter()
             .map(|path| assets.load(*path))
@@ -690,6 +700,58 @@ fn play_crisis_alarm_sfx(
 ) {
     for () in &new_crises {
         play.write(PlaySfx(Sfx::MajorAlarm));
+    }
+}
+
+/// Volume of one conveyor hum source. Low, because a line carries several.
+const CONVEYOR_HUM_VOLUME: f32 = 0.11;
+/// Volume of a parcel landing in a chute.
+const PARCEL_DROP_VOLUME: f32 = 0.30;
+
+/// "There is running machinery here." `freight` puts one of these along each
+/// belt run and [`voice_conveyor_hums`] gives it a loop.
+///
+/// The marker lives here rather than in `freight` so that module can stay clear
+/// of `AudioPlayer` entirely — this is still the one place playback is
+/// configured, as the module doc claims. `freight` says *where* a sound is;
+/// what it sounds like and how loud is this module's business.
+#[derive(Component)]
+pub struct ConveyorHum;
+
+/// "A parcel just landed here." Spawned per drop and despawned with its own
+/// playback, so `freight` never has to clean one up.
+#[derive(Component)]
+pub struct ParcelDrop;
+
+/// Gives a hum marker its loop, in place, so it dies when `freight` clears the
+/// belt rather than needing its own reconciliation pass.
+fn voice_conveyor_hums(
+    mut commands: Commands,
+    assets: Res<SfxAssets>,
+    hums: Query<Entity, Added<ConveyorHum>>,
+) {
+    for entity in &hums {
+        commands.entity(entity).insert((
+            AudioPlayer::new(assets.conveyor_loop.clone()),
+            PlaybackSettings::LOOP
+                .with_volume(Volume::Linear(CONVEYOR_HUM_VOLUME))
+                .with_spatial(true),
+        ));
+    }
+}
+
+fn voice_parcel_drops(
+    mut commands: Commands,
+    assets: Res<SfxAssets>,
+    drops: Query<Entity, Added<ParcelDrop>>,
+) {
+    for entity in &drops {
+        commands.entity(entity).insert((
+            AudioPlayer::new(assets.parcel_drop.clone()),
+            PlaybackSettings::DESPAWN
+                .with_volume(Volume::Linear(PARCEL_DROP_VOLUME))
+                .with_spatial(true),
+        ));
     }
 }
 

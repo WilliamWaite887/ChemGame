@@ -305,9 +305,14 @@ pub(crate) const WALL_THICKNESS: f32 = 0.25;
 /// Width of every doorway. The walkable slab through a door is this less the
 /// player's diameter, so much under 1.4 becomes a funnel you have to aim at.
 pub(crate) const DOOR_WIDTH: f32 = 1.8;
-/// Head height of a doorway. The wall above one is filled in, so you cannot see
-/// over the top into the gap between two rooms.
-pub(crate) const DOOR_HEIGHT: f32 = 2.3;
+/// Height of a doorway, floor to ceiling. Station walls in `lab.map` stand
+/// 3.0 m and every opening in one is cut the full way up, so a door has to be
+/// exactly this tall to seal it: anything shorter leaves a strip of the next
+/// room visible over the top of a shut airlock.
+///
+/// The old const-table lab is 0.2 m taller than the station, so under
+/// `not(feature = "trenchbroom")` a short header still fills the difference.
+pub(crate) const DOOR_HEIGHT: f32 = 3.0;
 
 /// Centre of the crew door, in world x. Lines up with [`COUNTER_SPOT`] so crew
 /// walk a straight line in from the station to the counter.
@@ -1554,7 +1559,11 @@ fn authored_container_sockets(kind: MachineKind) -> (Option<Vec3>, Option<Vec3>)
 #[derive(Component)]
 struct MachineVisual;
 
-const STATION_KIT: &str = "3dassets/station_starter_kit/glb";
+/// Where every authored `.glb` in the station kit lives, relative to `assets/`.
+///
+/// `pub(crate)` for `freight`, which loads its conveyor modules out of the same
+/// export folder — one string, so a move of the kit is one edit.
+pub(crate) const STATION_KIT: &str = "3dassets/station_starter_kit/glb";
 
 /// Primitive fixture assets plus the eight authored machine scenes.
 #[derive(Resource)]

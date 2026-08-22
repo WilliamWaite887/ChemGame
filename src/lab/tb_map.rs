@@ -582,12 +582,15 @@ fn selective_subrooms_are_inside_their_parent_departments() {
             },
         ),
         (
+            // Stops 3.4 m short of the back wall, the way Medical stops short
+            // of its ward bay: that band is the freight line's intake run, and
+            // nothing on a conveyor carries a collider.
             "Cargo Receiving",
             Bounds {
                 min_x: -109.5,
                 max_x: -94.0,
                 min_z: 31.4,
-                max_z: 51.0,
+                max_z: 47.6,
             },
         ),
         (
@@ -671,19 +674,44 @@ fn station_v2_keeps_its_department_and_route_footprints() {
                 max_z: 10.0,
             },
         ),
-        (
-            "Cargo",
-            Bounds {
-                min_x: -94.0,
-                max_x: -52.5,
-                min_z: 31.4,
-                max_z: 51.0,
-            },
-        ),
     ] {
         let found = named_bounds(room);
         assert_eq!(found.len(), 1, "{room} should be one authored rectangle");
         assert!(bounds_are_close(found[0], expected), "{room}: {found:?}");
+    }
+
+    // Cargo is two overlapping rectangles rather than one. Both of its long
+    // walls are built against now -- the freight line runs the length of the
+    // north band and storage racking the south one -- so what is left walkable
+    // is the working floor between them, plus one lane straight through the
+    // middle. That lane is not optional: the technical and maintenance
+    // airlocks sit at the same x, and nothing else reaches either of them.
+    let cargo = named_bounds("Cargo");
+    assert_eq!(
+        cargo.len(),
+        2,
+        "Cargo should be the working floor plus the cross lane between its two airlocks"
+    );
+    for expected in [
+        Bounds {
+            min_x: -94.0,
+            max_x: -52.5,
+            min_z: 34.5,
+            max_z: 47.6,
+        },
+        Bounds {
+            min_x: -81.5,
+            max_x: -78.5,
+            min_z: 31.4,
+            max_z: 51.0,
+        },
+    ] {
+        assert!(
+            cargo
+                .iter()
+                .any(|actual| bounds_are_close(*actual, expected)),
+            "Cargo is missing {expected:?}: {cargo:?}",
+        );
     }
 
     // Engineering is two brushes: the workshop proper, plus the strip over the
@@ -1309,7 +1337,7 @@ fn department_dressing_markers_fit_their_authored_rooms() {
             Vec3::new(-80.0, 0.0, 18.0),
             "0 180 0",
         ),
-        ("Cargo", "Cargo", Vec3::new(-80.0, 0.0, 35.0), "0 180 0"),
+        ("Cargo", "Cargo", Vec3::new(-70.0, 0.0, 45.0), "0 180 0"),
         (
             "Security",
             "Security",
@@ -1675,10 +1703,12 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             width: 1.25,
             depth: 0.42,
         },
+        // Both were on the north wall until the freight line took it; a wall
+        // module behind a running conveyor is a wall module nobody sees.
         Placement {
             kind: "cargo.manifest_board",
-            origin: "-2035 2800 0",
-            angles: "0 180 0",
+            origin: "-1520 2105 0",
+            angles: "0 -90 0",
             mount: Mount::Wall,
             room: CARGO,
             width: 1.35,
@@ -1686,8 +1716,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "cargo.parcel_shelf",
-            origin: "-2035 2520 0",
-            angles: "0 180 0",
+            origin: "-1760 2105 0",
+            angles: "0 -90 0",
             mount: Mount::Wall,
             room: CARGO,
             width: 1.65,
@@ -1710,6 +1740,109 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             room: CARGO,
             width: 1.25,
             depth: 0.40,
+        },
+        // The freight bay's floor fixtures, down the south wall and past the
+        // end of the belt. Every one stands in a band the map carves out of
+        // Cargo's walkable volume; the floor-fixture assertion below is what
+        // proves that, rather than these coordinates being trusted.
+        Placement {
+            kind: "cargo.storage_rack",
+            origin: "-1292 3680 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: CARGO,
+            width: 3.36,
+            depth: 1.26,
+        },
+        Placement {
+            kind: "cargo.storage_rack",
+            origin: "-1292 3540 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: CARGO,
+            width: 3.36,
+            depth: 1.26,
+        },
+        Placement {
+            kind: "cargo.storage_rack",
+            origin: "-1292 3400 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: CARGO,
+            width: 3.36,
+            depth: 1.26,
+        },
+        Placement {
+            kind: "cargo.storage_rack",
+            origin: "-1292 3060 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: CARGO,
+            width: 3.36,
+            depth: 1.26,
+        },
+        Placement {
+            kind: "cargo.crate_stack",
+            origin: "-1292 2928 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: CARGO,
+            width: 1.34,
+            depth: 1.12,
+        },
+        Placement {
+            kind: "cargo.crate_stack",
+            origin: "-1292 2840 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: CARGO,
+            width: 1.34,
+            depth: 1.12,
+        },
+        Placement {
+            kind: "cargo.pallet_row",
+            origin: "-1292 2740 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: CARGO,
+            width: 2.66,
+            depth: 1.10,
+        },
+        Placement {
+            kind: "cargo.storage_rack",
+            origin: "-1292 2500 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: CARGO,
+            width: 3.36,
+            depth: 1.26,
+        },
+        Placement {
+            kind: "cargo.storage_rack",
+            origin: "-1292 2360 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: CARGO,
+            width: 3.36,
+            depth: 1.26,
+        },
+        Placement {
+            kind: "cargo.forklift_bay",
+            origin: "-1320 2220 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: CARGO,
+            width: 2.42,
+            depth: 2.62,
+        },
+        Placement {
+            kind: "cargo.requisitions_desk",
+            origin: "-1936 2220 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: CARGO,
+            width: 2.20,
+            depth: 0.88,
         },
         Placement {
             kind: "sec.notice_board",
@@ -2111,6 +2244,26 @@ fn every_decoration_kind_has_an_exported_glb() {
             "assets/3dassets/station_starter_kit/glb/decor_cargo_weigh_station.glb",
         ),
         (
+            "cargo.storage_rack",
+            "assets/3dassets/station_starter_kit/glb/decor_cargo_storage_rack.glb",
+        ),
+        (
+            "cargo.crate_stack",
+            "assets/3dassets/station_starter_kit/glb/decor_cargo_crate_stack.glb",
+        ),
+        (
+            "cargo.pallet_row",
+            "assets/3dassets/station_starter_kit/glb/decor_cargo_pallet_row.glb",
+        ),
+        (
+            "cargo.forklift_bay",
+            "assets/3dassets/station_starter_kit/glb/decor_cargo_forklift_bay.glb",
+        ),
+        (
+            "cargo.requisitions_desk",
+            "assets/3dassets/station_starter_kit/glb/decor_cargo_requisitions_desk.glb",
+        ),
+        (
             "sec.notice_board",
             "assets/3dassets/station_starter_kit/glb/decor_sec_notice_board.glb",
         ),
@@ -2169,7 +2322,216 @@ fn every_station_kit_glb_parses_with_bevys_gltf_parser() {
             panic!("{} is not Bevy-compatible glTF: {error}", path.display())
         });
     }
-    assert_eq!(count, 48, "the station starter kit should contain 48 GLBs");
+    assert_eq!(count, 60, "the station starter kit should contain 60 GLBs");
+}
+
+/// The band both Cargo rooms carve out of their walkable volumes for the
+/// freight line, in world coordinates.
+///
+/// In the hall the carve is only the north-west alcove, `x -94..-83`; east of
+/// that the room still reaches the wall so the maintenance airlock stays
+/// reachable. Receiving carves the band across its full width.
+const FREIGHT_BAND_MIN_Z: f32 = 47.6;
+const FREIGHT_BAND_MAX_Z: f32 = 51.0;
+
+#[test]
+fn conveyor_markers_form_continuous_lines() {
+    // The map decides the layout and `freight` only knows how a belt behaves,
+    // so everything that could be wrong about the layout has to be wrong here
+    // rather than at runtime, where a mis-ordered run is a belt that teleports
+    // parcels and a missing chute is boxes riding off the end into the floor.
+    let map = parse();
+    let markers: Vec<&Entity> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("conveyor_spot"))
+        .collect();
+    assert!(!markers.is_empty(), "{MAP} authors no conveyor at all");
+
+    let mut lines: std::collections::BTreeMap<String, Vec<&Entity>> = Default::default();
+    for marker in &markers {
+        let line = property(marker, "line").unwrap_or_default();
+        assert!(!line.trim().is_empty(), "a conveyor_spot names no line");
+        lines.entry(line).or_default().push(marker);
+    }
+
+    for (line, mut pieces) in lines {
+        pieces.sort_by_key(|piece| {
+            property(piece, "index")
+                .and_then(|index| index.parse::<i32>().ok())
+                .expect("every conveyor_spot has an integer index")
+        });
+
+        let role = |piece: &Entity| property(piece, "role").unwrap_or_default();
+        let count = |what: &str| pieces.iter().filter(|piece| role(piece) == what).count();
+        assert_eq!(count("intake"), 1, "line '{line}' needs exactly one intake");
+        assert!(count("chute") >= 1, "line '{line}' has nowhere to send anything");
+        assert!(count("run") >= 1, "line '{line}' has no belt");
+        for piece in &pieces {
+            let role = role(piece);
+            assert!(
+                matches!(role.as_str(), "intake" | "run" | "sorter" | "chute"),
+                "line '{line}' has a piece with unknown role '{role}'",
+            );
+            if role == "chute" {
+                assert!(
+                    !property(piece, "label").unwrap_or_default().trim().is_empty(),
+                    "a chute on line '{line}' has no destination label",
+                );
+            }
+        }
+
+        // Runs have to meet end to end. `build_conveyor_lines` joins them into
+        // one path and only collapses ends within 5 cm of each other; a gap
+        // wider than that becomes an invisible extra segment a parcel slides
+        // along sideways through open air.
+        let mut previous_end: Option<(f32, f32)> = None;
+        for piece in pieces.iter().filter(|piece| role(piece) == "run") {
+            let (x, z) = origin_xz(piece).expect("a run with a valid origin");
+            let length: f32 = property(piece, "length")
+                .and_then(|length| length.parse().ok())
+                .expect("every run declares a length");
+            assert!(length > 0.0, "a run on line '{line}' has no length");
+            let angles = property(piece, "angles").unwrap_or_default();
+            // `+Z` local, as every other point class in the map reads it.
+            let (dx, dz) = match angles.as_str() {
+                "0 0 0" => (0.0, 1.0),
+                "0 90 0" => (1.0, 0.0),
+                "0 180 0" => (0.0, -1.0),
+                "0 -90 0" => (-1.0, 0.0),
+                other => panic!("unsupported conveyor angle {other}"),
+            };
+            if let Some((px, pz)) = previous_end {
+                let gap = ((x - px).powi(2) + (z - pz).powi(2)).sqrt();
+                assert!(
+                    gap <= 0.05,
+                    "line '{line}' has a {gap} m gap between runs at ({px}, {pz}) and ({x}, {z})",
+                );
+            }
+            previous_end = Some((x + dx * length, z + dz * length));
+        }
+
+        // Every diverter has to sit downstream of the scanner, or parcels are
+        // sorted after they have already been sent somewhere.
+        if let Some(sorter) = pieces.iter().find(|piece| role(piece) == "sorter") {
+            let (sorter_x, _) = origin_xz(sorter).expect("a sorter with a valid origin");
+            for chute in pieces.iter().filter(|piece| role(piece) == "chute") {
+                let (chute_x, _) = origin_xz(chute).expect("a chute with a valid origin");
+                assert!(
+                    chute_x > sorter_x,
+                    "a chute on line '{line}' at x {chute_x} sits upstream of the sorter \
+                     at x {sorter_x}",
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_conveyor_crossing_walkable_floor_clears_head_height() {
+    // Cargo's belt runs the length of the north wall, and the one strip of
+    // floor that has to run wall to wall crosses it. The belt goes *over* that
+    // lane rather than stopping short of it, which is only acceptable while it
+    // is genuinely overhead: let the deck sag toward walking height and the
+    // hall's only route between its two airlocks becomes something you walk
+    // face-first into. Nothing else notices -- the props carry no collider, so
+    // the game would happily draw a conveyor through somebody's head.
+    const CLEARANCE: f32 = 2.2;
+
+    let map = parse();
+    let walkable: Vec<Bounds> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
+        .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
+        .collect();
+
+    let mut runs: Vec<&Entity> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("conveyor_spot"))
+        .filter(|entity| property(entity, "role").as_deref() == Some("run"))
+        .collect();
+    runs.sort_by_key(|run| {
+        property(run, "index")
+            .and_then(|index| index.parse::<i32>().ok())
+            .expect("every run has an index")
+    });
+
+    // The same chaining `freight::Line::assemble` does: a run starts at
+    // whatever height the one before it finished at.
+    let mut deck = 0.95;
+    for run in runs {
+        let (x, z) = origin_xz(run).expect("a run with a valid origin");
+        let length: f32 = property(run, "length")
+            .and_then(|value| value.parse().ok())
+            .expect("every run declares a length");
+        let rise: f32 = property(run, "rise")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.0);
+        let (dx, dz) = match property(run, "angles").unwrap_or_default().as_str() {
+            "0 0 0" => (0.0, 1.0),
+            "0 90 0" => (1.0, 0.0),
+            "0 180 0" => (0.0, -1.0),
+            "0 -90 0" => (-1.0, 0.0),
+            other => panic!("unsupported conveyor angle {other}"),
+        };
+
+        for step in 0..=40 {
+            let along = step as f32 / 40.0;
+            let point = Vec3::new(x + dx * length * along, 0.0, z + dz * length * along);
+            let height = deck + rise * along;
+            if height >= CLEARANCE {
+                continue;
+            }
+            if let Some(area) = walkable.iter().find(|area| area.holds(point)) {
+                panic!(
+                    "a conveyor run passes over walkable floor {area:?} at ({}, {}) \
+                     only {height} m up; either lift it clear or carve the floor",
+                    point.x, point.z,
+                );
+            }
+        }
+        deck += rise;
+    }
+
+    assert!(
+        (deck - 0.95).abs() < 0.001,
+        "the line finishes {deck} m up: every metre climbed has to be given back, \
+         or the belt ends in mid-air",
+    );
+}
+
+#[test]
+fn no_conveyor_marker_stands_in_walkable_floor() {
+    // The same invariant floor-standing decorations already assert, and for
+    // the same reason: nothing here carries a collider, crew path from
+    // `func_walkable` alone, and `contain_on_surface` confines the player to it
+    // too. Carving the band is the *only* thing that stops a body walking
+    // through a running belt, so un-carving it has to fail here rather than in
+    // a playtest.
+    let map = parse();
+    let walkable: Vec<Bounds> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
+        .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
+        .collect();
+
+    for marker in map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("conveyor_spot"))
+    {
+        let (x, z) = origin_xz(marker).expect("a conveyor_spot with a valid origin");
+        let role = property(marker, "role").unwrap_or_default();
+        assert!(
+            (FREIGHT_BAND_MIN_Z..=FREIGHT_BAND_MAX_Z).contains(&z),
+            "conveyor_spot '{role}' at ({x}, {z}) is outside the carved freight band",
+        );
+        let point = Vec3::new(x, 0.0, z);
+        if let Some(area) = walkable.iter().find(|area| area.holds(point)) {
+            panic!(
+                "conveyor_spot '{role}' at ({x}, {z}) stands in walkable floor {area:?}; \
+                 carve the band back or bodies will walk through the belt",
+            );
+        }
+    }
 }
 
 #[test]
@@ -2427,6 +2789,7 @@ fn every_entity_in_the_map_is_a_class_the_game_registers() {
         "department_spot",
         "department_dressing",
         "decoration_spot",
+        "conveyor_spot",
         "wayfinding_hub",
         "wayfinding_sign",
         "escape_pod",
@@ -2482,6 +2845,29 @@ fn every_airlock_has_unique_semantic_ids_and_a_matching_nav_bridge() {
         count >= 8,
         "the station needs authored department/crossover airlocks"
     );
+}
+
+#[test]
+fn every_airlock_id_names_a_department_the_door_sprites_cover() {
+    // `door::DoorSkin` reads the department straight out of the id rather than
+    // keeping a second registry beside the map, so a misspelled or brand-new
+    // department does not fail loudly -- it quietly paints the door neutral.
+    // This is what makes that visible.
+    let map = parse();
+    for door in map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("door_spot"))
+    {
+        let id = property(door, "id").unwrap_or_default();
+        let neutral_by_name = id.split('.').nth(2) == Some("maintenance");
+        assert!(
+            crate::door::DoorSkin::from_spot_id(&id) != crate::door::DoorSkin::Maintenance
+                || neutral_by_name,
+            "door_spot `{id}` falls back to the neutral maintenance skin: either its \
+             department is misspelled, or `door::DoorSkin` needs a variant for it and \
+             `tools/gen_door_sprites.py` a color",
+        );
+    }
 }
 
 #[test]
