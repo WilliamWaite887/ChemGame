@@ -573,10 +573,13 @@ fn selective_subrooms_are_inside_their_parent_departments() {
             },
         ),
         (
+            // Shrunk to x -66..-54.5: the strip against the east wall, x
+            // -54.5..-52.5, is now the gas canister racks and filtration
+            // scrubber's floor rather than walkable.
             "Atmos/Utility",
             Bounds {
                 min_x: -66.0,
-                max_x: -52.5,
+                max_x: -54.5,
                 min_z: 15.0,
                 max_z: 28.6,
             },
@@ -714,19 +717,30 @@ fn station_v2_keeps_its_department_and_route_footprints() {
         );
     }
 
-    // Engineering is two brushes: the workshop proper, plus the strip over the
-    // roofed maintenance arm that is now its southern floor. The strip stops at
-    // Atmos/Utility's west wall -- the band behind Atmos is filled solid, so
-    // there is nothing to stand on between there and the Public Loop leg.
+    // Engineering is three brushes: the west sliver's walkable floor (0a,
+    // shrunk to z 15..23 -- the decoration pass's two floor-fixture rows,
+    // z 23..28.6, take the rest of that column, the only one with a real wall
+    // behind it), the rest of the room east of it (0b, full depth, untouched
+    // -- that's a through-route to the arm, not a wall recess, so nothing was
+    // carved from it), and the strip over the roofed maintenance arm that is
+    // the room's southern floor. The arm stops at Atmos/Utility's west wall --
+    // the band behind Atmos is filled solid, so there is nothing to stand on
+    // between there and the Public Loop leg.
     let engineering = named_bounds("Engineering");
     assert_eq!(
         engineering.len(),
-        2,
-        "Engineering should be the workshop plus the band strip west of Atmos"
+        3,
+        "Engineering should be the west sliver, the rest of the room, and the band strip west of Atmos"
     );
     for expected in [
         Bounds {
             min_x: -109.5,
+            max_x: -101.0,
+            min_z: 15.0,
+            max_z: 23.0,
+        },
+        Bounds {
+            min_x: -102.0,
             max_x: -66.0,
             min_z: 15.0,
             max_z: 28.6,
@@ -1495,11 +1509,32 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         max_z: -3.0,
     };
 
-    // The other four departments take wall modules only, so their walkable
-    // rectangle and their floor are the same thing.
+    // Security and Service take wall modules only, so their walkable
+    // rectangle and their floor are the same thing. Engineering's own floor
+    // fixtures sit in the west sliver, a corner its walkable volume no
+    // longer covers (world x -109.5..-102, z 23..28.6), so this is the
+    // room's full floor — matching how `MEDICAL_FLOOR` differs from
+    // `MEDICAL_WALKABLE` above.
     const ENGINEERING: Bounds = Bounds {
         min_x: -109.5,
         max_x: -66.0,
+        min_z: 15.0,
+        max_z: 28.6,
+    };
+    // The underfloor arm, Engineering's southern floor over what used to be
+    // an open trench. The high-voltage sign mounts on its north wall, shared
+    // with Cargo's cross lane.
+    const ENGINEERING_ARM: Bounds = Bounds {
+        min_x: -102.0,
+        max_x: -66.0,
+        min_z: 27.6,
+        max_z: 31.4,
+    };
+    // Shares Engineering's "ENGINEERING / ATMOS" signage and decoration
+    // materials, but is its own room rectangle.
+    const ATMOS_UTILITY: Bounds = Bounds {
+        min_x: -66.0,
+        max_x: -52.5,
         min_z: 15.0,
         max_z: 28.6,
     };
@@ -1702,6 +1737,112 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             room: ENGINEERING,
             width: 1.25,
             depth: 0.42,
+        },
+        // Floor fixtures in the north band brush 0's carve opened up. Big
+        // machinery (SMES bank, generator) sits west of the cross lane, where
+        // the arm's own floor does not reach; tools and suits sit east of it.
+        Placement {
+            kind: "eng.smes_bank",
+            origin: "-1116 4160 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: ENGINEERING,
+            width: 2.20,
+            depth: 1.00,
+        },
+        Placement {
+            kind: "eng.generator_turbine",
+            origin: "-1096 4292 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: ENGINEERING,
+            width: 2.60,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "eng.hardsuit_locker",
+            origin: "-948 4324 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: ENGINEERING,
+            width: 1.80,
+            depth: 0.85,
+        },
+        Placement {
+            kind: "eng.parts_workbench",
+            origin: "-948 4220 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: ENGINEERING,
+            width: 1.90,
+            depth: 0.95,
+        },
+        Placement {
+            kind: "eng.cable_spool_rack",
+            origin: "-948 4120 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: ENGINEERING,
+            width: 1.50,
+            depth: 0.90,
+        },
+        Placement {
+            kind: "eng.power_monitor_console",
+            origin: "-1139 3360 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: ENGINEERING,
+            width: 1.60,
+            depth: 0.32,
+        },
+        Placement {
+            kind: "eng.solar_readout",
+            origin: "-605 4000 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: ENGINEERING,
+            width: 1.10,
+            depth: 0.20,
+        },
+        // On the arm's north wall, shared with Cargo's cross lane, a few
+        // metres from the technical airlock both sides now dress around.
+        Placement {
+            kind: "eng.hv_warning_sign",
+            origin: "-1251 3600 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: ENGINEERING_ARM,
+            width: 0.70,
+            depth: 0.16,
+        },
+        // Atmos/Utility's floor fixtures, in the strip its own walkable
+        // brush shrink opened up against the room's east wall.
+        Placement {
+            kind: "eng.gas_canister_rack",
+            origin: "-760 2140 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: ATMOS_UTILITY,
+            width: 1.60,
+            depth: 0.80,
+        },
+        Placement {
+            kind: "eng.filtration_scrubber",
+            origin: "-880 2140 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: ATMOS_UTILITY,
+            width: 1.20,
+            depth: 1.20,
+        },
+        Placement {
+            kind: "eng.gas_canister_rack",
+            origin: "-1000 2140 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: ATMOS_UTILITY,
+            width: 1.60,
+            depth: 0.80,
         },
         // Both were on the north wall until the freight line took it; a wall
         // module behind a running conveyor is a wall module nobody sees.
@@ -2228,6 +2369,46 @@ fn every_decoration_kind_has_an_exported_glb() {
             "assets/3dassets/station_starter_kit/glb/decor_eng_safety_station.glb",
         ),
         (
+            "eng.smes_bank",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_smes_bank.glb",
+        ),
+        (
+            "eng.generator_turbine",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_generator_turbine.glb",
+        ),
+        (
+            "eng.hardsuit_locker",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_hardsuit_locker.glb",
+        ),
+        (
+            "eng.parts_workbench",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_parts_workbench.glb",
+        ),
+        (
+            "eng.cable_spool_rack",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_cable_spool_rack.glb",
+        ),
+        (
+            "eng.gas_canister_rack",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_gas_canister_rack.glb",
+        ),
+        (
+            "eng.filtration_scrubber",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_filtration_scrubber.glb",
+        ),
+        (
+            "eng.power_monitor_console",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_power_monitor_console.glb",
+        ),
+        (
+            "eng.hv_warning_sign",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_hv_warning_sign.glb",
+        ),
+        (
+            "eng.solar_readout",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_solar_readout.glb",
+        ),
+        (
             "cargo.manifest_board",
             "assets/3dassets/station_starter_kit/glb/decor_cargo_manifest_board.glb",
         ),
@@ -2322,7 +2503,7 @@ fn every_station_kit_glb_parses_with_bevys_gltf_parser() {
             panic!("{} is not Bevy-compatible glTF: {error}", path.display())
         });
     }
-    assert_eq!(count, 60, "the station starter kit should contain 60 GLBs");
+    assert_eq!(count, 70, "the station starter kit should contain 70 GLBs");
 }
 
 /// The band both Cargo rooms carve out of their walkable volumes for the

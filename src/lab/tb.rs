@@ -1320,6 +1320,46 @@ const DECORATION_KINDS: &[(&str, &str)] = &[
         "3dassets/station_starter_kit/glb/decor_eng_safety_station.glb",
     ),
     (
+        "eng.smes_bank",
+        "3dassets/station_starter_kit/glb/decor_eng_smes_bank.glb",
+    ),
+    (
+        "eng.generator_turbine",
+        "3dassets/station_starter_kit/glb/decor_eng_generator_turbine.glb",
+    ),
+    (
+        "eng.hardsuit_locker",
+        "3dassets/station_starter_kit/glb/decor_eng_hardsuit_locker.glb",
+    ),
+    (
+        "eng.parts_workbench",
+        "3dassets/station_starter_kit/glb/decor_eng_parts_workbench.glb",
+    ),
+    (
+        "eng.cable_spool_rack",
+        "3dassets/station_starter_kit/glb/decor_eng_cable_spool_rack.glb",
+    ),
+    (
+        "eng.gas_canister_rack",
+        "3dassets/station_starter_kit/glb/decor_eng_gas_canister_rack.glb",
+    ),
+    (
+        "eng.filtration_scrubber",
+        "3dassets/station_starter_kit/glb/decor_eng_filtration_scrubber.glb",
+    ),
+    (
+        "eng.power_monitor_console",
+        "3dassets/station_starter_kit/glb/decor_eng_power_monitor_console.glb",
+    ),
+    (
+        "eng.hv_warning_sign",
+        "3dassets/station_starter_kit/glb/decor_eng_hv_warning_sign.glb",
+    ),
+    (
+        "eng.solar_readout",
+        "3dassets/station_starter_kit/glb/decor_eng_solar_readout.glb",
+    ),
+    (
         "cargo.manifest_board",
         "3dassets/station_starter_kit/glb/decor_cargo_manifest_board.glb",
     ),
@@ -1414,25 +1454,71 @@ fn load_decoration_assets(mut commands: Commands, assets: Res<AssetServer>) {
     });
 }
 
+/// Floor decorations dense/inviting enough that a player walks straight into
+/// them, given [`WorldAssetRoot`] scenery is otherwise collision-free.
+///
+/// Every other `fixture` in the kit (Cargo's storage racks, its forklift, its
+/// requisitions desk) shares that same lack of a collider deliberately — it's
+/// the established convention for scenery, matched all the way back to
+/// `crew` ignoring `Solid` entirely for pathing. It went unnoticed there
+/// because those pieces sit backed into a carved band along a wall, with
+/// nothing drawing a player to walk past their front face. Engineering's new
+/// west-sliver cluster is the first free-standing, walk-up-to-able floor
+/// furniture in the game, and standing inside a thin-walled, single-sided box
+/// mesh reads as disconnected floating panels with nothing rendered behind
+/// them. These seven get a real [`Solid`] as a scoped fix — not a project-wide
+/// change to how decorations collide.
+///
+/// `(half_width, height, half_depth)` in the decoration's own local frame,
+/// `y` unrotated (yaw only ever turns the room's horizontal axes into each
+/// other) and matching each kind's nominal envelope in
+/// `station_starter_kit_manifest.json` — except the workbench and spool rack,
+/// bumped from their real 1.35 m to clear [`SET_DOWN_REACH`] (1.4 m): a
+/// [`Solid`] whose top falls at or below that line becomes a valid surface
+/// for [`resting_place`], and neither of these should catch a set-down
+/// beaker just because a collider happened to end near that height.
+const FLOOR_COLLIDER_ENVELOPES: &[(&str, Vec3)] = &[
+    ("eng.smes_bank", Vec3::new(1.10, 2.10, 0.50)),
+    ("eng.generator_turbine", Vec3::new(1.30, 2.30, 1.00)),
+    ("eng.hardsuit_locker", Vec3::new(0.90, 2.10, 0.425)),
+    ("eng.parts_workbench", Vec3::new(0.95, 1.45, 0.475)),
+    ("eng.cable_spool_rack", Vec3::new(0.75, 1.45, 0.45)),
+    ("eng.gas_canister_rack", Vec3::new(0.80, 1.50, 0.40)),
+    ("eng.filtration_scrubber", Vec3::new(0.60, 2.15, 0.60)),
+];
+
+fn floor_collider_envelope(kind: &str) -> Option<Vec3> {
+    FLOOR_COLLIDER_ENVELOPES
+        .iter()
+        .find(|(candidate, _)| *candidate == kind)
+        .map(|(_, envelope)| *envelope)
+}
+
 fn dress_decorations(
     mut commands: Commands,
     assets: Option<Res<DecorationAssets>>,
-    markers: Query<(Entity, &DecorationSpot), Without<DecorationDressed>>,
+    markers: Query<(Entity, &DecorationSpot, &Transform), Without<DecorationDressed>>,
 ) {
     let Some(assets) = assets else {
         return;
     };
 
-    for (entity, marker) in &markers {
+    for (entity, marker, transform) in &markers {
         let kind = marker.kind.trim();
         let Some(scene) = assets.scene(kind) else {
             warn!("decoration_spot has unknown kind '{kind}'");
             commands.entity(entity).insert(DecorationDressed);
             continue;
         };
-        commands
-            .entity(entity)
-            .insert((WorldAssetRoot(scene.clone()), DecorationDressed));
+        let mut spawn = commands.entity(entity);
+        spawn.insert((WorldAssetRoot(scene.clone()), DecorationDressed));
+        if let Some(local) = floor_collider_envelope(kind) {
+            // Only X/Z rotate with the marker's yaw; height never does.
+            let footprint = transform.rotation * Vec3::new(local.x, 0.0, local.z);
+            spawn.insert(Solid {
+                half_extents: Vec3::new(footprint.x.abs(), local.y, footprint.z.abs()),
+            });
+        }
     }
 }
 
