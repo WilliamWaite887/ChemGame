@@ -2848,25 +2848,47 @@
 {
 "classname" "func_walkable"
 "room" "Bridge"
-// brush 0
-// x_max extended from 120 to 136 (bevy z -3 -> -3.4): overlaps Bridge
-// Operations' own extended edge by 0.8 m at the seam where the dividing
-// wall and door used to be, so the two differently-named rooms connect
-// smoothly instead of touching at a zero-width line (the same clearance
-// no_room_is_split_by_an_invisible_seam requires for same-named rooms,
-// just applied by hand since that test only checks same-room adjacency).
-// y 1820->1770 (world x -44.25) and y 3180->3210 (world x -80.25): both end
-// pockets tightened snug around their occupants (duty station bank to the
-// east, holomap/captain's chair to the west) instead of a loose buffer, so
-// a player's walkable area reaches close to each fixture's own Solid
-// collider rather than stopping well short of it.
+// Four rectangles, not one. The mission-control pass fills the room
+// with furniture rows, and a floor fixture has to stand in ground
+// carved *out* of the walkable volume or crew path straight through
+// it. What is left walkable is three transverse concourses plus the
+// central aisle, which every band crosses -- that crossing is the
+// only thing joining them, so the aisle keeps its full 5 m width.
+// brush 0: the entry apron, just inside the public door.
 {
-( -400 1770 0 ) ( -400 3210 0 ) ( -400 1770 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -400 1770 0 ) ( -400 1770 20 ) ( 136 1770 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -400 1770 0 ) ( 136 1770 0 ) ( -400 3210 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -400 1770 20 ) ( -400 3210 20 ) ( 136 1770 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -400 3210 0 ) ( 136 3210 0 ) ( -400 3210 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 136 1770 0 ) ( 136 1770 20 ) ( 136 3210 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -400 1660 0 ) ( -400 3340 0 ) ( -400 1660 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -400 1660 0 ) ( -400 1660 20 ) ( -328 1660 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -400 1660 0 ) ( -328 1660 0 ) ( -400 3340 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -400 1660 20 ) ( -400 3340 20 ) ( -328 1660 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -400 3340 0 ) ( -328 3340 0 ) ( -400 3340 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -328 1660 0 ) ( -328 1660 20 ) ( -328 3340 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 1: the second transverse concourse.
+{
+( -244 1660 0 ) ( -244 3340 0 ) ( -244 1660 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -244 1660 0 ) ( -244 1660 20 ) ( -156 1660 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -244 1660 0 ) ( -156 1660 0 ) ( -244 3340 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -244 1660 20 ) ( -244 3340 20 ) ( -156 1660 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -244 3340 0 ) ( -156 3340 0 ) ( -244 3340 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -156 1660 0 ) ( -156 1660 20 ) ( -156 3340 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 2: the third transverse concourse.
+{
+( -32 1660 0 ) ( -32 3340 0 ) ( -32 1660 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -32 1660 0 ) ( -32 1660 20 ) ( 56 1660 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -32 1660 0 ) ( 56 1660 0 ) ( -32 3340 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -32 1660 20 ) ( -32 3340 20 ) ( 56 1660 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -32 3340 0 ) ( 56 3340 0 ) ( -32 3340 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 56 1660 0 ) ( 56 1660 20 ) ( 56 3340 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 3: the central aisle, public door to the seam. Every band
+{
+( -400 2292 0 ) ( -400 2492 0 ) ( -400 2292 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -400 2292 0 ) ( -400 2292 20 ) ( 132 2292 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -400 2292 0 ) ( 132 2292 0 ) ( -400 2492 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -400 2292 20 ) ( -400 2492 20 ) ( 132 2292 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -400 2492 0 ) ( 132 2492 0 ) ( -400 2492 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 132 2292 0 ) ( 132 2292 20 ) ( 132 2492 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 }
 // entity 51
@@ -3325,26 +3347,37 @@
 {
 "classname" "func_walkable"
 "room" "Bridge Operations"
-// brush 0
-// x_min extended from 120 to 104 (bevy z -3 -> -2.6): overlaps the main
-// hall's own extended edge by 0.8 m at the seam where the dividing wall
-// and door used to be, so the two rooms connect smoothly.
-// y 3340->3256 (world x -83.5 -> -81.4) and y 1660->1776 (world x -41.5
-// -> -44.4): two end pockets, mirroring the main hall's, sized snug
-// around the briefing table/pillar (west) and the second duty station
-// bank (east) so a player's walkable area reaches close to each fixture.
-// Both pockets are 0.2 m deeper than the fixtures alone need: the rooms
-// on the far side of Bridge Operations' east and west walls both bring
-// their own walkable floor right up to that same wall line, so every
-// fixture here is backed 0.2 m off it instead of sitting flush, clearing
-// their neighbor's floor bounds instead of touching them exactly.
+// The southern half of the same band-and-aisle skeleton: the fourth
+// concourse plus the aisle's southern leg. The two aisle halves
+// overlap by 1.5 m across the seam where the dividing wall used to
+// stand, which is what keeps the two differently-named rooms one
+// connected space for NavGraph.
+// brush 0: the fourth transverse concourse.
 {
-( 104 1776 0 ) ( 104 3256 0 ) ( 104 1776 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 104 1776 0 ) ( 104 1776 20 ) ( 360 1776 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 104 1776 0 ) ( 360 1776 0 ) ( 104 3256 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( 104 1776 20 ) ( 104 3256 20 ) ( 360 1776 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( 104 3256 0 ) ( 360 3256 0 ) ( 104 3256 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( 360 1776 0 ) ( 360 1776 20 ) ( 360 3256 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 140 1660 0 ) ( 140 3340 0 ) ( 140 1660 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 140 1660 0 ) ( 140 1660 20 ) ( 228 1660 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 140 1660 0 ) ( 228 1660 0 ) ( 140 3340 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 140 1660 20 ) ( 140 3340 20 ) ( 228 1660 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 140 3340 0 ) ( 228 3340 0 ) ( 140 3340 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 228 1660 0 ) ( 228 1660 20 ) ( 228 3340 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 1: the strip in front of the south viewscreen wall. Narrow, but
+{
+( 312 1660 0 ) ( 312 3340 0 ) ( 312 1660 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 312 1660 0 ) ( 312 1660 20 ) ( 360 1660 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 312 1660 0 ) ( 360 1660 0 ) ( 312 3340 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 312 1660 20 ) ( 312 3340 20 ) ( 360 1660 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 312 3340 0 ) ( 360 3340 0 ) ( 312 3340 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 360 1660 0 ) ( 360 1660 20 ) ( 360 3340 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// it is what makes the screens something a player can stand and read
+{
+( 80 2292 0 ) ( 80 2492 0 ) ( 80 2292 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 80 2292 0 ) ( 80 2292 20 ) ( 360 2292 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 80 2292 0 ) ( 360 2292 0 ) ( 80 2492 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 80 2292 20 ) ( 80 2492 20 ) ( 360 2292 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( 80 2492 0 ) ( 360 2492 0 ) ( 80 2492 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( 360 2292 0 ) ( 360 2292 20 ) ( 360 2492 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 }
 // entity 74
@@ -3999,89 +4032,221 @@
 "shadows_enabled" "false"
 }
 // entity 137
+// Bridge lighting, re-laid onto the new concourses: one row of four
+// per band so the light follows where a body can actually walk.
 {
 "classname" "light_point"
-"origin" "-40 3000 114"
+"origin" "-364 3120 114.00000762939453"
 "color" "0.72 0.86 1"
-"intensity" "360000"
-"range" "14"
+"intensity" "300000"
+"range" "13"
 "shadows_enabled" "false"
 }
-// entity 138
 {
 "classname" "light_point"
-"origin" "-40 2000 114"
+"origin" "-364 2720 114.00000762939453"
 "color" "0.72 0.86 1"
-"intensity" "360000"
-"range" "14"
+"intensity" "300000"
+"range" "13"
 "shadows_enabled" "false"
 }
-// entity 139
 {
 "classname" "light_point"
-"origin" "-140 3260 114"
+"origin" "-364 2080 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-364 1800 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-200 3120 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-200 2720 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-200 2080 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-200 1800 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "12 3120 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "12 2720 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "12 2080 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "12 1800 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "184 3120 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "184 2720 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "184 2080 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "184 1800 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "336 3120 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "336 2720 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "336 2080 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "336 1800 114.00000762939453"
+"color" "0.72 0.86 1"
+"intensity" "300000"
+"range" "13"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-260 2400 114.00000762939453"
+"color" "0.7 0.82 1"
+"intensity" "260000"
+"range" "12"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "120 2400 114.00000762939453"
+"color" "0.7 0.82 1"
+"intensity" "260000"
+"range" "12"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "280 2400 114.00000762939453"
+"color" "0.7 0.82 1"
+"intensity" "260000"
+"range" "12"
+"shadows_enabled" "false"
+}
+// Lavender accent over the command dais.
+{
+"classname" "light_point"
+"origin" "-78 2920 114.00000762939453"
 "color" "0.67 0.58 0.86"
 "intensity" "180000"
 "range" "10"
 "shadows_enabled" "false"
 }
-// A second lavender accent over the east pocket's duty station bank,
-// echoing the holomap's.
+// Lavender accent over the holomap island.
 {
 "classname" "light_point"
-"origin" "-140 1716 114"
+"origin" "-78 3128 114.00000762939453"
 "color" "0.67 0.58 0.86"
-"intensity" "160000"
+"intensity" "180000"
 "range" "10"
 "shadows_enabled" "false"
 }
+// entity 138
+// entity 139
+// A second lavender accent over the east pocket's duty station bank,
+// echoing the holomap's.
 // A third lavender accent over the Operations annex's own duty station
 // bank, in its east pocket directly across the open seam from the one
 // above.
-{
-"classname" "light_point"
-"origin" "240 1718 114"
-"color" "0.67 0.58 0.86"
-"intensity" "160000"
-"range" "10"
-"shadows_enabled" "false"
-}
 // entity 140
-{
-"classname" "light_point"
-"origin" "-280 2880 114"
-"color" "0.72 0.86 1"
-"intensity" "300000"
-"range" "13"
-"shadows_enabled" "false"
-}
 // entity 141
-{
-"classname" "light_point"
-"origin" "-160 1800 114"
-"color" "0.72 0.86 1"
-"intensity" "300000"
-"range" "13"
-"shadows_enabled" "false"
-}
 // entity 142
-{
-"classname" "light_point"
-"origin" "40 2600 114"
-"color" "0.72 0.86 1"
-"intensity" "300000"
-"range" "13"
-"shadows_enabled" "false"
-}
 // entity 143
-{
-"classname" "light_point"
-"origin" "-320 2000 114"
-"color" "0.72 0.86 1"
-"intensity" "300000"
-"range" "13"
-"shadows_enabled" "false"
-}
 // entity 144
 {
 "classname" "light_point"
@@ -4592,41 +4757,9 @@
 "shadows_enabled" "false"
 }
 // entity 194
-{
-"classname" "light_point"
-"origin" "240 2400 114"
-"color" "0.7 0.82 1"
-"intensity" "260000"
-"range" "12"
-"shadows_enabled" "false"
-}
 // entity 195
-{
-"classname" "light_point"
-"origin" "240 3120 114"
-"color" "0.7 0.82 1"
-"intensity" "260000"
-"range" "12"
-"shadows_enabled" "false"
-}
 // entity 196
-{
-"classname" "light_point"
-"origin" "240 2640 114"
-"color" "0.7 0.82 1"
-"intensity" "260000"
-"range" "12"
-"shadows_enabled" "false"
-}
 // entity 197
-{
-"classname" "light_point"
-"origin" "240 1920 114"
-"color" "0.7 0.82 1"
-"intensity" "260000"
-"range" "12"
-"shadows_enabled" "false"
-}
 // entity 198
 {
 "classname" "light_point"
@@ -5298,68 +5431,398 @@
 "angles" "0 -90 0"
 }
 // entity 275
+// ------------------------------------------------------------------
+// Bridge, dressed as mission control: ranks of console arcs facing a
+// viewscreen wall, a command dais centred in the west wing, and back
+// of house along the maintenance wall. Rows sit in the gaps between
+// the walkable concourses, filled end to end -- a gap left inside a
+// row is floor the carve makes unreachable for no visible reason.
+// ------------------------------------------------------------------
+// Row 1 -- the front rank, hard up against the viewscreen wall.
 {
 "classname" "decoration_spot"
-"origin" "-140 3260 0"
+"origin" "-286 3214 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-286 2974 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-286 2734 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-286 2554 0"
+"kind" "bridge.tactical_rail"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-286 2170 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-286 1930 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-286 1750 0"
+"kind" "bridge.tactical_rail"
+"angles" "0 180 0"
+}
+// Row 2 -- the command row: the dais centred in the west wing, ops desks east.
+{
+"classname" "decoration_spot"
+"origin" "-94 3290 0"
 "kind" "bridge.holomap_island"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-94 3186 0"
+"kind" "bridge.tactical_rail"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-94 3082 0"
+"kind" "bridge.briefing_table"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-94 2920 0"
+"kind" "bridge.command_dais"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-94 2808 0"
+"kind" "bridge.captains_chair"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-94 2784 0"
+"kind" "bridge.astrogation_pillar"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-94 2652 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-94 2520 0"
+"kind" "bridge.astrogation_pillar"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-94 2170 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-94 2006 0"
+"kind" "bridge.briefing_table"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-94 1842 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+// Row 3 -- the second rank.
+{
+"classname" "decoration_spot"
+"origin" "98 3274 0"
+"kind" "bridge.tactical_rail"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "98 3094 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "98 2854 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "98 2614 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "98 1788 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "98 2028 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "98 2208 0"
+"kind" "bridge.tactical_rail"
+"angles" "0 180 0"
+}
+// Row 4 -- back of house, along the maintenance wall.
+{
+"classname" "decoration_spot"
+"origin" "270 3274 0"
+"kind" "bridge.tactical_rail"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "270 3094 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "270 2930 0"
+"kind" "bridge.briefing_table"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "270 2766 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "270 2586 0"
+"kind" "bridge.tactical_rail"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "270 2170 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "270 1930 0"
+"kind" "bridge.console_arc"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "270 1766 0"
+"kind" "bridge.briefing_table"
+"angles" "0 180 0"
+}
+// Wall modules.
+{
+"classname" "decoration_spot"
+"origin" "360 3260 0"
+"kind" "bridge.viewscreen"
 "angles" "0 0 0"
 }
-// entity 276
 {
 "classname" "decoration_spot"
-"origin" "-400 2880 0"
+"origin" "360 3140 0"
+"kind" "bridge.viewscreen"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "360 3020 0"
+"kind" "bridge.viewscreen"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "360 2900 0"
+"kind" "bridge.viewscreen"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "360 2780 0"
+"kind" "bridge.viewscreen"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "360 2660 0"
+"kind" "bridge.viewscreen"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "360 2540 0"
+"kind" "bridge.viewscreen"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "360 2260 0"
+"kind" "bridge.viewscreen"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "360 2140 0"
+"kind" "bridge.viewscreen"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "360 2020 0"
+"kind" "bridge.viewscreen"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "360 1900 0"
+"kind" "bridge.viewscreen"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "360 1780 0"
+"kind" "bridge.viewscreen"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "360 3320 0"
+"kind" "bridge.alert_panel"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "360 1680 0"
+"kind" "bridge.alert_panel"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-400 3200 0"
 "kind" "bridge.nav_desk"
 "angles" "0 180 0"
 }
-// entity 277
 {
 "classname" "decoration_spot"
-"origin" "-400 1880 0"
+"origin" "-400 3040 0"
+"kind" "bridge.comms_console"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-400 2880 0"
+"kind" "bridge.crew_roster_board"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-400 2720 0"
 "kind" "bridge.alert_panel"
 "angles" "0 180 0"
 }
+{
+"classname" "decoration_spot"
+"origin" "-400 2580 0"
+"kind" "bridge.nav_desk"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-400 2300 0"
+"kind" "bridge.alert_panel"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-400 2040 0"
+"kind" "bridge.crew_roster_board"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-400 1740 0"
+"kind" "bridge.alert_panel"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-364 3340 0"
+"kind" "bridge.alert_panel"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-200 3340 0"
+"kind" "bridge.comms_console"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "12 3340 0"
+"kind" "bridge.crew_roster_board"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-364 1660 0"
+"kind" "bridge.alert_panel"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-200 1660 0"
+"kind" "bridge.crew_roster_board"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "12 1660 0"
+"kind" "bridge.comms_console"
+"angles" "0 -90 0"
+}
+// entity 276
+// entity 277
 // entity 278
 // Moved off the removed dividing wall onto the main hall's real
 // public-door wall, close to the holomap it now flanks.
-{
-"classname" "decoration_spot"
-"origin" "-400 3160 0"
-"kind" "bridge.viewscreen"
-"angles" "0 180 0"
-}
 // entity 279
-{
-"classname" "decoration_spot"
-"origin" "360 3000 0"
-"kind" "bridge.comms_console"
-"angles" "0 0 0"
-}
 // entity 280
 // Moved off the removed dividing wall onto the annex's real
 // maintenance-door wall, close to the duty station bank it now flanks.
-{
-"classname" "decoration_spot"
-"origin" "360 1880 0"
-"kind" "bridge.crew_roster_board"
-"angles" "0 0 0"
-}
 // Bridge floor plan, per the user's own sketch: the holomap and captain's
 // chair anchor the west end, the duty station bank anchors the east end,
 // the middle stays open. Both pockets are single-edge shrinks of the main
 // hall's walkable brush, sized snug around their occupants so a player can
 // walk right up to them.
-{
-"classname" "decoration_spot"
-"origin" "-320 3260 0"
-"kind" "bridge.captains_chair"
-"angles" "0 -90 0"
-}
-{
-"classname" "decoration_spot"
-"origin" "-140 1716 0"
-"kind" "bridge.duty_station_bank"
-"angles" "0 90 0"
-}
 // Operations annex, filled out to use its own 42x6m floor: a briefing
 // table + astrogation/sensor pillar backed into the west end wall (near
 // the comms console), a second duty station bank backed into the east end
@@ -5368,24 +5831,6 @@
 // Both are single-edge shrinks of this room's walkable brush along X,
 // the same end-pocket pattern as the main hall's, sized snug to their
 // occupants.
-{
-"classname" "decoration_spot"
-"origin" "168 3298 0"
-"kind" "bridge.briefing_table"
-"angles" "0 -90 0"
-}
-{
-"classname" "decoration_spot"
-"origin" "300 3320 0"
-"kind" "bridge.astrogation_pillar"
-"angles" "0 0 0"
-}
-{
-"classname" "decoration_spot"
-"origin" "240 1718 0"
-"kind" "bridge.duty_station_bank"
-"angles" "0 90 0"
-}
 // entity 281
 {
 "classname" "decoration_spot"

@@ -544,21 +544,6 @@ fn selective_subrooms_are_inside_their_parent_departments() {
             },
         ),
         (
-            // Its own end pockets now: the briefing table/pillar to the
-            // west (near the comms console), a second duty station bank to
-            // the east (near the roster board). Extended 0.4 m past its old
-            // z -3.0 edge into the main hall, overlapping that room's own
-            // extended edge, at the seam where the dividing wall and door
-            // used to be.
-            "Bridge Operations",
-            Bounds {
-                min_x: -81.4,
-                max_x: -44.4,
-                min_z: -9.0,
-                max_z: -2.6,
-            },
-        ),
-        (
             // Carved back 1.2 m for the specimen cabinet, as Medical is for
             // the ward bay.
             "Quarantine",
@@ -639,6 +624,49 @@ fn selective_subrooms_are_inside_their_parent_departments() {
         assert_eq!(found.len(), 1, "{room} should be one walkable rectangle");
         assert!(bounds_are_close(found[0], expected), "{room}: {found:?}");
     }
+
+    // Bridge Operations is the southern half of one band-and-aisle skeleton
+    // rather than a rectangle: the mission-control dressing pass fills the
+    // combined Bridge floor with furniture rows, and a floor fixture has to
+    // stand in ground carved out of the walkable volume. What is left is the
+    // fourth transverse concourse plus the aisle's southern leg. The aisle
+    // reaches z -2.0, past the old z -3.0 dividing line and into the main
+    // hall's own aisle half, because that overlap is the only thing joining
+    // the two differently-named rooms now the wall between them is gone.
+    let operations = named_bounds("Bridge Operations");
+    assert_eq!(
+        operations.len(),
+        3,
+        "Bridge Operations should be the fourth concourse, the viewscreen-wall \
+         strip, and the aisle's southern leg",
+    );
+    for expected in [
+        Bounds {
+            min_x: -83.5,
+            max_x: -41.5,
+            min_z: -5.7,
+            max_z: -3.5,
+        },
+        Bounds {
+            min_x: -83.5,
+            max_x: -41.5,
+            min_z: -9.0,
+            max_z: -7.8,
+        },
+        Bounds {
+            min_x: -62.3,
+            max_x: -57.3,
+            min_z: -9.0,
+            max_z: -2.0,
+        },
+    ] {
+        assert!(
+            operations
+                .iter()
+                .any(|actual| bounds_are_close(*actual, expected)),
+            "Bridge Operations is missing {expected:?}: {operations:?}",
+        );
+    }
 }
 
 #[test]
@@ -663,24 +691,6 @@ fn station_v2_keeps_its_department_and_route_footprints() {
             },
         ),
         (
-            // Two end pockets, snug around their occupants rather than a
-            // loose buffer, so a player's walkable area reaches close to
-            // each fixture's own Solid collider: the holomap/captain's
-            // chair pocket to the west, the duty station bank pocket to
-            // the east — both carved the same single-edge-shrink way
-            // Engineering's west sliver was, never a mid-room cut.
-            // Extended 0.4 m past its old z -3.0 edge into the Operations
-            // annex, overlapping that room's own extended edge, at the
-            // seam where the dividing wall and door used to be.
-            "Bridge",
-            Bounds {
-                min_x: -80.25,
-                max_x: -44.25,
-                min_z: -3.4,
-                max_z: 10.0,
-            },
-        ),
-        (
             // Stops 2.5 m short of the Bridge-facing wall: that strip is the
             // ward furniture, and a walkable volume that reached the wall
             // would route crew straight through two beds.
@@ -696,6 +706,54 @@ fn station_v2_keeps_its_department_and_route_footprints() {
         let found = named_bounds(room);
         assert_eq!(found.len(), 1, "{room} should be one authored rectangle");
         assert!(bounds_are_close(found[0], expected), "{room}: {found:?}");
+    }
+
+    // Bridge is four rectangles: three transverse concourses and the central
+    // aisle that crosses all of them. That skeleton is what a mission-control
+    // dressing costs. Furniture rows sit in the gaps between the concourses,
+    // and since crew ignore `Solid` and path from walkable area alone, a row
+    // has to be ground the walkable volume does not cover. The aisle is the
+    // only thing joining the concourses to each other, which is why it runs
+    // the room's full depth at a full 5 m and why both doors sit on it: pinch
+    // it and the room falls into three disconnected strips.
+    let bridge = named_bounds("Bridge");
+    assert_eq!(
+        bridge.len(),
+        4,
+        "Bridge should be three transverse concourses plus the central aisle",
+    );
+    for expected in [
+        Bounds {
+            min_x: -83.5,
+            max_x: -41.5,
+            min_z: 8.2,
+            max_z: 10.0,
+        },
+        Bounds {
+            min_x: -83.5,
+            max_x: -41.5,
+            min_z: 3.9,
+            max_z: 6.1,
+        },
+        Bounds {
+            min_x: -83.5,
+            max_x: -41.5,
+            min_z: -1.4,
+            max_z: 0.8,
+        },
+        Bounds {
+            min_x: -62.3,
+            max_x: -57.3,
+            min_z: -3.3,
+            max_z: 10.0,
+        },
+    ] {
+        assert!(
+            bridge
+                .iter()
+                .any(|actual| bounds_are_close(*actual, expected)),
+            "Bridge is missing {expected:?}: {bridge:?}",
+        );
     }
 
     // Cargo is two overlapping rectangles rather than one. Both of its long
@@ -1573,16 +1631,17 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         min_z: 15.0,
         max_z: 28.6,
     };
-    // Bridge's main hall. The holomap island sits in a west-end pocket the
-    // walkable brush no longer covers, the same "small edge shrink, not a
-    // mid-room cut" carve Engineering's west sliver settled on.
+    // Bridge's two halves. The wall that used to divide them is gone, so
+    // these are names for the north and south ends of one 42 x 19 m floor
+    // rather than separate rooms -- and the mission-control pass's third
+    // furniture row straddles the old z -3.0 dividing line, which is why the
+    // main hall's floor is quoted down to the far edge of that row.
     const BRIDGE: Bounds = Bounds {
         min_x: -83.5,
         max_x: -41.5,
-        min_z: -3.0,
+        min_z: -3.5,
         max_z: 10.0,
     };
-    // The Operations annex, south of the main hall across the internal door.
     const BRIDGE_OPERATIONS: Bounds = Bounds {
         min_x: -83.5,
         max_x: -41.5,
@@ -1875,46 +1934,495 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             width: 1.60,
             depth: 0.80,
         },
-        // Bridge, per the user's own floor-plan sketch: the holomap and
-        // captain's chair anchor the west end, the duty station bank
-        // anchors the east end, the middle stays open floor. Both end
-        // pockets are single-edge shrinks of the main hall's walkable
-        // brush, sized snug around their occupants (not a generous buffer)
-        // so a player's walkable area reaches close to each fixture's own
-        // Solid collider instead of stopping short of it. The Operations
-        // annex — now open to the hall, its dividing wall and door removed
-        // — keeps its own pockets uncarved; nothing floor-mounted lives
-        // there any more.
+        // ------------------------------------------------------------------
+        // Bridge, dressed as mission control.
+        //
+        // The first pass put eleven modules against the walls of a 42 x 19 m
+        // room: 32 m^2 of furniture, 4% of the floor, nothing in the middle.
+        // This is the same room filled the way its shape wants -- ranks of
+        // console arcs, a command dais centred in the west wing, and a
+        // viewscreen wall along the south end for the ranks to face.
+        //
+        // Every floor fixture is "0 180 0", facing away from the public door,
+        // so walking in you see the backs of the chairs and the crew are
+        // looking at the screens beyond them. `bridge.duty_station_bank` is
+        // deliberately absent: it is built back-to-back, three desks facing
+        // each way, so in a rank of single-sided consoles half its chairs
+        // always point the wrong way.
+        //
+        // Rows sit in the gaps between the walkable concourses, and each row
+        // is filled end to end on purpose. A floor fixture must stand in
+        // ground carved out of the walkable volume, so the carve follows the
+        // rows; a gap left inside a row is not open floor, it is an invisible
+        // wall a body cannot walk into and nothing on screen explains.
+        // ------------------------------------------------------------------
+        // Row 1 -- the front rank, hard up against the viewscreen wall.
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "-286 3214 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "-286 2974 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "-286 2734 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.tactical_rail",
+            origin: "-286 2554 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 3.00,
+            depth: 1.60,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "-286 2170 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "-286 1930 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.tactical_rail",
+            origin: "-286 1750 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 3.00,
+            depth: 1.60,
+        },
+        // Row 2 -- the command row: the dais centred in the west wing, ops desks east.
         Placement {
             kind: "bridge.holomap_island",
-            origin: "-140 3260 0",
-            angles: "0 0 0",
+            origin: "-94 3290 0",
+            angles: "0 180 0",
             mount: Mount::Floor,
             room: BRIDGE,
             width: 2.20,
             depth: 2.20,
         },
         Placement {
+            kind: "bridge.tactical_rail",
+            origin: "-94 3186 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 3.00,
+            depth: 1.60,
+        },
+        Placement {
+            kind: "bridge.briefing_table",
+            origin: "-94 3082 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 2.20,
+            depth: 1.70,
+        },
+        Placement {
+            kind: "bridge.command_dais",
+            origin: "-94 2920 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 5.00,
+            depth: 3.00,
+        },
+        Placement {
             kind: "bridge.captains_chair",
-            origin: "-320 3260 0",
-            angles: "0 -90 0",
+            origin: "-94 2808 0",
+            angles: "0 180 0",
             mount: Mount::Floor,
             room: BRIDGE,
             width: 0.60,
             depth: 0.55,
         },
         Placement {
-            kind: "bridge.duty_station_bank",
-            origin: "-140 1716 0",
-            angles: "0 90 0",
+            kind: "bridge.astrogation_pillar",
+            origin: "-94 2784 0",
+            angles: "0 180 0",
             mount: Mount::Floor,
             room: BRIDGE,
-            width: 4.20,
-            depth: 2.50,
+            width: 0.60,
+            depth: 0.60,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "-94 2652 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.astrogation_pillar",
+            origin: "-94 2520 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 0.60,
+            depth: 0.60,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "-94 2170 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.briefing_table",
+            origin: "-94 2006 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 2.20,
+            depth: 1.70,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "-94 1842 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 6.00,
+            depth: 2.00,
+        },
+        // Row 3 -- the second rank.
+        Placement {
+            kind: "bridge.tactical_rail",
+            origin: "98 3274 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 3.00,
+            depth: 1.60,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "98 3094 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "98 2854 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "98 2614 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "98 1788 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "98 2028 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.tactical_rail",
+            origin: "98 2208 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE,
+            width: 3.00,
+            depth: 1.60,
+        },
+        // Row 4 -- back of house, along the maintenance wall.
+        Placement {
+            kind: "bridge.tactical_rail",
+            origin: "270 3274 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE_OPERATIONS,
+            width: 3.00,
+            depth: 1.60,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "270 3094 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE_OPERATIONS,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.briefing_table",
+            origin: "270 2930 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE_OPERATIONS,
+            width: 2.20,
+            depth: 1.70,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "270 2766 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE_OPERATIONS,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.tactical_rail",
+            origin: "270 2586 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE_OPERATIONS,
+            width: 3.00,
+            depth: 1.60,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "270 2170 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE_OPERATIONS,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.console_arc",
+            origin: "270 1930 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE_OPERATIONS,
+            width: 6.00,
+            depth: 2.00,
+        },
+        Placement {
+            kind: "bridge.briefing_table",
+            origin: "270 1766 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: BRIDGE_OPERATIONS,
+            width: 2.20,
+            depth: 1.70,
+        },
+        // Wall modules.
+        Placement {
+            kind: "bridge.viewscreen",
+            origin: "360 3260 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 2.40,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.viewscreen",
+            origin: "360 3140 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 2.40,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.viewscreen",
+            origin: "360 3020 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 2.40,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.viewscreen",
+            origin: "360 2900 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 2.40,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.viewscreen",
+            origin: "360 2780 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 2.40,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.viewscreen",
+            origin: "360 2660 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 2.40,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.viewscreen",
+            origin: "360 2540 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 2.40,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.viewscreen",
+            origin: "360 2260 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 2.40,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.viewscreen",
+            origin: "360 2140 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 2.40,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.viewscreen",
+            origin: "360 2020 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 2.40,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.viewscreen",
+            origin: "360 1900 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 2.40,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.viewscreen",
+            origin: "360 1780 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 2.40,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.alert_panel",
+            origin: "360 3320 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 0.60,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.alert_panel",
+            origin: "360 1680 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: BRIDGE_OPERATIONS,
+            width: 0.60,
+            depth: 0.15,
         },
         Placement {
             kind: "bridge.nav_desk",
+            origin: "-400 3200 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: BRIDGE,
+            width: 1.80,
+            depth: 0.60,
+        },
+        Placement {
+            kind: "bridge.comms_console",
+            origin: "-400 3040 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: BRIDGE,
+            width: 1.40,
+            depth: 0.30,
+        },
+        Placement {
+            kind: "bridge.crew_roster_board",
             origin: "-400 2880 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: BRIDGE,
+            width: 1.20,
+            depth: 0.12,
+        },
+        Placement {
+            kind: "bridge.alert_panel",
+            origin: "-400 2720 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: BRIDGE,
+            width: 0.60,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.nav_desk",
+            origin: "-400 2580 0",
             angles: "0 180 0",
             mount: Mount::Wall,
             room: BRIDGE,
@@ -1923,79 +2431,84 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "bridge.alert_panel",
-            origin: "-400 1880 0",
+            origin: "-400 2300 0",
             angles: "0 180 0",
             mount: Mount::Wall,
             room: BRIDGE,
             width: 0.60,
             depth: 0.15,
         },
-        // The viewscreen and roster board originally mounted on the wall
-        // between the two rooms; that wall (and its door) was removed to
-        // open Bridge into one space, so both moved onto walls that still
-        // exist and sit close to the two floor anchors they flank — the
-        // viewscreen near the holomap on the main hall's public-door wall,
-        // the roster board near the duty bank on the annex's
-        // maintenance-door wall.
         Placement {
-            kind: "bridge.viewscreen",
-            origin: "-400 3160 0",
+            kind: "bridge.crew_roster_board",
+            origin: "-400 2040 0",
             angles: "0 180 0",
             mount: Mount::Wall,
             room: BRIDGE,
-            width: 2.40,
+            width: 1.20,
+            depth: 0.12,
+        },
+        Placement {
+            kind: "bridge.alert_panel",
+            origin: "-400 1740 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: BRIDGE,
+            width: 0.60,
+            depth: 0.15,
+        },
+        Placement {
+            kind: "bridge.alert_panel",
+            origin: "-364 3340 0",
+            angles: "0 90 0",
+            mount: Mount::Wall,
+            room: BRIDGE,
+            width: 0.60,
             depth: 0.15,
         },
         Placement {
             kind: "bridge.comms_console",
-            origin: "360 3000 0",
-            angles: "0 0 0",
+            origin: "-200 3340 0",
+            angles: "0 90 0",
             mount: Mount::Wall,
-            room: BRIDGE_OPERATIONS,
+            room: BRIDGE,
             width: 1.40,
             depth: 0.30,
         },
         Placement {
             kind: "bridge.crew_roster_board",
-            origin: "360 1880 0",
-            angles: "0 0 0",
+            origin: "12 3340 0",
+            angles: "0 90 0",
             mount: Mount::Wall,
-            room: BRIDGE_OPERATIONS,
+            room: BRIDGE,
             width: 1.20,
             depth: 0.12,
         },
-        // The Operations annex's own floor fill, using its full 42x6m
-        // footprint: a briefing table + sensor pillar backed into the west
-        // end wall near the comms console, a second duty station bank
-        // backed into the east end wall near the roster board — sitting
-        // directly across the open seam from the main hall's own bank, the
-        // same end-pocket carve pattern, sized snug to each occupant.
         Placement {
-            kind: "bridge.briefing_table",
-            origin: "168 3298 0",
+            kind: "bridge.alert_panel",
+            origin: "-364 1660 0",
             angles: "0 -90 0",
-            mount: Mount::Floor,
-            room: BRIDGE_OPERATIONS,
-            width: 2.20,
-            depth: 1.70,
-        },
-        Placement {
-            kind: "bridge.astrogation_pillar",
-            origin: "300 3320 0",
-            angles: "0 0 0",
-            mount: Mount::Floor,
-            room: BRIDGE_OPERATIONS,
+            mount: Mount::Wall,
+            room: BRIDGE,
             width: 0.60,
-            depth: 0.60,
+            depth: 0.15,
         },
         Placement {
-            kind: "bridge.duty_station_bank",
-            origin: "240 1718 0",
-            angles: "0 90 0",
-            mount: Mount::Floor,
-            room: BRIDGE_OPERATIONS,
-            width: 4.20,
-            depth: 2.50,
+            kind: "bridge.crew_roster_board",
+            origin: "-200 1660 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: BRIDGE,
+            width: 1.20,
+            depth: 0.12,
+        },
+        Placement {
+            kind: "bridge.comms_console",
+            origin: "12 1660 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: BRIDGE,
+            width: 1.40,
+            depth: 0.30,
         },
         // Both were on the north wall until the freight line took it; a wall
         // module behind a running conveyor is a wall module nobody sees.
@@ -2673,6 +3186,18 @@ fn every_decoration_kind_has_an_exported_glb() {
             "bridge.crew_roster_board",
             "assets/3dassets/station_starter_kit/glb/decor_bridge_crew_roster_board.glb",
         ),
+        (
+            "bridge.console_arc",
+            "assets/3dassets/station_starter_kit/glb/decor_bridge_console_arc.glb",
+        ),
+        (
+            "bridge.command_dais",
+            "assets/3dassets/station_starter_kit/glb/decor_bridge_command_dais.glb",
+        ),
+        (
+            "bridge.tactical_rail",
+            "assets/3dassets/station_starter_kit/glb/decor_bridge_tactical_rail.glb",
+        ),
     ] {
         let bytes = std::fs::read(path)
             .unwrap_or_else(|error| panic!("{kind} decoration is missing at {path}: {error}"));
@@ -2700,7 +3225,7 @@ fn every_station_kit_glb_parses_with_bevys_gltf_parser() {
             panic!("{} is not Bevy-compatible glTF: {error}", path.display())
         });
     }
-    assert_eq!(count, 81, "the station starter kit should contain 81 GLBs");
+    assert_eq!(count, 84, "the station starter kit should contain 84 GLBs");
 }
 
 /// The band both Cargo rooms carve out of their walkable volumes for the

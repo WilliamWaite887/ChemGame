@@ -1471,6 +1471,22 @@ const DECORATION_KINDS: &[(&str, &str)] = &[
         "bridge.crew_roster_board",
         "3dassets/station_starter_kit/glb/decor_bridge_crew_roster_board.glb",
     ),
+    // The mission-control row units. Bridge is 42 x 19 m, and the first pass
+    // dressed it with nothing wider than 4.2 m, which left every module
+    // reading as a small object lost in a hangar. These three are sized to
+    // tile a row end to end instead.
+    (
+        "bridge.console_arc",
+        "3dassets/station_starter_kit/glb/decor_bridge_console_arc.glb",
+    ),
+    (
+        "bridge.command_dais",
+        "3dassets/station_starter_kit/glb/decor_bridge_command_dais.glb",
+    ),
+    (
+        "bridge.tactical_rail",
+        "3dassets/station_starter_kit/glb/decor_bridge_tactical_rail.glb",
+    ),
 ];
 
 #[derive(Resource)]
@@ -1543,12 +1559,32 @@ const FLOOR_COLLIDER_ENVELOPES: &[(&str, Vec3)] = &[
     // table is left at its real ~0.80 m top on purpose — a table is exactly
     // the kind of thing a beaker should be able to rest on.
     ("bridge.captains_chair", Vec3::new(0.30, 1.45, 0.275)),
+    // No map places this either. A lone standing podium at the end of a
+    // seated rank read as clutter, and its status screen faces the room
+    // rather than the keypad — fine for a console meant to be read in
+    // passing, wrong sitting in a row of consoles that face a screen wall.
     ("bridge.duty_station", Vec3::new(0.55, 1.45, 0.35)),
     ("bridge.astrogation_pillar", Vec3::new(0.30, 1.75, 0.30)),
     ("bridge.briefing_table", Vec3::new(1.10, 0.80, 0.85)),
     // Left at its real ~0.95 m desktop height for the same reason as the
     // briefing table: a desk should be settable-on.
+    //
+    // No map places this any more. It is built back-to-back -- three desks
+    // facing each way -- so in Bridge's mission-control ranks, where every
+    // seat faces the viewscreen wall, half of each bank pointed the wrong
+    // way. Kept as a kind because a two-sided pit is the right answer for a
+    // room dressed around a central aisle rather than a screen wall.
     ("bridge.duty_station_bank", Vec3::new(2.10, 0.95, 1.25)),
+    // The mission-control row units. The console arc keeps its real 0.95 m
+    // desktop for the same reason the bank does. The dais is tall enough
+    // (2.30 m to the top of its holo mast) to need no thought, and its two
+    // steps are inside the collider rather than climbable -- there is no
+    // step-up in the controller, so the platform is scenery you walk around.
+    // The tactical rail is the one bumped for the usual reason: its handrail
+    // tops out at 1.10 m and a handrail is not a shelf.
+    ("bridge.console_arc", Vec3::new(3.00, 0.95, 1.00)),
+    ("bridge.command_dais", Vec3::new(2.50, 2.30, 1.50)),
+    ("bridge.tactical_rail", Vec3::new(1.50, 1.45, 0.80)),
 ];
 
 fn floor_collider_envelope(kind: &str) -> Option<Vec3> {
