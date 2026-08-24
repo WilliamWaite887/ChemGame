@@ -438,7 +438,14 @@ mod tests {
             "the authored character palette must survive export"
         );
         let node_names: Vec<_> = gltf.nodes().filter_map(|node| node.name()).collect();
-        for detail in ["VisorGeometry", "ChemistryBadge", "Thumb.L", "Thumb.R"] {
+        for detail in [
+            "VisorGeometry",
+            "ChemistryBadge",
+            "Thumb.L",
+            "Thumb.R",
+            "wrist.L",
+            "wrist.R",
+        ] {
             assert!(
                 node_names.contains(&detail),
                 "the second-pass detail {detail} must survive export"
