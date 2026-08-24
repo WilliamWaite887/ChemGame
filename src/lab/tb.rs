@@ -1303,6 +1303,34 @@ const DECORATION_KINDS: &[(&str, &str)] = &[
         "med.specimen_cold",
         "3dassets/station_starter_kit/glb/decor_med_specimen_cold.glb",
     ),
+    // The ward-and-cryo pass: a repeat-unit patient bay and its row-closing
+    // nurse station for Medical, plus a cryo pod rank (empty and occupied
+    // variants sharing one silhouette), its monitor console and wall board,
+    // for Quarantine.
+    (
+        "med.patient_bay",
+        "3dassets/station_starter_kit/glb/decor_med_patient_bay.glb",
+    ),
+    (
+        "med.nurse_station",
+        "3dassets/station_starter_kit/glb/decor_med_nurse_station.glb",
+    ),
+    (
+        "med.cryo_pod",
+        "3dassets/station_starter_kit/glb/decor_med_cryo_pod.glb",
+    ),
+    (
+        "med.cryo_pod_occupied",
+        "3dassets/station_starter_kit/glb/decor_med_cryo_pod_occupied.glb",
+    ),
+    (
+        "med.cryo_monitor_bay",
+        "3dassets/station_starter_kit/glb/decor_med_cryo_monitor_bay.glb",
+    ),
+    (
+        "med.cryo_control",
+        "3dassets/station_starter_kit/glb/decor_med_cryo_control.glb",
+    ),
     (
         "eng.breaker_panel",
         "3dassets/station_starter_kit/glb/decor_eng_breaker_panel.glb",
@@ -1487,6 +1515,46 @@ const DECORATION_KINDS: &[(&str, &str)] = &[
         "bridge.tactical_rail",
         "3dassets/station_starter_kit/glb/decor_bridge_tactical_rail.glb",
     ),
+    // Botany, dressed for the first time: `generate_botany_modules.py` owns
+    // all nine — a row of grow plots and their row-closing planter, a
+    // hydroponic propagation rack, a research desk, a standing nutrient
+    // tank, and four wall modules.
+    (
+        "bot.grow_plot",
+        "3dassets/station_starter_kit/glb/decor_bot_grow_plot.glb",
+    ),
+    (
+        "bot.planter_row",
+        "3dassets/station_starter_kit/glb/decor_bot_planter_row.glb",
+    ),
+    (
+        "bot.hydro_rack",
+        "3dassets/station_starter_kit/glb/decor_bot_hydro_rack.glb",
+    ),
+    (
+        "bot.research_desk",
+        "3dassets/station_starter_kit/glb/decor_bot_research_desk.glb",
+    ),
+    (
+        "bot.nutrient_tank",
+        "3dassets/station_starter_kit/glb/decor_bot_nutrient_tank.glb",
+    ),
+    (
+        "bot.seed_vault",
+        "3dassets/station_starter_kit/glb/decor_bot_seed_vault.glb",
+    ),
+    (
+        "bot.tool_rack",
+        "3dassets/station_starter_kit/glb/decor_bot_tool_rack.glb",
+    ),
+    (
+        "bot.sample_board",
+        "3dassets/station_starter_kit/glb/decor_bot_sample_board.glb",
+    ),
+    (
+        "bot.irrigation_panel",
+        "3dassets/station_starter_kit/glb/decor_bot_irrigation_panel.glb",
+    ),
 ];
 
 #[derive(Resource)]
@@ -1585,6 +1653,23 @@ const FLOOR_COLLIDER_ENVELOPES: &[(&str, Vec3)] = &[
     ("bridge.console_arc", Vec3::new(3.00, 0.95, 1.00)),
     ("bridge.command_dais", Vec3::new(2.50, 2.30, 1.50)),
     ("bridge.tactical_rail", Vec3::new(1.50, 1.45, 0.80)),
+    // The ward-and-cryo pass. None of these five sit anywhere near
+    // SET_DOWN_REACH (the closest real top is the research desk's screen at
+    // 1.54 m), so every one keeps its real nominal envelope with no bump —
+    // unlike `med.ward_bay`/`med.waiting_row`, which predate this table and
+    // still have no collider at all.
+    ("med.patient_bay", Vec3::new(1.35, 2.20, 1.20)),
+    ("med.nurse_station", Vec3::new(1.50, 1.80, 1.20)),
+    ("med.cryo_pod", Vec3::new(0.65, 2.60, 0.65)),
+    ("med.cryo_pod_occupied", Vec3::new(0.65, 2.60, 0.65)),
+    ("med.cryo_monitor_bay", Vec3::new(0.85, 1.90, 0.65)),
+    // Botany's five floor fixtures. Same reasoning: nothing here has a top
+    // anywhere close to SET_DOWN_REACH.
+    ("bot.grow_plot", Vec3::new(2.00, 2.70, 1.20)),
+    ("bot.planter_row", Vec3::new(0.75, 1.90, 1.20)),
+    ("bot.hydro_rack", Vec3::new(1.50, 2.20, 0.60)),
+    ("bot.research_desk", Vec3::new(1.20, 1.70, 0.80)),
+    ("bot.nutrient_tank", Vec3::new(0.60, 2.40, 0.60)),
 ];
 
 fn floor_collider_envelope(kind: &str) -> Option<Vec3> {

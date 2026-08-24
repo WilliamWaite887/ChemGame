@@ -29,3 +29,5 @@ assets/3dassets/station_starter_kit/generate_conveyor_modules.py
 assets/3dassets/station_starter_kit/generate_engineering_modules.py
 assets/3dassets/station_starter_kit/generate_bridge_modules.py
 assets/3dassets/station_starter_kit/__pycache__/generate_decor_modules.cpython-313.pyc
+assets/3dassets/station_starter_kit/generate_botany_modules.py
+assets/3dassets/station_starter_kit/generate_medical_modules.py
