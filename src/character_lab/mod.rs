@@ -23,6 +23,8 @@ use crate::AppState;
 
 const SUBJECT_MODEL: &str = "3dassets/glb/first_char_test.glb";
 const SUBJECT_POSITION: Vec3 = Vec3::new(12.35, 0.94, -3.0);
+const LOCOMOTION_START: Vec3 = Vec3::new(9.75, 0.94, -4.65);
+const LOCOMOTION_END: Vec3 = Vec3::new(13.15, 0.94, -4.65);
 const RACK_POSITION: Vec3 = Vec3::new(10.15, 0.40, -1.15);
 const SAMPLE_Y: f32 = 0.86;
 const SAMPLE_UNITS: i32 = 5;
@@ -62,6 +64,7 @@ impl Plugin for CharacterLabPlugin {
                 tag_test_subject_surfaces.after(dress_test_subjects),
                 attach_test_subject_animation.after(dress_test_subjects),
                 drive_test_subject_animation.after(attach_test_subject_animation),
+                pace_locomotion_previews.run_if(is_authority),
                 reset_subject_and_samples.run_if(is_authority),
             )
                 .run_if(in_state(AppState::Playing)),
@@ -69,10 +72,22 @@ impl Plugin for CharacterLabPlugin {
     }
 }
 
-/// Replicated identity for the stationary development body. The mesh remains
-/// local presentation, like chemist and crew meshes.
+/// Replicated identity for a development body. The mesh remains local
+/// presentation, like chemist and crew meshes.
 #[derive(Component, Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct TestSubject;
+
+/// Replicated marker for the second debug mannequin that continuously walks
+/// the short Analysis-room test lane.
+#[derive(Component, Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct LocomotionPreview;
+
+/// Authority-only integration state. Position itself already replicates.
+#[derive(Component)]
+struct LocomotionPreviewState {
+    progress: f32,
+    direction: f32,
+}
 
 /// The movable visual child. Effects animate this, never the authoritative
 /// root used by reach checks and replication.
@@ -96,7 +111,7 @@ struct TestDose(ReagentId);
 struct CharacterLabAssets {
     subject: Handle<WorldAsset>,
     animation_graph: Handle<AnimationGraph>,
-    animation_nodes: [AnimationNodeIndex; 4],
+    animation_nodes: [AnimationNodeIndex; 7],
 }
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +126,9 @@ enum CharacterAnimation {
     Stimulated = 1,
     Sedated = 2,
     Unsteady = 3,
+    Collapsed = 4,
+    Walk = 5,
+    WalkDrunk = 6,
 }
 
 fn load_character_lab_assets(
@@ -120,20 +138,24 @@ fn load_character_lab_assets(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut animation_graphs: ResMut<Assets<AnimationGraph>>,
 ) {
-    // Blender exports Actions alphabetically: Idle, Sedated, Stimulated,
-    // Unsteady. Keep the gameplay-facing node order explicit here.
+    // Blender exports Actions alphabetically: Collapsed, Idle, Sedated,
+    // Stimulated, Unsteady, Walk, WalkDrunk. Keep gameplay-facing node order
+    // explicit even though Blender stores the clips alphabetically.
     let (animation_graph, animation_nodes) = AnimationGraph::from_clips([
-        asset_server.load(GltfAssetLabel::Animation(0).from_asset(SUBJECT_MODEL)),
-        asset_server.load(GltfAssetLabel::Animation(2).from_asset(SUBJECT_MODEL)),
         asset_server.load(GltfAssetLabel::Animation(1).from_asset(SUBJECT_MODEL)),
         asset_server.load(GltfAssetLabel::Animation(3).from_asset(SUBJECT_MODEL)),
+        asset_server.load(GltfAssetLabel::Animation(2).from_asset(SUBJECT_MODEL)),
+        asset_server.load(GltfAssetLabel::Animation(4).from_asset(SUBJECT_MODEL)),
+        asset_server.load(GltfAssetLabel::Animation(0).from_asset(SUBJECT_MODEL)),
+        asset_server.load(GltfAssetLabel::Animation(5).from_asset(SUBJECT_MODEL)),
+        asset_server.load(GltfAssetLabel::Animation(6).from_asset(SUBJECT_MODEL)),
     ]);
     commands.insert_resource(CharacterLabAssets {
         subject: asset_server.load(GltfAssetLabel::Scene(0).from_asset(SUBJECT_MODEL)),
         animation_graph: animation_graphs.add(animation_graph),
         animation_nodes: animation_nodes
             .try_into()
-            .expect("the character animation graph has exactly four clips"),
+            .expect("the character animation graph has exactly seven clips"),
     });
 
     // A deliberately plain local-only plinth for the sample row. The bottles
@@ -162,6 +184,23 @@ fn spawn_character_lab(mut commands: Commands, db: Res<ChemDb>) {
         Interactable::new("reset chemical test subject and samples"),
         Transform::from_translation(SUBJECT_POSITION)
             .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
+        Visibility::default(),
+        Replicated,
+        crate::until_we_leave_the_lab(),
+    ));
+
+    commands.spawn((
+        Name::new("chemical locomotion test subject"),
+        TestSubject,
+        LocomotionPreview,
+        LocomotionPreviewState {
+            progress: 0.0,
+            direction: 1.0,
+        },
+        Body::default(),
+        Bloodstream::default(),
+        Interactable::new("reset moving chemical test subject and samples"),
+        Transform::from_translation(LOCOMOTION_START).with_rotation(locomotion_facing(1.0)),
         Visibility::default(),
         Replicated,
         crate::until_we_leave_the_lab(),
@@ -276,6 +315,7 @@ fn attach_test_subject_animation(
     mut players: Query<(Entity, &mut AnimationPlayer), Added<AnimationPlayer>>,
     parents: Query<&ChildOf>,
     visuals: Query<&TestSubjectVisual>,
+    locomotion_previews: Query<(), With<LocomotionPreview>>,
 ) {
     let Some(assets) = assets else {
         return;
@@ -284,11 +324,16 @@ fn attach_test_subject_animation(
         let Some(subject) = test_subject_ancestor(entity, &parents, &visuals) else {
             continue;
         };
+        let initial = if locomotion_previews.contains(subject) {
+            CharacterAnimation::Walk
+        } else {
+            CharacterAnimation::Idle
+        };
         let mut transitions = AnimationTransitions::new();
         transitions
             .play(
                 &mut player,
-                assets.animation_nodes[CharacterAnimation::Idle as usize],
+                assets.animation_nodes[initial as usize],
                 Duration::ZERO,
             )
             .repeat();
@@ -297,14 +342,27 @@ fn attach_test_subject_animation(
             transitions,
             TestSubjectAnimationPlayer {
                 subject,
-                current: CharacterAnimation::Idle,
+                current: initial,
             },
         ));
     }
 }
 
-fn desired_character_animation(blood: &chem_sim::Bloodstream) -> CharacterAnimation {
-    if blood.status(StatusKind::Sedated).intensity > 0.0
+fn desired_character_animation(
+    blood: &chem_sim::Bloodstream,
+    locomotion_preview: bool,
+) -> CharacterAnimation {
+    if blood.incapacitated() || blood.appears_dead() {
+        CharacterAnimation::Collapsed
+    } else if locomotion_preview {
+        if blood.status(StatusKind::Unsteady).intensity > 0.0
+            || blood.status(StatusKind::Drunk).intensity > 0.0
+        {
+            CharacterAnimation::WalkDrunk
+        } else {
+            CharacterAnimation::Walk
+        }
+    } else if blood.status(StatusKind::Sedated).intensity > 0.0
         || blood.status(StatusKind::Sluggish).intensity > 0.0
     {
         CharacterAnimation::Sedated
@@ -334,12 +392,20 @@ fn character_animation_speed(blood: &chem_sim::Bloodstream, animation: Character
         CharacterAnimation::Unsteady => {
             0.90 + blood.status(StatusKind::Unsteady).intensity.min(3.0) * 0.08
         }
+        CharacterAnimation::Collapsed => 1.0,
+        CharacterAnimation::Walk => {
+            (1.0 - blood.status(StatusKind::Sedated).intensity.min(3.0) * 0.12).max(0.58)
+        }
+        CharacterAnimation::WalkDrunk => {
+            (0.88 - blood.status(StatusKind::Drunk).intensity.min(3.0) * 0.06).max(0.58)
+        }
     }
 }
 
 fn drive_test_subject_animation(
     assets: Option<Res<CharacterLabAssets>>,
     bloods: Query<&Bloodstream>,
+    locomotion_previews: Query<(), With<LocomotionPreview>>,
     mut players: Query<(
         &mut AnimationPlayer,
         &mut AnimationTransitions,
@@ -353,7 +419,8 @@ fn drive_test_subject_animation(
         let Ok(blood) = bloods.get(controller.subject) else {
             continue;
         };
-        let desired = desired_character_animation(&blood.0);
+        let desired =
+            desired_character_animation(&blood.0, locomotion_previews.contains(controller.subject));
         let node = assets.animation_nodes[desired as usize];
         let speed = character_animation_speed(&blood.0, desired);
         if desired != controller.current {
@@ -366,6 +433,53 @@ fn drive_test_subject_animation(
             active.set_speed(speed);
         }
     }
+}
+
+fn pace_locomotion_previews(
+    time: Res<Time>,
+    mut previews: Query<
+        (&Bloodstream, &mut Transform, &mut LocomotionPreviewState),
+        With<LocomotionPreview>,
+    >,
+) {
+    let lane_length = LOCOMOTION_START.distance(LOCOMOTION_END);
+    for (blood, mut transform, mut state) in &mut previews {
+        if blood.0.incapacitated() || blood.0.appears_dead() {
+            continue;
+        }
+
+        let drunk = blood.0.status(StatusKind::Drunk).intensity
+            + blood.0.status(StatusKind::Unsteady).intensity;
+        let sedated = blood.0.status(StatusKind::Sedated).intensity
+            + blood.0.status(StatusKind::Sluggish).intensity;
+        let hastened = blood.0.status(StatusKind::Hastened).intensity;
+        let speed =
+            (0.82 + hastened.min(2.0) * 0.07 - drunk.min(3.0) * 0.07 - sedated.min(3.0) * 0.10)
+                .clamp(0.34, 1.10);
+        state.progress += state.direction * speed * time.delta_secs().min(0.1) / lane_length;
+        if state.progress >= 1.0 {
+            state.progress = 1.0;
+            state.direction = -1.0;
+        } else if state.progress <= 0.0 {
+            state.progress = 0.0;
+            state.direction = 1.0;
+        }
+
+        let mut position = LOCOMOTION_START.lerp(LOCOMOTION_END, state.progress);
+        position.z += (state.progress * std::f32::consts::TAU * 2.0).sin() * drunk.min(3.0) * 0.018;
+        transform.translation = position;
+        transform.rotation = locomotion_facing(state.direction);
+    }
+}
+
+fn locomotion_facing(direction: f32) -> Quat {
+    // Blender's -Y front becomes +Z in the exported glTF. Rotate that axis
+    // toward the lane velocity instead of assuming Bevy's conventional -Z.
+    Quat::from_rotation_y(if direction > 0.0 {
+        std::f32::consts::FRAC_PI_2
+    } else {
+        -std::f32::consts::FRAC_PI_2
+    })
 }
 
 fn reset_subject_and_samples(
@@ -429,7 +543,15 @@ mod tests {
             .collect();
         assert_eq!(
             animation_names,
-            ["Idle", "Sedated", "Stimulated", "Unsteady"]
+            [
+                "Collapsed",
+                "Idle",
+                "Sedated",
+                "Stimulated",
+                "Unsteady",
+                "Walk",
+                "WalkDrunk",
+            ]
         );
         assert_eq!(gltf.skins().count(), 1, "the runtime mesh must stay rigged");
         assert_eq!(
@@ -440,15 +562,51 @@ mod tests {
         let node_names: Vec<_> = gltf.nodes().filter_map(|node| node.name()).collect();
         for detail in [
             "VisorGeometry",
+            "VisorStrap.L",
+            "VisorStrap.R",
+            "VisorStrap.Back",
             "ChemistryBadge",
             "Thumb.L",
             "Thumb.R",
+            "LabCoatShell",
+            "TrouserShell",
+            "UndersleeveShell",
+            "BootShell",
+            "CoatCollar",
+            "CoatCuff.L",
+            "CoatCuff.R",
+            "CoatPocket.L",
+            "CoatPocket.R",
+            "CoatLapel.L",
+            "CoatLapel.R",
+            "TrouserWaistband",
             "wrist.L",
             "wrist.R",
+            "clavicle.L",
+            "clavicle.R",
+            "ankle.L",
+            "ankle.R",
         ] {
             assert!(
                 node_names.contains(&detail),
-                "the second-pass detail {detail} must survive export"
+                "the authored rig node {detail} must survive export"
+            );
+        }
+        for control in [
+            "ik_hand.L",
+            "ik_hand.R",
+            "ik_foot.L",
+            "ik_foot.R",
+            "orient_foot.L",
+            "orient_foot.R",
+            "pole_elbow.L",
+            "pole_elbow.R",
+            "pole_knee.L",
+            "pole_knee.R",
+        ] {
+            assert!(
+                !node_names.contains(&control),
+                "Blender-only control {control} must not enter the runtime skeleton"
             );
         }
     }
@@ -457,25 +615,62 @@ mod tests {
     fn drug_statuses_select_the_matching_authored_animation() {
         let mut blood = chem_sim::Bloodstream::default();
         assert_eq!(
-            desired_character_animation(&blood),
+            desired_character_animation(&blood, false),
             CharacterAnimation::Idle
         );
         blood.add_status(StatusKind::Hastened, 5.0, 1.0);
         assert_eq!(
-            desired_character_animation(&blood),
+            desired_character_animation(&blood, false),
             CharacterAnimation::Stimulated
         );
         blood.add_status(StatusKind::Unsteady, 5.0, 1.0);
         assert_eq!(
-            desired_character_animation(&blood),
+            desired_character_animation(&blood, false),
             CharacterAnimation::Unsteady
         );
         blood.add_status(StatusKind::Sedated, 5.0, 1.0);
         assert_eq!(
-            desired_character_animation(&blood),
+            desired_character_animation(&blood, false),
             CharacterAnimation::Sedated,
             "sedation wins when several drugs are active"
         );
+        blood.add_status(StatusKind::Sedated, 5.0, 4.0);
+        assert_eq!(
+            desired_character_animation(&blood, false),
+            CharacterAnimation::Collapsed,
+            "incapacitation switches to the authored collapsed posture"
+        );
+    }
+
+    #[test]
+    fn moving_preview_uses_walk_and_drunk_walk() {
+        let mut blood = chem_sim::Bloodstream::default();
+        assert_eq!(
+            desired_character_animation(&blood, true),
+            CharacterAnimation::Walk
+        );
+        blood.add_status(StatusKind::Drunk, 5.0, 1.0);
+        assert_eq!(
+            desired_character_animation(&blood, true),
+            CharacterAnimation::WalkDrunk
+        );
+        blood.add_status(StatusKind::Sedated, 5.0, 4.0);
+        assert_eq!(
+            desired_character_animation(&blood, true),
+            CharacterAnimation::Collapsed,
+            "incapacitation still overrides locomotion"
+        );
+    }
+
+    #[test]
+    fn moving_preview_faces_its_direction_of_travel() {
+        for (direction, travel) in [(1.0, Vec3::X), (-1.0, Vec3::NEG_X)] {
+            let model_forward = locomotion_facing(direction) * Vec3::Z;
+            assert!(
+                model_forward.dot(travel) > 0.999,
+                "exported +Z model forward must follow lane velocity"
+            );
+        }
     }
 
     #[test]

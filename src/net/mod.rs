@@ -25,7 +25,7 @@ use bevy_replicon_renet::renet::{ConnectionConfig, DisconnectReason};
 use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRenetPlugins};
 
 use crate::body::{Bloodstream, Body};
-use crate::character_lab::TestSubject;
+use crate::character_lab::{LocomotionPreview, TestSubject};
 use crate::chem_world::ChemicalPuddle;
 use crate::containers::{Container, HeldBy, InSlot, InSlotB, Stored};
 use crate::crew::{AtCounter, CrewMember, NeedsMedicalEvacuation};
@@ -581,6 +581,7 @@ fn register_replication(app: &mut App) {
         // keeping the schema identical means a debug host and its debug guest
         // both construct the imported visual around the same body state.
         .replicate::<TestSubject>()
+        .replicate::<LocomotionPreview>()
         // Rogue Security's reward — a pickable prop, shared lab state like
         // any other, so both peers see it appear on the counter.
         .replicate::<Deterrent>()

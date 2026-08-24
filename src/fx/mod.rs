@@ -653,7 +653,14 @@ fn animate_test_subject(
         let Ok(blood) = bloods.get(visual.subject) else {
             continue;
         };
-        let (offset, roll) = gait_offset(&blood.0, t);
+        let (mut offset, mut roll) = gait_offset(&blood.0, t);
+        if blood.0.incapacitated() || blood.0.appears_dead() {
+            // The imported rig owns its authored collapsed pose. Primitive
+            // characters still use gait_offset's whole-body fall, but layering
+            // that over the rig would rotate and lower this subject twice.
+            offset = Vec3::ZERO;
+            roll = 0.0;
+        }
         apply_part_pose(
             &mut transform,
             visual.rest,
