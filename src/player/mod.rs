@@ -1339,10 +1339,8 @@ mod tests {
             .insert_resource(lab::tb_map::authored_walkable_areas())
             .add_systems(Update, apply_move_input);
         for (center, half_extents) in lab::tb_map::authored_solid_colliders() {
-            app.world_mut().spawn((
-                Transform::from_translation(center),
-                Solid { half_extents },
-            ));
+            app.world_mut()
+                .spawn((Transform::from_translation(center), Solid { half_extents }));
         }
         app
     }
@@ -1388,10 +1386,26 @@ mod tests {
         // strand a body that the descent handles fine.
         const GROUND_FLOOR: f32 = 0.0;
         for (name, start, direction) in [
-            ("north", Vec3::new(-40.1, -3.6 + EYE_HEIGHT, 1.0), Vec2::new(0.0, -1.0)),
-            ("south", Vec3::new(-40.1, -3.6 + EYE_HEIGHT, 41.0), Vec2::new(0.0, 1.0)),
-            ("west", Vec3::new(-100.0, -3.6 + EYE_HEIGHT, 30.0), Vec2::new(-1.0, 0.0)),
-            ("east", Vec3::new(4.0, -3.6 + EYE_HEIGHT, 30.0), Vec2::new(1.0, 0.0)),
+            (
+                "north",
+                Vec3::new(-40.1, -3.6 + EYE_HEIGHT, 1.0),
+                Vec2::new(0.0, -1.0),
+            ),
+            (
+                "south",
+                Vec3::new(-40.1, -3.6 + EYE_HEIGHT, 41.0),
+                Vec2::new(0.0, 1.0),
+            ),
+            (
+                "west",
+                Vec3::new(-100.0, -3.6 + EYE_HEIGHT, 30.0),
+                Vec2::new(-1.0, 0.0),
+            ),
+            (
+                "east",
+                Vec3::new(4.0, -3.6 + EYE_HEIGHT, 30.0),
+                Vec2::new(1.0, 0.0),
+            ),
         ] {
             let mut app = map_app();
             let chemist = walking_chemist(&mut app, start, direction);
@@ -1422,10 +1436,26 @@ mod tests {
         // height. Only actually walking a body down each stair can.
         const LOWER_DECK_FLOOR: f32 = -3.6;
         for (name, start, direction) in [
-            ("north", Vec3::new(-40.1, EYE_HEIGHT, -10.0), Vec2::new(0.0, 1.0)),
-            ("south", Vec3::new(-40.1, EYE_HEIGHT, 53.0), Vec2::new(0.0, -1.0)),
-            ("west", Vec3::new(-111.0, EYE_HEIGHT, 30.0), Vec2::new(1.0, 0.0)),
-            ("east", Vec3::new(15.0, EYE_HEIGHT, 30.0), Vec2::new(-1.0, 0.0)),
+            (
+                "north",
+                Vec3::new(-40.1, EYE_HEIGHT, -10.0),
+                Vec2::new(0.0, 1.0),
+            ),
+            (
+                "south",
+                Vec3::new(-40.1, EYE_HEIGHT, 53.0),
+                Vec2::new(0.0, -1.0),
+            ),
+            (
+                "west",
+                Vec3::new(-111.0, EYE_HEIGHT, 30.0),
+                Vec2::new(1.0, 0.0),
+            ),
+            (
+                "east",
+                Vec3::new(15.0, EYE_HEIGHT, 30.0),
+                Vec2::new(-1.0, 0.0),
+            ),
         ] {
             let mut app = map_app();
             let chemist = walking_chemist(&mut app, start, direction);

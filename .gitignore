@@ -21,6 +21,7 @@ assets/3dassets/station_starter_kit/validate_station_starter_kit.py
 assets/3dassets/station_starter_kit/README.md
 assets/3dassets/station_starter_kit/generate_decor_modules.py
 assets/3dassets/station_starter_kit/station_starter_kit.blend1
+assets/3dassets/firstChar_rigged.blend1
 assets/3dassets/station_starter_kit/preview_*.png
 tools/gen_door_sprites.py
 tools/__pycache__/gen_door_sprites.cpython-314.pyc
@@ -31,3 +32,17 @@ assets/3dassets/station_starter_kit/generate_bridge_modules.py
 assets/3dassets/station_starter_kit/__pycache__/generate_decor_modules.cpython-313.pyc
 assets/3dassets/station_starter_kit/generate_botany_modules.py
 assets/3dassets/station_starter_kit/generate_medical_modules.py
+assets/3dassets/station_starter_kit/generate_security_modules.py
+docs/concepts/characters/README.md
+docs/character-effect-testing.md
+assets/3dassets/build_first_char_rig.py
+assets/3dassets/export_first_char.py
+assets/3dassets/render_first_char_preview.py
+docs/concepts/character-rig/idle.png
+docs/concepts/character-rig/sedated.png
+docs/concepts/character-rig/stimulated.png
+docs/concepts/character-rig/three-quarter.png
+docs/concepts/character-rig/unsteady.png
+docs/concepts/characters/direction-a-lab-pawn.png
+docs/concepts/characters/direction-b-soft-suit.png
+docs/concepts/characters/direction-c-departmental-doll.png

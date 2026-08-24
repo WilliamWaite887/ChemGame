@@ -225,6 +225,7 @@ fn handle_apply_held(
     held: Query<(Entity, &HeldBy)>,
     mut containers: Query<&mut Container>,
     chemist_bodies: Query<(), With<Chemist>>,
+    test_subjects: Query<(), With<crate::character_lab::TestSubject>>,
     orders: Query<(
         &crate::orders::Order,
         Has<crate::orders::IllicitOrder>,
@@ -388,6 +389,7 @@ fn handle_apply_held(
                         solution: snapshot,
                         authorized: target == player
                             || chemist_bodies.contains(target)
+                            || test_subjects.contains(target)
                             || requested
                             || crisis_care,
                         helpful: assessment.helpful,
@@ -502,6 +504,7 @@ fn handle_apply_held(
             solution: snapshot,
             authorized: patient == player
                 || chemist_bodies.contains(patient)
+                || test_subjects.contains(patient)
                 || requested
                 || crisis_care,
             helpful: assessment.helpful,
@@ -1196,6 +1199,43 @@ mod tests {
             blood_of(&app, patient).blood.volume_of(dylovene),
             Units::whole(15),
             "reviving the other chemist is the best reason to have one in the room"
+        );
+    }
+
+    #[test]
+    fn a_syringe_can_be_used_on_the_character_lab_subject() {
+        let mut app = test_app();
+        let (actor, syringe) = chemist_holding(&mut app, ContainerKind::Syringe, "hyperzine", 5);
+        let patient = app
+            .world_mut()
+            .spawn((
+                crate::character_lab::TestSubject,
+                Body::default(),
+                Bloodstream::default(),
+            ))
+            .id();
+
+        apply(&mut app, Some(patient));
+
+        let hyperzine = app.world().resource::<ChemDb>().reagent("hyperzine");
+        assert!(contents_of(&app, syringe).is_empty());
+        assert_eq!(
+            blood_of(&app, patient).blood.volume_of(hyperzine),
+            Units::whole(5),
+            "the mannequin uses the ordinary injection and bloodstream path"
+        );
+        let records: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ChemicalExposure>>()
+            .drain()
+            .collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].actor, Some(actor));
+        assert_eq!(records[0].target, patient);
+        assert_eq!(records[0].route, Route::Injected);
+        assert!(
+            records[0].authorized,
+            "deliberate mannequin tests must not count as patient abuse"
         );
     }
 

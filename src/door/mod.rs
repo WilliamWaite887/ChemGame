@@ -202,7 +202,10 @@ fn door_leaf_mesh() -> Mesh {
         Some(bevy::render::mesh::VertexAttributeValues::Float32x3(positions)) => positions.clone(),
         _ => unreachable!("Cuboid always stores Float32x3 positions"),
     };
-    let uvs: Vec<[f32; 2]> = positions.iter().map(|&[x, y, _z]| [x + 0.5, 0.5 - y]).collect();
+    let uvs: Vec<[f32; 2]> = positions
+        .iter()
+        .map(|&[x, y, _z]| [x + 0.5, 0.5 - y])
+        .collect();
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh
 }

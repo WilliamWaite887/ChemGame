@@ -976,29 +976,29 @@ mod tests {
             bevy::state::app::StatesPlugin,
             AssetPlugin::default(),
         ))
-            .init_state::<AppState>()
-            .init_asset::<Image>()
-            .init_resource::<Assets<Mesh>>()
-            .init_resource::<Assets<StandardMaterial>>()
-            .init_resource::<Departments>()
-            .init_resource::<DeliveryStations>()
-            .init_resource::<crate::lab::DoorSpots>()
-            .insert_resource(authored)
-            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-                std::time::Duration::from_secs_f32(0.05),
-            ))
-            .add_plugins((crate::nav::NavPlugin, crate::door::DoorPlugin))
-            .add_systems(
-                Update,
-                (
-                    start_crew_at_their_department,
-                    react_to_chemical_statuses,
-                    sync_medical_evacuation_prompt,
-                    walk_route,
-                )
-                    .chain()
-                    .run_if(in_state(AppState::Playing)),
-            );
+        .init_state::<AppState>()
+        .init_asset::<Image>()
+        .init_resource::<Assets<Mesh>>()
+        .init_resource::<Assets<StandardMaterial>>()
+        .init_resource::<Departments>()
+        .init_resource::<DeliveryStations>()
+        .init_resource::<crate::lab::DoorSpots>()
+        .insert_resource(authored)
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_secs_f32(0.05),
+        ))
+        .add_plugins((crate::nav::NavPlugin, crate::door::DoorPlugin))
+        .add_systems(
+            Update,
+            (
+                start_crew_at_their_department,
+                react_to_chemical_statuses,
+                sync_medical_evacuation_prompt,
+                walk_route,
+            )
+                .chain()
+                .run_if(in_state(AppState::Playing)),
+        );
         let (run, center) = crate::lab::doorways()
             .find(|(run, center)| {
                 let at = run.point(*center);

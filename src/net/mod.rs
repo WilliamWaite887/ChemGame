@@ -25,6 +25,7 @@ use bevy_replicon_renet::renet::{ConnectionConfig, DisconnectReason};
 use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRenetPlugins};
 
 use crate::body::{Bloodstream, Body};
+use crate::character_lab::TestSubject;
 use crate::chem_world::ChemicalPuddle;
 use crate::containers::{Container, HeldBy, InSlot, InSlotB, Stored};
 use crate::crew::{AtCounter, CrewMember, NeedsMedicalEvacuation};
@@ -45,7 +46,7 @@ pub mod steam;
 /// Arbitrary; both ends must agree. The low byte is an explicit schema
 /// revision so replicated chemistry additions cannot accidentally keep an old
 /// handshake compatible.
-const PROTOCOL_REVISION: u64 = 6;
+const PROTOCOL_REVISION: u64 = 7;
 const PROTOCOL_ID: u64 = 0x43_48_45_4d_00_00_00_00 | PROTOCOL_REVISION;
 const DEFAULT_PORT: u16 = 5327;
 /// The host is a local chemist, leaving three network seats in a four-person
@@ -576,6 +577,10 @@ fn register_replication(app: &mut App) {
         // in trouble.
         .replicate::<Body>()
         .replicate::<Bloodstream>()
+        // Debug character-lab identity. Release builds never spawn one, but
+        // keeping the schema identical means a debug host and its debug guest
+        // both construct the imported visual around the same body state.
+        .replicate::<TestSubject>()
         // Rogue Security's reward — a pickable prop, shared lab state like
         // any other, so both peers see it appear on the counter.
         .replicate::<Deterrent>()
@@ -1265,8 +1270,8 @@ mod tests {
     fn chemistry_schema_and_four_person_capacity_are_pinned() {
         assert_eq!(
             PROTOCOL_ID & 0xff,
-            6,
-            "static topology, semantic doors, and delivery lanes need revision 6"
+            7,
+            "the replicated character-lab test subject needs revision 7"
         );
         assert_eq!(MAX_REMOTE_CLIENTS, 3);
         assert_eq!(steam::LOBBY_CAPACITY, 4);

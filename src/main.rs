@@ -5,6 +5,7 @@ mod antagonist;
 mod arc;
 mod audio;
 mod body;
+mod character_lab;
 mod chem_data;
 mod chem_world;
 mod containers;
@@ -163,6 +164,10 @@ fn main() {
             interaction::InteractionPlugin,
             chem_world::ChemWorldPlugin,
             body::BodyPlugin,
+            // Debug builds get the imported character, sample rack and reset
+            // loop used to develop status-driven rigs. The plugin is inert in
+            // release builds.
+            character_lab::CharacterLabPlugin,
             hazards::HazardPlugin,
             // What the chemistry above does to the camera and the
             // models — reads `Bloodstream`, never mutates it.

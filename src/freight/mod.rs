@@ -293,8 +293,8 @@ impl Line {
             .sum();
 
         for piece in pieces.iter() {
-            let placed = Transform::from_translation(piece.origin)
-                .with_rotation(facing_yaw(piece.travel));
+            let placed =
+                Transform::from_translation(piece.origin).with_rotation(facing_yaw(piece.travel));
             match piece.role.as_str() {
                 "intake" => line.intake = Some(placed),
                 "sorter" => line.sorter = Some(placed),
@@ -513,10 +513,22 @@ fn dress_conveyors(
 
     for line in &lines.lines {
         if let Some(intake) = line.intake {
-            spawn_prop(&mut commands, assets.intake_port.clone(), intake, &line.id, "intake");
+            spawn_prop(
+                &mut commands,
+                assets.intake_port.clone(),
+                intake,
+                &line.id,
+                "intake",
+            );
         }
         if let Some(sorter) = line.sorter {
-            spawn_prop(&mut commands, assets.sorter.clone(), sorter, &line.id, "sorter");
+            spawn_prop(
+                &mut commands,
+                assets.sorter.clone(),
+                sorter,
+                &line.id,
+                "sorter",
+            );
         }
 
         for pair in line.path.windows(2) {
@@ -535,7 +547,11 @@ fn dress_conveyors(
             let along = line
                 .path
                 .get(index + 1)
-                .or_else(|| index.checked_sub(1).and_then(|before| line.path.get(before)))
+                .or_else(|| {
+                    index
+                        .checked_sub(1)
+                        .and_then(|before| line.path.get(before))
+                })
                 .map(|neighbour| *neighbour - *point)
                 .unwrap_or(Vec3::Z);
             let flat = Vec3::new(along.x, 0.0, along.z)
@@ -702,7 +718,11 @@ fn spawn_chute_sign(
 ) {
     let mounted = chute.mouth + toward_reader * SIGN_STANDOFF;
     let at = Vec3::new(mounted.x, SIGN_HEIGHT, mounted.z);
-    let lettering = meshes.add(pixel_sign_text_mesh(&chute.label, CHUTE_SIGN.0, CHUTE_SIGN.1));
+    let lettering = meshes.add(pixel_sign_text_mesh(
+        &chute.label,
+        CHUTE_SIGN.0,
+        CHUTE_SIGN.1,
+    ));
 
     commands
         .spawn((
@@ -1038,7 +1058,10 @@ mod tests {
         // Six runs that meet become seven waypoints, not twelve: each join is
         // collapsed. A duplicated point would stall a parcel for a frame.
         assert_eq!(line.path.len(), 7, "{:?}", line.path);
-        assert_eq!(line.position_at(0.0), Vec3::new(-109.375, DECK_HEIGHT, 49.8));
+        assert_eq!(
+            line.position_at(0.0),
+            Vec3::new(-109.375, DECK_HEIGHT, 49.8)
+        );
         // The far end is back at deck height: every metre climbed is given
         // back, which is what stops the belt ending in mid-air.
         let end = line.position_at(line.length);

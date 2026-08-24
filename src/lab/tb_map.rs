@@ -1623,6 +1623,12 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         min_z: -2.0,
         max_z: 10.0,
     };
+    const SECURITY_BACK: Bounds = Bounds {
+        min_x: -109.5,
+        max_x: -83.5,
+        min_z: -9.0,
+        max_z: -2.0,
+    };
     // Service is drawn as three brushes; every module here sits in the wide
     // eastern one.
     const SERVICE_EAST: Bounds = Bounds {
@@ -2688,6 +2694,78 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             depth: 0.34,
         },
         Placement {
+            kind: "sec.dispatch_console",
+            origin: "0 3400 0",
+            angles: "0 -90 0",
+            mount: Mount::Floor,
+            room: SECURITY,
+            width: 2.40,
+            depth: 1.20,
+        },
+        Placement {
+            kind: "sec.officer_desk_bank",
+            origin: "-250 4320 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: SECURITY,
+            width: 3.40,
+            depth: 1.70,
+        },
+        Placement {
+            kind: "sec.evidence_locker_bank",
+            origin: "290 4320 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: SECURITY_BACK,
+            width: 2.20,
+            depth: 0.90,
+        },
+        Placement {
+            kind: "sec.equipment_locker_bank",
+            origin: "290 3400 0",
+            angles: "0 -90 0",
+            mount: Mount::Floor,
+            room: SECURITY_BACK,
+            width: 2.20,
+            depth: 0.90,
+        },
+        Placement {
+            kind: "sec.brig_bunk",
+            origin: "300 4080 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: SECURITY_BACK,
+            width: 1.05,
+            depth: 2.20,
+        },
+        Placement {
+            kind: "sec.interrogation_table",
+            origin: "300 3630 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: SECURITY_BACK,
+            width: 2.20,
+            depth: 1.90,
+        },
+        Placement {
+            kind: "sec.mugshot_board",
+            origin: "85 4120 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: SECURITY_BACK,
+            width: 1.80,
+            depth: 0.24,
+        },
+        Placement {
+            kind: "sec.alert_panel",
+            origin: "355 3560 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: SECURITY_BACK,
+            width: 1.20,
+            depth: 0.26,
+        },
+        Placement {
             kind: "svc.menu_board",
             origin: "-1139 1200 0",
             angles: "0 180 0",
@@ -2801,7 +2879,19 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         // overhang walkable floor — you brush past a shelf. A bed cannot: with
         // no collider on the scene and no `Solid` for crew to consult, standing
         // in walkable ground is the same as not being there.
-        if placement.mount == Mount::Floor {
+        // Security deliberately keeps one continuous walkable floor. These
+        // fixtures have matching runtime `Solid` envelopes, so their visible
+        // geometry -- not a hidden floor boundary -- stops the player.
+        let collider_backed_security_fixture = matches!(
+            placement.kind,
+            "sec.dispatch_console"
+                | "sec.officer_desk_bank"
+                | "sec.evidence_locker_bank"
+                | "sec.equipment_locker_bank"
+                | "sec.brig_bunk"
+                | "sec.interrogation_table"
+        );
+        if placement.mount == Mount::Floor && !collider_backed_security_fixture {
             let walkable: Vec<Bounds> = map
                 .iter()
                 .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
@@ -3127,6 +3217,46 @@ fn every_decoration_kind_has_an_exported_glb() {
             "assets/3dassets/station_starter_kit/glb/decor_sec_evidence_wall.glb",
         ),
         (
+            "sec.booking_desk",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_booking_desk.glb",
+        ),
+        (
+            "sec.dispatch_console",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_dispatch_console.glb",
+        ),
+        (
+            "sec.officer_desk_bank",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_officer_desk_bank.glb",
+        ),
+        (
+            "sec.evidence_locker_bank",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_evidence_locker_bank.glb",
+        ),
+        (
+            "sec.equipment_locker_bank",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_equipment_locker_bank.glb",
+        ),
+        (
+            "sec.brig_bunk",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_brig_bunk.glb",
+        ),
+        (
+            "sec.interrogation_table",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_interrogation_table.glb",
+        ),
+        (
+            "sec.processing_scanner",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_processing_scanner.glb",
+        ),
+        (
+            "sec.mugshot_board",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_mugshot_board.glb",
+        ),
+        (
+            "sec.alert_panel",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_alert_panel.glb",
+        ),
+        (
             "svc.menu_board",
             "assets/3dassets/station_starter_kit/glb/decor_svc_menu_board.glb",
         ),
@@ -3225,7 +3355,10 @@ fn every_station_kit_glb_parses_with_bevys_gltf_parser() {
             panic!("{} is not Bevy-compatible glTF: {error}", path.display())
         });
     }
-    assert_eq!(count, 84, "the station starter kit should contain 84 GLBs");
+    assert_eq!(
+        count, 109,
+        "the station starter kit should contain 109 GLBs"
+    );
 }
 
 /// The band both Cargo rooms carve out of their walkable volumes for the
@@ -3267,7 +3400,10 @@ fn conveyor_markers_form_continuous_lines() {
         let role = |piece: &Entity| property(piece, "role").unwrap_or_default();
         let count = |what: &str| pieces.iter().filter(|piece| role(piece) == what).count();
         assert_eq!(count("intake"), 1, "line '{line}' needs exactly one intake");
-        assert!(count("chute") >= 1, "line '{line}' has nowhere to send anything");
+        assert!(
+            count("chute") >= 1,
+            "line '{line}' has nowhere to send anything"
+        );
         assert!(count("run") >= 1, "line '{line}' has no belt");
         for piece in &pieces {
             let role = role(piece);
@@ -3277,7 +3413,10 @@ fn conveyor_markers_form_continuous_lines() {
             );
             if role == "chute" {
                 assert!(
-                    !property(piece, "label").unwrap_or_default().trim().is_empty(),
+                    !property(piece, "label")
+                        .unwrap_or_default()
+                        .trim()
+                        .is_empty(),
                     "a chute on line '{line}' has no destination label",
                 );
             }

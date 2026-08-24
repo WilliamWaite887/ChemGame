@@ -2834,7 +2834,8 @@
 {
 "classname" "func_walkable"
 "room" "Security"
-// brush 0
+// One continuous floor: visible fixture colliders define the room's obstacles,
+// so navigation never creates invisible walls between furniture zones.
 {
 ( -400 3340 0 ) ( -400 4380 0 ) ( -400 3340 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( -400 3340 0 ) ( -400 3340 20 ) ( 80 3340 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
@@ -3333,7 +3334,8 @@
 {
 "classname" "func_walkable"
 "room" "Security Back Room"
-// brush 0
+// Continuous secure-room floor. Storage and detention fixtures stay against
+// the perimeter, leaving the three doors and the centre lane unobstructed.
 {
 ( 80 3340 0 ) ( 80 4380 0 ) ( 80 3340 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( 80 3340 0 ) ( 80 3340 20 ) ( 360 3340 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
@@ -5879,6 +5881,57 @@
 "origin" "-80 4375 0"
 "kind" "sec.evidence_wall"
 "angles" "0 90 0"
+}
+// Security layout by function: the existing department dressing remains the
+// public checkpoint; operations sit on the front-room perimeter; storage,
+// interview, and detention run south-to-north inside the secure back room.
+{
+"classname" "decoration_spot"
+"origin" "0 3400 0"
+"kind" "sec.dispatch_console"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-250 4320 0"
+"kind" "sec.officer_desk_bank"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "290 4320 0"
+"kind" "sec.evidence_locker_bank"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "290 3400 0"
+"kind" "sec.equipment_locker_bank"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "300 4080 0"
+"kind" "sec.brig_bunk"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "300 3630 0"
+"kind" "sec.interrogation_table"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "85 4120 0"
+"kind" "sec.mugshot_board"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "355 3560 0"
+"kind" "sec.alert_panel"
+"angles" "0 0 0"
 }
 // entity 288
 {

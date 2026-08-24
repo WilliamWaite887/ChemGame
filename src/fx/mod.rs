@@ -20,6 +20,7 @@ use chem_sim::{Bloodstream as ChemBloodstream, StatusKind};
 use rand::prelude::*;
 
 use crate::body::Bloodstream;
+use crate::character_lab::{TestSubjectSurface, TestSubjectVisual};
 use crate::crew::CrewBody;
 use crate::hazards::{HazardFelt, HazardKind};
 use crate::player::{ChemistBody, LocalPlayer, PlayerCamera};
@@ -45,6 +46,7 @@ impl Plugin for FxPlugin {
                     update_hallucination_cue,
                     animate_chemist_body,
                     animate_crew_body,
+                    animate_test_subject,
                 )
                     .run_if(in_state(AppState::Playing)),
             );
@@ -633,6 +635,39 @@ fn animate_crew_body(
             body_scale(&blood.0, t),
         );
         apply_part_tint(&mut materials, &material.0, part.base_color, &blood.0);
+    }
+}
+
+/// The imported development model uses the same chemistry presentation as
+/// live characters. Its GLB hierarchy is deeper than the primitive chemist
+/// meshes, so pose the scene root and tint its privately cloned surfaces.
+fn animate_test_subject(
+    time: Res<Time>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    bloods: Query<&Bloodstream>,
+    mut visuals: Query<(&TestSubjectVisual, &mut Transform)>,
+    surfaces: Query<(&TestSubjectSurface, &MeshMaterial3d<StandardMaterial>)>,
+) {
+    let t = time.elapsed_secs();
+    for (visual, mut transform) in &mut visuals {
+        let Ok(blood) = bloods.get(visual.subject) else {
+            continue;
+        };
+        let (offset, roll) = gait_offset(&blood.0, t);
+        apply_part_pose(
+            &mut transform,
+            visual.rest,
+            offset,
+            roll,
+            body_scale(&blood.0, t),
+        );
+    }
+
+    for (surface, material) in &surfaces {
+        let Ok(blood) = bloods.get(surface.subject) else {
+            continue;
+        };
+        apply_part_tint(&mut materials, &material.0, surface.base_color, &blood.0);
     }
 }
 

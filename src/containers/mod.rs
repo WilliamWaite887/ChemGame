@@ -276,8 +276,14 @@ pub(crate) fn dress_containers(
         commands.entity(entity).insert((
             Mesh3d(meshes.add(Cylinder::new(radius, height))),
             MeshMaterial3d(assets.glass_material.clone()),
-            Interactable::new(kind.label()),
         ));
+        // Most glassware uses its kind as the prompt. Debug fixtures and
+        // future authored samples may arrive with a more useful replicated
+        // label already, and presentation must not erase gameplay data just
+        // because the local mesh was built a frame later.
+        commands
+            .entity(entity)
+            .insert_if_new(Interactable::new(kind.label()));
 
         // The liquid is a child cylinder, scaled down as the container empties.
         // It starts invisible because a fresh container is empty; the first
@@ -650,5 +656,29 @@ mod tests {
 
         let mut liquids = app.world_mut().query::<&LiquidVisual>();
         assert_eq!(liquids.iter(app.world()).count(), 1);
+    }
+
+    #[test]
+    fn dressing_preserves_an_authored_interaction_label() {
+        let mut app = App::new();
+        app.add_plugins(AssetPlugin::default())
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .add_systems(Startup, load_container_assets)
+            .add_systems(Update, dress_containers);
+
+        let sample = app
+            .world_mut()
+            .spawn((
+                Container::new(ContainerKind::Bottle),
+                Interactable::new("Hyperzine sample — hastened"),
+            ))
+            .id();
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Interactable>(sample).unwrap().label,
+            "Hyperzine sample — hastened"
+        );
     }
 }

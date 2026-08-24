@@ -1439,6 +1439,49 @@ const DECORATION_KINDS: &[(&str, &str)] = &[
         "sec.evidence_wall",
         "3dassets/station_starter_kit/glb/decor_sec_evidence_wall.glb",
     ),
+    // Security's module library. Six floor fixtures and both wall cues are
+    // used in the current perimeter layout; booking and processing remain
+    // available for a future intake room without crowding this checkpoint.
+    (
+        "sec.booking_desk",
+        "3dassets/station_starter_kit/glb/decor_sec_booking_desk.glb",
+    ),
+    (
+        "sec.dispatch_console",
+        "3dassets/station_starter_kit/glb/decor_sec_dispatch_console.glb",
+    ),
+    (
+        "sec.officer_desk_bank",
+        "3dassets/station_starter_kit/glb/decor_sec_officer_desk_bank.glb",
+    ),
+    (
+        "sec.evidence_locker_bank",
+        "3dassets/station_starter_kit/glb/decor_sec_evidence_locker_bank.glb",
+    ),
+    (
+        "sec.equipment_locker_bank",
+        "3dassets/station_starter_kit/glb/decor_sec_equipment_locker_bank.glb",
+    ),
+    (
+        "sec.brig_bunk",
+        "3dassets/station_starter_kit/glb/decor_sec_brig_bunk.glb",
+    ),
+    (
+        "sec.interrogation_table",
+        "3dassets/station_starter_kit/glb/decor_sec_interrogation_table.glb",
+    ),
+    (
+        "sec.processing_scanner",
+        "3dassets/station_starter_kit/glb/decor_sec_processing_scanner.glb",
+    ),
+    (
+        "sec.mugshot_board",
+        "3dassets/station_starter_kit/glb/decor_sec_mugshot_board.glb",
+    ),
+    (
+        "sec.alert_panel",
+        "3dassets/station_starter_kit/glb/decor_sec_alert_panel.glb",
+    ),
     (
         "svc.menu_board",
         "3dassets/station_starter_kit/glb/decor_svc_menu_board.glb",
@@ -1576,7 +1619,10 @@ fn load_decoration_assets(mut commands: Commands, assets: Res<AssetServer>) {
         scenes: DECORATION_KINDS
             .iter()
             .map(|(kind, path)| {
-                (*kind, assets.load(GltfAssetLabel::Scene(0).from_asset(*path)))
+                (
+                    *kind,
+                    assets.load(GltfAssetLabel::Scene(0).from_asset(*path)),
+                )
             })
             .collect(),
     });
@@ -1653,6 +1699,18 @@ const FLOOR_COLLIDER_ENVELOPES: &[(&str, Vec3)] = &[
     ("bridge.console_arc", Vec3::new(3.00, 0.95, 1.00)),
     ("bridge.command_dais", Vec3::new(2.50, 2.30, 1.50)),
     ("bridge.tactical_rail", Vec3::new(1.50, 1.45, 0.80)),
+    // Security's walk-up fixtures. Desks and the interrogation table keep
+    // their real top height so they remain valid set-down surfaces. The brig
+    // bunk is deliberately raised to the standard non-surface collider height
+    // so its restraint rails do not become a convenient beaker shelf.
+    ("sec.booking_desk", Vec3::new(1.70, 2.15, 0.80)),
+    ("sec.dispatch_console", Vec3::new(1.20, 1.70, 0.60)),
+    ("sec.officer_desk_bank", Vec3::new(1.70, 1.43, 0.85)),
+    ("sec.evidence_locker_bank", Vec3::new(1.10, 2.10, 0.45)),
+    ("sec.equipment_locker_bank", Vec3::new(1.10, 2.10, 0.45)),
+    ("sec.brig_bunk", Vec3::new(0.525, 1.45, 1.10)),
+    ("sec.interrogation_table", Vec3::new(1.10, 1.25, 0.95)),
+    ("sec.processing_scanner", Vec3::new(0.70, 2.10, 0.55)),
     // The ward-and-cryo pass. None of these five sit anywhere near
     // SET_DOWN_REACH (the closest real top is the research desk's screen at
     // 1.54 m), so every one keeps its real nominal envelope with no bump —

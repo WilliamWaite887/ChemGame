@@ -1135,7 +1135,11 @@ impl WalkableAreas {
                 continue;
             }
             let holds = inset.holds(position);
-            let horizontal = if holds { position } else { inset.nearest(position) };
+            let horizontal = if holds {
+                position
+            } else {
+                inset.nearest(position)
+            };
             let floor_y = region.floor_at(horizontal);
             let candidate = Vec3::new(horizontal.x, floor_y + body_offset, horizontal.z);
             if holds {
@@ -1150,7 +1154,8 @@ impl WalkableAreas {
                     best_held = Some((distance, sloped, candidate));
                 }
             } else {
-                let distance = (horizontal.x - position.x).powi(2) + (horizontal.z - position.z).powi(2);
+                let distance =
+                    (horizontal.x - position.x).powi(2) + (horizontal.z - position.z).powi(2);
                 if best_clamped.is_none_or(|(nearest, _)| distance < nearest) {
                     best_clamped = Some((distance, candidate));
                 }
