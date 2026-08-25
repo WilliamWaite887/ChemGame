@@ -1,5 +1,6 @@
 /target
 /saves
+__pycache__/
 # Where saves lived before there were slots. `saves::migrate_legacy_saves`
 # moves these into `saves/Chemist/` on the next launch.
 save.ron

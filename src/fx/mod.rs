@@ -21,9 +21,9 @@ use rand::prelude::*;
 
 use crate::body::Bloodstream;
 use crate::character_lab::{TestSubjectSurface, TestSubjectVisual};
-use crate::crew::CrewBody;
+use crate::crew::{CrewBody, CrewSurface};
 use crate::hazards::{HazardFelt, HazardKind};
-use crate::player::{ChemistBody, LocalPlayer, PlayerCamera};
+use crate::player::{ChemistBody, ChemistSurface, LocalPlayer, PlayerCamera};
 use crate::AppState;
 
 pub struct FxPlugin;
@@ -547,14 +547,11 @@ fn animate_chemist_body(
     time: Res<Time>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     bloods: Query<&Bloodstream>,
-    mut parts: Query<(
-        &ChemistBody,
-        &mut Transform,
-        &MeshMaterial3d<StandardMaterial>,
-    )>,
+    mut parts: Query<(&ChemistBody, &mut Transform)>,
+    surfaces: Query<(&ChemistSurface, &MeshMaterial3d<StandardMaterial>)>,
 ) {
     let t = time.elapsed_secs();
-    for (part, mut transform, material) in &mut parts {
+    for (part, mut transform) in &mut parts {
         let Ok(blood) = bloods.get(part.chemist) else {
             continue;
         };
@@ -562,11 +559,17 @@ fn animate_chemist_body(
         apply_part_pose(
             &mut transform,
             part.rest,
+            part.rest_rotation,
             offset,
             roll,
             body_scale(&blood.0, t),
         );
-        apply_part_tint(&mut materials, &material.0, part.base_color, &blood.0);
+    }
+    for (surface, material) in &surfaces {
+        let Ok(blood) = bloods.get(surface.chemist) else {
+            continue;
+        };
+        apply_part_tint(&mut materials, &material.0, surface.base_color, &blood.0);
     }
 }
 
@@ -576,12 +579,19 @@ fn animate_chemist_body(
 /// `(Vec3::ZERO, 0.0)` every frame. Writing that unconditionally marked the
 /// part `Changed<Transform>` and re-ran propagation for the whole body
 /// hierarchy on every peer, every frame, for a pose that had not moved.
-fn apply_part_pose(transform: &mut Transform, rest: Vec3, offset: Vec3, roll: f32, scale: Vec3) {
+fn apply_part_pose(
+    transform: &mut Transform,
+    rest: Vec3,
+    rest_rotation: Quat,
+    offset: Vec3,
+    roll: f32,
+    scale: Vec3,
+) {
     let translation = rest + offset;
     if transform.translation != translation {
         transform.translation = translation;
     }
-    let rotation = Quat::from_rotation_z(roll);
+    let rotation = rest_rotation * Quat::from_rotation_z(roll);
     if transform.rotation != rotation {
         transform.rotation = rotation;
     }
@@ -595,7 +605,7 @@ fn apply_part_pose(transform: &mut Transform, rest: Vec3, offset: Vec3, roll: f3
 /// `Assets::get_mut` emits `AssetEvent::Modified` unconditionally, which forces
 /// the render world to re-extract and re-prepare that `StandardMaterial` — a
 /// uniform write plus a bind group — every frame. Materials are deliberately
-/// per-chemist rather than shared (see `player::ChemistBody::base_color`), so
+/// per-chemist rather than shared (see `player::ChemistSurface`), so
 /// that cost scaled with everyone in the room, overwhelmingly to re-upload a
 /// colour identical to the one already there.
 fn apply_part_tint(
@@ -619,10 +629,11 @@ fn animate_crew_body(
     time: Res<Time>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     bloods: Query<&Bloodstream>,
-    mut parts: Query<(&CrewBody, &mut Transform, &MeshMaterial3d<StandardMaterial>)>,
+    mut parts: Query<(&CrewBody, &mut Transform)>,
+    surfaces: Query<(&CrewSurface, &MeshMaterial3d<StandardMaterial>)>,
 ) {
     let t = time.elapsed_secs();
-    for (part, mut transform, material) in &mut parts {
+    for (part, mut transform) in &mut parts {
         let Ok(blood) = bloods.get(part.crew) else {
             continue;
         };
@@ -630,11 +641,17 @@ fn animate_crew_body(
         apply_part_pose(
             &mut transform,
             part.rest,
+            part.rest_rotation,
             offset,
             roll,
             body_scale(&blood.0, t),
         );
-        apply_part_tint(&mut materials, &material.0, part.base_color, &blood.0);
+    }
+    for (surface, material) in &surfaces {
+        let Ok(blood) = bloods.get(surface.crew) else {
+            continue;
+        };
+        apply_part_tint(&mut materials, &material.0, surface.base_color, &blood.0);
     }
 }
 
@@ -664,6 +681,7 @@ fn animate_test_subject(
         apply_part_pose(
             &mut transform,
             visual.rest,
+            Quat::IDENTITY,
             offset,
             roll,
             body_scale(&blood.0, t),

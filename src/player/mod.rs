@@ -7,13 +7,18 @@
 //! walking does, which is the tolerable half of the trade.
 
 use bevy::ecs::entity::MapEntities;
+use bevy::gltf::GltfAssetLabel;
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::body::{Bloodstream, Body};
+use crate::character_lab::{
+    character_animation_speed, desired_character_animation, CharacterAnimation,
+};
 use crate::interaction::{Focus, InteractionMode};
 use crate::lab::{self, Solid};
 use crate::net::is_authority;
@@ -64,6 +69,10 @@ impl Plugin for PlayerPlugin {
                     // Local presentation, runs everywhere.
                     (
                         dress_chemists,
+                        configure_chemist_faces.after(dress_chemists),
+                        tag_chemist_surfaces.after(dress_chemists),
+                        attach_chemist_animation.after(dress_chemists),
+                        drive_chemist_animation.after(attach_chemist_animation),
                         adopt_my_chemist,
                         hide_own_body,
                         // Reading the mouse and keyboard on the player's
@@ -312,46 +321,63 @@ fn adopt_my_chemist(mut commands: Commands, mut assigned: MessageReader<YouAreCh
     }
 }
 
-/// Lab coat white, so the other chemist reads instantly against the grey
-/// room and the coloured crew uniforms. Shared with [`animate_chemist_body`]
-/// in `fx`, which blends a chemical-status tint on top of this rather than
-/// whatever colour a mutated material happens to hold — see
-/// [`ChemistBody::base_color`].
-pub(crate) const COAT_COLOR: Color = Color::srgb(0.88, 0.90, 0.93);
-pub(crate) const SKIN_COLOR: Color = Color::srgb(0.76, 0.62, 0.52);
-
-/// Meshes every chemist in the lab is drawn from.
-///
-/// Materials are deliberately *not* here — M12 moved them into a fresh
-/// [`StandardMaterial`] per chemist, spawned in [`dress_chemists`]. A single
-/// shared `Handle<StandardMaterial>` for every chemist's coat would mean
-/// tinting one chemist drunk-red would tint every chemist sharing that
-/// handle, since a material handle is a reference to one asset, not a
-/// per-entity copy.
+/// The player/Chemistry version of the shared station character rig.
 #[derive(Resource)]
 pub(crate) struct ChemistAssets {
-    body: Handle<Mesh>,
-    head: Handle<Mesh>,
+    model: Handle<WorldAsset>,
+    animation_graph: Handle<AnimationGraph>,
+    animation_nodes: [AnimationNodeIndex; 7],
 }
 
-pub(crate) fn load_chemist_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
+pub(crate) fn load_chemist_assets(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut animation_graphs: ResMut<Assets<AnimationGraph>>,
+) {
+    let path = "3dassets/glb/first_char_player.glb";
+    let (graph, nodes) = AnimationGraph::from_clips([
+        asset_server.load(GltfAssetLabel::Animation(1).from_asset(path)),
+        asset_server.load(GltfAssetLabel::Animation(3).from_asset(path)),
+        asset_server.load(GltfAssetLabel::Animation(2).from_asset(path)),
+        asset_server.load(GltfAssetLabel::Animation(4).from_asset(path)),
+        asset_server.load(GltfAssetLabel::Animation(0).from_asset(path)),
+        asset_server.load(GltfAssetLabel::Animation(5).from_asset(path)),
+        asset_server.load(GltfAssetLabel::Animation(6).from_asset(path)),
+    ]);
     commands.insert_resource(ChemistAssets {
-        body: meshes.add(Capsule3d::new(0.3, 0.9)),
-        head: meshes.add(Sphere::new(0.2)),
+        model: asset_server.load(GltfAssetLabel::Scene(0).from_asset(path)),
+        animation_graph: animation_graphs.add(graph),
+        animation_nodes: nodes
+            .try_into()
+            .expect("the shared player rig has exactly seven clips"),
     });
 }
 
-/// A body part, and the chemist it belongs to.
+/// The imported visual root, and the chemist it belongs to.
 ///
-/// `rest` is the part's un-animated local offset and `base_color` its
-/// un-tinted material colour — both needed so `fx::animate_chemist_body` can
-/// compute this frame's wobble/tint fresh from a fixed reference point
-/// instead of drifting by accumulating onto whatever the last frame left.
+/// `rest` and `rest_rotation` let `fx::animate_chemist_body` compute this
+/// frame's wobble from a fixed reference pose instead of accumulating drift.
 #[derive(Component)]
 pub(crate) struct ChemistBody {
     pub(crate) chemist: Entity,
     pub(crate) rest: Vec3,
+    pub(crate) rest_rotation: Quat,
+}
+
+/// A privately cloned material below an imported chemist scene.
+#[derive(Component)]
+pub(crate) struct ChemistSurface {
+    pub(crate) chemist: Entity,
     pub(crate) base_color: Color,
+}
+
+#[derive(Component)]
+struct ChemistFaceConfigured;
+
+#[derive(Component)]
+struct ChemistAnimationController {
+    chemist: Entity,
+    current: CharacterAnimation,
 }
 
 /// Gives every chemist something to look at.
@@ -363,7 +389,6 @@ pub(crate) struct ChemistBody {
 pub(crate) fn dress_chemists(
     mut commands: Commands,
     assets: Option<Res<ChemistAssets>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     chemists: Query<Entity, Added<Player>>,
 ) {
     let Some(assets) = assets else {
@@ -383,40 +408,166 @@ pub(crate) fn dress_chemists(
         // `Visibility` is spelled out rather than left to `Mesh3d`'s required
         // components, because `hide_own_body` writes it: a part that only got
         // one implicitly is a part the hiding query cannot see.
-        let body_rest = Vec3::new(0.0, -0.85, 0.0);
+        let body_rest = Vec3::new(0.0, -0.75, 0.0);
+        let body_rotation = Quat::from_rotation_y(std::f32::consts::PI);
         commands.spawn((
-            Mesh3d(assets.body.clone()),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: COAT_COLOR,
-                perceptual_roughness: 0.8,
-                ..default()
-            })),
-            Transform::from_translation(body_rest),
+            Name::new("player chemistry character"),
+            WorldAssetRoot(assets.model.clone()),
+            // The camera and movement convention face -Z at zero yaw, while
+            // Blender's authored character faces +Z after glTF conversion.
+            Transform::from_translation(body_rest).with_rotation(body_rotation),
             Visibility::default(),
             ChemistBody {
                 chemist,
                 rest: body_rest,
-                base_color: COAT_COLOR,
+                rest_rotation: body_rotation,
             },
             ChildOf(chemist),
         ));
-        let head_rest = Vec3::new(0.0, -0.15, 0.0);
-        commands.spawn((
-            Mesh3d(assets.head.clone()),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: SKIN_COLOR,
-                perceptual_roughness: 0.8,
-                ..default()
-            })),
-            Transform::from_translation(head_rest),
-            Visibility::default(),
-            ChemistBody {
-                chemist,
-                rest: head_rest,
-                base_color: SKIN_COLOR,
+    }
+}
+
+fn chemist_visual_ancestor(
+    mut entity: Entity,
+    parents: &Query<&ChildOf>,
+    visuals: &Query<&ChemistBody>,
+) -> Option<Entity> {
+    for _ in 0..64 {
+        if visuals.contains(entity) {
+            return Some(entity);
+        }
+        entity = parents.get(entity).ok()?.parent();
+    }
+    None
+}
+
+fn chemist_face_variant(name: &str) -> Option<u8> {
+    let prefix = name.strip_prefix("Face")?;
+    prefix.get(..2)?.parse::<u8>().ok()?.checked_sub(1)
+}
+
+fn configure_chemist_faces(
+    mut commands: Commands,
+    mut nodes: Query<(Entity, &Name, &mut Visibility), Without<ChemistFaceConfigured>>,
+    parents: Query<&ChildOf>,
+    visuals: Query<&ChemistBody>,
+) {
+    for (entity, name, mut visibility) in &mut nodes {
+        let Some(variant) = chemist_face_variant(name.as_str()) else {
+            continue;
+        };
+        if chemist_visual_ancestor(entity, &parents, &visuals).is_none() {
+            continue;
+        }
+        *visibility = if variant == 0 {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        commands.entity(entity).insert(ChemistFaceConfigured);
+    }
+}
+
+fn tag_chemist_surfaces(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    meshes: Query<
+        (Entity, &MeshMaterial3d<StandardMaterial>),
+        (With<Mesh3d>, Without<ChemistSurface>),
+    >,
+    parents: Query<&ChildOf>,
+    visuals: Query<&ChemistBody>,
+) {
+    for (entity, material) in &meshes {
+        let Some(visual_entity) = chemist_visual_ancestor(entity, &parents, &visuals) else {
+            continue;
+        };
+        let Ok(visual) = visuals.get(visual_entity) else {
+            continue;
+        };
+        let Some(source) = materials.get(&material.0).cloned() else {
+            continue;
+        };
+        let base_color = source.base_color;
+        commands.entity(entity).insert((
+            MeshMaterial3d(materials.add(source)),
+            ChemistSurface {
+                chemist: visual.chemist,
+                base_color,
             },
-            ChildOf(chemist),
         ));
+    }
+}
+
+fn attach_chemist_animation(
+    mut commands: Commands,
+    assets: Option<Res<ChemistAssets>>,
+    mut players: Query<(Entity, &mut AnimationPlayer), Added<AnimationPlayer>>,
+    parents: Query<&ChildOf>,
+    visuals: Query<&ChemistBody>,
+) {
+    let Some(assets) = assets else {
+        return;
+    };
+    for (entity, mut player) in &mut players {
+        let Some(visual_entity) = chemist_visual_ancestor(entity, &parents, &visuals) else {
+            continue;
+        };
+        let Ok(visual) = visuals.get(visual_entity) else {
+            continue;
+        };
+        let initial = CharacterAnimation::Idle;
+        let mut transitions = AnimationTransitions::new();
+        transitions
+            .play(
+                &mut player,
+                assets.animation_nodes[initial as usize],
+                Duration::ZERO,
+            )
+            .repeat();
+        commands.entity(entity).insert((
+            AnimationGraphHandle(assets.animation_graph.clone()),
+            transitions,
+            ChemistAnimationController {
+                chemist: visual.chemist,
+                current: initial,
+            },
+        ));
+    }
+}
+
+fn drive_chemist_animation(
+    assets: Option<Res<ChemistAssets>>,
+    bloods: Query<&Bloodstream>,
+    intents: Query<&MoveIntent>,
+    mut players: Query<(
+        &mut AnimationPlayer,
+        &mut AnimationTransitions,
+        &mut ChemistAnimationController,
+    )>,
+) {
+    let Some(assets) = assets else {
+        return;
+    };
+    for (mut player, mut transitions, mut controller) in &mut players {
+        let Ok(blood) = bloods.get(controller.chemist) else {
+            continue;
+        };
+        let moving = intents
+            .get(controller.chemist)
+            .is_ok_and(|intent| intent.direction != Vec2::ZERO);
+        let desired = desired_character_animation(&blood.0, moving);
+        let node = assets.animation_nodes[desired as usize];
+        let speed = character_animation_speed(&blood.0, desired);
+        if desired != controller.current {
+            transitions
+                .play(&mut player, node, Duration::from_millis(260))
+                .repeat()
+                .set_speed(speed);
+            controller.current = desired;
+        } else if let Some(active) = player.animation_mut(node) {
+            active.set_speed(speed);
+        }
     }
 }
 
@@ -1169,15 +1320,29 @@ mod tests {
         app.add_plugins(AssetPlugin::default())
             .init_asset::<Mesh>()
             .init_asset::<StandardMaterial>()
+            .init_asset::<WorldAsset>()
+            .init_asset::<AnimationGraph>()
             .add_message::<YouAreChemist>()
             // Driven as a real schedule rather than one-shot calls: these key
             // off `Added` and message readers, both of which are relative to a
             // system's own last run.
-            .add_systems(Startup, load_chemist_assets)
             .add_systems(
                 Update,
                 (dress_chemists, adopt_my_chemist, hide_own_body).chain(),
             );
+        let (graph, nodes) =
+            AnimationGraph::from_clips(std::array::from_fn::<Handle<AnimationClip>, 7, _>(|_| {
+                Handle::default()
+            }));
+        let animation_graph = app
+            .world_mut()
+            .resource_mut::<Assets<AnimationGraph>>()
+            .add(graph);
+        app.insert_resource(ChemistAssets {
+            model: Handle::default(),
+            animation_graph,
+            animation_nodes: nodes.try_into().unwrap(),
+        });
 
         let me = replicated_chemist(&mut app);
         let them = replicated_chemist(&mut app);
@@ -1190,7 +1355,7 @@ mod tests {
             .map(|(part, visibility)| (part.chemist, *visibility))
             .collect();
 
-        assert_eq!(seen.len(), 4, "a body and a head each");
+        assert_eq!(seen.len(), 2, "one imported character visual each");
         // A replicated chemist has no `Visibility` of its own, and body parts
         // parented to one that lacks it are never drawn. Bevy reports this as
         // a B0004 warning at runtime rather than an error, so nothing else

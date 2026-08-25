@@ -28,7 +28,7 @@ use crate::body::{Bloodstream, Body};
 use crate::character_lab::{LocomotionPreview, TestSubject};
 use crate::chem_world::ChemicalPuddle;
 use crate::containers::{Container, HeldBy, InSlot, InSlotB, Stored};
-use crate::crew::{AtCounter, CrewMember, NeedsMedicalEvacuation};
+use crate::crew::{AtCounter, CrewAppearance, CrewMember, NeedsMedicalEvacuation};
 use crate::cult::{Cultist, RitualAnchor};
 use crate::door::{Corroded, Door};
 use crate::hazards::{ActiveHazard, SmokeCloud, SmokeOwner, SmokePayload};
@@ -46,7 +46,7 @@ pub mod steam;
 /// Arbitrary; both ends must agree. The low byte is an explicit schema
 /// revision so replicated chemistry additions cannot accidentally keep an old
 /// handshake compatible.
-const PROTOCOL_REVISION: u64 = 7;
+const PROTOCOL_REVISION: u64 = 8;
 const PROTOCOL_ID: u64 = 0x43_48_45_4d_00_00_00_00 | PROTOCOL_REVISION;
 const DEFAULT_PORT: u16 = 5327;
 /// The host is a local chemist, leaving three network seats in a four-person
@@ -546,6 +546,7 @@ fn register_replication(app: &mut App) {
         .replicate::<CounterOrder>()
         .replicate::<Produce>()
         .replicate::<CrewMember>()
+        .replicate::<CrewAppearance>()
         // Interaction labels are gameplay affordances, not decoration: a
         // guest cannot hand over an order or evacuate an incapacitated
         // resident if their focus ray is unable to recognise that entity as
@@ -739,6 +740,8 @@ mod tests {
                     .init_asset::<Mesh>()
                     .init_asset::<StandardMaterial>()
                     .init_asset::<WorldAsset>()
+                    .init_asset::<AnimationClip>()
+                    .init_asset::<AnimationGraph>()
                     .add_systems(
                         Startup,
                         (
@@ -847,8 +850,8 @@ mod tests {
         let mut parts = client.world_mut().query::<&crate::player::ChemistBody>();
         assert_eq!(
             parts.iter(client.world()).count(),
-            2,
-            "a body and a head, or the other chemist is an invisible pair of hands"
+            1,
+            "the other chemist needs one imported character visual"
         );
     }
 
@@ -1271,8 +1274,8 @@ mod tests {
     fn chemistry_schema_and_four_person_capacity_are_pinned() {
         assert_eq!(
             PROTOCOL_ID & 0xff,
-            7,
-            "the replicated character-lab test subject needs revision 7"
+            8,
+            "replicated NPC appearance identity needs revision 8"
         );
         assert_eq!(MAX_REMOTE_CLIENTS, 3);
         assert_eq!(steam::LOBBY_CAPACITY, 4);

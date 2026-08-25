@@ -61,6 +61,7 @@ impl Plugin for CharacterLabPlugin {
             Update,
             (
                 dress_test_subjects,
+                configure_test_subject_faces.after(dress_test_subjects),
                 tag_test_subject_surfaces.after(dress_test_subjects),
                 attach_test_subject_animation.after(dress_test_subjects),
                 drive_test_subject_animation.after(attach_test_subject_animation),
@@ -95,7 +96,11 @@ struct LocomotionPreviewState {
 pub(crate) struct TestSubjectVisual {
     pub(crate) subject: Entity,
     pub(crate) rest: Vec3,
+    face_variant: u8,
 }
+
+#[derive(Component)]
+struct TestSubjectFaceConfigured;
 
 /// A material-bearing mesh nested inside the imported GLB scene.
 #[derive(Component)]
@@ -121,7 +126,7 @@ struct TestSubjectAnimationPlayer {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CharacterAnimation {
+pub(crate) enum CharacterAnimation {
     Idle = 0,
     Stimulated = 1,
     Sedated = 2,
@@ -258,9 +263,41 @@ fn dress_test_subjects(
             TestSubjectVisual {
                 subject,
                 rest: Vec3::ZERO,
+                face_variant: (subject.index().index() % 3) as u8,
             },
             ChildOf(subject),
         ));
+    }
+}
+
+fn test_subject_face_variant(name: &str) -> Option<u8> {
+    let prefix = name.strip_prefix("Face")?;
+    prefix.get(..2)?.parse::<u8>().ok()?.checked_sub(1)
+}
+
+fn configure_test_subject_faces(
+    mut commands: Commands,
+    mut nodes: Query<(Entity, &Name, &mut Visibility), Without<TestSubjectFaceConfigured>>,
+    parents: Query<&ChildOf>,
+    visuals: Query<&TestSubjectVisual>,
+) {
+    for (entity, name, mut visibility) in &mut nodes {
+        let Some(variant) = test_subject_face_variant(name.as_str()) else {
+            continue;
+        };
+        let Some(subject) = test_subject_ancestor(entity, &parents, &visuals) else {
+            continue;
+        };
+        let selected = visuals
+            .iter()
+            .find(|visual| visual.subject == subject)
+            .is_some_and(|visual| visual.face_variant == variant);
+        *visibility = if selected {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        commands.entity(entity).insert(TestSubjectFaceConfigured);
     }
 }
 
@@ -348,7 +385,7 @@ fn attach_test_subject_animation(
     }
 }
 
-fn desired_character_animation(
+pub(crate) fn desired_character_animation(
     blood: &chem_sim::Bloodstream,
     locomotion_preview: bool,
 ) -> CharacterAnimation {
@@ -380,7 +417,10 @@ fn desired_character_animation(
     }
 }
 
-fn character_animation_speed(blood: &chem_sim::Bloodstream, animation: CharacterAnimation) -> f32 {
+pub(crate) fn character_animation_speed(
+    blood: &chem_sim::Bloodstream,
+    animation: CharacterAnimation,
+) -> f32 {
     match animation {
         CharacterAnimation::Idle => 1.0,
         CharacterAnimation::Stimulated => {
@@ -560,25 +600,51 @@ mod tests {
             "the authored character palette must survive export"
         );
         let node_names: Vec<_> = gltf.nodes().filter_map(|node| node.name()).collect();
-        for detail in [
+        for removed in [
             "VisorGeometry",
             "VisorStrap.L",
             "VisorStrap.R",
             "VisorStrap.Back",
+        ] {
+            assert!(
+                !node_names.contains(&removed),
+                "removed face obstruction {removed} must not return"
+            );
+        }
+        for detail in [
             "ChemistryBadge",
+            "Face01.Eye.L",
+            "Face01.Eye.R",
+            "Face01.Nose",
+            "Face01.Mouth",
+            "Face01.Hair.Cap",
+            "Face02.Eye.L",
+            "Face02.Eye.R",
+            "Face02.Nose",
+            "Face02.Mouth.L",
+            "Face02.Mouth.R",
+            "Face02.Hair.Cap",
+            "Face03.Eye.L",
+            "Face03.Eye.R",
+            "Face03.Nose",
+            "Face03.Mouth",
+            "Face03.Hair.Crop",
+            "Ear.L",
+            "Ear.R",
             "Thumb.L",
             "Thumb.R",
             "LabCoatShell",
             "TrouserShell",
             "UndersleeveShell",
             "BootShell",
-            "CoatCollar",
-            "CoatCuff.L",
-            "CoatCuff.R",
             "CoatPocket.L",
             "CoatPocket.R",
-            "CoatLapel.L",
-            "CoatLapel.R",
+            "CoatPocketFlap.L",
+            "CoatPocketFlap.R",
+            "JacketCollarSeam.L",
+            "JacketCollarSeam.R",
+            "JacketPlacket.Top",
+            "JacketPlacket.Bottom",
             "TrouserWaistband",
             "wrist.L",
             "wrist.R",
@@ -607,6 +673,57 @@ mod tests {
             assert!(
                 !node_names.contains(&control),
                 "Blender-only control {control} must not enter the runtime skeleton"
+            );
+        }
+    }
+
+    #[test]
+    fn every_department_export_keeps_the_shared_rig_and_three_faces() {
+        let variants = [
+            ("player", "ChemistryBadge"),
+            ("medical", "MedicalBadge.Vertical"),
+            ("security", "SecurityShoulder.L"),
+            ("engineering", "EngineeringBeltBuckle"),
+            ("cargo", "CargoHarnessBuckle"),
+            ("service", "ServiceApron"),
+        ];
+        for (department, role_marker) in variants {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets")
+                .join("3dassets")
+                .join("glb")
+                .join(format!("first_char_{department}.glb"));
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
+            let gltf = bevy::gltf::gltf::Gltf::from_slice(&bytes)
+                .unwrap_or_else(|error| panic!("{} is not valid glTF: {error}", path.display()));
+            assert_eq!(gltf.skins().count(), 1, "{department} lost the shared rig");
+            assert_eq!(
+                gltf.animations().count(),
+                7,
+                "{department} lost authored actions"
+            );
+            let nodes: Vec<_> = gltf.nodes().filter_map(|node| node.name()).collect();
+            assert!(
+                nodes.contains(&role_marker),
+                "{department} export is missing {role_marker}"
+            );
+            for face in [
+                "Face01.Eye.L",
+                "Face01.Hair.Cap",
+                "Face02.Eye.L",
+                "Face02.Hair.Cap",
+                "Face03.Eye.L",
+                "Face03.Hair.Crop",
+            ] {
+                assert!(nodes.contains(&face), "{department} is missing {face}");
+            }
+            for ear in ["Ear.L", "Ear.R"] {
+                assert!(nodes.contains(&ear), "{department} is missing {ear}");
+            }
+            assert!(
+                !nodes.contains(&"VisorGeometry"),
+                "{department} brought the removed visor back"
             );
         }
     }

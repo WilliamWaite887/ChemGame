@@ -5,14 +5,19 @@
 //! and corridor waypoints.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use bevy::ecs::entity::MapEntities;
+use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use chem_sim::StatusKind;
 use serde::{Deserialize, Serialize};
 
 use crate::body::{Bloodstream, Body, COLLAPSE_PENALTY};
+use crate::character_lab::{
+    character_animation_speed, desired_character_animation, CharacterAnimation,
+};
 use crate::interaction::{Interactable, InteractionMode};
 use crate::lab::{DeliveryLane, DeliveryStations, MapReady, COUNTER_SPOT, DOOR_MAX_X, DOOR_MIN_X};
 use crate::machines::chemist_entity;
@@ -58,7 +63,15 @@ impl Plugin for CrewPlugin {
                     // Runs everywhere: a crew member who arrived by
                     // replication needs a body drawing just as much as one
                     // spawned locally.
-                    dress_crew,
+                    (
+                        dress_crew,
+                        configure_crew_faces.after(dress_crew),
+                        tag_crew_surfaces.after(dress_crew),
+                        attach_crew_animation.after(dress_crew),
+                        drive_crew_animation.after(attach_crew_animation),
+                    )
+                        .after(assign_crew_appearances),
+                    assign_crew_appearances.run_if(is_authority),
                 )
                     .run_if(in_state(AppState::Playing)),
             );
@@ -130,6 +143,14 @@ pub struct CrewMember {
     pub role: String,
 }
 
+/// Replicated once-per-spawn appearance identity. Keeping the random choice
+/// beside the NPC means every peer sees the same face and later presentation
+/// rebuilds cannot silently reroll it.
+#[derive(Component, Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct CrewAppearance {
+    pub face_variant: u8,
+}
+
 /// Where a crew member is in their visit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CrewPhase {
@@ -158,6 +179,10 @@ pub struct CrewRoute {
 }
 
 impl CrewRoute {
+    fn is_moving(&self) -> bool {
+        self.pending.is_some() || self.waypoints.get(self.index).is_some()
+    }
+
     /// The walk in: to their place at the counter.
     pub fn arrival(lane: f32) -> Self {
         Self::arrival_for(DeliveryLane::Public, lane)
@@ -234,39 +259,128 @@ fn spawn_z() -> f32 {
     crate::lab::ROOMS[crate::lab::LOBBY].max_z + 2.5
 }
 
-/// Shared meshes for crew bodies.
-///
-/// No materials here since M12 — every crew member's uniform and skin are a
-/// fresh [`StandardMaterial`] per instance (see [`dress_crew`]), for the same
-/// reason `player::ChemistAssets` dropped its shared `coat`/`skin` handles:
-/// tinting a status onto a shared handle would tint everyone holding it.
+/// The five department variants share geometry, skeleton and animations; only
+/// their authored palette and small role accessories differ.
 #[derive(Resource)]
 pub struct CrewAssets {
-    body: Handle<Mesh>,
-    head: Handle<Mesh>,
+    models: [CrewModelAsset; 5],
 }
 
-fn load_crew_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
+impl CrewAssets {
+    fn theme_for(role: &str) -> usize {
+        match role {
+            "Medical" => 0,
+            "Security" => 1,
+            "Engineering" => 2,
+            "Cargo" => 3,
+            _ => 4,
+        }
+    }
+
+    fn model_for(&self, role: &str) -> (usize, &CrewModelAsset) {
+        let theme = Self::theme_for(role);
+        (theme, &self.models[theme])
+    }
+}
+
+struct CrewModelAsset {
+    scene: Handle<WorldAsset>,
+    animation_graph: Handle<AnimationGraph>,
+    animation_nodes: [AnimationNodeIndex; 7],
+}
+
+fn load_crew_model(
+    path: &'static str,
+    asset_server: &AssetServer,
+    animation_graphs: &mut Assets<AnimationGraph>,
+) -> CrewModelAsset {
+    let (graph, nodes) = AnimationGraph::from_clips([
+        asset_server.load(GltfAssetLabel::Animation(1).from_asset(path)),
+        asset_server.load(GltfAssetLabel::Animation(3).from_asset(path)),
+        asset_server.load(GltfAssetLabel::Animation(2).from_asset(path)),
+        asset_server.load(GltfAssetLabel::Animation(4).from_asset(path)),
+        asset_server.load(GltfAssetLabel::Animation(0).from_asset(path)),
+        asset_server.load(GltfAssetLabel::Animation(5).from_asset(path)),
+        asset_server.load(GltfAssetLabel::Animation(6).from_asset(path)),
+    ]);
+    CrewModelAsset {
+        scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset(path)),
+        animation_graph: animation_graphs.add(graph),
+        animation_nodes: nodes
+            .try_into()
+            .expect("the shared crew rig has exactly seven clips"),
+    }
+}
+
+fn load_crew_assets(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut animation_graphs: ResMut<Assets<AnimationGraph>>,
+) {
     commands.insert_resource(CrewAssets {
-        body: meshes.add(Capsule3d::new(0.28, 0.85)),
-        head: meshes.add(Sphere::new(0.19)),
+        models: [
+            load_crew_model(
+                "3dassets/glb/first_char_medical.glb",
+                &asset_server,
+                &mut animation_graphs,
+            ),
+            load_crew_model(
+                "3dassets/glb/first_char_security.glb",
+                &asset_server,
+                &mut animation_graphs,
+            ),
+            load_crew_model(
+                "3dassets/glb/first_char_engineering.glb",
+                &asset_server,
+                &mut animation_graphs,
+            ),
+            load_crew_model(
+                "3dassets/glb/first_char_cargo.glb",
+                &asset_server,
+                &mut animation_graphs,
+            ),
+            load_crew_model(
+                "3dassets/glb/first_char_service.glb",
+                &asset_server,
+                &mut animation_graphs,
+            ),
+        ],
     });
 }
 
-/// A body part, and the crew member it belongs to.
+/// The imported visual root, and the crew member it belongs to.
 ///
 /// The M12 twin of `player::ChemistBody`, and needed for the same reason:
 /// `fx::animate_crew_body` has to wobble/tint a *child* mesh, never the root
 /// `Transform`, because the root is replicated and authoritative —
 /// `CrewRoute`'s movement and every interaction raycast depend on it staying
-/// exactly where the server put it. `rest`/`base_color` are the part's
-/// un-animated reference point, recomputed from every frame rather than
-/// accumulated onto, so nothing drifts.
+/// exactly where the server put it. `rest`/`rest_rotation` are its un-animated
+/// reference pose, recomputed every frame rather than accumulated, so nothing
+/// drifts.
 #[derive(Component)]
 pub(crate) struct CrewBody {
     pub(crate) crew: Entity,
     pub(crate) rest: Vec3,
+    pub(crate) rest_rotation: Quat,
+    pub(crate) face_variant: u8,
+    theme: usize,
+}
+
+/// A privately cloned material below an imported crew scene.
+#[derive(Component)]
+pub(crate) struct CrewSurface {
+    pub(crate) crew: Entity,
     pub(crate) base_color: Color,
+}
+
+#[derive(Component)]
+struct CrewFaceConfigured;
+
+#[derive(Component)]
+struct CrewAnimationController {
+    crew: Entity,
+    theme: usize,
+    current: CharacterAnimation,
 }
 
 /// Spawns a crew member outside the door, walking in.
@@ -307,82 +421,208 @@ pub fn spawn_crew_member(commands: &mut Commands, def: &CrewDef, lane: f32) -> E
         .id()
 }
 
-/// Gives a crew member their body, head and uniform.
+/// Gives a crew member the shared rig in their department theme.
 ///
-/// The uniform colour is looked up from the roster by name rather than sent,
-/// because both ends load `station.crew.ron` anyway. A visitor whose name is
-/// not in the roster still gets a body, in grey — an unrecognised name should
-/// read as an oddity at the counter, not an invisible person holding an order.
-///
-/// Both meshes are children (`CrewBody`), not — as the body mesh used to be —
-/// inserted straight onto the root. A wobble applied to the root would
+/// The imported scene is a child (`CrewBody`), not inserted straight onto the
+/// replicated root. A wobble applied to the root would
 /// corrupt the replicated, authoritative `Transform` `CrewRoute` and every
 /// interaction raycast depend on; a child can be animated freely.
+fn assign_crew_appearances(
+    mut commands: Commands,
+    crew: Query<Entity, (Added<CrewMember>, Without<CrewAppearance>)>,
+) {
+    for entity in &crew {
+        commands.entity(entity).insert(CrewAppearance {
+            face_variant: rand::random_range(0..3),
+        });
+    }
+}
+
 fn dress_crew(
     mut commands: Commands,
     assets: Option<Res<CrewAssets>>,
-    station: Option<Res<crate::orders::StationData>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    crew: Query<(Entity, &CrewMember), Added<CrewMember>>,
+    crew: Query<(Entity, &CrewMember, &CrewAppearance), Added<CrewAppearance>>,
 ) {
     let Some(assets) = assets else {
         return;
     };
 
-    for (entity, member) in &crew {
-        let color = station
-            .as_ref()
-            .and_then(|station| {
-                station
-                    .crew
-                    .iter()
-                    .find(|def| def.name == member.name)
-                    .map(|def| def.color)
-            })
-            .unwrap_or([0.55, 0.55, 0.58]);
-
-        let [r, g, b] = color;
-        let uniform_color = Color::srgb(r, g, b);
-
+    for (entity, member, appearance) in &crew {
         // A replicated crew member arrives without `Visibility` — presentation
         // is not on the wire — and a parent with none cannot propagate it to
         // the children below. Mirrors `player::dress_chemists`'s identical fix.
         commands.entity(entity).insert_if_new(Visibility::default());
 
         let body_rest = Vec3::ZERO;
+        let (theme, model) = assets.model_for(&member.role);
         commands.spawn((
-            Mesh3d(assets.body.clone()),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: uniform_color,
-                perceptual_roughness: 0.75,
-                ..default()
-            })),
+            Name::new(format!("{} department character", member.role)),
+            WorldAssetRoot(model.scene.clone()),
             Transform::from_translation(body_rest),
             Visibility::default(),
             CrewBody {
                 crew: entity,
                 rest: body_rest,
-                base_color: uniform_color,
+                rest_rotation: Quat::IDENTITY,
+                face_variant: appearance.face_variant.min(2),
+                theme,
             },
             ChildOf(entity),
         ));
+    }
+}
 
-        let head_rest = Vec3::new(0.0, 0.62, 0.0);
-        commands.spawn((
-            Mesh3d(assets.head.clone()),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: crate::player::SKIN_COLOR,
-                perceptual_roughness: 0.8,
-                ..default()
-            })),
-            Transform::from_translation(head_rest),
-            Visibility::default(),
-            CrewBody {
-                crew: entity,
-                rest: head_rest,
-                base_color: crate::player::SKIN_COLOR,
+fn attach_crew_animation(
+    mut commands: Commands,
+    assets: Option<Res<CrewAssets>>,
+    mut players: Query<(Entity, &mut AnimationPlayer), Added<AnimationPlayer>>,
+    parents: Query<&ChildOf>,
+    visuals: Query<&CrewBody>,
+    routes: Query<&CrewRoute>,
+) {
+    let Some(assets) = assets else {
+        return;
+    };
+    for (entity, mut player) in &mut players {
+        let Some(visual_entity) = crew_visual_ancestor(entity, &parents, &visuals) else {
+            continue;
+        };
+        let Ok(visual) = visuals.get(visual_entity) else {
+            continue;
+        };
+        let walking = routes.get(visual.crew).is_ok_and(CrewRoute::is_moving);
+        let initial = if walking {
+            CharacterAnimation::Walk
+        } else {
+            CharacterAnimation::Idle
+        };
+        let model = &assets.models[visual.theme];
+        let mut transitions = AnimationTransitions::new();
+        transitions
+            .play(
+                &mut player,
+                model.animation_nodes[initial as usize],
+                Duration::ZERO,
+            )
+            .repeat();
+        commands.entity(entity).insert((
+            AnimationGraphHandle(model.animation_graph.clone()),
+            transitions,
+            CrewAnimationController {
+                crew: visual.crew,
+                theme: visual.theme,
+                current: initial,
             },
-            ChildOf(entity),
+        ));
+    }
+}
+
+fn drive_crew_animation(
+    assets: Option<Res<CrewAssets>>,
+    bloods: Query<&Bloodstream>,
+    routes: Query<&CrewRoute>,
+    mut players: Query<(
+        &mut AnimationPlayer,
+        &mut AnimationTransitions,
+        &mut CrewAnimationController,
+    )>,
+) {
+    let Some(assets) = assets else {
+        return;
+    };
+    for (mut player, mut transitions, mut controller) in &mut players {
+        let Ok(blood) = bloods.get(controller.crew) else {
+            continue;
+        };
+        let moving = routes.get(controller.crew).is_ok_and(CrewRoute::is_moving);
+        let desired = desired_character_animation(&blood.0, moving);
+        let model = &assets.models[controller.theme];
+        let node = model.animation_nodes[desired as usize];
+        let speed = character_animation_speed(&blood.0, desired);
+        if desired != controller.current {
+            transitions
+                .play(&mut player, node, Duration::from_millis(260))
+                .repeat()
+                .set_speed(speed);
+            controller.current = desired;
+        } else if let Some(active) = player.animation_mut(node) {
+            active.set_speed(speed);
+        }
+    }
+}
+
+fn crew_visual_ancestor(
+    mut entity: Entity,
+    parents: &Query<&ChildOf>,
+    visuals: &Query<&CrewBody>,
+) -> Option<Entity> {
+    for _ in 0..64 {
+        if visuals.contains(entity) {
+            return Some(entity);
+        }
+        entity = parents.get(entity).ok()?.parent();
+    }
+    None
+}
+
+fn face_variant_from_name(name: &str) -> Option<u8> {
+    let prefix = name.strip_prefix("Face")?;
+    let digits = prefix.get(..2)?;
+    digits.parse::<u8>().ok()?.checked_sub(1)
+}
+
+fn configure_crew_faces(
+    mut commands: Commands,
+    mut nodes: Query<(Entity, &Name, &mut Visibility), Without<CrewFaceConfigured>>,
+    parents: Query<&ChildOf>,
+    visuals: Query<&CrewBody>,
+) {
+    for (entity, name, mut visibility) in &mut nodes {
+        let Some(variant) = face_variant_from_name(name.as_str()) else {
+            continue;
+        };
+        let Some(visual_entity) = crew_visual_ancestor(entity, &parents, &visuals) else {
+            continue;
+        };
+        let selected = visuals
+            .get(visual_entity)
+            .is_ok_and(|visual| visual.face_variant == variant);
+        *visibility = if selected {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        commands.entity(entity).insert(CrewFaceConfigured);
+    }
+}
+
+fn tag_crew_surfaces(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    meshes: Query<
+        (Entity, &MeshMaterial3d<StandardMaterial>),
+        (With<Mesh3d>, Without<CrewSurface>),
+    >,
+    parents: Query<&ChildOf>,
+    visuals: Query<&CrewBody>,
+) {
+    for (entity, material) in &meshes {
+        let Some(visual_entity) = crew_visual_ancestor(entity, &parents, &visuals) else {
+            continue;
+        };
+        let Ok(visual) = visuals.get(visual_entity) else {
+            continue;
+        };
+        let Some(source) = materials.get(&material.0).cloned() else {
+            continue;
+        };
+        let base_color = source.base_color;
+        commands.entity(entity).insert((
+            MeshMaterial3d(materials.add(source)),
+            CrewSurface {
+                crew: visual.crew,
+                base_color,
+            },
         ));
     }
 }
@@ -919,6 +1159,31 @@ mod tests {
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_secs_f32(seconds));
         app.update();
+    }
+
+    #[test]
+    fn a_crew_member_gets_one_persistent_bounded_face_choice() {
+        let mut app = App::new();
+        app.add_systems(Update, assign_crew_appearances);
+        let crew = app
+            .world_mut()
+            .spawn(CrewMember {
+                name: "Face Tester".into(),
+                role: "Service".into(),
+            })
+            .id();
+        app.update();
+        let first = *app.world().get::<CrewAppearance>(crew).unwrap();
+        assert!(first.face_variant < 3);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<CrewAppearance>(crew)
+                .unwrap()
+                .face_variant,
+            first.face_variant,
+            "presentation updates must not reroll an established NPC"
+        );
     }
 
     #[test]
