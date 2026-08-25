@@ -14,8 +14,8 @@ use crate::units::{Kelvin, Units};
 /// Serialisable for the same reason — and under the same contract — as
 /// [`crate::ReagentId`]: co-op clients name a recipe over the wire when they
 /// ask to buy a hint for it. The id is a position in the loaded reaction list,
-/// so both ends must agree on the data files, which replicon's protocol hash
-/// enforces rather than us.
+/// so both ends must agree on the data files. The game layer includes those
+/// files in its LAN/Steam compatibility fingerprint.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct ReactionId(pub u32);
 
@@ -23,6 +23,17 @@ impl ReactionId {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+}
+
+/// The physical behavior of a radial reaction pulse.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PulseKind {
+    /// Throws nearby bodies away from the reaction.
+    Push,
+    /// Draws nearby bodies toward the reaction.
+    Pull,
+    /// Disorients nearby bodies without moving them.
+    Concuss,
 }
 
 /// Something a reaction does beyond producing reagent.
@@ -35,6 +46,27 @@ pub enum ReactionEffect {
     Smoke(f32),
     /// Goes bang. The chemist's traditional reward for curiosity.
     Explosion(f32),
+    /// Data-authored energetic output. The resolver converts this to a final
+    /// `Explosion` using the amount that actually reacted, so batch size
+    /// matters while overheat detonations retain their existing fixed power.
+    ExplosionProfile { strength: f32, modifier: f32 },
+    /// A resolved radial force or concussive pulse.
+    Pulse { kind: PulseKind, power: f32 },
+    /// Data-authored pulse output. As with `ExplosionProfile`, the resolver
+    /// turns this into a concrete pulse whose power scales with batch size.
+    PulseProfile {
+        kind: PulseKind,
+        strength: f32,
+        modifier: f32,
+    },
+    /// A resolved electromagnetic pulse that disables nearby equipment.
+    Emp(f32),
+    /// Batch-scaled electromagnetic output authored in reaction data.
+    EmpProfile { strength: f32, modifier: f32 },
+    /// A resolved electrical arc that shocks bodies and equipment nearby.
+    Electric(f32),
+    /// Batch-scaled electrical output authored in reaction data.
+    ElectricProfile { strength: f32, modifier: f32 },
 }
 
 /// How a recipe is allowed to begin in the lab.
@@ -127,6 +159,19 @@ pub struct ReactionDef {
     pub min_temp: Option<Kelvin>,
     #[serde(default)]
     pub max_temp: Option<Kelvin>,
+    /// Optional operating window for quality-controlled chemistry.
+    #[serde(default)]
+    pub min_ph: Option<f32>,
+    #[serde(default)]
+    pub optimal_ph: Option<f32>,
+    #[serde(default)]
+    pub max_ph: Option<f32>,
+    /// Minimum volume-weighted input purity required to begin.
+    #[serde(default)]
+    pub min_purity: Option<f32>,
+    /// pH movement per unit of reaction, applied after products form.
+    #[serde(default)]
+    pub ph_shift: f32,
     /// Past this the reaction **still runs**, but goes wrong.
     ///
     /// Deliberately not `max_temp`, which simply stops it. An overheat is the
@@ -168,9 +213,15 @@ pub struct Reaction {
     pub reactants: Vec<(ReagentId, Units)>,
     pub catalysts: Vec<(ReagentId, Units)>,
     pub products: Vec<(ReagentId, Units)>,
+    product_ph: Vec<(ReagentId, f32)>,
     pub process: ReactionProcess,
     pub min_temp: Option<Kelvin>,
     pub max_temp: Option<Kelvin>,
+    pub min_ph: Option<f32>,
+    pub optimal_ph: Option<f32>,
+    pub max_ph: Option<f32>,
+    pub min_purity: Option<f32>,
+    pub ph_shift: f32,
     pub overheat_temp: Option<Kelvin>,
     pub overheat: Overheat,
     pub priority: i32,
@@ -196,6 +247,18 @@ impl Reaction {
             if solution.temperature > max {
                 return None;
             }
+        }
+        let ph = solution.ph();
+        if self.min_ph.is_some_and(|minimum| ph < minimum)
+            || self.max_ph.is_some_and(|maximum| ph > maximum)
+        {
+            return None;
+        }
+        if self
+            .min_purity
+            .is_some_and(|minimum| self.input_purity(solution) < minimum)
+        {
+            return None;
         }
         for &(id, required) in &self.catalysts {
             if !solution.contains_at_least(id, required) {
@@ -248,6 +311,54 @@ impl Reaction {
         matches!(self.overheat_temp, Some(threshold) if temperature > threshold)
     }
 
+    /// Purity retained by products at the solution's current pH. The edge of
+    /// an authored range keeps half the input quality, making imprecise normal
+    /// chemistry recoverable rather than a binary failure.
+    pub fn product_purity(&self, solution: &Solution) -> f32 {
+        let input = self.input_purity(solution);
+        let Some(optimum) = self.optimal_ph else {
+            return input;
+        };
+        let ph = solution.ph();
+        let span = if ph <= optimum {
+            optimum - self.min_ph.unwrap_or(optimum)
+        } else {
+            self.max_ph.unwrap_or(optimum) - optimum
+        };
+        if span <= f32::EPSILON {
+            return input;
+        }
+        let distance = ((ph - optimum).abs() / span).clamp(0.0, 1.0);
+        (input * (1.0 - 0.5 * distance)).clamp(0.0, 1.0)
+    }
+
+    /// Volume-weighted quality of the stoichiometric reactants this reaction
+    /// consumes. Unrelated filler and surviving catalysts are deliberately
+    /// excluded: neither may launder a bad input across a purity gate or into
+    /// a high-quality product.
+    pub fn input_purity(&self, solution: &Solution) -> f32 {
+        let total: f32 = self
+            .reactants
+            .iter()
+            .map(|(_, required)| required.as_f32())
+            .sum();
+        if total <= 0.0 {
+            return 1.0;
+        }
+        self.reactants
+            .iter()
+            .map(|(id, required)| solution.purity_of(*id) * required.as_f32() / total)
+            .sum::<f32>()
+            .clamp(0.0, 1.0)
+    }
+
+    pub(crate) fn product_ph(&self, reagent: ReagentId) -> f32 {
+        self.product_ph
+            .iter()
+            .find_map(|(id, ph)| (*id == reagent).then_some(*ph))
+            .unwrap_or(7.0)
+    }
+
     /// The most this reaction may advance in `dt` seconds, or `None` for "as
     /// far as it will go" — which is both what an unrated reaction always
     /// means and what an infinite `dt` asks for.
@@ -264,12 +375,16 @@ impl Reaction {
     /// A `rate` of zero or less is a content bug. It is read as "instant"
     /// rather than "never", because a recipe that silently cannot be made is a
     /// far worse thing to ship than one that is merely faster than intended.
-    pub fn step_limit(&self, dt: f32) -> Option<Units> {
+    pub fn step_limit(&self, dt: f32, temperature: Kelvin) -> Option<Units> {
         let rate = self.rate?;
         if !dt.is_finite() || !rate.is_positive() {
             return None;
         }
-        let allowance = Units::from_f64(rate.as_f64() * dt.max(0.0) as f64);
+        let thermal_factor = self
+            .min_temp
+            .map(|minimum| (0.5 + (temperature.0 - minimum.0) / 100.0).clamp(0.5, 2.5))
+            .unwrap_or(1.0);
+        let allowance = Units::from_f64(rate.as_f64() * thermal_factor as f64 * dt.max(0.0) as f64);
         if dt > 0.0 && !allowance.is_positive() {
             return Some(Units::from_raw(1));
         }
@@ -326,7 +441,31 @@ impl ReactionSet {
         if products.is_empty() {
             return Err(ChemDataError::NoProducts { reaction: def.id });
         }
+        let valid_ph = def.min_ph.is_none_or(|value| (0.0..=14.0).contains(&value))
+            && def.max_ph.is_none_or(|value| (0.0..=14.0).contains(&value))
+            && def
+                .optimal_ph
+                .is_none_or(|value| (0.0..=14.0).contains(&value))
+            && match (def.min_ph, def.max_ph) {
+                (Some(minimum), Some(maximum)) => minimum <= maximum,
+                _ => true,
+            }
+            && def.optimal_ph.is_none_or(|optimum| {
+                def.min_ph.is_none_or(|minimum| optimum >= minimum)
+                    && def.max_ph.is_none_or(|maximum| optimum <= maximum)
+            })
+            && def
+                .min_purity
+                .is_none_or(|value| (0.0..=1.0).contains(&value));
+        if !valid_ph {
+            return Err(ChemDataError::InvalidQualityRange { reaction: def.id });
+        }
         validate_process(&def.id, &reactants, &catalysts, &process)?;
+
+        let product_ph = products
+            .iter()
+            .map(|(id, _)| (*id, reagents.get(*id).ph))
+            .collect();
 
         let id = ReactionId(self.reactions.len() as u32);
         self.reactions.push(Reaction {
@@ -335,9 +474,15 @@ impl ReactionSet {
             reactants,
             catalysts,
             products,
+            product_ph,
             process,
             min_temp: def.min_temp,
             max_temp: def.max_temp,
+            min_ph: def.min_ph,
+            optimal_ph: def.optimal_ph,
+            max_ph: def.max_ph,
+            min_purity: def.min_purity,
+            ph_shift: def.ph_shift,
             overheat_temp: def.overheat_temp,
             overheat: def.overheat,
             priority: def.priority,
@@ -396,17 +541,19 @@ impl ReactionSet {
         ReactionActivation { reactions }
     }
 
-    /// The reaction that produces `reagent` as one of its products, if any.
+    /// The reaction whose primary product is `reagent`, if any.
     ///
-    /// Returns the first match if more than one reaction claims the same
-    /// product — the data does not do this today (every reagent name appears
-    /// in a `products` list at most once across `chem.reactions.ron`), but
-    /// nothing in the type system enforces it, so this must never panic if
-    /// it stops holding.
+    /// Only the first authored product defines the synthesis path. Later
+    /// products are coproducts or waste: exposing one of those as a second
+    /// producer would make recipe-tree recursion and order batch sizing depend
+    /// on file order. Data tests keep primary synthesis unique.
     pub fn producer_of(&self, reagent: ReagentId) -> Option<&Reaction> {
-        self.reactions
-            .iter()
-            .find(|reaction| reaction.products.iter().any(|(id, _)| *id == reagent))
+        self.reactions.iter().find(|reaction| {
+            reaction
+                .products
+                .first()
+                .is_some_and(|(id, _)| *id == reagent)
+        })
     }
 }
 
@@ -474,21 +621,104 @@ fn ingredient_totals(
 /// Something wrong with the chemistry data files.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChemDataError {
-    UnknownReagent { reaction: String, reagent: String },
-    NoReactants { reaction: String },
-    NoProducts { reaction: String },
-    InvalidAgitationProcess { reaction: String },
+    DuplicateReagent {
+        reagent: String,
+    },
+    DuplicateReaction {
+        reaction: String,
+    },
+    InvalidReagentField {
+        reagent: String,
+        field: &'static str,
+    },
+    InvalidReactionField {
+        reaction: String,
+        field: &'static str,
+    },
+    UnreachableReactionProduct {
+        reagent: String,
+    },
+    UnknownReagent {
+        reaction: String,
+        reagent: String,
+    },
+    UnknownInverse {
+        reagent: String,
+        inverse: String,
+    },
+    UnknownRecoveryTarget {
+        reagent: String,
+        target: String,
+    },
+    InvalidRecoveryTarget {
+        reagent: String,
+    },
+    UnknownPurgeTarget {
+        reagent: String,
+        target: String,
+    },
+    InvalidPurgeAmount {
+        reagent: String,
+        target: String,
+    },
+    NoReactants {
+        reaction: String,
+    },
+    NoProducts {
+        reaction: String,
+    },
+    InvalidAgitationProcess {
+        reaction: String,
+    },
+    InvalidQualityRange {
+        reaction: String,
+    },
 }
 
 impl std::fmt::Display for ChemDataError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ChemDataError::DuplicateReagent { reagent } => {
+                write!(f, "reagent '{reagent}' is defined more than once")
+            }
+            ChemDataError::DuplicateReaction { reaction } => {
+                write!(f, "reaction '{reaction}' is defined more than once")
+            }
+            ChemDataError::InvalidReagentField { reagent, field } => {
+                write!(f, "reagent '{reagent}' has an invalid {field}")
+            }
+            ChemDataError::InvalidReactionField { reaction, field } => {
+                write!(f, "reaction '{reaction}' has an invalid {field}")
+            }
+            ChemDataError::UnreachableReactionProduct { reagent } => write!(
+                f,
+                "reaction product '{reagent}' is unreachable from dispenser or produce sources (check for a circular dependency)"
+            ),
             ChemDataError::UnknownReagent { reaction, reagent } => {
                 write!(
                     f,
                     "reaction '{reaction}' refers to unknown reagent '{reagent}'"
                 )
             }
+            ChemDataError::UnknownInverse { reagent, inverse } => {
+                write!(f, "reagent '{reagent}' names unknown inverse '{inverse}'")
+            }
+            ChemDataError::UnknownRecoveryTarget { reagent, target } => write!(
+                f,
+                "reagent '{reagent}' names unknown HPLC recovery target '{target}'"
+            ),
+            ChemDataError::InvalidRecoveryTarget { reagent } => write!(
+                f,
+                "reagent '{reagent}' cannot use itself as an HPLC recovery target"
+            ),
+            ChemDataError::UnknownPurgeTarget { reagent, target } => write!(
+                f,
+                "reagent '{reagent}' names unknown targeted purge reagent '{target}'"
+            ),
+            ChemDataError::InvalidPurgeAmount { reagent, target } => write!(
+                f,
+                "reagent '{reagent}' targets '{target}' with a non-positive purge amount"
+            ),
             ChemDataError::NoReactants { reaction } => {
                 write!(f, "reaction '{reaction}' has no reactants")
             }
@@ -499,6 +729,9 @@ impl std::fmt::Display for ChemDataError {
                 f,
                 "reaction '{reaction}' has agitation sides that do not exactly partition its reactants and catalysts"
             ),
+            ChemDataError::InvalidQualityRange { reaction } => {
+                write!(f, "reaction '{reaction}' has an invalid pH or purity range")
+            }
         }
     }
 }

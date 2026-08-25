@@ -225,9 +225,13 @@ fn generate_obsessed_visit(
             station.drop_position(crate::lab::COUNTER_TOP + height * 0.5)
                 - (station.transform.rotation * Vec3::X) * 0.6,
         );
+        let ph = db.reagents.get(reagent).ph;
         commands.queue(move |world: &mut World| {
             if let Some(mut container) = world.get_mut::<crate::containers::Container>(token) {
-                let _ = container.solution.add(reagent, chem_sim::Units::whole(5));
+                let _ =
+                    container
+                        .solution
+                        .add_profiled(reagent, chem_sim::Units::whole(5), 1.0, ph);
             }
         });
     }

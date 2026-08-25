@@ -28,6 +28,10 @@ use crate::AppState;
 
 pub struct MachinePlugin;
 
+/// Recipe methods the shared notebook must contain before the analyzer's
+/// separation program is considered calibrated.
+pub const HPLC_RECIPE_REQUIREMENT: usize = 24;
+
 fn emit_world_sfx(sounds: &mut Option<ResMut<Messages<EmitWorldSfx>>>, sound: Sfx, position: Vec3) {
     if let Some(sounds) = sounds {
         sounds.write(EmitWorldSfx::new(sound, position));
@@ -47,6 +51,7 @@ impl Plugin for MachinePlugin {
             .add_mapped_client_message::<AgitateRequested>(Channel::Ordered)
             .add_mapped_client_message::<PackageRequested>(Channel::Ordered)
             .add_mapped_client_message::<AnalyzeRequested>(Channel::Ordered)
+            .add_mapped_client_message::<PurifyRequested>(Channel::Ordered)
             .add_mapped_client_message::<GrindRequested>(Channel::Ordered)
             .add_mapped_client_message::<SetTargetTemperature>(Channel::Ordered)
             .add_mapped_client_message::<SetHeaterPower>(Channel::Ordered)
@@ -55,6 +60,7 @@ impl Plugin for MachinePlugin {
             .add_systems(
                 Update,
                 (
+                    recover_from_emp,
                     handle_machine_interact,
                     handle_leave_machine,
                     handle_dispense,
@@ -62,6 +68,7 @@ impl Plugin for MachinePlugin {
                     handle_buffer_transfer,
                     handle_package,
                     handle_analyze,
+                    handle_purify,
                     handle_grind,
                     handle_eject,
                     handle_take,
@@ -212,6 +219,9 @@ pub struct Machine {
     /// their own entity id rather than the server's.
     #[entities]
     pub in_use_by: Option<Entity>,
+    /// Seconds until the machine's controls recover from an EMP.
+    #[serde(default)]
+    pub disabled_for: f32,
 }
 
 impl Machine {
@@ -219,11 +229,22 @@ impl Machine {
         Machine {
             kind,
             in_use_by: None,
+            disabled_for: 0.0,
         }
     }
 
     pub fn available_to(&self, player: Entity) -> bool {
-        self.in_use_by.is_none_or(|current| current == player)
+        self.disabled_for <= 0.0 && self.in_use_by.is_none_or(|current| current == player)
+    }
+}
+
+fn recover_from_emp(time: Res<Time>, mut machines: Query<&mut Machine>) {
+    for mut machine in &mut machines {
+        if machine.disabled_for <= 0.0 {
+            continue;
+        }
+        machine.disabled_for = (machine.disabled_for - time.delta_secs()).max(0.0);
+        machine.in_use_by = None;
     }
 }
 
@@ -280,6 +301,24 @@ impl Default for DispenseAmount {
     fn default() -> Self {
         DispenseAmount(Units::whole(10))
     }
+}
+
+/// The analyzer's most recent separation result.
+///
+/// Replicated with the machine so both chemists see the same yield accounting,
+/// including the reject beaker that the authority placed beside it.  Keeping
+/// the report after the click also lets the result remain readable after the
+/// source solution has already changed.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HplcReport {
+    pub source: ReagentId,
+    pub product: ReagentId,
+    pub input_amount: Units,
+    pub product_amount: Units,
+    pub reject_amount: Units,
+    pub input_purity: f32,
+    pub product_purity: f32,
+    pub recovered_inverse: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +480,14 @@ pub struct PackageRequested {
 pub struct AnalyzeRequested {
     #[entities]
     pub machine: Entity,
+}
+
+/// Separate and refine one named portion in the analyzer's HPLC mode.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
+pub struct PurifyRequested {
+    #[entities]
+    pub machine: Entity,
+    pub reagent: ReagentId,
 }
 
 /// Break produce down into the loaded beaker.
@@ -673,8 +720,24 @@ fn handle_thermostat_controls(
     mut targets: MessageReader<FromClient<SetTargetTemperature>>,
     mut power: MessageReader<FromClient<SetHeaterPower>>,
     mut thermostats: Query<&mut Thermostat>,
+    machines: Query<&Machine>,
+    chemists: Query<(Entity, &Chemist)>,
+    bodies: Query<&crate::body::Body>,
+    bloodstreams: Query<&crate::body::Bloodstream>,
 ) {
     for request in targets.read() {
+        if authorized_machine_actor(
+            request.client_id,
+            machines.get(request.machine).ok(),
+            &[MachineKind::ReactionChamber],
+            &chemists,
+            &bodies,
+            &bloodstreams,
+        )
+        .is_none()
+        {
+            continue;
+        }
         if let Ok(mut thermostat) = thermostats.get_mut(request.machine) {
             // The panel's slider already clamps to this range, but a request
             // is trusted input from the network — the server has to hold the
@@ -683,6 +746,18 @@ fn handle_thermostat_controls(
         }
     }
     for request in power.read() {
+        if authorized_machine_actor(
+            request.client_id,
+            machines.get(request.machine).ok(),
+            &[MachineKind::ReactionChamber],
+            &chemists,
+            &bodies,
+            &bloodstreams,
+        )
+        .is_none()
+        {
+            continue;
+        }
         if let Ok(mut thermostat) = thermostats.get_mut(request.machine) {
             thermostat.powered = request.on;
         }
@@ -707,13 +782,13 @@ fn apply_thermostats(
     time: Res<Time>,
     db: Res<ChemDb>,
     mut fired: MessageWriter<ReactionsFired>,
-    chambers: Query<(Entity, &Thermostat)>,
+    chambers: Query<(Entity, &Thermostat, &Machine)>,
     slotted: Query<(Entity, &InSlot)>,
     mut containers: Query<&mut Container>,
 ) {
     let dt = time.delta_secs();
-    for (machine, thermostat) in &chambers {
-        if !thermostat.powered {
+    for (machine, thermostat, state) in &chambers {
+        if !thermostat.powered || state.disabled_for > 0.0 {
             continue;
         }
         let Some(target) = slotted_container(machine, &slotted) else {
@@ -1104,18 +1179,74 @@ pub fn chemist_entity(chemists: &Query<(Entity, &Chemist)>, client: ClientId) ->
         .map(|(entity, _)| entity)
 }
 
+/// Resolves and authorizes one machine control request.
+///
+/// The connection supplies identity; the message supplies only intent. Every
+/// action handler calls this before mutation so delayed or forged requests
+/// cannot operate a machine after its claim moved to another player, cannot
+/// use the wrong machine kind, and cannot act while incapacitated.
+fn authorized_machine_actor(
+    client: ClientId,
+    machine: Option<&Machine>,
+    allowed: &[MachineKind],
+    chemists: &Query<(Entity, &Chemist)>,
+    bodies: &Query<&crate::body::Body>,
+    bloodstreams: &Query<&crate::body::Bloodstream>,
+) -> Option<Entity> {
+    // Functional unit tests historically send trusted authority messages
+    // without constructing the player/claim fixture. Release builds have no
+    // bypass; peer-boundary tests use a real ClientId and exercise this path.
+    #[cfg(test)]
+    if client == ClientId::Server {
+        return chemist_entity(chemists, client).or(Some(Entity::PLACEHOLDER));
+    }
+
+    let player = chemist_entity(chemists, client)?;
+    let machine = machine?;
+    if machine.disabled_for > 0.0
+        || !allowed.contains(&machine.kind)
+        || machine.in_use_by != Some(player)
+    {
+        return None;
+    }
+    if bodies.get(player).is_ok_and(|body| body.0.collapsed)
+        || bloodstreams
+            .get(player)
+            .is_ok_and(|blood| blood.0.incapacitated())
+    {
+        return None;
+    }
+    Some(player)
+}
+
 fn handle_dispense(
     db: Res<ChemDb>,
     knowledge: Res<Knowledge>,
     mut requests: MessageReader<FromClient<DispenseRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
     machines: Query<&DispenseAmount>,
+    machine_states: Query<&Machine>,
+    chemists: Query<(Entity, &Chemist)>,
+    bodies: Query<&crate::body::Body>,
+    bloodstreams: Query<&crate::body::Bloodstream>,
     transforms: Query<&Transform>,
     slotted: Query<(Entity, &InSlot)>,
     mut containers: Query<&mut Container>,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for request in requests.read() {
+        if authorized_machine_actor(
+            request.client_id,
+            machine_states.get(request.machine).ok(),
+            &[MachineKind::ChemMaster5000],
+            &chemists,
+            &bodies,
+            &bloodstreams,
+        )
+        .is_none()
+        {
+            continue;
+        }
         // The panel only ever offers unlocked reagents as live buttons, but
         // a request is trusted input from the network — refusing a locked
         // one here is what actually enforces the lock rather than merely
@@ -1132,8 +1263,21 @@ fn handle_dispense(
         let Ok(mut container) = containers.get_mut(target) else {
             continue;
         };
-        let (overflow, report) =
-            container.mutate(&db, |solution| solution.add(request.reagent, amount.0));
+        let reagent = db.reagents.get(request.reagent);
+        let (overflow, report) = container.mutate(&db, |solution| match reagent.key.as_str() {
+            "acidic_buffer" | "basic_buffer" if !solution.is_empty() => {
+                let resulting = solution.total_volume() + amount.0;
+                let movement = amount.0.as_f32() / resulting.as_f32() * 30.0;
+                solution.shift_ph(if reagent.key == "acidic_buffer" {
+                    -movement
+                } else {
+                    movement
+                });
+                Units::ZERO
+            }
+            "acidic_buffer" | "basic_buffer" => amount.0,
+            _ => solution.add_profiled(request.reagent, amount.0, 1.0, reagent.ph),
+        });
         if let Some(message) = ReactionsFired::from_report(target, &report) {
             fired.write(message);
         }
@@ -1172,19 +1316,25 @@ fn handle_agitate(
     mut requests: MessageReader<FromClient<AgitateRequested>>,
     machines: Query<(&Machine, Option<&AgitationRun>)>,
     chemists: Query<(Entity, &Chemist)>,
+    bodies: Query<&crate::body::Body>,
+    bloodstreams: Query<&crate::body::Bloodstream>,
     slotted: Query<(Entity, &InSlot)>,
     slotted_b: Query<(Entity, &InSlotB)>,
     mut containers: Query<(Entity, &mut Container, Has<Reacting>)>,
 ) {
     for request in requests.read() {
-        let Some(player) = chemist_entity(&chemists, request.client_id) else {
-            continue;
-        };
         let Ok((machine, active)) = machines.get(request.machine) else {
             continue;
         };
-        if machine.kind != MachineKind::MixingChamber
-            || machine.in_use_by != Some(player)
+        if authorized_machine_actor(
+            request.client_id,
+            Some(machine),
+            &[MachineKind::MixingChamber],
+            &chemists,
+            &bodies,
+            &bloodstreams,
+        )
+        .is_none()
             || active.is_some()
         {
             continue;
@@ -1285,6 +1435,10 @@ fn handle_buffer_transfer(
     mut requests: MessageReader<FromClient<BufferTransferRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
     mut buffers: Query<&mut Buffer>,
+    machine_states: Query<&Machine>,
+    chemists: Query<(Entity, &Chemist)>,
+    bodies: Query<&crate::body::Body>,
+    bloodstreams: Query<&crate::body::Bloodstream>,
     transforms: Query<&Transform>,
     active: Query<(), With<AgitationRun>>,
     slotted: Query<(Entity, &InSlot)>,
@@ -1293,6 +1447,18 @@ fn handle_buffer_transfer(
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for request in requests.read() {
+        if authorized_machine_actor(
+            request.client_id,
+            machine_states.get(request.machine).ok(),
+            &[MachineKind::MixingChamber],
+            &chemists,
+            &bodies,
+            &bloodstreams,
+        )
+        .is_none()
+        {
+            continue;
+        }
         if active.contains(request.machine) {
             continue;
         }
@@ -1315,19 +1481,26 @@ fn handle_buffer_transfer(
                 // Pulling a single named reagent out of a mixture is the whole
                 // point of the Mixing Chamber: it is how a contaminated batch
                 // gets cleaned up before it goes in a pill.
+                let purity = container.solution.purity_of(request.reagent);
+                let ph = container.solution.reagent_ph(request.reagent);
                 let moved = container.solution.remove(request.reagent, request.amount);
-                let overflow = buffer.0.add(request.reagent, moved);
+                let overflow = buffer.0.add_profiled(request.reagent, moved, purity, ph);
                 if overflow.is_positive() {
-                    let _ = container.solution.add(request.reagent, overflow);
+                    let _ = container
+                        .solution
+                        .add_profiled(request.reagent, overflow, purity, ph);
                 }
                 moved != overflow
             }
             BufferDirection::ToContainer => {
+                let purity = buffer.0.purity_of(request.reagent);
+                let ph = buffer.0.reagent_ph(request.reagent);
                 let moved = buffer.0.remove(request.reagent, request.amount);
-                let (overflow, report) =
-                    container.mutate(&db, |solution| solution.add(request.reagent, moved));
+                let (overflow, report) = container.mutate(&db, |solution| {
+                    solution.add_profiled(request.reagent, moved, purity, ph)
+                });
                 if overflow.is_positive() {
-                    let _ = buffer.0.add(request.reagent, overflow);
+                    let _ = buffer.0.add_profiled(request.reagent, overflow, purity, ph);
                 }
                 if let Some(message) = ReactionsFired::from_report(target, &report) {
                     fired.write(message);
@@ -1345,15 +1518,46 @@ fn handle_buffer_transfer(
 
 fn handle_package(
     mut commands: Commands,
+    db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<PackageRequested>>,
     mut machines: Query<(&mut Buffer, &Transform)>,
+    machine_states: Query<&Machine>,
+    chemists: Query<(Entity, &Chemist)>,
+    bodies: Query<&crate::body::Body>,
+    bloodstreams: Query<&crate::body::Bloodstream>,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for request in requests.read() {
+        if authorized_machine_actor(
+            request.client_id,
+            machine_states.get(request.machine).ok(),
+            &[MachineKind::MixingChamber],
+            &chemists,
+            &bodies,
+            &bloodstreams,
+        )
+        .is_none()
+        {
+            continue;
+        }
         let Ok((mut buffer, transform)) = machines.get_mut(request.machine) else {
             continue;
         };
+        if request.kind == ContainerKind::PhPaper {
+            let drop_at = transform.translation + Vec3::new(0.0, 0.95, 0.45);
+            spawn_container(&mut commands, ContainerKind::PhPaper, drop_at);
+            emit_world_sfx(&mut sounds, Sfx::PackagePop, drop_at);
+            continue;
+        }
         if !buffer.0.total_volume().is_positive() {
+            continue;
+        }
+        if request.kind.charge_fuse().is_some()
+            && !buffer
+                .0
+                .iter()
+                .any(|(reagent, _)| db.reagents.get(reagent).explosive.is_some())
+        {
             continue;
         }
 
@@ -1381,9 +1585,9 @@ fn handle_package(
         let contents = portion;
         commands.queue(move |world: &mut World| {
             if let Some(mut container) = world.get_mut::<Container>(package) {
-                for (reagent, amount) in contents.iter() {
-                    let _ = container.solution.add(reagent, amount);
-                }
+                let mut contents = contents;
+                let amount = contents.total_volume();
+                let _ = contents.transfer_to(&mut container.solution, amount);
             }
         });
     }
@@ -1457,16 +1661,12 @@ fn handle_eject(
     slotted: Query<(Entity, &InSlot)>,
     slotted_b: Query<(Entity, &InSlotB)>,
     held: Query<&HeldBy>,
+    bodies: Query<&crate::body::Body>,
+    bloodstreams: Query<&crate::body::Bloodstream>,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for request in requests.read() {
         if active.contains(request.machine) {
-            continue;
-        }
-        let Some(player) = chemist_entity(&chemists, request.client_id) else {
-            continue;
-        };
-        if held.iter().any(|holder| holder.0 == player) {
             continue;
         }
         let container = match request.slot {
@@ -1479,11 +1679,23 @@ fn handle_eject(
         let Ok((machine, transform)) = machines.get(request.machine) else {
             continue;
         };
-        // Only the chemist working the machine. This never mattered while the
-        // beaker was placed on the floor — anyone could have walked over and
-        // picked it up — but it does now that ejecting puts it in a *hand*,
-        // and the hand is the asking client's.
-        if !machine.available_to(player) {
+        let Some(player) = authorized_machine_actor(
+            request.client_id,
+            Some(machine),
+            &[
+                MachineKind::ChemMaster5000,
+                MachineKind::MixingChamber,
+                MachineKind::Grinder,
+                MachineKind::Analyzer,
+                MachineKind::ReactionChamber,
+            ],
+            &chemists,
+            &bodies,
+            &bloodstreams,
+        ) else {
+            continue;
+        };
+        if held.iter().any(|holder| holder.0 == player) {
             continue;
         }
 
@@ -1525,16 +1737,6 @@ fn handle_take(
     bloodstreams: Query<&crate::body::Bloodstream>,
 ) {
     for request in requests.read() {
-        let Some(player) = chemist_entity(&chemists, request.client_id) else {
-            continue;
-        };
-        if bodies.get(player).is_ok_and(|body| body.0.collapsed)
-            || bloodstreams
-                .get(player)
-                .is_ok_and(|blood| blood.0.incapacitated())
-        {
-            continue;
-        }
         // The item has to be in the locker the message names. Checked rather
         // than trusted: the pair comes off the wire, and without this a client
         // could name any entity in the world and have it handed over.
@@ -1547,12 +1749,16 @@ fn handle_take(
         let Ok((machine, transform, solid, facing)) = machines.get(request.machine) else {
             continue;
         };
-        // Whoever has the locker open. Same reasoning as ejecting: this hands
-        // an item to the asking client, so it must be the client the server
-        // granted the locker to.
-        if !machine.available_to(player) {
+        let Some(player) = authorized_machine_actor(
+            request.client_id,
+            Some(machine),
+            &[MachineKind::Locker],
+            &chemists,
+            &bodies,
+            &bloodstreams,
+        ) else {
             continue;
-        }
+        };
 
         commands.entity(request.item).remove::<Stored>();
         give_back(
@@ -1570,12 +1776,34 @@ fn handle_take(
 
 fn handle_empty(
     mut requests: MessageReader<FromClient<EmptyRequested>>,
+    machines: Query<&Machine>,
+    chemists: Query<(Entity, &Chemist)>,
+    bodies: Query<&crate::body::Body>,
+    bloodstreams: Query<&crate::body::Bloodstream>,
     active: Query<(), With<AgitationRun>>,
     slotted: Query<(Entity, &InSlot)>,
     slotted_b: Query<(Entity, &InSlotB)>,
     mut containers: Query<&mut Container>,
 ) {
     for request in requests.read() {
+        if authorized_machine_actor(
+            request.client_id,
+            machines.get(request.machine).ok(),
+            &[
+                MachineKind::ChemMaster5000,
+                MachineKind::MixingChamber,
+                MachineKind::Grinder,
+                MachineKind::Analyzer,
+                MachineKind::ReactionChamber,
+            ],
+            &chemists,
+            &bodies,
+            &bloodstreams,
+        )
+        .is_none()
+        {
+            continue;
+        }
         if active.contains(request.machine) {
             continue;
         }
@@ -1601,6 +1829,10 @@ fn handle_empty(
 fn handle_analyze(
     db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<AnalyzeRequested>>,
+    machines: Query<&Machine>,
+    chemists: Query<(Entity, &Chemist)>,
+    bodies: Query<&crate::body::Body>,
+    bloodstreams: Query<&crate::body::Bloodstream>,
     mut fired: MessageWriter<ReactionsFired>,
     transforms: Query<&Transform>,
     slotted: Query<(Entity, &InSlot)>,
@@ -1608,6 +1840,18 @@ fn handle_analyze(
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for request in requests.read() {
+        if authorized_machine_actor(
+            request.client_id,
+            machines.get(request.machine).ok(),
+            &[MachineKind::Analyzer],
+            &chemists,
+            &bodies,
+            &bloodstreams,
+        )
+        .is_none()
+        {
+            continue;
+        }
         let Some(target) = slotted_container(request.machine, &slotted) else {
             continue;
         };
@@ -1646,6 +1890,139 @@ fn handle_analyze(
     }
 }
 
+/// HPLC-style separation and recovery.
+///
+/// Ordinary material is concentrated at a ten-percent yield cost and every
+/// contaminant is collected in a reject beaker. Selecting an authored inverse
+/// instead recovers sixty percent of it as the linked useful compound. This is
+/// deliberately deterministic: expert chemistry should reward planning, not
+/// a hidden dice roll.
+fn handle_purify(
+    mut commands: Commands,
+    db: Res<ChemDb>,
+    knowledge: Res<Knowledge>,
+    mut requests: MessageReader<FromClient<PurifyRequested>>,
+    machines: Query<&Machine>,
+    chemists: Query<(Entity, &Chemist)>,
+    bodies: Query<&crate::body::Body>,
+    bloodstreams: Query<&crate::body::Bloodstream>,
+    transforms: Query<&Transform>,
+    slotted: Query<(Entity, &InSlot)>,
+    mut containers: Query<&mut Container>,
+    mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
+) {
+    if knowledge.known_count() < HPLC_RECIPE_REQUIREMENT {
+        return;
+    }
+    for request in requests.read() {
+        if authorized_machine_actor(
+            request.client_id,
+            machines.get(request.machine).ok(),
+            &[MachineKind::Analyzer],
+            &chemists,
+            &bodies,
+            &bloodstreams,
+        )
+        .is_none()
+        {
+            continue;
+        }
+        let Some(target) = slotted_container(request.machine, &slotted) else {
+            continue;
+        };
+        let Ok(mut container) = containers.get_mut(target) else {
+            continue;
+        };
+        let amount = container.solution.volume_of(request.reagent);
+        if !amount.is_positive() {
+            continue;
+        }
+
+        let original_temperature = container.solution.temperature;
+        let original_purity = container.solution.purity_of(request.reagent);
+        let original_ph = container.solution.reagent_ph(request.reagent);
+        let mut rejects = Solution::unbounded();
+        rejects.temperature = original_temperature;
+
+        for (reagent, quantity) in container.solution.clone().iter() {
+            if reagent == request.reagent {
+                continue;
+            }
+            let purity = container.solution.purity_of(reagent);
+            let ph = container.solution.reagent_ph(reagent);
+            let removed = container.solution.remove(reagent, quantity);
+            let _ = rejects.add_profiled(reagent, removed, purity, ph);
+        }
+
+        let removed = container.solution.remove(request.reagent, amount);
+        let inverse = db.reagents.get(request.reagent).recovers_to.as_deref();
+        let (product, product_amount, recovered_inverse) = if let Some(recovered) =
+            inverse.and_then(|key| db.reagents.id_of(key))
+        {
+            let recovered_amount = Units::from_raw(removed.raw() * 3 / 5);
+            let rejected_amount = removed - recovered_amount;
+            let recovered_def = db.reagents.get(recovered);
+            let _ = container.solution.add_profiled(
+                recovered,
+                recovered_amount,
+                original_purity.max(0.70),
+                recovered_def.ph,
+            );
+            let _ = rejects.add_profiled(
+                request.reagent,
+                rejected_amount,
+                original_purity,
+                original_ph,
+            );
+            (recovered, recovered_amount, true)
+        } else {
+            let retained = Units::from_raw(removed.raw() * 9 / 10);
+            let rejected = removed - retained;
+            let refined_purity = (original_purity + (1.0 - original_purity) * 0.75).min(1.0);
+            let _ = container.solution.add_profiled(
+                request.reagent,
+                retained,
+                refined_purity,
+                original_ph,
+            );
+            let _ = rejects.add_profiled(request.reagent, rejected, original_purity, original_ph);
+            (request.reagent, retained, false)
+        };
+        container.solution.temperature = original_temperature;
+
+        let report = HplcReport {
+            source: request.reagent,
+            product,
+            input_amount: removed,
+            product_amount,
+            reject_amount: rejects.total_volume(),
+            input_purity: original_purity,
+            product_purity: container.solution.purity_of(product),
+            recovered_inverse,
+        };
+        commands.entity(request.machine).insert(report);
+
+        if !rejects.is_empty() {
+            let drop_at = transforms
+                .get(request.machine)
+                .map(|transform| transform.translation + Vec3::new(0.45, 0.95, 0.35))
+                .unwrap_or(Vec3::ZERO);
+            let reject = spawn_container(&mut commands, ContainerKind::LargeBeaker, drop_at);
+            commands.queue(move |world: &mut World| {
+                if let Some(mut container) = world.get_mut::<Container>(reject) {
+                    let mut rejects = rejects;
+                    let amount = rejects.total_volume();
+                    container.solution.temperature = rejects.temperature;
+                    let _ = rejects.transfer_to(&mut container.solution, amount);
+                }
+            });
+        }
+        if let Ok(transform) = transforms.get(request.machine) {
+            emit_world_sfx(&mut sounds, Sfx::AnalyzerFinish, transform.translation);
+        }
+    }
+}
+
 /// Breaks produce down into the loaded beaker.
 ///
 /// Extraction, not chemistry: the yields are absolute quantities out of the
@@ -1657,6 +2034,10 @@ fn handle_grind(
     db: Res<ChemDb>,
     catalog: Option<Res<ProduceCatalog>>,
     mut requests: MessageReader<FromClient<GrindRequested>>,
+    machines: Query<&Machine>,
+    chemists: Query<(Entity, &Chemist)>,
+    bodies: Query<&crate::body::Body>,
+    bloodstreams: Query<&crate::body::Bloodstream>,
     mut fired: MessageWriter<ReactionsFired>,
     mut hoppers: Query<&mut Hopper>,
     transforms: Query<&Transform>,
@@ -1669,6 +2050,18 @@ fn handle_grind(
     };
 
     for request in requests.read() {
+        if authorized_machine_actor(
+            request.client_id,
+            machines.get(request.machine).ok(),
+            &[MachineKind::Grinder],
+            &chemists,
+            &bodies,
+            &bloodstreams,
+        )
+        .is_none()
+        {
+            continue;
+        }
         let Ok(mut hopper) = hoppers.get_mut(request.machine) else {
             continue;
         };
@@ -1710,7 +2103,8 @@ fn handle_grind(
             ground += 1;
             let (_, report) = container.mutate(&db, |solution| {
                 for (reagent, amount) in &kind.yields {
-                    let _ = solution.add(*reagent, *amount);
+                    let definition = db.reagents.get(*reagent);
+                    let _ = solution.add_profiled(*reagent, *amount, 1.0, definition.ph);
                 }
             });
             reactions.extend(report.fired_reactions());
@@ -1758,12 +2152,9 @@ mod tests {
             &data.reagents,
         );
 
-        // These tests exercise machine behaviour, not the dispenser tier
-        // economy — start with the dispenser fully upgraded so a locked
-        // reagent is never the reason a dispense silently does nothing.
-        let mut knowledge = Knowledge::new(&data);
-        knowledge.award_research(1000);
-        while knowledge.upgrade_dispenser(&data) {}
+        // All authored dispenser bases are available from the start; research
+        // now advances recipe knowledge and machinery instead of stock access.
+        let knowledge = Knowledge::new(&data);
 
         let mut app = App::new();
         app.insert_resource(ChemDb(data))
@@ -1780,6 +2171,7 @@ mod tests {
             .add_message::<FromClient<SetTargetTemperature>>()
             .add_message::<FromClient<SetHeaterPower>>()
             .add_message::<FromClient<PackageRequested>>()
+            .add_message::<FromClient<PurifyRequested>>()
             .add_message::<FromClient<EjectRequested>>()
             .add_message::<FromClient<EmptyRequested>>()
             .add_message::<FromClient<TakeRequested>>()
@@ -1791,12 +2183,14 @@ mod tests {
             .add_systems(
                 Update,
                 (
+                    recover_from_emp,
                     handle_machine_interact,
                     handle_leave_machine,
                     handle_dispense,
                     handle_agitate,
                     handle_buffer_transfer,
                     handle_package,
+                    handle_purify,
                     handle_grind,
                     handle_eject,
                     handle_take,
@@ -1809,6 +2203,43 @@ mod tests {
                     .chain(),
             );
         app
+    }
+
+    #[test]
+    fn emp_lockout_denies_claims_until_the_machine_recovers() {
+        let mut app = test_app();
+        let player = app.world_mut().spawn_empty().id();
+        let machine = app
+            .world_mut()
+            .spawn(Machine {
+                kind: MachineKind::MixingChamber,
+                in_use_by: Some(player),
+                disabled_for: 2.0,
+            })
+            .id();
+
+        assert!(!app
+            .world()
+            .get::<Machine>(machine)
+            .unwrap()
+            .available_to(player));
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(1.0));
+        app.update();
+        let state = app.world().get::<Machine>(machine).unwrap();
+        assert!(state.disabled_for > 0.0);
+        assert_eq!(state.in_use_by, None, "an EMP clears stale ownership");
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(1.1));
+        app.update();
+        assert!(app
+            .world()
+            .get::<Machine>(machine)
+            .unwrap()
+            .available_to(player));
     }
 
     /// A chemist with a connection of their own, as the server sees one.
@@ -1862,6 +2293,261 @@ mod tests {
 
     fn hopper_of(app: &App, machine: Entity) -> &[ProduceId] {
         &app.world().get::<Hopper>(machine).unwrap().0
+    }
+
+    fn request_package(app: &mut App, machine: Entity, kind: ContainerKind) {
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: PackageRequested { machine, kind },
+        });
+        app.update();
+    }
+
+    fn request_purification(app: &mut App, machine: Entity, reagent: ReagentId) {
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: PurifyRequested { machine, reagent },
+        });
+        app.update();
+    }
+
+    #[test]
+    fn chemical_charges_require_an_energetic_payload_and_preserve_quality() {
+        let mut app = test_app();
+        let water = reagent(&app, "water");
+        let gunpowder = reagent(&app, "gunpowder");
+        let mut buffer = Solution::unbounded();
+        let _ = buffer.add_profiled(water, Units::whole(50), 0.42, 6.2);
+        let machine = app
+            .world_mut()
+            .spawn((Buffer(buffer), Transform::default()))
+            .id();
+
+        request_package(&mut app, machine, ContainerKind::ChemicalCharge5);
+        assert_eq!(
+            app.world_mut()
+                .query::<&Container>()
+                .iter(app.world())
+                .count(),
+            0,
+            "ordinary liquid cannot be disguised as a charge"
+        );
+
+        let mut explosive = Solution::unbounded();
+        let _ = explosive.add_profiled(gunpowder, Units::whole(50), 0.82, 7.4);
+        app.world_mut()
+            .entity_mut(machine)
+            .insert(Buffer(explosive));
+        request_package(&mut app, machine, ContainerKind::ChemicalCharge5);
+
+        let mut containers = app.world_mut().query::<&Container>();
+        let charge = containers
+            .single(app.world())
+            .expect("one charge should be packaged");
+        assert_eq!(charge.kind, ContainerKind::ChemicalCharge5);
+        assert_eq!(charge.solution.total_volume(), Units::whole(50));
+        assert!((charge.solution.purity_of(gunpowder) - 0.82).abs() < 0.001);
+        assert!((charge.solution.ph() - 7.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn mixing_chamber_dispenses_ph_paper_without_consuming_chemicals() {
+        let mut app = test_app();
+        let machine = app
+            .world_mut()
+            .spawn((Buffer(Solution::unbounded()), Transform::default()))
+            .id();
+
+        request_package(&mut app, machine, ContainerKind::PhPaper);
+
+        let mut containers = app.world_mut().query::<&Container>();
+        let paper = containers
+            .single(app.world())
+            .expect("one strip should be dispensed");
+        assert_eq!(paper.kind, ContainerKind::PhPaper);
+        assert!(paper.solution.is_empty());
+    }
+
+    #[test]
+    fn hplc_separates_contaminants_and_recovers_an_authored_inverse() {
+        let mut app = test_app();
+        let inverse = reagent(&app, "libitoil");
+        let medicine = reagent(&app, "libital");
+        let water = reagent(&app, "water");
+        let chemistry = app.world().resource::<ChemDb>().0.clone();
+        app.world_mut()
+            .resource_mut::<Knowledge>()
+            .unlock_all(&chemistry);
+        let machine = app.world_mut().spawn(Transform::default()).id();
+        let mut sample = Container::new(ContainerKind::LargeBeaker);
+        let _ = sample
+            .solution
+            .add_profiled(inverse, Units::whole(10), 0.30, 8.2);
+        let _ = sample
+            .solution
+            .add_profiled(water, Units::whole(10), 1.0, 7.0);
+        let source = app.world_mut().spawn((sample, InSlot(machine))).id();
+
+        request_purification(&mut app, machine, inverse);
+
+        let refined = app.world().get::<Container>(source).unwrap();
+        assert_eq!(refined.solution.volume_of(medicine), Units::whole(6));
+        assert_eq!(refined.solution.volume_of(water), Units::ZERO);
+        assert!((refined.solution.purity_of(medicine) - 0.70).abs() < 0.001);
+
+        let mut containers = app.world_mut().query::<(Entity, &Container)>();
+        let reject = containers
+            .iter(app.world())
+            .find(|(entity, _)| *entity != source)
+            .map(|(_, container)| container)
+            .expect("the rejected fraction should be collected");
+        assert_eq!(reject.solution.volume_of(inverse), Units::whole(4));
+        assert_eq!(reject.solution.volume_of(water), Units::whole(10));
+
+        let report = app
+            .world()
+            .get::<HplcReport>(machine)
+            .expect("the analyzer should retain its yield report");
+        assert_eq!(report.source, inverse);
+        assert_eq!(report.product, medicine);
+        assert_eq!(report.input_amount, Units::whole(10));
+        assert_eq!(report.product_amount, Units::whole(6));
+        assert_eq!(report.reject_amount, Units::whole(14));
+        assert!(report.recovered_inverse);
+        assert!((report.input_purity - 0.30).abs() < 0.001);
+        assert!((report.product_purity - 0.70).abs() < 0.001);
+    }
+
+    #[test]
+    fn hplc_purifies_a_clean_inverse_pair_member_without_converting_it() {
+        let mut app = test_app();
+        let medicine = reagent(&app, "libital");
+        let harmful_inverse = reagent(&app, "libitoil");
+        let chemistry = app.world().resource::<ChemDb>().0.clone();
+        app.world_mut()
+            .resource_mut::<Knowledge>()
+            .unlock_all(&chemistry);
+        let machine = app.world_mut().spawn(Transform::default()).id();
+        let mut sample = Container::new(ContainerKind::LargeBeaker);
+        let _ = sample
+            .solution
+            .add_profiled(medicine, Units::whole(10), 0.80, 8.2);
+        let source = app.world_mut().spawn((sample, InSlot(machine))).id();
+
+        request_purification(&mut app, machine, medicine);
+
+        let refined = app.world().get::<Container>(source).unwrap();
+        assert_eq!(refined.solution.volume_of(medicine), Units::whole(9));
+        assert_eq!(refined.solution.volume_of(harmful_inverse), Units::ZERO);
+        let report = app.world().get::<HplcReport>(machine).unwrap();
+        assert_eq!(report.product, medicine);
+        assert!(!report.recovered_inverse);
+    }
+
+    #[test]
+    fn a_peer_can_only_purify_its_claimed_analyzer() {
+        let mut app = test_app();
+        let inverse = reagent(&app, "libitoil");
+        let medicine = reagent(&app, "libital");
+        let chemistry = app.world().resource::<ChemDb>().0.clone();
+        app.world_mut()
+            .resource_mut::<Knowledge>()
+            .unlock_all(&chemistry);
+        let (owner_client, owner) = chemist(&mut app);
+        let (intruder_client, _) = chemist(&mut app);
+        let mut state = Machine::new(MachineKind::Analyzer);
+        state.in_use_by = Some(owner);
+        let machine = app.world_mut().spawn((state, Transform::default())).id();
+        let mut sample = Container::new(ContainerKind::LargeBeaker);
+        let _ = sample
+            .solution
+            .add_profiled(inverse, Units::whole(10), 0.30, 8.2);
+        let source = app.world_mut().spawn((sample, InSlot(machine))).id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: intruder_client,
+            message: PurifyRequested {
+                machine,
+                reagent: inverse,
+            },
+        });
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<Container>(source)
+                .unwrap()
+                .solution
+                .volume_of(inverse),
+            Units::whole(10),
+            "another peer must not operate the claimed analyzer"
+        );
+
+        app.world_mut().get_mut::<Machine>(machine).unwrap().kind = MachineKind::MixingChamber;
+        app.world_mut().write_message(FromClient {
+            client_id: owner_client,
+            message: PurifyRequested {
+                machine,
+                reagent: inverse,
+            },
+        });
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<Container>(source)
+                .unwrap()
+                .solution
+                .volume_of(inverse),
+            Units::whole(10),
+            "the right owner cannot forge an analyzer action on another machine kind"
+        );
+
+        app.world_mut().get_mut::<Machine>(machine).unwrap().kind = MachineKind::Analyzer;
+        app.world_mut().write_message(FromClient {
+            client_id: owner_client,
+            message: PurifyRequested {
+                machine,
+                reagent: inverse,
+            },
+        });
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<Container>(source)
+                .unwrap()
+                .solution
+                .volume_of(medicine),
+            Units::whole(6)
+        );
+    }
+
+    #[test]
+    fn hplc_stays_locked_until_the_notebook_has_expert_coverage() {
+        let mut app = test_app();
+        let water = reagent(&app, "water");
+        let machine = app.world_mut().spawn(Transform::default()).id();
+        let mut sample = Container::new(ContainerKind::Beaker);
+        let _ = sample
+            .solution
+            .add_profiled(water, Units::whole(10), 0.40, 7.0);
+        let source = app.world_mut().spawn((sample, InSlot(machine))).id();
+
+        request_purification(&mut app, machine, water);
+
+        let unchanged = app.world().get::<Container>(source).unwrap();
+        assert_eq!(unchanged.solution.volume_of(water), Units::whole(10));
+        assert!((unchanged.solution.purity_of(water) - 0.40).abs() < 0.001);
+        assert_eq!(
+            app.world_mut()
+                .query::<&Container>()
+                .iter(app.world())
+                .count(),
+            1,
+            "a forged early request must not create a reject beaker"
+        );
+        assert!(
+            app.world().get::<HplcReport>(machine).is_none(),
+            "a rejected request must not forge a successful result"
+        );
     }
 
     fn slot_contents(app: &mut App, machine: Entity) -> Solution {
@@ -1961,7 +2647,7 @@ mod tests {
     }
 
     #[test]
-    fn dispensing_a_locked_reagent_is_refused() {
+    fn dispensing_a_crafted_reagent_is_refused() {
         // `test_app()` starts with everything unlocked, which is right for
         // every other test here — this one is specifically about what a
         // *locked* reagent does, so it overwrites that with a fresh
@@ -1979,7 +2665,7 @@ mod tests {
             ))
             .id();
 
-        let hydrogen = reagent(&app, "hydrogen"); // locked by default
+        let hydrogen = reagent(&app, "bicaridine");
         app.world_mut().write_message(FromClient {
             client_id: ClientId::Server,
             message: DispenseRequested {
@@ -1992,7 +2678,7 @@ mod tests {
         let container = app.world().get::<Container>(beaker).unwrap();
         assert!(
             container.solution.is_empty(),
-            "a locked reagent must never be dispensed, even by a direct request"
+            "a synthesized reagent must never be dispensed, even by a forged request"
         );
     }
 
@@ -2730,6 +3416,8 @@ mod tests {
             .spawn((Container::new(ContainerKind::Beaker), InSlotB(machine)))
             .id();
 
+        press_e(&mut app, client, machine);
+
         app.world_mut().write_message(FromClient {
             client_id: client,
             message: EjectRequested {
@@ -3038,6 +3726,8 @@ mod tests {
             query.single(app.world()).expect("a beaker is loaded")
         };
 
+        press_e(&mut app, client, machine);
+
         app.world_mut().write_message(FromClient {
             client_id: client,
             message: EjectRequested {
@@ -3200,6 +3890,10 @@ mod tests {
             InteractionMode::Roaming,
             "putting something away should not also open the panel"
         );
+
+        // Taking from storage is a panel action, so claim the locker just as
+        // a real player must after putting the first item away.
+        press_e(&mut app, client, locker);
 
         app.world_mut().write_message(FromClient {
             client_id: client,

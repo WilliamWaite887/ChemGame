@@ -651,4 +651,930 @@
             "Equal parts radium, potassium and mercury.",
         ],
     ),
+
+    // ---- Dangerous chemistry progression --------------------------------
+    (
+        id: "ash", reactants: [("oil", 1)], products: [("ash", 1)],
+        min_temp: Some((480.0)), priority: 18,
+        hints: ["One industrial precursor, heated nearly to ignition.", "Bake oil above 480K."],
+    ),
+    (
+        id: "saltpetre", reactants: [("oxygen", 3), ("potassium", 1), ("nitrogen", 1)], products: [("saltpetre", 3)],
+        priority: 4,
+        hints: ["Three base reagents, with the oxidizer tripled.", "Three oxygen to one each potassium and nitrogen."],
+    ),
+    (
+        id: "multiver", reactants: [("sodium_chloride", 2), ("ash", 2)], products: [("multiver", 4)],
+        min_temp: Some((380.0)), max_temp: Some((410.0)), min_ph: Some(7.0), optimal_ph: Some(9.0), max_ph: Some(11.0),
+        rate: Some(1), priority: 22,
+        hints: ["Two precursors in equal amounts within a narrow warm range.", "Salt and ash, held between 380K and 410K."],
+    ),
+    (
+        id: "gunpowder", reactants: [("multiver", 1), ("saltpetre", 1), ("sulfur", 1)], products: [("gunpowder", 3)],
+        priority: 20,
+        hints: ["An antitoxin, an oxidizer, and sulfur.", "Equal parts multiver, saltpetre, and sulfur."],
+    ),
+    (
+        id: "acetone", reactants: [("oil", 1), ("welding_fuel", 1), ("oxygen", 1)], products: [("acetone", 3)],
+        priority: 12,
+        hints: ["Three flammable or oxidizing inputs in equal parts.", "Oil, welding fuel, and oxygen."],
+    ),
+    (
+        id: "phenol", reactants: [("oil", 1), ("chlorine", 1), ("water", 1)], products: [("phenol", 3)],
+        priority: 12,
+        hints: ["A hydrocarbon, a halogen, and water.", "Equal parts oil, chlorine, and water."],
+    ),
+    (
+        id: "fluorosulfuric_acid", reactants: [("fluorine", 1), ("hydrogen", 1), ("potassium", 1), ("sulphuric_acid", 1)], products: [("fluorosulfuric_acid", 4)],
+        min_temp: Some((380.0)), min_ph: Some(0.0), optimal_ph: Some(2.0), max_ph: Some(5.5), priority: 24,
+        hints: ["A hot four-part superacid reaction.", "Fluorine, hydrogen, potassium, and sulphuric acid above 380K."],
+    ),
+    (
+        id: "nitric_acid", reactants: [("fluorosulfuric_acid", 1), ("hydrogen_peroxide", 1), ("nitrogen", 1)], products: [("nitric_acid", 2)],
+        min_temp: Some((480.0)), min_ph: Some(0.0), optimal_ph: Some(2.5), max_ph: Some(6.0), priority: 25,
+        hints: ["A superacid, peroxide, and nitrogen under extreme heat.", "Equal parts fluorosulfuric acid, hydrogen peroxide, and nitrogen above 480K."],
+    ),
+    (
+        id: "glycerol", reactants: [("corn_oil", 3), ("sulphuric_acid", 1)], products: [("glycerol", 1)],
+        process: Agitated(side_a: [("corn_oil", 3)], side_b: [("sulphuric_acid", 1)]),
+        min_ph: Some(0.0), optimal_ph: Some(3.0), max_ph: Some(7.0), rate: Some(0.5), priority: 25,
+        hints: ["A produce oil must be kept separate from a strong acid until agitation.", "Three parts corn oil against one sulphuric acid."],
+    ),
+    (
+        id: "acetone_oxide", reactants: [("acetone", 2), ("hydrogen_peroxide", 1), ("oxygen", 1)], products: [("acetone_oxide", 2)],
+        process: Agitated(side_a: [("acetone", 2)], side_b: [("hydrogen_peroxide", 1), ("oxygen", 1)]),
+        rate: Some(1), priority: 25,
+        hints: ["Keep the solvent apart from the peroxide side until agitation.", "Two acetone against one each hydrogen peroxide and oxygen."],
+    ),
+    (
+        id: "nitroglycerin", reactants: [("glycerol", 1), ("sulphuric_acid", 1), ("nitric_acid", 1)], catalysts: [("stabilizing_agent", 1)], products: [("nitroglycerin", 2)],
+        min_ph: Some(0.0), optimal_ph: Some(1.5), max_ph: Some(4.5), min_purity: Some(0.6), priority: 32,
+        hints: ["Three nitration ingredients and a surviving stabilizer.", "Glycerol, sulphuric acid, and nitric acid over stabilizing agent."],
+    ),
+    (
+        id: "unstable_nitroglycerin", reactants: [("glycerol", 1), ("sulphuric_acid", 1), ("nitric_acid", 1)], products: [("ash", 1)],
+        min_ph: Some(0.0), max_ph: Some(4.5), effects: [ExplosionProfile(strength: 0.5, modifier: 0.0)], priority: 31,
+        hints: ["This is the consequence of attempting nitration without stabilizer."],
+    ),
+    (
+        id: "rdx", reactants: [("phenol", 2), ("acetone_oxide", 1), ("nitric_acid", 1)], catalysts: [("stabilizing_agent", 1)], products: [("rdx", 1)],
+        min_temp: Some((404.0)), min_ph: Some(0.0), optimal_ph: Some(2.0), max_ph: Some(5.0), min_purity: Some(0.7), priority: 34,
+        hints: ["A hot, stabilized synthesis using two advanced branches.", "Two phenol, one acetone oxide, and one nitric acid over stabilizer above 404K."],
+    ),
+    (
+        id: "unstable_rdx", reactants: [("phenol", 2), ("acetone_oxide", 1), ("nitric_acid", 1)], products: [("ash", 1)],
+        min_temp: Some((404.0)), effects: [ExplosionProfile(strength: 0.25, modifier: 4.0)], priority: 33,
+        hints: ["This is the consequence of heating the RDX chain without stabilizer."],
+    ),
+    (
+        id: "detonate_gunpowder", reactants: [("gunpowder", 1)], products: [("ash", 1)], min_temp: Some((474.0)),
+        effects: [ExplosionProfile(strength: 0.1, modifier: 5.0)], priority: 50,
+        hints: ["Gunpowder initiates at 474K."],
+    ),
+    (
+        id: "detonate_nitroglycerin", reactants: [("nitroglycerin", 1)], products: [("ash", 1)], min_temp: Some((474.0)),
+        effects: [ExplosionProfile(strength: 0.5, modifier: 0.0)], priority: 50,
+        hints: ["Nitroglycerin initiates at 474K."],
+    ),
+    (
+        id: "detonate_rdx", reactants: [("rdx", 1)], products: [("ash", 1)], min_temp: Some((474.0)),
+        effects: [ExplosionProfile(strength: 0.25, modifier: 4.0)], priority: 50,
+        hints: ["RDX initiates at 474K."],
+    ),
+
+    // ---- Expanded components and medicine -------------------------------
+    (id: "lye", reactants: [("sodium", 1), ("water", 1)], products: [("lye", 2)], priority: 12, hints: ["Dissolve sodium into water carefully.", "Equal parts sodium and water."]),
+    (id: "formaldehyde", reactants: [("ethanol", 1), ("oxygen", 1)], catalysts: [("silver", 1)], products: [("formaldehyde", 2)], priority: 14, hints: ["Oxidize ethanol over a metal catalyst.", "Ethanol and oxygen over silver."]),
+    (
+        id: "acetaldehyde", reactants: [("acetone", 1), ("formaldehyde", 1), ("water", 1)], products: [("acetaldehyde", 3)],
+        min_temp: Some((450.0)), min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0),
+        min_purity: Some(0.60), ph_shift: 0.02, priority: 25,
+        hints: ["A volatile aldehyde forms only in a hot, controlled neutral band.", "Equal parts acetone, formaldehyde, and water above 450K at pH 5–9."],
+    ),
+    (
+        id: "pentaerythritol", reactants: [("acetaldehyde", 1), ("formaldehyde", 3), ("lye", 1)], products: [("pentaerythritol", 2)],
+        min_temp: Some((100.0)), min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0),
+        min_purity: Some(0.70), ph_shift: 0.02, rate: Some(0.5), priority: 27,
+        hints: ["The aldehyde scaffold needs excess formaldehyde and a controlled alkaline reagent.", "One acetaldehyde, three formaldehyde, and one lye at pH 5–9; five input parts yield only two."],
+    ),
+    (
+        id: "penthrite", reactants: [("pentaerythritol", 1), ("nitric_acid", 1), ("acetone", 1)], catalysts: [("stabilizing_agent", 1)], products: [("penthrite", 3)],
+        min_temp: Some((255.0)), min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0),
+        min_purity: Some(0.80), overheat_temp: Some((450.0)), overheat: Detonate(power: 3.0),
+        effects: [Heat(0.5)], priority: 36,
+        hints: ["A purified nitrate scaffold becomes medicine only over a surviving stabilizer; overheating is explosive.", "Pentaerythritol, nitric acid, and acetone over Stabilizing Agent at pH 5–9; remain below 450K."],
+    ),
+    (
+        id: "penthrite_epinephrine_incompatibility", reactants: [("penthrite", 1), ("epinephrine", 1)], products: [("ash", 1)],
+        effects: [ExplosionProfile(strength: 0.2, modifier: 1.5)], priority: 52,
+        hints: ["Equal Penthrite and Epinephrine are violently incompatible."],
+    ),
+    (
+        id: "penthrite_atropine_incompatibility", reactants: [("penthrite", 1), ("atropine", 1)], products: [("ash", 1)],
+        effects: [ExplosionProfile(strength: 0.2, modifier: 1.5)], priority: 52,
+        hints: ["Equal Penthrite and Atropine are violently incompatible."],
+    ),
+    (
+        id: "penthrite_energetic_incompatibility", reactants: [("penthrite", 1), ("phenol", 1), ("acetone_oxide", 1)], products: [("ash", 1)],
+        min_temp: Some((315.0)), effects: [ExplosionProfile(strength: 0.2, modifier: 1.5)], priority: 53,
+        hints: ["Penthrite, phenol, and acetone oxide become an energetic payload above 315K."],
+    ),
+    (
+        id: "impedrezene", reactants: [("mercury", 1), ("oxygen", 1), ("sugar", 1)], products: [("impedrezene", 2)],
+        min_temp: Some((100.0)), min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0),
+        min_purity: Some(0.30), ph_shift: 0.02, priority: 18,
+        hints: ["A heavy metal, oxygen, and sugar form a cognitively impairing opiate with poor yield.", "Equal mercury, oxygen, and sugar at pH 5–9; three input parts yield only two."],
+    ),
+    (
+        id: "psicodine", reactants: [("mannitol", 2), ("impedrezene", 1), ("water", 2)], products: [("psicodine", 5)],
+        min_temp: Some((100.0)), min_ph: Some(5.0), optimal_ph: Some(7.5), max_ph: Some(10.0),
+        min_purity: Some(0.25), ph_shift: 0.02, effects: [Heat(0.2)], priority: 28,
+        hints: ["A neural medicine can refine a dangerous narcotic into psychiatric treatment.", "Two Mannitol, one Impedrezene, and two water at pH 5–10."],
+    ),
+    (id: "diethylamine", reactants: [("ammonia", 1), ("ethanol", 1)], products: [("diethylamine", 2)], min_ph: Some(7.0), optimal_ph: Some(10.0), max_ph: Some(13.0), priority: 14, hints: ["An alkaline amine built from ammonia and alcohol.", "Equal parts ammonia and ethanol."]),
+    (id: "salicylic_acid", reactants: [("phenol", 1), ("sodium", 1), ("carbon", 1)], products: [("salicylic_acid", 3)], min_temp: Some((350.0)), min_ph: Some(2.0), optimal_ph: Some(4.0), max_ph: Some(7.0), rate: Some(1), priority: 22, hints: ["A warm aromatic trauma medicine with controlled acidity.", "Phenol, sodium, and carbon above 350K."]),
+    (id: "oxandrolone", reactants: [("carbon", 1), ("phenol", 1), ("hydrogen", 1)], products: [("oxandrolone", 2)], min_temp: Some((390.0)), min_ph: Some(4.0), optimal_ph: Some(6.0), max_ph: Some(8.0), rate: Some(0.8), priority: 22, hints: ["A warm superior burn medicine based on phenol.", "Carbon, phenol, and hydrogen above 390K."]),
+    (id: "salbutamol", reactants: [("salicylic_acid", 1), ("lithium", 1), ("bromine", 1)], products: [("salbutamol", 2)], min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), rate: Some(1), priority: 23, hints: ["A trauma medicine becomes an airway drug with two base elements.", "Salicylic acid, lithium, and bromine near neutral pH."]),
+    (id: "epinephrine", reactants: [("phenol", 1), ("acetone", 1), ("diethylamine", 1), ("oxygen", 1)], products: [("epinephrine", 4)], process: Agitated(side_a: [("phenol", 1), ("acetone", 1)], side_b: [("diethylamine", 1), ("oxygen", 1)]), min_ph: Some(6.0), optimal_ph: Some(7.5), max_ph: Some(9.0), rate: Some(1), priority: 26, hints: ["Two organic sides must be prepared separately.", "Phenol and acetone against diethylamine and oxygen."]),
+    (id: "atropine", reactants: [("ethanol", 1), ("acetone", 1), ("diethylamine", 1)], products: [("atropine", 2)], min_ph: Some(7.0), optimal_ph: Some(9.0), max_ph: Some(11.5), rate: Some(0.8), priority: 23, hints: ["An alkaline critical-care synthesis using an amine.", "Ethanol, acetone, and diethylamine." ]),
+    (id: "pentetic_acid", reactants: [("formaldehyde", 1), ("sodium", 1), ("cyanide", 1), ("diethylamine", 1)], products: [("pentetic_acid", 4)], process: Agitated(side_a: [("formaldehyde", 1), ("sodium", 1)], side_b: [("cyanide", 1), ("diethylamine", 1)]), min_ph: Some(2.0), optimal_ph: Some(4.0), max_ph: Some(7.0), min_purity: Some(0.65), rate: Some(0.5), priority: 27, hints: ["A four-component chelator with two separately prepared sides.", "Formaldehyde and sodium against cyanide and diethylamine."]),
+    (id: "cryoxadone", reactants: [("dexalin", 1), ("water", 1), ("ice", 1)], products: [("cryoxadone", 3)], max_temp: Some((285.0)), rate: Some(1), priority: 22, hints: ["A broad medicine that only forms cold.", "Dexalin, water, and ice below 285K."]),
+    (id: "synthflesh", reactants: [("bicaridine", 1), ("kelotane", 1), ("carbon", 1)], products: [("synthflesh", 3)], priority: 22, hints: ["Combine the basic trauma and burn medicines with an organic scaffold.", "Bicaridine, kelotane, and carbon."]),
+
+    // ---- Narcotic control and utility -----------------------------------
+    (id: "morphine", reactants: [("carbon", 2), ("hydrogen", 2), ("ethanol", 1), ("oxygen", 1)], products: [("morphine", 3)], min_ph: Some(6.0), optimal_ph: Some(8.0), max_ph: Some(10.0), rate: Some(1), priority: 18, hints: ["A four-part analgesic synthesis.", "Carbon, hydrogen, ethanol, and oxygen in a 2:2:1:1 ratio."]),
+    (id: "ephedrine", reactants: [("diethylamine", 1), ("sugar", 1), ("oil", 1)], products: [("ephedrine", 3)], priority: 18, hints: ["An amine, sugar, and oil form a rough stimulant.", "Equal parts diethylamine, sugar, and oil."]),
+    (id: "haloperidol", reactants: [("chlorine", 1), ("fluorine", 1), ("aluminium", 1), ("potassium_iodide", 1)], products: [("haloperidol", 4)], min_purity: Some(0.6), rate: Some(1), priority: 20, hints: ["A four-part antipsychotic using two halogens.", "Chlorine, fluorine, aluminium, and potassium iodide."]),
+    (id: "space_lube", reactants: [("water", 1), ("silicon", 1), ("oxygen", 1)], products: [("space_lube", 3)], priority: 9, hints: ["Three base reagents create a persistent lubricant.", "Water, silicon, and oxygen."]),
+    (id: "sterilizine", reactants: [("ethanol", 1), ("space_cleaner", 1), ("silver", 1)], products: [("sterilizine", 3)], priority: 12, hints: ["Improve cleaner with alcohol and an antimicrobial metal.", "Ethanol, space cleaner, and silver."]),
+    (id: "foaming_agent", reactants: [("lithium", 1), ("hydrogen", 1)], products: [("foaming_agent", 2)], priority: 9, hints: ["A light metal and the lightest gas.", "Equal parts lithium and hydrogen."]),
+    (id: "fluorosurfactant", reactants: [("fluorine", 2), ("carbon", 2), ("sulphuric_acid", 1)], products: [("fluorosurfactant", 5)], priority: 15, hints: ["A fluorinated carbon carrier conditioned by strong acid.", "Combine two parts each Fluorine and Carbon with one part Sulphuric Acid."]),
+    (id: "chemical_foam", reactants: [("fluorosurfactant", 1), ("water", 1)], products: [("chemical_foam", 2)], priority: 17, hints: ["A surfactant and Water form an expanding carrier while leaving every unrelated reagent in the mixture.", "Combine equal Fluorosurfactant and Water, then release the finished mixture as a splash or spray."]),
+    (id: "metal_foam", reactants: [("foaming_agent", 1), ("iron", 3)], products: [("metal_foam", 4)], priority: 18, hints: ["A lightweight foaming precursor expands a structural metal into a temporary barrier.", "Combine one part Foaming Agent with three parts Iron, then release the mixture where the barrier is needed."]),
+    (id: "firefighting_foam", reactants: [("foaming_agent", 1), ("cryostylane", 1), ("water", 1)], products: [("firefighting_foam", 3)], max_temp: Some((310.0)), priority: 16, hints: ["A cool foam mixture designed to suppress fire.", "Foaming agent, cryostylane, and water below 310K."]),
+    (id: "drying_agent", reactants: [("sodium", 1), ("silicon", 1), ("oxygen", 1)], products: [("drying_agent", 3)], priority: 9, hints: ["Three base reagents make an absorbent powder.", "Sodium, silicon, and oxygen."]),
+
+    // ---- Purity medicine and recoverable inverse ------------------------
+    (
+        id: "libital", reactants: [("phenol", 2), ("nitrogen", 2), ("oxygen", 2)], catalysts: [("sodium", 1)], products: [("libital", 4)],
+        min_temp: Some((225.0)), min_ph: Some(6.0), optimal_ph: Some(8.2), max_ph: Some(10.0), min_purity: Some(0.30),
+        rate: Some(1), priority: 28,
+        hints: ["A phenol-based trauma medicine made alkaline over sodium.", "Two each phenol, nitrogen, and oxygen over sodium, above 225K and between pH 6 and 10."],
+    ),
+    (
+        id: "libitoil", reactants: [("phenol", 2), ("nitrogen", 2), ("oxygen", 2)], products: [("libitoil", 3)],
+        min_temp: Some((225.0)), min_ph: Some(0.0), optimal_ph: Some(4.0), max_ph: Some(5.9),
+        rate: Some(1), priority: 27,
+        hints: ["Libital's acidic inverse forms when the same batch falls below its safe pH window."],
+    ),
+    (
+        id: "helbital", reactants: [("carbon", 1), ("fluorine", 1), ("sugar", 1)], catalysts: [("copper", 1)], products: [("helbital", 3)],
+        min_temp: Some((250.0)), max_temp: Some((550.0)), min_ph: Some(5.0), optimal_ph: Some(8.0), max_ph: Some(9.5), min_purity: Some(0.55),
+        rate: Some(0.8), priority: 29,
+        hints: ["A critical trauma medicine formed from carbon, fluorine, and sugar over copper.", "Hold the batch between pH 5 and 9.5 above 250K."],
+    ),
+    (
+        id: "probital", reactants: [("acetone", 2), ("copper", 1), ("phosphorus", 1)], catalysts: [("sodium", 1)], products: [("probital", 3)],
+        min_temp: Some((225.0)), min_ph: Some(4.5), optimal_ph: Some(5.5), max_ph: Some(12.0), min_purity: Some(0.35),
+        rate: Some(1), priority: 27,
+        hints: ["Two parts acetone with copper and phosphorus over sodium.", "Keep the warm trauma batch above 225K and at least mildly acidic."],
+    ),
+    (
+        id: "aiuri", reactants: [("ammonia", 1), ("hydrogen", 2), ("sulphuric_acid", 1)], catalysts: [("sodium", 1)], products: [("aiuri", 3)],
+        min_temp: Some((200.0)), max_temp: Some((315.0)), min_ph: Some(4.8), optimal_ph: Some(6.5), max_ph: Some(9.0), min_purity: Some(0.25),
+        rate: Some(0.8), priority: 27,
+        hints: ["An ammonia, hydrogen, and acid burn medicine buffered by sodium.", "Keep it below 315K and between pH 4.8 and 9."],
+    ),
+    (
+        id: "lenturi", reactants: [("ammonia", 1), ("silver", 1), ("sulfur", 1), ("chlorine", 1)], catalysts: [("lithium", 1)], products: [("lenturi", 4)],
+        min_temp: Some((200.0)), max_temp: Some((500.0)), min_ph: Some(6.0), optimal_ph: Some(8.0), max_ph: Some(11.0), min_purity: Some(0.25),
+        rate: Some(0.5), priority: 30,
+        hints: ["A five-component superior burn medicine using silver and an alkaline catalyst.", "Ammonia, silver, sulfur, and chlorine over lithium between pH 6 and 11."],
+    ),
+    (
+        id: "tirimol", reactants: [("acetone", 2), ("nitrogen", 3)], catalysts: [("sulphuric_acid", 1), ("oxygen", 1)], products: [("tirimol", 4)],
+        min_temp: Some((200.0)), min_ph: Some(5.0), optimal_ph: Some(5.8), max_ph: Some(7.1), min_purity: Some(0.40),
+        rate: Some(0.5), priority: 30,
+        hints: ["A narrow-pH emergency airway medicine made over two surviving catalysts.", "Two acetone and three nitrogen over sulphuric acid and oxygen, between pH 5 and 7.1."],
+    ),
+    (
+        id: "convermol", reactants: [("oil", 1), ("fluorine", 1), ("hydrogen", 1)], products: [("convermol", 3)],
+        min_temp: Some((370.0)), max_temp: Some((570.0)), min_ph: Some(3.0), optimal_ph: Some(5.6), max_ph: Some(8.5), min_purity: Some(0.40),
+        rate: Some(1), priority: 26,
+        hints: ["A hot oil-based oxygen medicine using fluorine and hydrogen.", "Hold oil, fluorine, and hydrogen above 370K near pH 5.6."],
+    ),
+
+    // ---- Detoxification and neurological medicine ----------------------
+    (
+        id: "calomel", reactants: [("mercury", 1), ("chlorine", 1)], products: [("calomel", 2)],
+        min_temp: Some((374.0)), min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(10.0), min_purity: Some(0.25),
+        rate: Some(1), priority: 24,
+        hints: ["A mercury purge that only forms under substantial heat.", "Equal parts mercury and chlorine above 374K."],
+    ),
+    (
+        id: "ammoniated_mercury", reactants: [("calomel", 1), ("ammonia", 2)], products: [("ammoniated_mercury", 3)],
+        min_ph: Some(5.0), optimal_ph: Some(8.0), max_ph: Some(10.0), min_purity: Some(0.40),
+        rate: Some(0.8), priority: 27,
+        hints: ["Refine the heated mercury purge with an alkaline component.", "One Calomel with two Ammonia between pH 5 and 10."],
+    ),
+    (
+        id: "granibitaluri", reactants: [("sodium_chloride", 1), ("carbon", 1), ("sulphuric_acid", 1)], catalysts: [("iron", 5)], products: [("granibitaluri", 3)],
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(10.0), min_purity: Some(0.25),
+        rate: Some(1), priority: 23,
+        hints: ["A broad injury medicine built over a large iron catalyst bed.", "Salt, carbon, and sulphuric acid over five units of iron."],
+    ),
+    (
+        id: "seiver", reactants: [("aluminium", 2), ("nitrogen", 2), ("potassium", 2)], products: [("seiver", 3)],
+        min_temp: Some((320.0)), min_ph: Some(5.0), optimal_ph: Some(6.5), max_ph: Some(8.0), min_purity: Some(0.35),
+        rate: Some(0.5), priority: 25,
+        hints: ["An endothermic radiation medicine assembled from three base stocks.", "Two each aluminium, nitrogen, and potassium above 320K between pH 5 and 8."],
+    ),
+    (
+        id: "neurine", reactants: [("acetone", 2), ("mannitol", 2), ("oxygen", 2)], products: [("neurine", 4)],
+        min_ph: Some(6.8), optimal_ph: Some(8.0), max_ph: Some(10.0), min_purity: Some(0.40),
+        rate: Some(0.5), priority: 28,
+        hints: ["A neural medicine combining a solvent branch with an established brain treatment.", "Two each acetone, mannitol, and oxygen between pH 6.8 and 10."],
+    ),
+    (
+        id: "diphenhydramine", reactants: [("diethylamine", 1), ("oil", 1), ("bromine", 1), ("carbon", 1), ("ethanol", 1)], products: [("diphenhydramine", 4)],
+        min_ph: Some(5.0), optimal_ph: Some(7.5), max_ph: Some(10.0), min_purity: Some(0.30),
+        rate: Some(0.8), priority: 24,
+        hints: ["A five-component sedating counteragent based on an amine and oil.", "Diethylamine, oil, bromine, carbon, and ethanol in equal parts."],
+    ),
+    (
+        id: "oculine", reactants: [("multiver", 1), ("carbon", 1), ("hydrogen", 1)], products: [("oculine", 3)],
+        min_temp: Some((200.0)), max_temp: Some((600.0)), min_ph: Some(4.8), optimal_ph: Some(6.8), max_ph: Some(8.5), min_purity: Some(0.30),
+        rate: Some(1), priority: 24,
+        hints: ["Turn a purge precursor into a specialist vision counteragent.", "Multiver, carbon, and hydrogen above 200K between pH 4.8 and 8.5."],
+    ),
+
+    // ---- Koibean medicine branch ---------------------------------------
+    (
+        id: "cryptobiolin", reactants: [("oxygen", 1), ("potassium", 1), ("sugar", 1)], products: [("cryptobiolin", 3)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)), min_ph: Some(5.0), optimal_ph: Some(7.5), max_ph: Some(9.0), min_purity: Some(0.30),
+        // Lower than the three tutorial medicines so a broad starter mix
+        // cannot have this intermediate steal their oxygen, potassium and
+        // sugar before their intended reactions resolve.
+        rate: Some(1), priority: 4,
+        hints: ["A disorienting three-part intermediate made from ordinary dispenser stock.", "Equal parts oxygen, potassium, and sugar between pH 5 and 9."],
+    ),
+    (
+        id: "rezadone", reactants: [("carpotoxin", 1), ("cryptobiolin", 1), ("copper", 1)], products: [("rezadone", 3)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)), min_ph: Some(5.0), optimal_ph: Some(8.0), max_ph: Some(10.0), min_purity: Some(0.25),
+        rate: Some(1), priority: 29,
+        hints: ["A superior restorative needs one toxic botanical extract and one synthesized intermediate.", "Equal parts Carpotoxin, Cryptobiolin, and copper between pH 5 and 10."],
+    ),
+    (
+        id: "antihol", reactants: [("multiver", 1), ("copper", 1), ("ethanol", 1)], products: [("antihol", 3)],
+        min_temp: Some((100.0)), max_temp: Some((550.0)), min_ph: Some(3.5), optimal_ph: Some(5.5), max_ph: Some(8.5), min_purity: Some(0.15),
+        rate: Some(0.75), priority: 26,
+        hints: ["Refine an established purge into an alcohol-specific counteragent.", "Equal parts Multiver, copper, and ethanol between pH 3.5 and 8.5."],
+    ),
+    (
+        id: "modafinil",
+        // TG also repeats ammonia here after it has already been incorporated
+        // into Diethylamine. ChemGame omits that duplicate branch input so the
+        // method remains discoverable under the five-reagent focus limit.
+        reactants: [("acetone", 1), ("diethylamine", 1), ("phenol", 1), ("sulphuric_acid", 1)],
+        catalysts: [("bromine", 1)], products: [("modafinil", 4)],
+        min_temp: Some((173.0)), max_temp: Some((600.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.5), max_ph: Some(10.0), min_purity: Some(0.25),
+        ph_shift: 0.04, rate: Some(0.5), priority: 29,
+        hints: [
+            "A slow wakefulness medicine joins three established organic branches over a surviving halogen catalyst.",
+            "Equal parts acetone, diethylamine, phenol, and sulphuric acid over bromine, between pH 5 and 10.",
+        ],
+    ),
+    (
+        id: "naloxone",
+        reactants: [("morphine", 1), ("hydrogen_peroxide", 1), ("bromine", 1), ("ethanol", 1)],
+        products: [("naloxone", 4)],
+        min_temp: Some((173.0)), max_temp: Some((600.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.5), max_ph: Some(10.0), min_purity: Some(0.25),
+        ph_shift: 0.04, rate: Some(1), priority: 30,
+        hints: [
+            "An opioid medicine becomes its own antidote through a four-part controlled synthesis.",
+            "Equal parts Morphine, Hydrogen Peroxide, bromine, and ethanol between pH 5 and 10.",
+        ],
+    ),
+    (
+        id: "hercuri",
+        reactants: [("cryostylane", 3), ("lye", 1), ("bromine", 1)],
+        products: [("hercuri", 5)], effects: [Heat(-0.5)],
+        min_temp: Some((173.0)), max_temp: Some((250.0)),
+        min_ph: Some(6.0), optimal_ph: Some(8.9), max_ph: Some(10.0), min_purity: Some(0.30),
+        rate: Some(0.5), priority: 31,
+        hints: [
+            "A cryogenic burn medicine forms from three parts Cryostylane and two caustic base stocks only while actively cooled.",
+            "Mix three Cryostylane, one Lye, and one bromine below 250K, between pH 6 and 10; the reaction cools itself further.",
+        ],
+    ),
+    (
+        id: "herignis",
+        reactants: [("cryostylane", 3), ("lye", 1), ("bromine", 1)],
+        products: [("herignis", 5)], effects: [Heat(-0.5)],
+        min_temp: Some((173.0)), max_temp: Some((250.0)),
+        min_ph: Some(0.0), optimal_ph: Some(4.0), max_ph: Some(5.9),
+        rate: Some(0.5), priority: 30,
+        hints: [
+            "Hercuri's hot-tempered inverse forms when the same cold batch becomes too acidic.",
+            "Recover Herignis through the HPLC, or keep the synthesis at pH 6 and above.",
+        ],
+    ),
+    (
+        id: "nitrous_oxide",
+        reactants: [("ammonia", 2), ("oxygen", 2), ("nitrogen", 1)],
+        products: [("nitrous_oxide", 5)], effects: [Heat(1.0)],
+        min_temp: Some((525.0)), overheat_temp: Some((575.0)), overheat: Detonate(power: 2.0),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), min_purity: Some(0.30),
+        ph_shift: 0.02, priority: 32,
+        hints: [
+            "A volatile gas intermediate forms from an ammonia branch and two atmospheric base stocks in a narrow high-temperature window.",
+            "Combine two Ammonia, two oxygen, and one nitrogen above 525K between pH 5 and 9; crossing 575K detonates the batch.",
+        ],
+    ),
+    (
+        id: "syriniver",
+        // Mindbreaker Toxin replaces TG's hacked-dispenser generic Toxin,
+        // keeping this a reachable controlled synthesis with an existing use.
+        reactants: [("nitrous_oxide", 2), ("mindbreaker_toxin", 1), ("fluorine", 1), ("sulfur", 1)],
+        products: [("syriniver", 5)], effects: [Heat(-0.25)],
+        min_temp: Some((250.0)), max_temp: Some((600.0)),
+        min_ph: Some(6.5), optimal_ph: Some(8.6), max_ph: Some(9.0), min_purity: Some(0.30),
+        rate: Some(0.3), priority: 33,
+        hints: [
+            "A volatile intermediate is refined with a controlled toxin and two elemental stocks into an aggressive purge medicine.",
+            "Mix two Nitrous Oxide with one each Mindbreaker Toxin, fluorine, and sulfur above 250K between pH 6.5 and 9.",
+        ],
+    ),
+    (
+        id: "miners_salve",
+        reactants: [("oil", 1), ("iron", 1), ("water", 1)],
+        products: [("miners_salve", 3)], effects: [Heat(0.2)],
+        min_temp: Some((173.0)), max_temp: Some((600.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(10.0), min_purity: Some(0.25),
+        priority: 22,
+        hints: [
+            "A simple improvised salve joins one common organic intermediate with metal and water; package it as a patch for full effect.",
+            "Combine equal parts Oil, iron, and water between pH 5 and 10, then use the Mixing Chamber's patch form.",
+        ],
+    ),
+    (
+        id: "pyroxadone",
+        // TG's unsupported slime-jelly branch becomes a deliberate junction
+        // between established cryogenic, plasma, and fire chemistry.
+        reactants: [("cryoxadone", 1), ("plasma", 1), ("phlogiston", 1)],
+        products: [("pyroxadone", 3)], effects: [Heat(0.4)],
+        min_temp: Some((374.0)), max_temp: Some((420.0)),
+        min_ph: Some(5.0), optimal_ph: Some(8.0), max_ph: Some(10.0), min_purity: Some(0.40),
+        priority: 34,
+        hints: [
+            "An expert emergency medicine joins an established cold treatment to plasma and a self-heating fire compound.",
+            "Combine equal parts Cryoxadone, plasma, and Phlogiston from 374K through 420K between pH 5 and 10.",
+            "The product only heals a patient while Burning is active, so prepare an extinguishing follow-up before treatment.",
+        ],
+    ),
+    (
+        id: "regenerative_jelly",
+        reactants: [("omnizine", 1), ("slime_jelly", 1)],
+        products: [("regenerative_jelly", 2)], effects: [Heat(0.2)],
+        min_temp: Some((173.0)), max_temp: Some((600.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(10.0), min_purity: Some(0.50),
+        ph_shift: 0.02, priority: 35,
+        hints: [
+            "Two rare biological extracts from separate Botany deliveries form a universal restorative; both arrive contaminated by grinding.",
+            "Combine equal parts purified Omnizine and Slime Jelly between pH 5 and 10.",
+        ],
+    ),
+    (
+        id: "sulfonal",
+        reactants: [("acetone", 1), ("diethylamine", 1), ("sulfur", 1)],
+        products: [("sulfonal", 3)], effects: [Heat(0.3)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(4.0), optimal_ph: Some(6.0), max_ph: Some(9.0), min_purity: Some(0.50),
+        ph_shift: 0.02, priority: 28,
+        hints: [
+            "A slow sedative poison joins an organic solvent, an amine, and sulfur under controlled acidity.",
+            "Equal parts Acetone, Diethylamine, and sulfur between pH 4 and 9; the effect is delayed after exposure.",
+        ],
+    ),
+    (
+        id: "anacea",
+        reactants: [("haloperidol", 1), ("impedrezene", 1), ("radium", 1)],
+        products: [("anacea", 3)], effects: [Heat(0.5)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(6.0), optimal_ph: Some(8.0), max_ph: Some(9.0), min_purity: Some(0.70),
+        ph_shift: 0.03, priority: 32,
+        hints: [
+            "A high-purity counter-medicine toxin combines psychiatric treatment, its narcotic precursor, and a radioactive stock.",
+            "Equal parts Haloperidol, Impedrezene, and radium between pH 6 and 9; low-quality inputs cannot sustain the synthesis.",
+        ],
+    ),
+    (
+        id: "aranesp",
+        reactants: [("epinephrine", 1), ("diethylamine", 1), ("phenol", 1), ("atropine", 1), ("morphine", 1)],
+        products: [("aranesp", 5)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), min_purity: Some(0.50),
+        ph_shift: 0.03, rate: Some(0.5), priority: 31,
+        hints: [
+            "Five established medicine and component branches converge into a dangerous stimulant whose identity depends on input quality.",
+            "Equal parts Epinephrine, Diethylamine, Phenol, Atropine, and Morphine between pH 5 and 9; inputs must average at least 50% purity.",
+        ],
+    ),
+    (
+        // This lower-priority route is eligible at every purity, but Aranesp
+        // wins whenever its 50% minimum is met. Below that line, the inverse
+        // forms from exactly the same batch without a bespoke max-purity field.
+        id: "epoetin_alfa",
+        reactants: [("epinephrine", 1), ("diethylamine", 1), ("phenol", 1), ("atropine", 1), ("morphine", 1)],
+        products: [("epoetin_alfa", 5)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0),
+        ph_shift: 0.03, rate: Some(0.5), priority: 30,
+        hints: [
+            "Aranesp's same five-part batch inverts when average input purity falls below its 50% requirement.",
+            "Epoetin Alfa remains medically useful, but prolonged exposure brings escalating delayed neurological effects; HPLC can recover Aranesp from it.",
+        ],
+    ),
+    (
+        id: "happiness",
+        reactants: [("nitrous_oxide", 2), ("epinephrine", 1), ("ethanol", 1)],
+        catalysts: [("plasma", 5)], products: [("happiness", 4)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), min_purity: Some(0.40),
+        ph_shift: 0.03, rate: Some(0.4), priority: 33,
+        hints: [
+            "A volatile sedative branch and emergency stimulant are conditioned by alcohol over a substantial plasma catalyst.",
+            "Combine two Nitrous Oxide, one Epinephrine, and one ethanol over 5u plasma between pH 5 and 9; inputs must average at least 40% purity.",
+        ],
+    ),
+    (
+        // Happiness wins at 40% purity and above. Below that threshold this
+        // lower-priority route preserves the snapshot's Sadness inverse.
+        id: "sadness",
+        reactants: [("nitrous_oxide", 2), ("epinephrine", 1), ("ethanol", 1)],
+        catalysts: [("plasma", 5)], products: [("sadness", 4)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0),
+        ph_shift: 0.03, rate: Some(0.4), priority: 32,
+        hints: [
+            "Happiness's same plasma-catalyzed batch inverts below 40% average input purity.",
+            "Sadness creates a distinct withdrawn mood and purges Happiness and Psicodine specifically; HPLC can recover its useful inverse.",
+        ],
+    ),
+    (
+        // TG yields five parts from seven parts of input. Keeping that loss
+        // makes clean botanical extraction and careful batch planning matter.
+        id: "pump_up",
+        reactants: [("epinephrine", 2), ("coffee", 5)],
+        products: [("pump_up", 5)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), min_purity: Some(0.30),
+        ph_shift: 0.02, rate: Some(0.8), priority: 34,
+        hints: [
+            "An emergency stimulant is concentrated into a dirty botanical source, sacrificing part of the batch for endurance.",
+            "Combine two Epinephrine with five Coffee between pH 5 and 9; inputs must average at least 30% purity and seven input units yield five Pump-Up.",
+        ],
+    ),
+    (
+        id: "organic_slurry",
+        reactants: [("plant_fibre", 3), ("welding_fuel", 3)],
+        products: [("organic_slurry", 3)],
+        process: Agitated(
+            side_a: [("plant_fibre", 3)],
+            side_b: [("welding_fuel", 3)],
+        ),
+        min_ph: Some(4.0), optimal_ph: Some(6.0), max_ph: Some(8.0), min_purity: Some(0.30),
+        rate: Some(0.6), priority: 28,
+        hints: [
+            "Dirty biological material must be fuel-treated while its two preparation sides are still distinct.",
+            "Agitate three Plant Fibre against three Welding Fuel between pH 4 and 8; half the starting volume survives as Organic Slurry.",
+        ],
+    ),
+    (
+        id: "maintenance_tar",
+        reactants: [("organic_slurry", 1), ("tea", 1), ("welding_fuel", 1)],
+        products: [("maintenance_tar", 3), ("sulphuric_acid", 1)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), min_purity: Some(0.30),
+        ph_shift: 0.02, rate: Some(0.6), priority: 35,
+        hints: [
+            "The organic maintenance precursor is steeped with a botanical drink and more industrial fuel, leaving an acidic contaminant.",
+            "Equal Organic Slurry, Tea, and Welding Fuel between pH 5 and 9 yields three Maintenance Tar plus one Sulphuric Acid.",
+        ],
+    ),
+    (
+        id: "maintenance_sludge",
+        reactants: [("maintenance_tar", 3), ("fluorosulfuric_acid", 1)],
+        catalysts: [("hydrogen_peroxide", 5)],
+        products: [("maintenance_sludge", 1)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), min_purity: Some(0.30),
+        ph_shift: 0.02, rate: Some(0.4), priority: 36,
+        hints: [
+            "Tar is stripped down with a superacid over a substantial peroxide catalyst; most of the volume is discarded.",
+            "Three Maintenance Tar and one Fluorosulfuric Acid over 5u Hydrogen Peroxide, pH 5 to 9, yield only one Maintenance Sludge.",
+        ],
+    ),
+    (
+        id: "maintenance_powder",
+        reactants: [("maintenance_sludge", 6), ("nitric_acid", 1), ("universal_enzyme", 1)],
+        catalysts: [("acetone_oxide", 5)],
+        products: [("maintenance_powder", 1)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), min_purity: Some(0.30),
+        ph_shift: 0.02, rate: Some(0.2), priority: 37,
+        hints: [
+            "Six units of the maintenance concentrate are refined with a hot-acid branch and cultured enzyme over a peroxide catalyst.",
+            "Six Maintenance Sludge, one Nitric Acid, and one Universal Enzyme over 5u Acetone Oxide, pH 5 to 9, yield only one Maintenance Powder.",
+        ],
+    ),
+    (
+        id: "kronkaine",
+        reactants: [("kronkus_extract", 3), ("welding_fuel", 2), ("ammonia", 1)],
+        products: [("kronkaine", 6)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(6.0), optimal_ph: Some(8.0), max_ph: Some(10.0), min_purity: Some(0.40),
+        ph_shift: 0.03, rate: Some(0.6), priority: 38,
+        hints: [
+            "A rare purple Botany extract is cut with industrial fuel and an alkaline nitrogen stock.",
+            "Combine three Kronkus Extract, two Welding Fuel, and one Ammonia between pH 6 and 10; average input purity must reach 40%.",
+        ],
+    ),
+    (
+        id: "blastoff",
+        reactants: [("cyanide", 2), ("silver", 2), ("lye", 1)],
+        products: [("blastoff", 5)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(7.0), optimal_ph: Some(10.0), max_ph: Some(12.0), min_purity: Some(0.40),
+        ph_shift: 0.04, rate: Some(0.7), priority: 38,
+        hints: [
+            "A lethal poison and conductive metal are driven into an alkaline motor-disrupting narcotic.",
+            "Combine two Cyanide, two Silver, and one Lye between pH 7 and 12; average input purity must reach 40%.",
+        ],
+    ),
+    (
+        // TG's Nothing drink belongs to excluded food/drink chemistry. Water
+        // preserves its neutral-carrier role without opening that entire
+        // subsystem solely for one advanced maintenance recipe.
+        id: "saturn_x",
+        reactants: [("lead", 1), ("water", 1), ("maintenance_tar", 2)],
+        products: [("saturn_x", 4)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), min_purity: Some(0.40),
+        ph_shift: 0.03, rate: Some(0.4), priority: 39,
+        hints: [
+            "A toxic heavy metal is suspended in a neutral carrier and folded into the first maintenance-drug stage.",
+            "Combine one Lead, one Water, and two Maintenance Tar between pH 5 and 9; average input purity must reach 40%.",
+        ],
+    ),
+    (
+        id: "mute_toxin",
+        reactants: [("uranium", 2), ("water", 1), ("carbon", 1)],
+        products: [("mute_toxin", 2)], effects: [Heat(-0.3)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(6.0), optimal_ph: Some(12.2), max_ph: Some(14.0), min_purity: Some(0.40),
+        rate: Some(0.5), priority: 38,
+        hints: [
+            "A radioactive stock is diluted with water and carbon under strongly alkaline control; half the input volume is discarded.",
+            "Combine two Uranium, one Water, and one Carbon between pH 6 and 14; average input purity must reach 40%.",
+        ],
+    ),
+    (
+        id: "heparin",
+        reactants: [("formaldehyde", 1), ("sodium_chloride", 1), ("lithium", 1)],
+        products: [("heparin", 3)],
+        min_temp: Some((100.0)), max_temp: Some((800.0)),
+        min_ph: Some(5.0), optimal_ph: Some(8.0), max_ph: Some(9.5), min_purity: Some(0.60),
+        rate: Some(0.5), priority: 39,
+        hints: [
+            "A preservative, salt, and light metal form a high-purity anticoagulant whose danger only appears in an already-injured patient.",
+            "Combine equal Formaldehyde, Sodium Chloride, and Lithium between pH 5 and 9.5; average input purity must reach 60%.",
+        ],
+    ),
+    (
+        id: "lexorin",
+        reactants: [("salbutamol", 1), ("plasma", 1), ("hydrogen", 1)],
+        products: [("lexorin", 3)], effects: [Heat(-0.3)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(1.8), optimal_ph: Some(4.0), max_ph: Some(7.0), min_purity: Some(0.40),
+        ph_shift: -0.04, rate: Some(0.4), priority: 40,
+        hints: [
+            "An oxygen medicine is inverted through plasma and hydrogen into a strongly acidic respiratory poison.",
+            "Combine equal Salbutamol, Plasma, and Hydrogen between pH 1.8 and 7; average input purity must reach 40%. Epinephrine is the specific counteragent.",
+        ],
+    ),
+    (
+        // Poison-kit stock is adapted into an expert synthesis so it remains
+        // part of the chemistry loop instead of appearing from an unsupported
+        // uplink. The narrow hot window makes its escalation earned knowledge.
+        id: "initropidril",
+        reactants: [("cyanide", 1), ("nitric_acid", 1), ("plasma", 1)],
+        products: [("initropidril", 3)],
+        min_temp: Some((420.0)), max_temp: Some((650.0)),
+        min_ph: Some(3.0), optimal_ph: Some(5.5), max_ph: Some(8.0), min_purity: Some(0.70),
+        ph_shift: -0.03, rate: Some(0.2), priority: 41,
+        hints: [
+            "A fast poison, strong oxidizing acid, and plasma are held in a narrow hot window to form an expert cardiac-style toxin.",
+            "Combine equal Cyanide, Nitric Acid, and Plasma at 420–650K between pH 3 and 8; average input purity must reach 70%.",
+        ],
+    ),
+    (
+        // Peacekeeper dispensing is not a supported source. Diluting the
+        // botanical fatigue toxin into Saline-Glucose creates its capped,
+        // nonlethal restraint counterpart through an understandable step.
+        id: "tiring_solution",
+        reactants: [("tirizene", 2), ("saline_glucose", 1)],
+        products: [("tiring_solution", 3)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), min_purity: Some(0.30),
+        rate: Some(0.8), priority: 41,
+        hints: [
+            "A botanical fatigue poison is buffered into a nonlethal restraint solution with an established medical carrier.",
+            "Combine two Tirizene with one Saline-Glucose between pH 5 and 9; average input purity must reach 30%.",
+        ],
+    ),
+    (
+        // Poison-kit Pancuronium becomes a refinement of the existing Curare
+        // source. Salbutamol's presence foreshadows that breathing—not toxin
+        // damage—is this derivative's central danger.
+        id: "pancuronium",
+        reactants: [("curare", 1), ("salbutamol", 1), ("sodium_chloride", 1)],
+        products: [("pancuronium", 3)],
+        min_temp: Some((300.0)), max_temp: Some((500.0)),
+        min_ph: Some(5.0), optimal_ph: Some(6.7), max_ph: Some(8.5), min_purity: Some(0.60),
+        rate: Some(0.25), priority: 42,
+        hints: [
+            "Curare is refined with a respiratory medicine and salt into a quieter delayed paralytic.",
+            "Combine equal Curare, Salbutamol, and Sodium Chloride at 300–500K between pH 5 and 8.5; average input purity must reach 60%.",
+        ],
+    ),
+    (
+        // Unsupported emagged-hypo supply becomes a controlled refinement of
+        // the already-established slow sedative branch.
+        id: "sodium_thiopental",
+        reactants: [("sulfonal", 1), ("sodium", 1), ("ethanol", 1)],
+        products: [("sodium_thiopental", 3)],
+        min_temp: Some((350.0)), max_temp: Some((600.0)),
+        min_ph: Some(6.0), optimal_ph: Some(7.5), max_ph: Some(10.0), min_purity: Some(0.50),
+        ph_shift: 0.02, rate: Some(0.3), priority: 42,
+        hints: [
+            "A slow synthesized sedative is conditioned with Sodium and Ethanol into a nonlethal ten-cycle knockout agent.",
+            "Combine equal Sulfonal, Sodium, and Ethanol at 350–600K between pH 6 and 10; average input purity must reach 50%.",
+        ],
+    ),
+    (
+        // Poison-kit stock becomes a high-control isotope synthesis using the
+        // station's existing radiological component branch. The batch is slow
+        // enough for pH and purity corrections before the product forms.
+        id: "polonium",
+        reactants: [("uranium", 1), ("radium", 1), ("chlorine", 1)],
+        products: [("polonium", 3)],
+        min_temp: Some((500.0)), max_temp: Some((700.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), min_purity: Some(0.70),
+        rate: Some(0.2), priority: 43,
+        hints: [
+            "Two radioactive components are conditioned with Chlorine in a tightly controlled hot batch to produce a persistent isotope poison.",
+            "Combine equal Uranium, Radium, and Chlorine at 500–700K between pH 5 and 9; average input purity must reach 70%.",
+        ],
+    ),
+    (
+        // This follows the guide's unusual one-reagent conversion exactly.
+        // The demanding heat, basic pH, and purity requirements make it an
+        // expert refinement rather than a free upgrade to an early narcotic.
+        id: "fentanyl",
+        reactants: [("space_drugs", 1)],
+        products: [("fentanyl", 1)],
+        min_temp: Some((674.0)), max_temp: Some((874.0)),
+        min_ph: Some(7.0), optimal_ph: Some(9.0), max_ph: Some(11.0), min_purity: Some(0.50),
+        ph_shift: 0.03, rate: Some(0.2), priority: 43,
+        hints: [
+            "Space Drugs can be thermally refined into a concentrated opiate with a delayed eighteen-cycle knockout.",
+            "Hold Space Drugs at 674–874K between pH 7 and 11; input purity must reach 50%. Naloxone treats both the acute dose and the resulting habit.",
+        ],
+    ),
+    (
+        // Hidden party-pod stock becomes an auditable heavy-metal synthesis
+        // from the existing Lead and organic component branches.
+        id: "lead_acetate",
+        reactants: [("lead", 1), ("acetone", 1), ("oxygen", 1)],
+        products: [("lead_acetate", 3)],
+        min_temp: Some((350.0)), max_temp: Some((600.0)),
+        min_ph: Some(4.0), optimal_ph: Some(6.5), max_ph: Some(9.0), min_purity: Some(0.50),
+        rate: Some(0.4), priority: 44,
+        hints: [
+            "Lead is conditioned with an organic solvent and Oxygen into a controlled neurological poison.",
+            "Combine equal Lead, Acetone, and Oxygen at 350–600K between pH 4 and 9; average input purity must reach 50%.",
+        ],
+    ),
+    (
+        id: "itching_powder",
+        reactants: [("multiver", 1), ("ammonia", 1), ("welding_fuel", 1)],
+        products: [("itching_powder", 3)], effects: [Heat(-0.2)],
+        min_temp: Some((280.0)), max_temp: Some((700.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), min_purity: Some(0.30),
+        ph_shift: 0.03, rate: Some(0.4), priority: 44,
+        hints: [
+            "A refined mineral component, Ammonia, and Welding Fuel form a contact-active irritant in a broad warm window.",
+            "Combine equal Multiver, Ammonia, and Welding Fuel at 280–700K between pH 5 and 9; average input purity must reach 30%.",
+        ],
+    ),
+    (
+        // This component must be made hot enough to react but kept below the
+        // 474K activation point of its Gunpowder input.
+        id: "teslium",
+        reactants: [("gunpowder", 1), ("silver", 1), ("plasma", 1)],
+        products: [("teslium", 3)],
+        min_temp: Some((400.0)), max_temp: Some((473.0)),
+        min_ph: Some(4.0), optimal_ph: Some(7.2), max_ph: Some(10.0), min_purity: Some(0.60),
+        rate: Some(0.2), priority: 45,
+        hints: [
+            "Gunpowder, Silver, and Plasma form an energetic intermediate only in the narrow space below Gunpowder ignition.",
+            "Combine equal Gunpowder, Silver, and Plasma at 400–473K between pH 4 and 10; average input purity must reach 60%.",
+        ],
+    ),
+    (
+        id: "rotatium",
+        reactants: [("teslium", 1), ("mindbreaker_toxin", 1), ("fentanyl", 1)],
+        products: [("rotatium", 3)], effects: [Heat(-0.3)],
+        min_temp: Some((100.0)), max_temp: Some((900.0)),
+        min_ph: Some(3.0), optimal_ph: Some(6.2), max_ph: Some(9.0), min_purity: Some(0.60),
+        ph_shift: 0.03, rate: Some(0.24), priority: 46,
+        hints: [
+            "An energetic component, a hallucinogen, and a concentrated opiate converge into an expert delayed perception toxin.",
+            "Combine equal Teslium, Mindbreaker Toxin, and Fentanyl between pH 3 and 9; average input purity must reach 60%. Severe distortion begins after twenty active cycles.",
+        ],
+    ),
+
+    // ---- Force and temperature reaction agents -------------------------
+    (
+        id: "pyrosium",
+        reactants: [("plasma", 1), ("radium", 1), ("phosphorus", 1)],
+        products: [("pyrosium", 3)], effects: [Heat(-2.0)], priority: 35,
+        hints: [
+            "Three energetic base reagents form a reusable thermal catalyst and make an immediate coolant shock while combining.",
+            "Combine equal Plasma, Radium, and Phosphorus. Larger batches cool further; keep liquid Oxygen away until you want heat.",
+        ],
+    ),
+    (
+        id: "pyrosium_heating",
+        reactants: [("oxygen", 1)], catalysts: [("pyrosium", 1)],
+        products: [("depleted_oxygen", 1)], effects: [Heat(4.0)], priority: 60,
+        hints: [
+            "The thermal catalyst survives while consuming an oxidizer and leaving an inert residue.",
+            "Add liquid Oxygen to Pyrosium. Every Oxygen unit becomes Depleted Oxygen and raises the container by 4K; the Pyrosium remains.",
+        ],
+    ),
+    (
+        id: "sonic_powder",
+        // Cola is outside the scoped food/drink system. Sugar retains the
+        // recipe's carbonated-carrier role using a standard dispenser input.
+        reactants: [("oxygen", 1), ("sugar", 1), ("phosphorus", 1)],
+        catalysts: [("stabilizing_agent", 1)], products: [("sonic_powder", 3)],
+        priority: 37,
+        hints: [
+            "A stabilizer is the only difference between a portable acoustic agent and an immediate pressure pulse.",
+            "Combine equal Oxygen, Sugar, and Phosphorus over Stabilizing Agent. The product activates at 374K.",
+        ],
+    ),
+    (
+        id: "unstable_sonic_powder",
+        reactants: [("oxygen", 1), ("sugar", 1), ("phosphorus", 1)],
+        products: [("ash", 1)],
+        effects: [PulseProfile(kind: Concuss, strength: 0.20, modifier: 1.5)], priority: 36,
+        hints: ["Mixing the Sonic Powder ingredients without Stabilizing Agent releases the concussive pulse immediately."],
+    ),
+    (
+        id: "activate_sonic_powder", reactants: [("sonic_powder", 1)], products: [("ash", 1)],
+        min_temp: Some((374.0)),
+        effects: [PulseProfile(kind: Concuss, strength: 0.0666667, modifier: 1.5)], priority: 55,
+        hints: ["Stabilized Sonic Powder activates when heated to 374K."],
+    ),
+    (
+        id: "sorium",
+        reactants: [("carbon", 1), ("mercury", 1), ("nitrogen", 1), ("oxygen", 1)],
+        catalysts: [("stabilizing_agent", 1)], products: [("sorium", 4)], priority: 38,
+        hints: [
+            "Four dispenser reagents make a radial repulsion agent only while a stabilizer is present.",
+            "Combine equal Carbon, Mercury, Nitrogen, and Oxygen over Stabilizing Agent. Heat the product to 474K to activate it.",
+        ],
+    ),
+    (
+        id: "unstable_sorium",
+        reactants: [("carbon", 1), ("mercury", 1), ("nitrogen", 1), ("oxygen", 1)],
+        products: [("ash", 1)],
+        effects: [PulseProfile(kind: Push, strength: 0.18, modifier: 1.0)], priority: 37,
+        hints: ["Mixing Sorium without Stabilizing Agent throws nearby people away immediately."],
+    ),
+    (
+        id: "activate_sorium", reactants: [("sorium", 1)], products: [("ash", 1)],
+        min_temp: Some((474.0)),
+        effects: [PulseProfile(kind: Push, strength: 0.045, modifier: 1.0)], priority: 55,
+        hints: ["Stabilized Sorium activates when heated to 474K."],
+    ),
+    (
+        id: "liquid_dark_matter",
+        reactants: [("carbon", 1), ("plasma", 1), ("radium", 1)],
+        catalysts: [("stabilizing_agent", 1)], products: [("liquid_dark_matter", 3)], priority: 38,
+        hints: [
+            "Three energetic inputs make an attraction agent only while a stabilizer is present.",
+            "Combine equal Carbon, Plasma, and Radium over Stabilizing Agent. Heat the product to 474K to activate it.",
+        ],
+    ),
+    (
+        id: "unstable_liquid_dark_matter",
+        reactants: [("carbon", 1), ("plasma", 1), ("radium", 1)],
+        products: [("ash", 1)],
+        effects: [PulseProfile(kind: Pull, strength: 0.18, modifier: 1.0)], priority: 37,
+        hints: ["Mixing Liquid Dark Matter without Stabilizing Agent pulls nearby people inward immediately."],
+    ),
+    (
+        id: "activate_liquid_dark_matter", reactants: [("liquid_dark_matter", 1)], products: [("ash", 1)],
+        min_temp: Some((474.0)),
+        effects: [PulseProfile(kind: Pull, strength: 0.06, modifier: 1.0)], priority: 55,
+        hints: ["Stabilized Liquid Dark Matter activates when heated to 474K."],
+    ),
+
+    // ---- Electrical and expert energetic chemistry --------------------
+    (
+        id: "exotic_stabilizer",
+        reactants: [("hyper_plasmium_oxide", 1), ("stabilizing_agent", 1)],
+        products: [("exotic_stabilizer", 2)], priority: 48,
+        hints: [
+            "A rare salvage oxide upgrades the ordinary stabilizer used by dangerous chemistry.",
+            "Combine equal Hyper-Plasmium Oxide and Stabilizing Agent. The resulting Exotic Stabilizer is a catalyst for TaTP.",
+        ],
+    ),
+    (
+        // TG randomizes both TaTP temperature windows. Fixed ranges retain
+        // the thermal-control challenge while keeping the recipe learnable.
+        id: "tatp",
+        reactants: [("acetone_oxide", 1), ("nitric_acid", 1), ("pentaerythritol", 1)],
+        catalysts: [("exotic_stabilizer", 1)], products: [("tatp", 1)],
+        min_temp: Some((401.0)), max_temp: Some((499.0)),
+        min_ph: Some(0.0), optimal_ph: Some(2.5), max_ph: Some(6.0), min_purity: Some(0.80),
+        priority: 58,
+        hints: [
+            "Three advanced organic and acid branches form a highly sensitive explosive only over an exotic catalyst.",
+            "Combine equal Acetone Oxide, Nitric Acid, and Pentaerythritol over Exotic Stabilizer at 401–499K, pH 0–6, and at least 80% input purity.",
+        ],
+    ),
+    (
+        id: "unstable_tatp",
+        reactants: [("acetone_oxide", 1), ("nitric_acid", 1), ("pentaerythritol", 1)],
+        products: [("ash", 1)], min_temp: Some((401.0)), max_temp: Some((499.0)),
+        effects: [ExplosionProfile(strength: 0.30, modifier: 3.0)], priority: 57,
+        hints: ["Heating the TaTP ingredients through their reaction window without Exotic Stabilizer detonates the batch immediately."],
+    ),
+    (
+        id: "detonate_tatp", reactants: [("tatp", 1)], products: [("ash", 1)],
+        min_temp: Some((550.0)),
+        effects: [ExplosionProfile(strength: 0.30, modifier: 3.0)], priority: 60,
+        hints: ["Stabilized TaTP initiates when heated to 550K."],
+    ),
+    (
+        id: "emp",
+        reactants: [("iron", 1), ("uranium", 1), ("aluminium", 1)],
+        products: [("emp_residue", 1)],
+        effects: [EmpProfile(strength: 0.22, modifier: 1.5)], priority: 50,
+        hints: [
+            "Three conductive and radioactive metals discharge immediately rather than producing a portable reagent.",
+            "Combine equal Iron, Uranium, and Aluminium. Batch size controls the radius and duration of the electromagnetic pulse.",
+        ],
+    ),
+    (
+        id: "tesla_shock_water",
+        reactants: [("teslium", 1), ("water", 1)], products: [("tesla_residue", 1)],
+        effects: [ElectricProfile(strength: 0.25, modifier: 1.5)], priority: 59,
+        hints: ["Water discharges Teslium into an immediate electrical arc that shocks bodies and disables nearby machinery."],
+    ),
+    (
+        id: "tesla_shock_heat", reactants: [("teslium", 1)], products: [("tesla_residue", 1)],
+        min_temp: Some((474.0)),
+        effects: [ElectricProfile(strength: 0.25, modifier: 1.5)], priority: 59,
+        hints: ["Teslium releases its electrical charge when heated to 474K."],
+    ),
+    (
+        id: "carbon_dioxide",
+        reactants: [("carbon", 1), ("oxygen", 2)], products: [("carbon_dioxide", 3)],
+        min_temp: Some((777.0)), max_temp: Some((900.0)),
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), min_purity: Some(0.30),
+        effects: [Heat(0.2)], priority: 47,
+        hints: [
+            "A carbon charge and excess Oxygen form an atmospheric fire suppressant only under extreme heat.",
+            "Combine one part Carbon with two parts Oxygen at 777–900K, pH 5–9, and at least 30% input purity.",
+        ],
+    ),
+    (
+        id: "pax",
+        reactants: [("mindbreaker_toxin", 1), ("multiver", 1), ("sodium_chloride", 2), ("sodium", 1)],
+        products: [("pax", 5)],
+        min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), min_purity: Some(0.30),
+        priority: 47,
+        hints: [
+            "A perception toxin is conditioned with a refined purge component and mineral salts into a non-sedating pacifier.",
+            "Combine equal Mindbreaker Toxin, Multiver, and Sodium with two parts Sodium Chloride at pH 5–9; inputs must average at least 30% purity.",
+        ],
+    ),
 ]

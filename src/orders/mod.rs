@@ -18,11 +18,12 @@ use crate::chem_world::{assess_exposure, ChemicalExposure, ExposureSource};
 use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlot, Stored};
 use crate::crew::{spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{InteractRequested, Interactable};
-use crate::knowledge::{research_for_delivery, Knowledge};
+use crate::knowledge::{research_for_delivery_at_purity, Knowledge};
 use crate::lab::{DeliveryLane, DeliveryStation, DeliveryStations, COUNTER_SPOT};
 use crate::machines::{chemist_entity, slotted_container, Machine, MachineKind};
 use crate::net::is_authority;
 use crate::player::Chemist;
+use crate::produce::{Produce, ProduceCatalog};
 use crate::radio::{announce_request, channel_for, RadioEntry, RadioLog};
 use crate::shift::{current_rules, weighted_pick, CurrentForecast};
 use crate::AppState;
@@ -146,6 +147,29 @@ pub struct RequestDef {
     /// `every_request_carries_a_theme`.
     #[serde(default)]
     pub themes: Vec<String>,
+    /// Successful deliveries required before this request joins the pool.
+    #[serde(default)]
+    pub minimum_successes: u32,
+    /// Recorded methods required before specialized equipment assumptions in
+    /// this request are fair. This is independent of knowing the requested
+    /// reagent itself: a chromatography-grade order also requires a calibrated
+    /// analyzer.
+    #[serde(default)]
+    pub minimum_recipes_known: usize,
+    /// Exact industrial/emergency asks do not accept a category substitute.
+    #[serde(default)]
+    pub exact: bool,
+    /// Minimum purity accepted for the requested reagent. Zero preserves the
+    /// existing forgiving behavior for ordinary service orders.
+    #[serde(default)]
+    pub minimum_purity: f32,
+    /// Per-request time allowance for unusually involved syntheses.
+    #[serde(default = "default_request_patience_scale")]
+    pub patience_scale: f32,
+}
+
+fn default_request_patience_scale() -> f32 {
+    1.0
 }
 
 /// How the difficulty tightens as the career goes on.
@@ -448,6 +472,10 @@ pub struct Order {
     /// exactness comes from the marker, not this field, and the two never
     /// stack.
     pub specific: bool,
+    /// Minimum purity accepted for the matched reagent. Kept on the order so
+    /// replication and late joiners grade against the same authored target.
+    #[serde(default)]
+    pub minimum_purity: f32,
     pub amount: Units,
     pub plea: String,
     /// Seconds before a waiting crew member gives up and leaves.
@@ -1042,6 +1070,22 @@ pub fn grade(
     (Outcome::Success, Some(reagent))
 }
 
+fn enforce_minimum_purity(
+    outcome: Outcome,
+    matched: Option<ReagentId>,
+    minimum_purity: f32,
+    delivered: &Solution,
+) -> Outcome {
+    if outcome == Outcome::Success
+        && matched
+            .is_some_and(|reagent| delivered.purity_of(reagent) + f32::EPSILON < minimum_purity)
+    {
+        Outcome::Impure
+    } else {
+        outcome
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn generate_orders(
     mut commands: Commands,
@@ -1056,6 +1100,9 @@ fn generate_orders(
     active: Query<&CrewMember, crate::crew::NotResident>,
     development_orders: Query<(), With<DevelopmentOrder>>,
     chemists: Query<(), With<Chemist>>,
+    containers: Query<&Container>,
+    produce: Query<&Produce>,
+    produce_catalog: Option<Res<ProduceCatalog>>,
 ) {
     let Some(knowledge) = knowledge else {
         return;
@@ -1097,8 +1144,9 @@ fn generate_orders(
     // Required work is authored around something the lab can produce now.
     // Development work is the bounded look ahead below, never an accidental
     // side effect of two medicines sharing a broad treatment category.
-    let makeable = knowledge.available_reagents(&db);
-    let development = knowledge.development_reagents(&db);
+    let inventory = physical_reagent_inventory(&containers, &produce, produce_catalog.as_deref());
+    let makeable = knowledge.available_reagents_with_inventory(&db, inventory.iter().copied());
+    let development = knowledge.development_reagents_with_inventory(&db, inventory.iter().copied());
 
     // Keep pool membership tied to the authored reference reagent. Grading is
     // still lenient, but a late "best treatment" plea should not appear merely
@@ -1110,12 +1158,16 @@ fn generate_orders(
         .config
         .requests
         .iter()
+        .filter(|request| request.minimum_successes <= shift.succeeded)
+        .filter(|request| request.minimum_recipes_known <= knowledge.known_count())
         .filter(|request| request_reagent(request).is_some_and(|id| makeable.contains(&id)))
         .collect();
     let just_beyond: Vec<&RequestDef> = station
         .config
         .requests
         .iter()
+        .filter(|request| request.minimum_successes <= shift.succeeded)
+        .filter(|request| request.minimum_recipes_known <= knowledge.known_count())
         .filter(|request| {
             request_reagent(request).is_some_and(|id| development.contains(&id))
                 && request_category(request)
@@ -1157,6 +1209,7 @@ fn generate_orders(
     if is_development {
         patience *= station.config.ramp.stretch_patience_scale.max(1.0);
     }
+    patience *= request.patience_scale.max(0.25);
     // A `CompedRound` requisition buys exactly the next order some extra
     // patience — only this ordinary stream, never `generate_specific_orders`
     // or any minor-thread visit, each of which has its own authored identity
@@ -1178,9 +1231,14 @@ fn generate_orders(
     commands.entity(crew).insert((
         Order {
             reagent,
-            specific: false,
+            specific: request.exact,
+            minimum_purity: request.minimum_purity.clamp(0.0, 1.0),
             amount,
-            plea: request.plea.clone(),
+            plea: if request.exact {
+                request.specific_plea.clone()
+            } else {
+                request.plea.clone()
+            },
             patience,
             waited: 0.0,
         },
@@ -1199,6 +1257,8 @@ fn generate_orders(
     // of the conversation rather than only the verdict.
     let announced_plea = if is_development {
         format!("Optional R&D request \u{2014} {}", request.plea)
+    } else if request.exact {
+        request.specific_plea.clone()
     } else {
         request.plea.clone()
     };
@@ -1235,6 +1295,9 @@ fn generate_specific_orders(
     mut radio: ResMut<RadioLog>,
     active: Query<&CrewMember, crate::crew::NotResident>,
     chemists: Query<(), With<Chemist>>,
+    containers: Query<&Container>,
+    produce: Query<&Produce>,
+    produce_catalog: Option<Res<ProduceCatalog>>,
 ) {
     let Some(knowledge) = knowledge else {
         return;
@@ -1275,11 +1338,14 @@ fn generate_specific_orders(
         return;
     };
 
-    let makeable = knowledge.available_reagents(&db);
+    let inventory = physical_reagent_inventory(&containers, &produce, produce_catalog.as_deref());
+    let makeable = knowledge.available_reagents_with_inventory(&db, inventory);
     let in_reach: Vec<&RequestDef> = station
         .config
         .requests
         .iter()
+        .filter(|request| request.minimum_successes <= shift.succeeded)
+        .filter(|request| request.minimum_recipes_known <= knowledge.known_count())
         .filter(|request| {
             db.reagents
                 .id_of(&request.reagent)
@@ -1305,7 +1371,8 @@ fn generate_specific_orders(
     };
     let amount = deliverable_amount(&db, reagent, Units::whole(asked as i32));
 
-    let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
+    let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1)
+        * request.patience_scale.max(0.25);
     let crew = spawn_crew_member(&mut commands, crew_def, waiting as f32 * 0.95);
 
     let reagent_name = db.reagents.get(reagent).name.clone();
@@ -1313,6 +1380,7 @@ fn generate_specific_orders(
         Order {
             reagent,
             specific: true,
+            minimum_purity: request.minimum_purity.clamp(0.0, 1.0),
             amount,
             plea: request.specific_plea.clone(),
             patience,
@@ -1335,6 +1403,29 @@ fn generate_specific_orders(
         "{} ({}) specifically wants {} {}",
         crew_def.name, crew_def.role, amount, reagent_name
     );
+}
+
+pub(crate) fn physical_reagent_inventory(
+    containers: &Query<&Container>,
+    produce: &Query<&Produce>,
+    catalog: Option<&ProduceCatalog>,
+) -> HashSet<ReagentId> {
+    let mut inventory = HashSet::new();
+    for container in containers {
+        inventory.extend(container.solution.iter().map(|(reagent, _)| reagent));
+    }
+    if let Some(catalog) = catalog {
+        for item in produce {
+            inventory.extend(
+                catalog
+                    .get(item.0)
+                    .yields
+                    .iter()
+                    .map(|(reagent, _)| *reagent),
+            );
+        }
+    }
+    inventory
 }
 
 #[allow(clippy::type_complexity)]
@@ -1564,13 +1655,14 @@ fn complete_delivery(
         body,
     } = handover;
 
-    let (outcome, matched) = grade(
+    let (mut outcome, matched) = grade(
         wanted_for(order, kind, db),
         order.amount,
         &container.solution,
         container.kind,
         db,
     );
+    outcome = enforce_minimum_purity(outcome, matched, order.minimum_purity, &container.solution);
 
     // An illicit or specific order always names its (already-known-to-the-
     // player) reagent. A plain lenient order names whatever was actually
@@ -1597,10 +1689,13 @@ fn complete_delivery(
     // around: a lenient order accepts any member of its category, and both
     // currencies below pay for the one the chemist chose to make.
     let potency = matched.map(|id| db.reagents.get(id).potency).unwrap_or(0);
+    let delivered_purity = matched
+        .map(|id| container.solution.purity_of(id))
+        .unwrap_or(1.0);
 
     if outcome.is_good() {
         shift.succeeded += 1;
-        knowledge.award_research(research_for_delivery(potency));
+        knowledge.award_research(research_for_delivery_at_purity(potency, delivered_purity));
     } else {
         shift.botched += 1;
     }
@@ -1954,9 +2049,10 @@ fn leave_sample_vials(
         occupied.push(spot);
         let vial = spawn_container(&mut commands, ContainerKind::Bottle, spot);
         let amount = ContainerKind::Bottle.capacity();
+        let ph = db.reagents.get(product).ph;
         commands.queue(move |world: &mut World| {
             if let Some(mut container) = world.get_mut::<Container>(vial) {
-                let _ = container.solution.add(product, amount);
+                let _ = container.solution.add_profiled(product, amount, 1.0, ph);
             }
         });
 
@@ -2084,6 +2180,7 @@ mod tests {
                 Order {
                     reagent,
                     specific: false,
+                    minimum_purity: 0.0,
                     amount: Units::whole(amount),
                     plea: String::new(),
                     patience,
@@ -2628,12 +2725,35 @@ mod tests {
         assert_eq!(matched, Some(db.reagent("dermaline")));
     }
 
+    #[test]
+    fn exact_quality_requirement_rejects_a_usable_but_impure_batch() {
+        let db = db();
+        let reagent = db.reagent("bicaridine");
+        let mut delivered = Solution::new(Units::whole(50));
+        let _ = delivered.add_profiled(reagent, Units::whole(20), 0.72, 7.0);
+        let (outcome, matched) = grade(
+            Wanted::Exact(reagent),
+            Units::whole(20),
+            &delivered,
+            ContainerKind::Beaker,
+            &db,
+        );
+
+        assert_eq!(outcome, Outcome::Success, "the medicine remains usable");
+        assert_eq!(
+            enforce_minimum_purity(outcome, matched, 0.85, &delivered),
+            Outcome::Impure,
+            "a precision order may still reject it"
+        );
+    }
+
     // -- specific (exact-asking) orders -----------------------------------
 
     fn specific_order(db: &ChemDb, reagent: &str, amount: i32) -> Order {
         Order {
             reagent: db.reagent(reagent),
             specific: true,
+            minimum_purity: 0.0,
             amount: Units::whole(amount),
             plea: String::new(),
             patience: 60.0,
@@ -3019,7 +3139,7 @@ mod tests {
             let reagent = db.reagents.id_of(&request.reagent).unwrap();
             let cat = reference_category(&db, reagent).unwrap();
             assert!(
-                cat.is_legitimately_orderable(),
+                request.exact || cat.is_legitimately_orderable(),
                 "'{}' resolves to {:?}, which nobody legitimately orders",
                 request.reagent,
                 cat

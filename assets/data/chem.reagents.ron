@@ -94,6 +94,7 @@
         id: "water",
         name: "Water",
         color: (0.55, 0.72, 0.90),
+        ph: 7.0,
         dispensable: true,
         tier: 1,
         // The only thing in the lab that sobers you up.
@@ -421,6 +422,7 @@
         id: "sulphuric_acid",
         name: "Sulphuric Acid",
         color: (0.86, 0.82, 0.30),
+        ph: 1.0,
         treats: Some("Nothing. It dissolves things, including you."),
         categories: [Poisons],
         // The only reagent whose route really matters: a needle drives it past
@@ -514,9 +516,11 @@
             Counter(kind: Paranoid, seconds: 4.0, intensity: 2.0),
             Counter(kind: Blurred, seconds: 4.0, intensity: 2.0),
             Counter(kind: Unsteady, seconds: 4.0, intensity: 2.0),
+            Counter(kind: Sluggish, seconds: 4.0, intensity: 1.5),
             Harm(Toxin, 0.5),
         ],
         overdose_effects: [Harm(Toxin, 2)],
+        targeted_purges: [("tirizene", 2), ("tiring_solution", 2)],
     ),
 
     // ---- Drink ------------------------------------------------------------
@@ -545,6 +549,7 @@
         id: "ammonia",
         name: "Ammonia",
         color: (0.72, 0.86, 0.78),
+        ph: 11.5,
         treats: Some("Nothing. A fertiliser, and the way in to three other recipes."),
         categories: [Precursors],
         effects: [
@@ -601,6 +606,7 @@
         id: "hydrogen_peroxide",
         name: "Hydrogen Peroxide",
         color: (0.88, 0.94, 0.98),
+        ph: 6.0,
         treats: Some("Nothing. It bleaches whatever it lands on, skin included."),
         // Files under both: it is a precursor by intent and corrosive by
         // accident, and a chemist looking under either heading should find it.
@@ -833,5 +839,1077 @@
             Status(kind: Analgesic, seconds: 8.0, intensity: 1.5),
         ],
         overdose_effects: [Harm(Toxin, 6), Status(kind: Sedated, seconds: 14.0, intensity: 5.0)],
+    ),
+
+    // ---- Expanded base stock --------------------------------------------
+    // The dispenser is complete from a fresh save. Difficulty now lives in
+    // synthesis, control, equipment and external ingredient sources.
+    (id: "bromine", name: "Bromine", color: (0.55, 0.18, 0.10), ph: 5.5, dispensable: true, effects: [Harm(Toxin, 0.5)]),
+    (id: "silver", name: "Silver", color: (0.78, 0.80, 0.84), dispensable: true),
+    (id: "gold", name: "Gold", color: (0.94, 0.72, 0.18), dispensable: true),
+    (id: "uranium", name: "Uranium", color: (0.34, 0.72, 0.28), dispensable: true, effects: [Status(kind: Irradiated, seconds: 5.0, intensity: 1.0)]),
+    (id: "acidic_buffer", name: "Acidic Buffer", color: (0.88, 0.42, 0.34), ph: 0.0, dispensable: true),
+    (id: "basic_buffer", name: "Basic Buffer", color: (0.34, 0.50, 0.90), ph: 14.0, dispensable: true),
+
+    // ---- Dangerous chemistry backbone ----------------------------------
+    (id: "corn_oil", name: "Corn Oil", color: (0.86, 0.72, 0.24), from_produce: true, world_effects: [Slippery(seconds: 24.0), Flammable(intensity: 0.8, seconds: 20.0)]),
+    (id: "ash", name: "Ash", color: (0.28, 0.28, 0.28), ph: 10.5, treats: Some("A basic industrial precursor left by extreme heat."), categories: [Precursors], intentionally_inert: true),
+    (id: "saltpetre", name: "Saltpetre", color: (0.90, 0.90, 0.84), treats: Some("An oxidizing precursor used in propellants."), categories: [Precursors], intentionally_inert: true),
+    (
+        id: "multiver", name: "Multiver", color: (0.42, 0.78, 0.62), ph: 9.0,
+        overdose: Some(20), treats: Some("A powerful purge that trades a little breath for rapid detoxification."),
+        categories: [Antitoxins], potency: 3,
+        effects: [Heal(Toxin, 3), Purge(1.5), Harm(Oxygen, 0.3)],
+        overdose_effects: [Harm(Oxygen, 2)],
+    ),
+    (
+        id: "gunpowder", name: "Gunpowder", color: (0.20, 0.20, 0.18), controlled: true,
+        explosive: Some((strength: 0.1, modifier: 5.0, activation_temp: (474.0))),
+        treats: Some("A low explosive that initiates when heated to 474K."), categories: [Pyrotechnics],
+        effects: [Harm(Toxin, 0.5)],
+    ),
+    (id: "acetone", name: "Acetone", color: (0.82, 0.82, 0.76), treats: Some("A volatile solvent and explosive precursor."), categories: [Precursors], world_effects: [Flammable(intensity: 1.0, seconds: 15.0)]),
+    (id: "phenol", name: "Phenol", color: (0.72, 0.68, 0.56), ph: 5.5, treats: Some("A toxic aromatic precursor."), categories: [Precursors, Poisons], effects: [Harm(Toxin, 1), Contact(Burn, 1)]),
+    (id: "fluorosulfuric_acid", name: "Fluorosulfuric Acid", color: (0.82, 0.90, 0.44), ph: 0.2, treats: Some("A superacid used in advanced energetic chemistry."), categories: [Precursors, Poisons], effects: [Harm(Toxin, 2), Contact(Burn, 4)], world_effects: [Corrode(strength: 3.5)]),
+    (id: "nitric_acid", name: "Nitric Acid", color: (0.90, 0.82, 0.42), ph: 0.5, treats: Some("A strong oxidizing acid used in nitration."), categories: [Precursors, Poisons], effects: [Harm(Toxin, 1), Contact(Burn, 3)], world_effects: [Corrode(strength: 2.5)]),
+    (id: "glycerol", name: "Glycerol", color: (0.76, 0.72, 0.62), treats: Some("A viscous component for advanced explosives."), categories: [Precursors], world_effects: [Slippery(seconds: 30.0)]),
+    (id: "acetone_oxide", name: "Acetone Oxide", color: (0.92, 0.88, 0.72), treats: Some("A shock-sensitive peroxide intermediate."), categories: [Precursors, Pyrotechnics], effects: [Contact(Burn, 4)]),
+    (
+        id: "nitroglycerin", name: "Nitroglycerin", color: (0.86, 0.78, 0.36), controlled: true,
+        explosive: Some((strength: 0.5, modifier: 0.0, activation_temp: (474.0))),
+        treats: Some("A powerful stabilized liquid explosive that initiates at 474K."), categories: [Pyrotechnics],
+        effects: [Contact(Burn, 4)], world_effects: [Slippery(seconds: 20.0)],
+    ),
+    (
+        id: "rdx", name: "RDX", color: (0.92, 0.92, 0.82), controlled: true,
+        explosive: Some((strength: 0.25, modifier: 4.0, activation_temp: (474.0))),
+        treats: Some("A compact high explosive intended for controlled demolition."), categories: [Pyrotechnics],
+        effects: [Harm(Toxin, 1)],
+    ),
+
+    // ---- Component and medicine expansion -------------------------------
+    (id: "lye", name: "Lye", color: (0.80, 0.82, 0.72), ph: 13.0, treats: Some("A caustic base used by medicines and cleaners."), categories: [Precursors, Poisons], effects: [Contact(Burn, 2)], world_effects: [Corrode(strength: 1.0)]),
+    (id: "formaldehyde", name: "Formaldehyde", color: (0.76, 0.72, 0.70), ph: 4.0, treats: Some("A preservative and specialized synthesis component."), categories: [Precursors, Poisons], effects: [Harm(Toxin, 1)]),
+    (id: "diethylamine", name: "Diethylamine", color: (0.72, 0.76, 0.58), ph: 11.0, treats: Some("An alkaline component used throughout advanced medicine."), categories: [Precursors], effects: [Harm(Toxin, 0.5)]),
+    (id: "salicylic_acid", name: "Salicylic Acid", color: (0.92, 0.86, 0.82), ph: 3.0, overdose: Some(25), treats: Some("Reliable treatment for moderate physical trauma."), categories: [Trauma], potency: 2, effects: [Heal(Brute, 2)], overdose_effects: [Harm(Toxin, 1)]),
+    (id: "oxandrolone", name: "Oxandrolone", color: (0.90, 0.64, 0.40), overdose: Some(15), treats: Some("Superior treatment for severe burns."), categories: [Burns], potency: 3, effects: [Heal(Burn, 4)], overdose_effects: [Harm(Toxin, 2)]),
+    (id: "salbutamol", name: "Salbutamol", color: (0.60, 0.82, 0.94), overdose: Some(20), treats: Some("Rapid treatment for oxygen deprivation."), categories: [Airloss], potency: 3, effects: [Heal(Oxygen, 4), Counter(kind: Choking, seconds: 3.0, intensity: 1.0)], overdose_effects: [Harm(Toxin, 1)]),
+    (id: "epinephrine", name: "Epinephrine", color: (0.88, 0.88, 0.72), overdose: Some(20), treats: Some("Emergency stabilization across several damage types; also rapidly clears Lexorin."), categories: [Trauma, Burns, Airloss, Stimulants], potency: 2, effects: [Heal(Brute, 1), Heal(Burn, 1), Heal(Oxygen, 2), Status(kind: Stabilized, seconds: 8.0, intensity: 2.0)], overdose_effects: [Harm(Toxin, 2), Status(kind: Unsteady, seconds: 5.0, intensity: 1.0)], targeted_purges: [("lexorin", 2)]),
+    (id: "atropine", name: "Atropine", color: (0.76, 0.82, 0.62), overdose: Some(15), treats: Some("Critical-care antitoxin and stabilizer."), categories: [Antitoxins, Airloss], potency: 3, effects: [Heal(Toxin, 2), Heal(Oxygen, 2), Purge(0.5), Status(kind: Stabilized, seconds: 6.0, intensity: 1.5)], overdose_effects: [Harm(Toxin, 2)]),
+    (id: "pentetic_acid", name: "Pentetic Acid", color: (0.62, 0.86, 0.64), ph: 3.5, overdose: Some(20), treats: Some("Aggressive toxin and radiation chelation."), categories: [Antitoxins, Radiation], potency: 3, effects: [Heal(Toxin, 3), Purge(2), Counter(kind: Irradiated, seconds: 4.0, intensity: 2.0)], overdose_effects: [Harm(Brute, 1)]),
+    (id: "cryoxadone", name: "Cryoxadone", color: (0.66, 0.88, 0.98), overdose: Some(25), treats: Some("Broad recovery medicine associated with controlled cooling."), categories: [Trauma, Burns, Airloss], potency: 2, effects: [Heal(Brute, 2), Heal(Burn, 2), Heal(Oxygen, 2), Status(kind: Chilled, seconds: 3.0, intensity: 0.4)], overdose_effects: [Status(kind: Chilled, seconds: 8.0, intensity: 2.0)]),
+    (id: "synthflesh", name: "Synthflesh", color: (0.86, 0.48, 0.42), treats: Some("Topical repair for trauma and burns."), categories: [Trauma, Burns], potency: 3, effects: [Heal(Brute, 3), Heal(Burn, 3)]),
+
+    // ---- Additional narcotics, controls and utility ---------------------
+    (id: "morphine", name: "Morphine", color: (0.76, 0.74, 0.82), controlled: true, addictive: 0.8, overdose: Some(20), treats: Some("A medical analgesic and sedative with serious overdose risk."), categories: [Stimulants], potency: 1, effects: [Status(kind: Analgesic, seconds: 8.0, intensity: 1.5), Status(kind: Sedated, seconds: 4.0, intensity: 0.8)], overdose_effects: [Harm(Oxygen, 3), Status(kind: Sedated, seconds: 10.0, intensity: 3.0)]),
+    (id: "ephedrine", name: "Ephedrine", color: (0.86, 0.84, 0.70), controlled: true, addictive: 0.4, overdose: Some(20), treats: Some("A rough stimulant used in emergency synthesis."), categories: [Stimulants], potency: 1, effects: [Status(kind: Hastened, seconds: 5.0, intensity: 1.0), Status(kind: Focused, seconds: 4.0, intensity: 0.8)], overdose_effects: [Harm(Toxin, 2)]),
+    (id: "haloperidol", name: "Haloperidol", color: (0.80, 0.86, 0.88), overdose: Some(20), treats: Some("Suppresses hallucination, paranoia, and severe stimulation."), categories: [Antitoxins, Stimulants], potency: 2, effects: [Counter(kind: Hallucinating, seconds: 5.0, intensity: 3.0), Counter(kind: Paranoid, seconds: 5.0, intensity: 3.0), Counter(kind: Hastened, seconds: 3.0, intensity: 1.0)], overdose_effects: [Status(kind: Sedated, seconds: 8.0, intensity: 2.0)]),
+    (id: "space_lube", name: "Space Lube", color: (0.58, 0.72, 0.90), treats: Some("A persistent industrial lubricant."), categories: [Utility], world_effects: [Slippery(seconds: 55.0)]),
+    (id: "sterilizine", name: "Sterilizine", color: (0.68, 0.88, 0.88), treats: Some("A strong surface sterilizer."), categories: [Utility], effects: [Harm(Toxin, 0.5)], world_effects: [Clean(strength: 4.0)]),
+    (id: "foaming_agent", name: "Foaming Agent", color: (0.88, 0.90, 0.92), treats: Some("A lightweight precursor used to form temporary metal-foam barriers."), categories: [Utility, Precursors], intentionally_inert: true),
+    (id: "fluorosurfactant", name: "Fluorosurfactant", color: (0.76, 0.92, 0.95), ph: 5.5, treats: Some("A concentrated surfactant that becomes a mixture-carrying chemical foam when combined with Water."), categories: [Utility, Precursors], intentionally_inert: true),
+    (id: "chemical_foam", name: "Chemical Foam", color: (0.82, 0.94, 0.96), ph: 6.5, treats: Some("An expanding slippery carrier that spreads its complete mixture, purity, and ownership across a broad area when released."), categories: [Utility], world_effects: [ExpandFoam(radius: 3.0, seconds: 24.0, solid: false), Slippery(seconds: 18.0)]),
+    (id: "metal_foam", name: "Metal Foam", color: (0.62, 0.67, 0.70), ph: 7.0, treats: Some("An expanding lightweight metal foam that forms a temporary movement barrier and carries the rest of its mixture."), categories: [Utility], world_effects: [ExpandFoam(radius: 2.2, seconds: 36.0, solid: true)]),
+    (id: "firefighting_foam", name: "Firefighting Foam", color: (0.76, 0.88, 0.94), treats: Some("Expands without becoming slippery, cools fires, and suppresses burning on contact."), categories: [Utility], effects: [Counter(kind: Burning, seconds: 8.0, intensity: 3.0)], world_effects: [Chill(kelvin_per_unit: 4.0), ExpandFoam(radius: 2.8, seconds: 20.0, solid: false)]),
+    (id: "drying_agent", name: "Drying Agent", color: (0.84, 0.80, 0.70), treats: Some("A utility powder that neutralizes slippery residue."), categories: [Utility], world_effects: [Clean(strength: 1.0)]),
+
+    // ---- Purity medicine and authored inverse ---------------------------
+    (
+        id: "libital", name: "Libital", color: (0.93, 0.93, 0.55), ph: 8.2,
+        inverse: Some("libitoil"), overdose: Some(25),
+        treats: Some("An efficient trauma medicine whose synthesis rewards tight pH control."),
+        categories: [Trauma], potency: 3, metabolism: Some(0.2),
+        effects: [Heal(Brute, 3), Harm(Toxin, 0.3)],
+        overdose_effects: [Harm(Toxin, 2)],
+    ),
+    (
+        id: "libitoil", name: "Libitoil", color: (0.50, 0.46, 0.18), ph: 8.2,
+        inverse: Some("libital"), recovers_to: Some("libital"),
+        treats: Some("Nothing. A failed Libital inversion recoverable through HPLC separation."),
+        categories: [Poisons],
+        effects: [Harm(Brute, 2), Harm(Toxin, 1), Status(kind: Unsteady, seconds: 4.0, intensity: 1.0)],
+    ),
+    (
+        id: "helbital", name: "Helbital", color: (0.58, 0.00, 0.83), ph: 8.0,
+        overdose: Some(35), treats: Some("Critical trauma treatment that trades breathing capacity for rapid repair."),
+        categories: [Trauma], potency: 4, metabolism: Some(0.2),
+        effects: [Heal(Brute, 4), Harm(Oxygen, 1), Status(kind: Stabilized, seconds: 4.0, intensity: 1.0)],
+        overdose_effects: [Harm(Burn, 1), Status(kind: Blurred, seconds: 5.0, intensity: 1.0)],
+    ),
+    (
+        id: "probital", name: "Probital", color: (1.00, 1.00, 0.42), ph: 5.5,
+        overdose: Some(20), treats: Some("Strong trauma medicine whose accumulating fatigue limits repeated dosing."),
+        categories: [Trauma], potency: 3, metabolism: Some(0.2),
+        effects: [Heal(Brute, 3), Status(kind: Sluggish, seconds: 2.0, intensity: 0.25)],
+        overdose_effects: [Status(kind: Sedated, seconds: 8.0, intensity: 2.0)],
+    ),
+    (
+        id: "aiuri", name: "Aiuri", color: (0.55, 0.58, 1.00), ph: 4.0,
+        overdose: Some(25), treats: Some("Efficient burn treatment that must be synthesized below its flash point."),
+        categories: [Burns], potency: 3, metabolism: Some(0.2),
+        effects: [Heal(Burn, 3), Harm(Toxin, 0.2)],
+        overdose_effects: [Status(kind: Blurred, seconds: 6.0, intensity: 1.5)],
+    ),
+    (
+        id: "lenturi", name: "Lenturi", color: (0.38, 0.44, 1.00), ph: 4.7,
+        overdose: Some(25), treats: Some("Superior burn medicine assembled from a demanding multi-component batch."),
+        categories: [Burns], potency: 4, metabolism: Some(0.2),
+        effects: [Heal(Burn, 4), Harm(Toxin, 0.4)],
+        overdose_effects: [Harm(Toxin, 2), Status(kind: Burning, seconds: 3.0, intensity: 0.5)],
+    ),
+    (
+        id: "tirimol", name: "Tirimol", color: (1.00, 0.39, 0.39), ph: 5.6,
+        overdose: Some(25), treats: Some("Emergency oxygen medicine that leaves the patient profoundly tired."),
+        categories: [Airloss], potency: 4, metabolism: Some(0.2),
+        effects: [Heal(Oxygen, 5), Status(kind: Sluggish, seconds: 3.0, intensity: 0.5)],
+        overdose_effects: [Status(kind: Sedated, seconds: 10.0, intensity: 3.0)],
+        after_effects: [Status(kind: Sedated, seconds: 5.0, intensity: 1.0)],
+    ),
+    (
+        id: "convermol", name: "Convermol", color: (1.00, 0.39, 0.39), ph: 5.6,
+        overdose: Some(35), treats: Some("Rapidly exchanges oxygen debt for a smaller toxin burden."),
+        categories: [Airloss], potency: 3, metabolism: Some(0.2),
+        effects: [Heal(Oxygen, 3), Harm(Toxin, 0.5)],
+        overdose_effects: [Harm(Toxin, 3)],
+    ),
+
+    // ---- Detoxification and neurological medicine ----------------------
+    (
+        id: "calomel", name: "Calomel", color: (0.90, 0.88, 0.82), ph: 1.5,
+        overdose: Some(20), treats: Some("An aggressive heated purge whose mercury burden also harms the patient."),
+        categories: [Antitoxins], potency: 3, metabolism: Some(0.4),
+        effects: [Purge(3), Harm(Toxin, 1)],
+        overdose_effects: [Harm(Toxin, 3)],
+    ),
+    (
+        id: "ammoniated_mercury", name: "Ammoniated Mercury", color: (0.74, 0.82, 0.72), ph: 7.0,
+        overdose: Some(10), treats: Some("A powerful toxin treatment and purge made from Calomel."),
+        categories: [Antitoxins], potency: 4, metabolism: Some(0.1),
+        effects: [Heal(Toxin, 3), Purge(2.5)],
+        overdose_effects: [Harm(Toxin, 3)],
+    ),
+    (
+        id: "granibitaluri", name: "Granibitaluri", color: (0.88, 0.88, 0.88),
+        overdose: Some(50), treats: Some("Steady combined treatment for physical trauma and burns."),
+        categories: [Trauma, Burns], potency: 2, metabolism: Some(0.2),
+        effects: [Heal(Brute, 1.5), Heal(Burn, 1.5)],
+        overdose_effects: [Harm(Toxin, 1)],
+    ),
+    (
+        id: "seiver", name: "Seiver", color: (0.16, 0.18, 0.20), ph: 3.7,
+        treats: Some("Temperature-sensitive radiation and toxin medicine adapted to station emergency care."),
+        categories: [Radiation, Antitoxins], potency: 4, metabolism: Some(0.2),
+        effects: [Heal(Toxin, 3), Counter(kind: Irradiated, seconds: 7.0, intensity: 3.0), Status(kind: RadiationShield, seconds: 5.0, intensity: 1.0)],
+    ),
+    (
+        id: "neurine", name: "Neurine", color: (0.76, 0.76, 0.76), ph: 7.0,
+        treats: Some("Reforms damaged neural connections, clearing sensory and motor impairment."),
+        categories: [Stimulants, Antitoxins], potency: 3, metabolism: Some(0.2),
+        effects: [Counter(kind: Blurred, seconds: 6.0, intensity: 3.0), Counter(kind: Unsteady, seconds: 5.0, intensity: 2.0), Status(kind: Focused, seconds: 6.0, intensity: 1.5)],
+    ),
+    (
+        id: "diphenhydramine", name: "Diphenhydramine", color: (0.39, 1.00, 0.90),
+        overdose: Some(25), treats: Some("A sedating counteragent for stimulant-driven motor and perception symptoms."),
+        categories: [Antitoxins, Stimulants], potency: 2, metabolism: Some(0.2),
+        effects: [Counter(kind: Hastened, seconds: 5.0, intensity: 2.0), Counter(kind: Unsteady, seconds: 4.0, intensity: 1.5), Status(kind: Sedated, seconds: 3.0, intensity: 0.4)],
+        overdose_effects: [Status(kind: Sedated, seconds: 10.0, intensity: 2.5)],
+    ),
+    (
+        id: "oculine", name: "Oculine", color: (0.25, 0.25, 0.25), ph: 10.0,
+        treats: Some("Restores chemical visual impairment and improves perception."),
+        categories: [Antitoxins, Stimulants], potency: 2, metabolism: Some(0.1),
+        effects: [Counter(kind: Blurred, seconds: 8.0, intensity: 4.0), Status(kind: Focused, seconds: 6.0, intensity: 1.0)],
+    ),
+
+    // ---- Koibean medicine branch ---------------------------------------
+    // Appended so existing reagent ids remain stable across saves and the
+    // network protocol. Carpotoxin is an external root; the other two are a
+    // one-intermediate superior-medicine chain from the TG guide.
+    (
+        id: "carpotoxin", name: "Carpotoxin", color: (0.00, 0.20, 0.20), ph: 7.0,
+        from_produce: true,
+        treats: Some("A toxic Koibean extract used as the rare substrate for Rezadone."),
+        categories: [Poisons], metabolism: Some(0.4),
+        effects: [Harm(Toxin, 2)],
+    ),
+    (
+        id: "cryptobiolin", name: "Cryptobiolin", color: (0.68, 0.71, 0.86), ph: 8.0,
+        treats: Some("A disorienting intermediate used in advanced restorative medicine."),
+        categories: [Precursors, Poisons], metabolism: Some(0.6),
+        effects: [Status(kind: Unsteady, seconds: 5.0, intensity: 1.5), Status(kind: Blurred, seconds: 4.0, intensity: 1.0)],
+    ),
+    (
+        id: "rezadone", name: "Rezadone", color: (0.40, 0.60, 0.00), ph: 12.2,
+        overdose: Some(30),
+        treats: Some("Superior combined repair for severe physical trauma and burns."),
+        categories: [Trauma, Burns], potency: 4, metabolism: Some(0.4),
+        effects: [Heal(Brute, 2), Heal(Burn, 2)],
+        overdose_effects: [Harm(Toxin, 1), Status(kind: Unsteady, seconds: 6.0, intensity: 1.5)],
+    ),
+    (
+        id: "antihol", name: "Antihol", color: (0.00, 0.71, 0.78), ph: 4.0,
+        treats: Some("Rapidly clears alcohol, drunkenness, and the lingering motor impairment they cause."),
+        categories: [Antitoxins], potency: 3, metabolism: Some(0.4),
+        effects: [Heal(Toxin, 0.5), Purge(3), Counter(kind: Drunk, seconds: 8.0, intensity: 4.0), Counter(kind: Unsteady, seconds: 3.0, intensity: 1.0)],
+    ),
+    (
+        // TG's wakefulness medicine maps onto ChemGame's readable sedation,
+        // balance, cold and focus statuses. Its low metabolism and sharply
+        // escalating overdose preserve the source drug's risk without adding
+        // an opaque random overdose threshold.
+        id: "modafinil", name: "Modafinil", color: (0.75, 0.97, 0.85), ph: 7.4,
+        overdose: Some(20), critical_overdose: Some(40),
+        treats: Some("A slow specialist medicine that clears chemical sedation, cold impairment, and dizziness."),
+        categories: [Stimulants], potency: 3, metabolism: Some(0.1),
+        effects: [
+            Counter(kind: Sedated, seconds: 7.0, intensity: 3.0),
+            Counter(kind: Unsteady, seconds: 5.0, intensity: 2.0),
+            Counter(kind: Chilled, seconds: 3.0, intensity: 1.0),
+            Status(kind: Focused, seconds: 7.0, intensity: 1.25),
+        ],
+        overdose_effects: [Status(kind: Unsteady, seconds: 8.0, intensity: 2.0), Status(kind: Choking, seconds: 3.0, intensity: 0.5)],
+        critical_effects: [Harm(Oxygen, 2), Status(kind: Sedated, seconds: 10.0, intensity: 3.0)],
+    ),
+    (
+        // The body effects clear the immediate overdose; `src/addiction`
+        // separately reduces persistent opioid habits while this is present.
+        id: "naloxone", name: "Naloxone", color: (0.96, 0.95, 0.84), ph: 4.0,
+        treats: Some("An opioid antagonist that clears sedative overdose, breath loss, and persistent opioid dependence."),
+        categories: [Antitoxins, Airloss], potency: 3, metabolism: Some(0.2),
+        effects: [
+            Heal(Oxygen, 1),
+            Counter(kind: Sedated, seconds: 5.0, intensity: 2.5),
+            Counter(kind: Choking, seconds: 4.0, intensity: 2.0),
+            Purge(3),
+        ],
+    ),
+    (
+        // TG's 47K requirement is below the reaction chamber's supported
+        // range. The adapted process still has to be actively cooled below
+        // room temperature and rewards holding the naturally alkaline batch
+        // near its 8.9 optimum.
+        id: "hercuri", name: "Hercuri", color: (0.78, 0.93, 0.98), ph: 8.9,
+        inverse: Some("herignis"), overdose: Some(25),
+        treats: Some("A cold-synthesized burn medicine that also suppresses active flames and cools surfaces."),
+        categories: [Burns], potency: 3, metabolism: Some(0.2),
+        effects: [
+            Heal(Burn, 3),
+            Counter(kind: Burning, seconds: 7.0, intensity: 3.0),
+            Status(kind: Chilled, seconds: 2.0, intensity: 0.25),
+        ],
+        overdose_effects: [Status(kind: Chilled, seconds: 8.0, intensity: 2.0)],
+        world_effects: [Chill(kelvin_per_unit: 2.0)],
+    ),
+    (
+        id: "herignis", name: "Herignis", color: (0.96, 0.33, 0.12), ph: 8.9,
+        inverse: Some("hercuri"), recovers_to: Some("hercuri"),
+        treats: Some("Nothing. Hercuri's acidic inverse, recoverable through careful HPLC separation."),
+        categories: [Poisons], metabolism: Some(0.2),
+        effects: [Harm(Burn, 2), Status(kind: Burning, seconds: 6.0, intensity: 1.5)],
+        world_effects: [Ignite(intensity: 1.5, seconds: 8.0)],
+    ),
+    (
+        id: "nitrous_oxide", name: "Nitrous Oxide", color: (0.50, 0.50, 0.50), ph: 7.0,
+        treats: Some("A volatile sedative gas and advanced medicine intermediate."),
+        categories: [Precursors, Poisons], metabolism: Some(0.6),
+        effects: [
+            Status(kind: Sedated, seconds: 4.0, intensity: 1.0),
+            Status(kind: Hallucinating, seconds: 5.0, intensity: 0.75),
+            Status(kind: Unsteady, seconds: 3.0, intensity: 0.5),
+            Harm(Oxygen, 0.5),
+        ],
+    ),
+    (
+        // ChemGame has no liver-organ simulation or IV-only reagent
+        // conversion. A sharp 6u overdose and small systemic cost preserve
+        // the source medicine's dilution puzzle across every delivery route.
+        id: "syriniver", name: "Syriniver", color: (0.55, 0.87, 0.14), ph: 8.6,
+        overdose: Some(6),
+        treats: Some("An aggressive toxin treatment and blood purge that must be heavily diluted."),
+        categories: [Antitoxins], potency: 4, metabolism: Some(0.3),
+        effects: [Heal(Toxin, 3), Purge(2), Harm(Brute, 0.5)],
+        overdose_effects: [
+            Harm(Toxin, 3),
+            Harm(Brute, 1),
+            Status(kind: Unsteady, seconds: 8.0, intensity: 2.0),
+        ],
+    ),
+    (
+        id: "miners_salve", name: "Miner's Salve", color: (0.43, 0.39, 0.46), ph: 7.0,
+        treats: Some("An improvised trauma-and-burn salve whose full repair is delivered by chemical patches."),
+        categories: [Trauma, Burns], potency: 2, metabolism: Some(1.0),
+        effects: [
+            Heal(Brute, 0.5), Heal(Burn, 0.5),
+            TopicalHeal(Brute, 4), TopicalHeal(Burn, 4),
+            Status(kind: Analgesic, seconds: 6.0, intensity: 1.0),
+        ],
+    ),
+    (
+        // Persistent body temperature is not simulated, so the source
+        // medicine's heat threshold becomes an explicit Burning requirement.
+        id: "pyroxadone", name: "Pyroxadone", color: (0.86, 0.27, 0.12), ph: 12.0,
+        treats: Some("A powerful four-damage emergency medicine that functions only while its patient is actively burning."),
+        categories: [Trauma, Burns, Antitoxins, Airloss], potency: 5, metabolism: Some(0.4),
+        effects: [
+            ConditionalHeal(required: Burning, kind: Brute, amount: 2),
+            ConditionalHeal(required: Burning, kind: Burn, amount: 3),
+            ConditionalHeal(required: Burning, kind: Toxin, amount: 2),
+            ConditionalHeal(required: Burning, kind: Oxygen, amount: 4),
+        ],
+    ),
+    (
+        id: "omnizine", name: "Omnizine", color: (0.86, 0.86, 0.86), ph: 7.0,
+        from_produce: true, overdose: Some(30),
+        treats: Some("A rare botanical medicine that slowly repairs every basic damage type."),
+        categories: [Trauma, Burns, Antitoxins, Airloss], potency: 2, metabolism: Some(0.1),
+        effects: [Heal(Brute, 0.5), Heal(Burn, 0.5), Heal(Toxin, 0.5), Heal(Oxygen, 0.5)],
+        overdose_effects: [Harm(Brute, 1), Harm(Burn, 1), Harm(Toxin, 1), Harm(Oxygen, 1)],
+    ),
+    (
+        // The source's random burst damage becomes a steady, legible toxin
+        // tradeoff. It is useful in an emergency but much safer as a precursor.
+        id: "slime_jelly", name: "Slime Jelly", color: (0.50, 0.12, 0.16), ph: 7.0,
+        from_produce: true,
+        treats: Some("An unstable regenerative substrate extracted from Glowshrooms."),
+        categories: [Precursors, Trauma, Poisons], metabolism: Some(0.4),
+        effects: [Heal(Brute, 1), Harm(Toxin, 0.5)],
+    ),
+    (
+        id: "regenerative_jelly", name: "Regenerative Jelly", color: (0.80, 0.14, 1.00), ph: 7.0,
+        treats: Some("A purified biological medicine that repairs all four basic damage types."),
+        categories: [Trauma, Burns, Antitoxins, Airloss], potency: 4, metabolism: Some(0.4),
+        effects: [Heal(Brute, 1.5), Heal(Burn, 1.5), Heal(Toxin, 1.5), Heal(Oxygen, 1.5)],
+    ),
+    (
+        id: "acetaldehyde", name: "Acetaldehyde", color: (0.82, 0.79, 0.68), ph: 7.0,
+        treats: Some("A volatile expert intermediate used to build Pentaerythritol."),
+        categories: [Precursors, Poisons], metabolism: Some(0.5),
+        effects: [Harm(Toxin, 0.5)],
+        world_effects: [Flammable(intensity: 0.8, seconds: 10.0)],
+    ),
+    (
+        id: "pentaerythritol", name: "Pentaerythritol", color: (0.94, 0.94, 0.90), ph: 7.0,
+        treats: Some("A purified expert nitrate scaffold used for Penthrite synthesis."),
+        categories: [Precursors], intentionally_inert: true,
+    ),
+    (
+        // Wittel has no supported station source, so its role is adapted to
+        // the established non-consumed Stabilizing Agent catalyst. The heart
+        // organ cost becomes a readable overdose rather than invisible organ
+        // damage, while the medicine's defining critical-only repair remains.
+        id: "penthrite", name: "Penthrite", color: (0.92, 0.84, 0.63), ph: 7.0,
+        controlled: true, overdose: Some(50),
+        explosive: Some((strength: 0.2, modifier: 1.5, activation_temp: (450.0))),
+        treats: Some("A controlled critical-care explosive that repairs severe mixed trauma and stabilizes the patient."),
+        categories: [Trauma, Burns, Antitoxins, Airloss, Pyrotechnics], potency: 5, metabolism: Some(0.2),
+        effects: [
+            CriticalHeal(Brute, 2), CriticalHeal(Burn, 2),
+            CriticalHeal(Toxin, 2), CriticalHeal(Oxygen, 6),
+            Status(kind: Stabilized, seconds: 8.0, intensity: 2.0),
+        ],
+        overdose_effects: [
+            Harm(Toxin, 4), Harm(Oxygen, 8),
+            Status(kind: Choking, seconds: 10.0, intensity: 3.0),
+        ],
+    ),
+    (
+        // Brain damage is not a separate ChemGame channel. Cognitive injury
+        // becomes sedation, unsteadiness, and a small toxin cost.
+        id: "impedrezene", name: "Impedrezene", color: (0.88, 0.49, 0.87), ph: 7.0,
+        controlled: true, addictive: 0.55,
+        treats: Some("A cognitively impairing opiate and the dangerous precursor to Psicodine."),
+        categories: [Illicit, Poisons, Precursors], metabolism: Some(0.4),
+        effects: [
+            Harm(Toxin, 1),
+            Status(kind: Sedated, seconds: 5.0, intensity: 1.0),
+            Status(kind: Unsteady, seconds: 5.0, intensity: 1.0),
+        ],
+    ),
+    (
+        id: "psicodine", name: "Psicodine", color: (0.03, 0.91, 0.62), ph: 7.0,
+        overdose: Some(30),
+        treats: Some("A psychiatric stabilizer that suppresses hallucination, paranoia and motor confusion."),
+        categories: [Antitoxins, Stimulants], potency: 3, metabolism: Some(0.1),
+        effects: [
+            Counter(kind: Hallucinating, seconds: 6.0, intensity: 3.0),
+            Counter(kind: Paranoid, seconds: 6.0, intensity: 3.0),
+            Counter(kind: Unsteady, seconds: 6.0, intensity: 3.0),
+            Status(kind: Focused, seconds: 4.0, intensity: 1.0),
+        ],
+        overdose_effects: [
+            Harm(Toxin, 1),
+            Status(kind: Hallucinating, seconds: 8.0, intensity: 2.0),
+        ],
+    ),
+    (
+        id: "sulfonal", name: "Sulfonal", color: (0.49, 0.76, 0.63), ph: 6.0,
+        controlled: true,
+        treats: Some("A slow, delayed sedative poison that incapacitates after prolonged bloodstream exposure."),
+        categories: [Poisons], metabolism: Some(0.05),
+        effects: [
+            Harm(Toxin, 0.5),
+            DelayedStatus(after_ticks: 22, kind: Sedated, seconds: 6.0, intensity: 2.2),
+        ],
+    ),
+    (
+        // Organ-specific interactions are outside the body model, but the
+        // source toxin's defining medicine purge is preserved directly.
+        id: "anacea", name: "Anacea", color: (0.24, 0.32, 0.20), ph: 8.0,
+        controlled: true,
+        treats: Some("A counter-medicine toxin that slowly harms its victim while stripping therapeutic reagents from their blood."),
+        categories: [Poisons], metabolism: Some(0.03),
+        effects: [Harm(Toxin, 0.15), MedicinePurge(5)],
+    ),
+    (
+        // Cigarette smoking is not a delivery system, so Botany supplies
+        // grindable tobacco and patches/sprays provide the deliberate route.
+        id: "nicotine", name: "Nicotine", color: (0.38, 0.65, 0.52), ph: 7.0,
+        from_produce: true, addictive: 0.60, overdose: Some(15),
+        treats: Some("A legal but addictive botanical stimulant that briefly sharpens focus and resists mild sedation."),
+        categories: [Poisons], metabolism: Some(0.05),
+        effects: [
+            Status(kind: Focused, seconds: 3.0, intensity: 0.6),
+            Counter(kind: Sedated, seconds: 2.0, intensity: 0.5),
+        ],
+        overdose_effects: [Harm(Oxygen, 1.1), Harm(Toxin, 0.1)],
+    ),
+    (
+        // Stamina is represented by readable movement/focus benefits. TG's
+        // random suffocation is averaged into deterministic oxygen damage so
+        // the danger can be planned around rather than hidden behind a roll.
+        id: "aranesp", name: "Aranesp", color: (0.47, 1.00, 0.94), ph: 7.0,
+        inverse: Some("epoetin_alfa"), controlled: true, addictive: 0.65,
+        treats: Some("A highly addictive illicit stimulant that boosts movement and focus while steadily damaging respiration and toxin health."),
+        categories: [Illicit, Poisons], metabolism: Some(0.2),
+        effects: [
+            Status(kind: Hastened, seconds: 6.0, intensity: 1.5),
+            Status(kind: Focused, seconds: 5.0, intensity: 1.0),
+            Harm(Oxygen, 0.5), Harm(Toxin, 0.5),
+        ],
+    ),
+    (
+        // Blood volume, bleeding, and liver damage are not represented. The
+        // inverse instead repairs their shared oxygen consequence, then uses
+        // the delayed-effect clock for TG's escalating long-exposure risks.
+        id: "epoetin_alfa", name: "Epoetin Alfa", color: (0.87, 0.89, 1.00), ph: 6.1,
+        inverse: Some("aranesp"), recovers_to: Some("aranesp"), overdose: Some(20),
+        treats: Some("A low-purity Aranesp inverse that supports oxygen recovery but develops escalating neurological side effects during long exposure."),
+        categories: [Airloss], potency: 2, metabolism: Some(0.25),
+        effects: [
+            Heal(Oxygen, 1),
+            DelayedStatus(after_ticks: 10, kind: Blurred, seconds: 4.0, intensity: 0.5),
+            DelayedStatus(after_ticks: 31, kind: Unsteady, seconds: 6.0, intensity: 1.0),
+            DelayedStatus(after_ticks: 31, kind: Hallucinating, seconds: 6.0, intensity: 1.0),
+            DelayedStatus(after_ticks: 46, kind: Choking, seconds: 6.0, intensity: 1.5),
+        ],
+        overdose_effects: [
+            Harm(Oxygen, 3), Harm(Toxin, 1),
+            Status(kind: Blurred, seconds: 10.0, intensity: 2.0),
+            Status(kind: Unsteady, seconds: 8.0, intensity: 2.0),
+        ],
+    ),
+    (
+        // Phobias, disgust, and brain damage map to the readable mood, motor,
+        // and toxin channels. Overdose creates an opposed Sadness status so
+        // the promised mood swings affect both players and station residents.
+        id: "happiness", name: "Happiness", color: (0.00, 0.00, 0.78), ph: 7.0,
+        inverse: Some("sadness"), controlled: true, addictive: 0.90, overdose: Some(20),
+        treats: Some("A highly addictive hallucinogen that suppresses fear and confusion while producing a conspicuous positive mood."),
+        categories: [Illicit, Poisons], metabolism: Some(0.2),
+        effects: [
+            Status(kind: Happiness, seconds: 7.0, intensity: 1.5),
+            Counter(kind: Sadness, seconds: 5.0, intensity: 2.0),
+            Counter(kind: Paranoid, seconds: 5.0, intensity: 2.0),
+            Counter(kind: Unsteady, seconds: 4.0, intensity: 1.0),
+            Harm(Toxin, 0.2),
+        ],
+        overdose_effects: [
+            Harm(Toxin, 0.5),
+            Status(kind: Sadness, seconds: 5.0, intensity: 1.0),
+            Status(kind: Hallucinating, seconds: 5.0, intensity: 0.8),
+        ],
+    ),
+    (
+        // TG's sanity and depression systems become their own visible mood
+        // status. Its exact counter-drug relationship is preserved rather
+        // than approximated as a broad medicine or poison purge.
+        id: "sadness", name: "Sadness", color: (0.00, 0.02, 1.00), ph: 12.0,
+        inverse: Some("happiness"), recovers_to: Some("happiness"), controlled: true,
+        treats: Some("Happiness's low-purity inverse: a withdrawn mood toxin that specifically strips Happiness and Psicodine from the bloodstream."),
+        categories: [Poisons], metabolism: Some(0.1),
+        effects: [
+            Status(kind: Sadness, seconds: 7.0, intensity: 1.3),
+            Counter(kind: Happiness, seconds: 5.0, intensity: 3.0),
+            Counter(kind: Focused, seconds: 3.0, intensity: 1.0),
+        ],
+        targeted_purges: [("happiness", 5), ("psicodine", 5)],
+    ),
+    (
+        // Coffee is deliberately botanical rather than dispenser stock. It is
+        // useful by itself, but cleaning the fibre out of a ground batch is
+        // the quality-control lesson before committing it to Pump-Up.
+        id: "coffee", name: "Coffee", color: (0.36, 0.18, 0.08), ph: 5.0,
+        from_produce: true,
+        treats: Some("A mild botanical stimulant and the external ingredient needed to synthesize Pump-Up."),
+        categories: [Precursors], metabolism: Some(0.4),
+        effects: [
+            Status(kind: Focused, seconds: 3.0, intensity: 0.25),
+            Counter(kind: Sluggish, seconds: 1.0, intensity: 0.15),
+        ],
+    ),
+    (
+        // Stamina and baton-only knockdown immunity do not have one-to-one
+        // systems here. Stabilized gives the intended anti-collapse identity,
+        // while deterministic expected damage replaces TG's hidden random
+        // breath-loss rolls. It remains dangerous rather than free speed.
+        id: "pump_up", name: "Pump-Up", color: (0.78, 0.43, 0.12), ph: 7.0,
+        controlled: true, addictive: 0.60, overdose: Some(30),
+        treats: Some("An illicit endurance stimulant that temporarily resists collapse and sharpens focus at a respiratory cost."),
+        categories: [Illicit, Poisons], metabolism: Some(0.64),
+        effects: [
+            Status(kind: Stabilized, seconds: 6.0, intensity: 1.0),
+            Status(kind: Focused, seconds: 4.0, intensity: 0.5),
+            Status(kind: Unsteady, seconds: 2.0, intensity: 0.2),
+            Harm(Oxygen, 0.2),
+        ],
+        overdose_effects: [
+            Harm(Oxygen, 1.0), Harm(Toxin, 0.3),
+            Status(kind: Unsteady, seconds: 5.0, intensity: 1.2),
+        ],
+    ),
+    (
+        // Random languages, giggling, and speech slurring collapse into the
+        // shared perceptual/motor status vocabulary. Its exceptionally slow
+        // metabolism remains the defining risk: one dose lingers a long time.
+        id: "mushroom_hallucinogen", name: "Mushroom Hallucinogen", color: (0.91, 0.00, 0.91), ph: 6.4,
+        from_produce: true, controlled: true, addictive: 0.75, overdose: Some(30),
+        treats: Some("A slow botanical hallucinogen that causes prolonged perceptual and motor impairment."),
+        categories: [Illicit, Poisons], metabolism: Some(0.08),
+        effects: [
+            Status(kind: Hallucinating, seconds: 8.0, intensity: 1.6),
+            Status(kind: Drunk, seconds: 5.0, intensity: 0.8),
+            Status(kind: Unsteady, seconds: 4.0, intensity: 0.5),
+        ],
+        overdose_effects: [
+            Status(kind: Paranoid, seconds: 7.0, intensity: 1.3),
+            Status(kind: Blurred, seconds: 6.0, intensity: 1.0),
+            Status(kind: Unsteady, seconds: 6.0, intensity: 1.0),
+        ],
+    ),
+    (
+        id: "tea", name: "Tea", color: (0.46, 0.27, 0.10), ph: 5.5,
+        from_produce: true,
+        treats: Some("A mild botanical focus aid and external ingredient for maintenance chemistry."),
+        categories: [Precursors], metabolism: Some(0.4),
+        effects: [Status(kind: Focused, seconds: 2.0, intensity: 0.2)],
+    ),
+    (
+        id: "universal_enzyme", name: "Universal Enzyme", color: (0.74, 0.64, 0.32), ph: 7.0,
+        from_produce: true,
+        treats: Some("A cultured external ingredient consumed by the final maintenance-drug refinement."),
+        categories: [Precursors], intentionally_inert: true,
+    ),
+    (
+        // Dead-animal dipping is outside the station simulation. Agitated
+        // Plant Fibre and fuel preserve the same dirty organic preparation.
+        id: "organic_slurry", name: "Organic Slurry", color: (0.33, 0.31, 0.00), ph: 5.5,
+        treats: Some("A foul maintenance precursor produced by fuel-treating plant waste."),
+        categories: [Precursors], intentionally_inert: true,
+    ),
+    (
+        // Liver damage maps to toxin damage. The small Stabilized effect and
+        // sedation counter preserve its rough anti-stun escape niche.
+        id: "maintenance_tar", name: "Maintenance Tar", color: (0.03, 0.03, 0.03), ph: 7.0,
+        controlled: true, addictive: 0.50, overdose: Some(30),
+        treats: Some("A crude escape drug that resists sedation and collapse while steadily poisoning its user."),
+        categories: [Illicit, Poisons], metabolism: Some(0.2),
+        effects: [
+            Status(kind: Stabilized, seconds: 4.0, intensity: 0.4),
+            Counter(kind: Sedated, seconds: 3.0, intensity: 1.0),
+            Harm(Toxin, 1.5),
+        ],
+        overdose_effects: [Harm(Toxin, 8)],
+    ),
+    (
+        // Wound resistance becomes analgesic collapse headroom. The overdose
+        // value folds TG's deterministic toxin plus expected vomiting spike
+        // into one predictable consequence.
+        id: "maintenance_sludge", name: "Maintenance Sludge", color: (0.13, 0.24, 0.17), ph: 7.0,
+        controlled: true, addictive: 0.80, overdose: Some(25),
+        treats: Some("A concentrated maintenance drug that masks serious injury while toxin damage accumulates."),
+        categories: [Illicit, Poisons], metabolism: Some(0.8),
+        effects: [
+            Status(kind: Analgesic, seconds: 7.0, intensity: 1.2),
+            Harm(Toxin, 0.5),
+        ],
+        overdose_effects: [Harm(Toxin, 1.5)],
+    ),
+    (
+        // There is no generic skill-XP system, so faster learning is expressed
+        // as the existing Focused gameplay aggregate. The extreme eight-to-one
+        // synthesis loss remains its progression and economy identity.
+        id: "maintenance_powder", name: "Maintenance Powder", color: (0.94, 0.94, 0.90), ph: 7.0,
+        controlled: true, addictive: 1.40, overdose: Some(15),
+        treats: Some("An expert maintenance stimulant that produces exceptional focus at a low overdose threshold."),
+        categories: [Illicit, Poisons], metabolism: Some(0.2),
+        effects: [
+            Status(kind: Focused, seconds: 8.0, intensity: 2.0),
+            Counter(kind: Unsteady, seconds: 3.0, intensity: 1.0),
+            Harm(Toxin, 0.1),
+        ],
+        overdose_effects: [Harm(Toxin, 3)],
+    ),
+    (
+        // TG's Kronkus fruit is supplied through the existing Botany courier
+        // and grinder loop. The clean extract is deliberately inert until it
+        // is committed to Kronkaine, making the physical delivery meaningful.
+        id: "kronkus_extract", name: "Kronkus Extract", color: (0.53, 0.30, 0.68), ph: 6.0,
+        from_produce: true,
+        treats: Some("A rare botanical stimulant precursor extracted from Kronkus fruit."),
+        categories: [Precursors], intentionally_inert: true,
+    ),
+    (
+        // Instant stamina restoration and action-time reduction share the
+        // readable movement, focus, and anti-collapse channels. The source's
+        // heart damage becomes predictable toxin/respiratory risk.
+        id: "kronkaine", name: "Kronkaine", color: (0.74, 0.30, 0.86), ph: 8.0,
+        controlled: true, addictive: 1.10, overdose: Some(20),
+        treats: Some("A rare, intensely addictive speed drug that sharpens movement and action while straining the body."),
+        categories: [Illicit, Poisons], metabolism: Some(0.4),
+        effects: [
+            Status(kind: Hastened, seconds: 8.0, intensity: 1.8),
+            Status(kind: Focused, seconds: 6.0, intensity: 1.2),
+            Status(kind: Stabilized, seconds: 4.0, intensity: 0.8),
+            Harm(Toxin, 0.3),
+        ],
+        overdose_effects: [
+            Harm(Toxin, 3), Harm(Oxygen, 1),
+            Status(kind: Choking, seconds: 5.0, intensity: 0.8),
+        ],
+    ),
+    (
+        // Random flips and involuntary lunges become strong deterministic
+        // motor instability with a visible warning cadence. Stabilization
+        // preserves the original reduced-knockdown identity without taking
+        // control away from the player.
+        id: "blastoff", name: "bLaSToFF", color: (0.96, 0.32, 0.10), ph: 10.0,
+        controlled: true, addictive: 0.85, overdose: Some(30),
+        treats: Some("A caustic dissociative that causes violent, predictable motor surges and visual distortion."),
+        categories: [Illicit, Poisons], metabolism: Some(0.4),
+        effects: [
+            Status(kind: Hallucinating, seconds: 7.0, intensity: 1.0),
+            Status(kind: Unsteady, seconds: 7.0, intensity: 1.8),
+            Status(kind: Stabilized, seconds: 4.0, intensity: 0.6),
+            Harm(Oxygen, 0.3),
+        ],
+        overdose_effects: [
+            Harm(Oxygen, 0.3),
+            Status(kind: Unsteady, seconds: 8.0, intensity: 2.7),
+        ],
+    ),
+    (
+        // Lead is ordinary mineral chemistry, so it joins the append-only
+        // base dispenser roster instead of becoming an arbitrary late lock.
+        id: "lead", name: "Lead", color: (0.34, 0.37, 0.42), ph: 7.0,
+        dispensable: true,
+        treats: Some("A toxic heavy-metal stock used in advanced maintenance chemistry."),
+        categories: [Precursors, Poisons], effects: [Harm(Toxin, 0.5)],
+    ),
+    (
+        // Clothing-specific invisibility is outside the current character
+        // mesh model. Obscured instead fades the whole wearer and shortens
+        // hostile visual detection while keeping them readable and targetable.
+        id: "saturn_x", name: "SaturnX", color: (0.12, 0.04, 0.22), ph: 7.0,
+        controlled: true, addictive: 0.80, overdose: Some(25),
+        treats: Some("A maintenance-derived stealth narcotic that chemically suppresses the wearer's outline at a steady toxin cost."),
+        categories: [Illicit, Poisons], metabolism: Some(0.2),
+        effects: [
+            Status(kind: Obscured, seconds: 8.0, intensity: 1.5),
+            Harm(Toxin, 0.3),
+        ],
+        overdose_effects: [
+            Harm(Toxin, 0.6),
+            Status(kind: Euphoric, seconds: 5.0, intensity: 0.6),
+        ],
+    ),
+    (
+        // Speech itself is not simulated as a free-text channel. Muted blocks
+        // an isolated victim's Security report while still allowing a nearby
+        // witness to report the assault, giving the toxin real counterplay.
+        id: "mute_toxin", name: "Mute Toxin", color: (0.47, 0.58, 0.68), ph: 12.2,
+        controlled: true,
+        treats: Some("A strongly alkaline communication suppressant that prevents an isolated victim from reporting chemical abuse."),
+        categories: [Poisons], metabolism: Some(0.4),
+        effects: [Status(kind: Muted, seconds: 6.0, intensity: 1.5)],
+    ),
+    (
+        // The current injury model does not split open wounds from other
+        // physical trauma. Existing brute damage is the legible equivalent:
+        // an unhurt patient is unaffected, while an injured one deteriorates.
+        id: "heparin", name: "Heparin", color: (0.77, 0.16, 0.18), ph: 11.6,
+        controlled: true,
+        treats: Some("An anticoagulant poison that worsens existing physical trauma and blood-loss symptoms without harming an uninjured patient."),
+        categories: [Poisons], metabolism: Some(0.08),
+        effects: [
+            ConditionalHarm(existing: Brute, kind: Brute, amount: 2),
+            ConditionalHarm(existing: Brute, kind: Oxygen, amount: 0.5),
+        ],
+    ),
+    (
+        // TG's terminal damage scales with time spent metabolising. Recording
+        // exposure ticks preserves that delayed threat and lets early purging
+        // genuinely reduce the final injury instead of merely postponing it.
+        id: "amanitin", name: "Amanitin", color: (0.51, 0.33, 0.24), ph: 6.2,
+        from_produce: true, controlled: true,
+        treats: Some("A Destroying Angel extract that remains quiet until its final metabolism tick, then deals toxin damage proportional to exposure time."),
+        categories: [Poisons], metabolism: Some(0.2),
+        after_effects: [AccumulatedHarm(Toxin, 3)],
+    ),
+    (
+        // Full input lock is intentionally avoided. A long low-rate exposure
+        // instead causes steady respiratory/toxin damage and then a powerful,
+        // readable sedation state after eleven metabolism cycles.
+        id: "curare", name: "Curare", color: (0.43, 0.59, 0.18), ph: 6.8,
+        from_produce: true, controlled: true,
+        treats: Some("A slow Curare Vine paralytic that steadily attacks breathing and produces deep sedation after prolonged exposure."),
+        categories: [Poisons], metabolism: Some(0.05),
+        effects: [
+            Harm(Oxygen, 1), Harm(Toxin, 1),
+            DelayedStatus(after_ticks: 11, kind: Sedated, seconds: 8.0, intensity: 3.0),
+        ],
+    ),
+    (
+        // Breath suppression maps to heavy oxygen damage plus Choking, both
+        // visible through existing patient feedback. Epinephrine's targeted
+        // purge is the authored emergency response rather than a universal
+        // magic antidote.
+        id: "lexorin", name: "Lexorin", color: (0.28, 0.67, 0.70), ph: 1.2,
+        controlled: true,
+        treats: Some("An acidic respiratory poison that rapidly causes air loss and choking; Epinephrine clears it at an accelerated rate."),
+        categories: [Poisons], metabolism: Some(0.4),
+        effects: [
+            Harm(Oxygen, 5),
+            Status(kind: Choking, seconds: 5.0, intensity: 2.0),
+        ],
+    ),
+    (
+        // Random cardiac events are converted to a deterministic warning
+        // curve: toxin damage begins immediately, respiratory collapse soon
+        // follows, and prolonged exposure ends in deep incapacitation.
+        id: "initropidril", name: "Initropidril", color: (0.50, 0.06, 0.75), ph: 5.5,
+        controlled: true,
+        treats: Some("An expert cardiac-style poison that rapidly escalates from toxin damage into respiratory collapse and incapacitation."),
+        categories: [Poisons], metabolism: Some(0.2),
+        effects: [
+            Harm(Toxin, 2.5),
+            DelayedHarm(after_ticks: 4, kind: Oxygen, amount: 6),
+            DelayedStatus(after_ticks: 4, kind: Choking, seconds: 5.0, intensity: 1.5),
+            DelayedStatus(after_ticks: 8, kind: Sedated, seconds: 7.0, intensity: 3.0),
+        ],
+    ),
+    (
+        // Stamina damage has no separate health pool. A renewable Sluggish
+        // status retains Tirizene's harmless but tactically disruptive role;
+        // Synaptizine now explicitly clears that shared fatigue channel.
+        id: "tirizene", name: "Tirizene", color: (0.43, 0.16, 0.16), ph: 6.5,
+        from_produce: true, controlled: true,
+        treats: Some("A Death Berry fatigue toxin that slows movement without directly damaging the patient; Synaptizine counters it."),
+        categories: [Poisons], metabolism: Some(0.4),
+        effects: [Status(kind: Sluggish, seconds: 3.0, intensity: 0.8)],
+    ),
+    (
+        // The source's stamina ceiling becomes a fixed non-stacking status
+        // intensity. Repeated ticks refresh the slowdown without allowing it
+        // to grow into lethal damage or permanent loss of control.
+        id: "tiring_solution", name: "Tiring Solution", color: (0.35, 0.19, 0.19), ph: 7.0,
+        controlled: true,
+        treats: Some("A nonlethal restraint solution that maintains a capped movement slowdown and is countered by Synaptizine."),
+        categories: [Poisons], metabolism: Some(0.6),
+        effects: [Status(kind: Sluggish, seconds: 4.0, intensity: 1.2)],
+    ),
+    (
+        // The original has several cycle thresholds. Data-driven delayed harm
+        // preserves its quiet onset and sharply escalating late phase; Muted
+        // represents the swollen-tongue warning before paralysis begins.
+        id: "tetrodotoxin", name: "Tetrodotoxin", color: (0.90, 0.91, 0.92), ph: 6.4,
+        from_produce: true, controlled: true,
+        treats: Some("A Toxic Pufferfish extract with a seven-cycle warning period, paralysis at thirteen cycles, and severe escalating late damage."),
+        categories: [Poisons], metabolism: Some(0.1),
+        effects: [
+            DelayedStatus(after_ticks: 7, kind: Muted, seconds: 4.0, intensity: 0.7),
+            DelayedHarm(after_ticks: 13, kind: Oxygen, amount: 2),
+            DelayedHarm(after_ticks: 13, kind: Toxin, amount: 2),
+            DelayedStatus(after_ticks: 13, kind: Sedated, seconds: 5.0, intensity: 2.2),
+            DelayedHarm(after_ticks: 21, kind: Oxygen, amount: 2),
+            DelayedHarm(after_ticks: 21, kind: Toxin, amount: 2),
+            DelayedStatus(after_ticks: 21, kind: Unsteady, seconds: 5.0, intensity: 1.5),
+            DelayedHarm(after_ticks: 29, kind: Oxygen, amount: 4),
+            DelayedHarm(after_ticks: 29, kind: Toxin, amount: 4),
+            DelayedStatus(after_ticks: 38, kind: Choking, seconds: 7.0, intensity: 2.5),
+        ],
+    ),
+    (
+        // Random breath loss becomes a deterministic delayed respiratory
+        // phase. It remains initially silent, then incapacitates at exactly
+        // ten active cycles while continuing to threaten oxygen.
+        id: "pancuronium", name: "Pancuronium", color: (0.10, 0.31, 0.59), ph: 6.7,
+        controlled: true,
+        treats: Some("A refined paralytic with no early warning that causes respiratory distress and deep sedation after ten metabolism cycles."),
+        categories: [Poisons], metabolism: Some(0.1),
+        effects: [
+            DelayedHarm(after_ticks: 10, kind: Oxygen, amount: 1),
+            DelayedStatus(after_ticks: 10, kind: Choking, seconds: 6.0, intensity: 2.0),
+            DelayedStatus(after_ticks: 10, kind: Sedated, seconds: 8.0, intensity: 3.0),
+        ],
+    ),
+    (
+        // Stamina loss is represented by Sluggish and the ten-cycle knockout
+        // by Sedated. No direct damage is authored, preserving its intended
+        // nonlethal interrogation identity; Modafinil counters the sedation.
+        id: "sodium_thiopental", name: "Sodium Thiopental", color: (0.39, 0.59, 0.98), ph: 7.5,
+        controlled: true,
+        treats: Some("A nonlethal interrogation sedative that slows immediately and causes a long knockout after ten active cycles."),
+        categories: [Poisons], metabolism: Some(0.3),
+        effects: [
+            Status(kind: Sluggish, seconds: 3.0, intensity: 0.7),
+            DelayedStatus(after_ticks: 10, kind: Sedated, seconds: 10.0, intensity: 3.0),
+        ],
+    ),
+    (
+        // The unsupported mushroom-extraction step is represented by a dirty
+        // grinder source. Its straightforward toxin damage makes this an
+        // early lesson in botanical poisons and broad-spectrum purging.
+        id: "amatoxin", name: "Amatoxin", color: (0.58, 0.43, 0.28), ph: 6.0,
+        from_produce: true, controlled: true,
+        treats: Some("A Fly Amanita extract that steadily damages the liver-equivalent toxin channel until purged."),
+        categories: [Poisons], metabolism: Some(0.4),
+        effects: [Harm(Toxin, 2.5)],
+    ),
+    (
+        // TG's extremely slow metabolism is retained. Choking supplies the
+        // readable breath-loss warning while ordinary oxygen and toxin harm
+        // continue for as long as the tiny metabolic clearance allows.
+        id: "coniine", name: "Coniine", color: (0.39, 0.13, 0.18), ph: 6.4,
+        from_produce: true, controlled: true,
+        treats: Some("An exceptionally persistent Death Berry respiratory poison that slowly causes toxin damage and breath loss."),
+        categories: [Poisons], metabolism: Some(0.024),
+        effects: [
+            Harm(Toxin, 1.75),
+            Status(kind: Choking, seconds: 5.0, intensity: 1.0),
+        ],
+    ),
+    (
+        // Random itching and blur checks become a small deterministic sensory
+        // burden. The authored 30-unit overdose preserves the original sharp
+        // transition into simultaneous physical, toxin, and oxygen damage.
+        id: "histamine", name: "Histamine", color: (0.82, 0.61, 0.30), ph: 5.8,
+        from_produce: true, controlled: true, overdose: Some(30),
+        treats: Some("An Omega Weed irritant that blurs vision at ordinary doses and becomes a broad systemic poison above 30 units."),
+        categories: [Poisons], metabolism: Some(0.1),
+        effects: [
+            Harm(Brute, 0.4),
+            Status(kind: Blurred, seconds: 3.0, intensity: 0.4),
+        ],
+        overdose_effects: [
+            Harm(Brute, 2), Harm(Toxin, 2), Harm(Oxygen, 2),
+            Status(kind: Blurred, seconds: 5.0, intensity: 1.2),
+        ],
+    ),
+    (
+        // A rare uplink-only isotope becomes an expert synthesis. Irradiated
+        // is already a durable, visible damage-over-time channel with several
+        // specialist counteragents, so no bespoke radiation damage is needed.
+        id: "polonium", name: "Polonium", color: (0.27, 0.88, 0.20), ph: 7.0,
+        controlled: true,
+        treats: Some("A slow-clearing radiological poison that creates intense persistent irradiation countered by radiation medicines."),
+        categories: [Poisons], metabolism: Some(0.05),
+        effects: [Status(kind: Irradiated, seconds: 8.0, intensity: 4.0)],
+    ),
+    (
+        // Brain damage has no separate health channel, so the opiate's acute
+        // neurological harm is split between toxin damage and readable motor
+        // impairment. Its eighteen-cycle loss of consciousness remains exact.
+        id: "fentanyl", name: "Fentanyl", color: (0.77, 0.75, 0.84), ph: 9.0,
+        controlled: true, addictive: 1.2,
+        treats: Some("A dangerously concentrated synthesized opiate that impairs coordination and causes delayed unconsciousness after eighteen cycles."),
+        categories: [Illicit, Poisons], metabolism: Some(0.2),
+        effects: [
+            Harm(Toxin, 2.5),
+            Status(kind: Unsteady, seconds: 4.0, intensity: 0.8),
+            DelayedStatus(after_ticks: 18, kind: Sedated, seconds: 10.0, intensity: 3.0),
+        ],
+    ),
+    (
+        // Heart damage is adapted to the toxin and oxygen channels. The
+        // guide's twelve-cycle faint/out-of-breath phase becomes a precise
+        // Choking warning and reversible chemical incapacitation threshold.
+        id: "bungotoxin", name: "Bungotoxin", color: (0.92, 1.00, 0.56), ph: 6.3,
+        from_produce: true, controlled: true,
+        treats: Some("A Bungo Fruit cardiotoxic extract that causes mixed toxin and oxygen damage before a twelve-cycle fainting crisis."),
+        categories: [Poisons], metabolism: Some(0.2),
+        effects: [
+            Harm(Toxin, 2), Harm(Oxygen, 1),
+            DelayedStatus(after_ticks: 12, kind: Choking, seconds: 6.0, intensity: 2.0),
+            DelayedStatus(after_ticks: 12, kind: Sedated, seconds: 6.0, intensity: 2.0),
+        ],
+    ),
+    (
+        // ChemGame has no separate brain or ear organs. Splitting their harm
+        // across toxin and physical trauma while adding a mild visual signal
+        // preserves a readable, treatable neurological heavy-metal poison.
+        id: "lead_acetate", name: "Lead Acetate", color: (0.82, 0.87, 0.75), ph: 6.5,
+        controlled: true,
+        treats: Some("A synthesized heavy-metal neurotoxin that steadily causes physical and toxin damage with subtle sensory confusion."),
+        categories: [Poisons], metabolism: Some(0.4),
+        effects: [
+            Harm(Brute, 1), Harm(Toxin, 1),
+            Status(kind: Blurred, seconds: 3.0, intensity: 0.25),
+        ],
+    ),
+    (
+        // This is the one scoped poison whose threat is defined by remaining
+        // dose. The generic volume-scaled effect makes dilution and every unit
+        // removed by a purge visibly reduce both damage channels next tick.
+        id: "venom", name: "Venom", color: (0.94, 1.00, 0.94), ph: 6.0,
+        from_produce: true, controlled: true,
+        treats: Some("A Giant Spider extract whose brute and toxin damage scale directly with the amount still circulating in the bloodstream."),
+        categories: [Poisons], metabolism: Some(0.1),
+        effects: [
+            VolumeScaledHarm(Toxin, 0.1),
+            VolumeScaledHarm(Brute, 0.3),
+        ],
+    ),
+    (
+        // All touch routes already enter ChemGame blood at a reduced dose, so
+        // the guide's unusual splash behavior emerges from the shared route
+        // model rather than a reagent-specific exception.
+        id: "itching_powder", name: "Itching Powder", color: (0.78, 0.78, 0.78), ph: 7.0,
+        controlled: true,
+        treats: Some("A contact-active irritant that causes repeated scratching trauma and mild motor distraction even after a splash."),
+        categories: [Poisons], metabolism: Some(0.2),
+        effects: [
+            Harm(Brute, 0.2),
+            Status(kind: Unsteady, seconds: 3.0, intensity: 0.25),
+        ],
+    ),
+    (
+        // The guide's repeated internal shocks become readable burn damage
+        // and motor disruption. Water or 474K releases the batch as a world
+        // arc, while Rotatium still consumes it as an expert precursor.
+        id: "teslium", name: "Teslium", color: (0.24, 0.78, 0.93), ph: 7.2,
+        controlled: true, metabolism: Some(0.2),
+        treats: Some("A volatile energetic intermediate that shocks exposed bodies, feeds Rotatium, and arcs through nearby people and machinery when mixed with Water or heated to 474K."),
+        categories: [Precursors, Pyrotechnics],
+        effects: [
+            Harm(Burn, 1),
+            Status(kind: Unsteady, seconds: 3.0, intensity: 0.6),
+        ],
+    ),
+    (
+        // The screen-rotation effect is represented through the same readable
+        // visual and gait impairment used by other perception toxins. Its
+        // exact twenty-cycle onset and slow direct toxin harm are retained.
+        id: "rotatium", name: "Rotatium", color: (0.67, 0.53, 0.79), ph: 6.2,
+        controlled: true,
+        treats: Some("An expert perception toxin that causes steady toxin damage before severe rocking visual and motor distortion after twenty cycles."),
+        categories: [Poisons], metabolism: Some(0.24),
+        effects: [
+            Harm(Toxin, 0.5),
+            DelayedStatus(after_ticks: 20, kind: Blurred, seconds: 5.0, intensity: 1.5),
+            DelayedStatus(after_ticks: 20, kind: Unsteady, seconds: 5.0, intensity: 2.0),
+        ],
+    ),
+    (
+        // Container heating is authored as a catalyst reaction below. In a
+        // body, oxygen consumption and rising temperature become a readable
+        // choking/burning combination instead of an unsupported body-heat
+        // number.
+        id: "pyrosium", name: "Pyrosium", color: (0.94, 0.31, 0.12), ph: 7.0,
+        controlled: true,
+        treats: Some("A reusable thermal catalyst: it consumes liquid Oxygen to heat its container without consuming the Pyrosium."),
+        categories: [Utility, Pyrotechnics],
+        effects: [
+            Status(kind: Choking, seconds: 4.0, intensity: 1.0),
+            Status(kind: Burning, seconds: 3.0, intensity: 0.5),
+        ],
+    ),
+    (
+        id: "depleted_oxygen", name: "Depleted Oxygen", color: (0.42, 0.47, 0.51), ph: 7.0,
+        treats: Some("An inert spent oxidizer left after Pyrosium converts liquid Oxygen into heat; HPLC can remove it."),
+        categories: [Utility], intentionally_inert: true,
+    ),
+    (
+        id: "sonic_powder", name: "Sonic Powder", color: (0.86, 0.78, 0.26), ph: 7.0,
+        controlled: true,
+        treats: Some("A stabilized concussive powder that deafens and disorients nearby people when heated to 374K."),
+        categories: [Pyrotechnics], intentionally_inert: true,
+    ),
+    (
+        id: "sorium", name: "Sorium", color: (0.55, 0.80, 0.94), ph: 7.0,
+        controlled: true,
+        treats: Some("A stabilized reaction agent that throws nearby people away when heated to 474K."),
+        categories: [Utility, Pyrotechnics], intentionally_inert: true,
+    ),
+    (
+        id: "liquid_dark_matter", name: "Liquid Dark Matter", color: (0.18, 0.07, 0.29), ph: 7.0,
+        controlled: true,
+        treats: Some("A stabilized reaction agent that pulls nearby people inward when heated to 474K."),
+        categories: [Utility, Pyrotechnics], intentionally_inert: true,
+    ),
+    (
+        // TG obtains this from a geyser. ChemGame's cargo/salvage courier is
+        // the established replacement for unsupported remote ecosystems.
+        id: "hyper_plasmium_oxide", name: "Hyper-Plasmium Oxide", color: (0.48, 0.13, 0.62), ph: 5.5,
+        from_produce: true,
+        treats: Some("A rare salvage-derived oxide used to turn ordinary Stabilizing Agent into an expert energetic stabilizer."),
+        categories: [Precursors], intentionally_inert: true,
+    ),
+    (
+        id: "exotic_stabilizer", name: "Exotic Stabilizer", color: (0.58, 0.24, 0.72), ph: 6.5,
+        treats: Some("An expert catalyst that makes TaTP portable through its first reaction window without being consumed."),
+        categories: [Precursors, Pyrotechnics], intentionally_inert: true,
+    ),
+    (
+        // A deterministic 550K activation replaces TG's randomized second
+        // temperature window so expert batches remain learnable and testable.
+        id: "tatp", name: "TaTP", color: (0.94, 0.92, 0.84), ph: 2.0,
+        controlled: true,
+        explosive: Some((strength: 0.30, modifier: 3.0, activation_temp: (550.0))),
+        treats: Some("An exceptionally sensitive expert explosive stabilized during synthesis and detonated at 550K."),
+        categories: [Pyrotechnics],
+        effects: [Harm(Burn, 5)],
+    ),
+    (
+        id: "emp_residue", name: "EMP Residue", color: (0.33, 0.38, 0.32), ph: 7.0,
+        treats: Some("An inert calibration residue left after an electromagnetic pulse consumes its metal charge."),
+        categories: [Utility, Pyrotechnics], intentionally_inert: true,
+    ),
+    (
+        id: "tesla_residue", name: "Tesla Residue", color: (0.33, 0.59, 0.70), ph: 7.0,
+        treats: Some("An inert conductive residue left when Teslium releases its electrical charge."),
+        categories: [Utility, Pyrotechnics], intentionally_inert: true,
+    ),
+    (
+        // A full atmospheric gas simulation is outside scope. Released CO2
+        // instead performs its defining station job directly: suppressing
+        // nearby chemical fires and Burning status.
+        id: "carbon_dioxide", name: "Carbon Dioxide", color: (0.69, 0.69, 0.69), ph: 6.1,
+        treats: Some("A hot-synthesized atmospheric utility that extinguishes nearby chemical fires when released but causes choking in the bloodstream."),
+        categories: [Utility], metabolism: Some(0.4),
+        effects: [Status(kind: Choking, seconds: 3.0, intensity: 0.75)],
+        world_effects: [Extinguish(radius: 3.0, seconds: 8.0)],
+    ),
+    (
+        // ChemGame has no generic combat-mode toggle. Pacified is narrower
+        // and readable: it stops hostile NPC pursuit/attacks without slowing,
+        // sedating, or taking normal controls from a player.
+        id: "pax", name: "Pax", color: (0.67, 0.67, 0.67), ph: 7.0,
+        controlled: true,
+        treats: Some("A controlled pacification drug that calms paranoia and temporarily prevents hostile NPC pursuit without sedating the subject."),
+        categories: [Utility, Poisons], metabolism: Some(0.1),
+        effects: [
+            Counter(kind: Paranoid, seconds: 4.0, intensity: 2.0),
+            Status(kind: Pacified, seconds: 4.0, intensity: 1.0),
+        ],
     ),
 ]

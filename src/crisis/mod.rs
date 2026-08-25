@@ -315,6 +315,7 @@ fn afflict_victim(
         Order {
             reagent: cure,
             specific: false,
+            minimum_purity: 0.0,
             // Only the *cure* is clamped. `harm_amount` above is what the
             // casualty was dosed with before they walked in — a poisoning is
             // meant to be past the threshold, and that is the whole crisis.

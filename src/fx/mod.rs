@@ -256,6 +256,11 @@ fn status_color(kind: StatusKind) -> Color {
         StatusKind::Choking => Color::srgb(0.18, 0.36, 0.72),
         StatusKind::Mutating => Color::srgb(0.60, 0.10, 0.67),
         StatusKind::Focused => Color::srgb(0.16, 0.56, 1.00),
+        StatusKind::Happiness => Color::srgb(1.00, 0.74, 0.18),
+        StatusKind::Sadness => Color::srgb(0.20, 0.30, 0.58),
+        StatusKind::Obscured => Color::srgb(0.18, 0.07, 0.30),
+        StatusKind::Muted => Color::srgb(0.72, 0.78, 0.82),
+        StatusKind::Pacified => Color::srgb(0.58, 0.78, 0.72),
     }
 }
 
@@ -527,7 +532,8 @@ fn status_tint(base: Color, blood: &ChemBloodstream) -> Color {
         b += (target.blue - b) * amount;
     }
 
-    Color::srgb(r, g, b)
+    let alpha = (1.0 - blood.concealment()).clamp(0.20, 1.0);
+    Color::srgba(r, g, b, alpha)
 }
 
 fn body_scale(blood: &ChemBloodstream, t: f32) -> Vec3 {
@@ -569,7 +575,13 @@ fn animate_chemist_body(
         let Ok(blood) = bloods.get(surface.chemist) else {
             continue;
         };
-        apply_part_tint(&mut materials, &material.0, surface.base_color, &blood.0);
+        apply_part_tint(
+            &mut materials,
+            &material.0,
+            surface.base_color,
+            &surface.base_alpha_mode,
+            &blood.0,
+        );
     }
 }
 
@@ -612,16 +624,26 @@ fn apply_part_tint(
     materials: &mut Assets<StandardMaterial>,
     handle: &Handle<StandardMaterial>,
     base_color: Color,
+    base_alpha_mode: &AlphaMode,
     blood: &chem_sim::Bloodstream,
 ) {
     let tint = status_tint(base_color, blood);
+    let alpha_mode = if tint.to_srgba().alpha < 0.999 {
+        AlphaMode::Blend
+    } else {
+        *base_alpha_mode
+    };
     // Peeked through the immutable getter first: reaching for `get_mut` at all
     // is what dirties the asset, so the comparison has to happen before it.
-    if materials.get(handle).is_some_and(|m| m.base_color == tint) {
+    if materials
+        .get(handle)
+        .is_some_and(|m| m.base_color == tint && m.alpha_mode == alpha_mode)
+    {
         return;
     }
     if let Some(mut material) = materials.get_mut(handle) {
         material.base_color = tint;
+        material.alpha_mode = alpha_mode;
     }
 }
 
@@ -651,7 +673,13 @@ fn animate_crew_body(
         let Ok(blood) = bloods.get(surface.crew) else {
             continue;
         };
-        apply_part_tint(&mut materials, &material.0, surface.base_color, &blood.0);
+        apply_part_tint(
+            &mut materials,
+            &material.0,
+            surface.base_color,
+            &surface.base_alpha_mode,
+            &blood.0,
+        );
     }
 }
 
@@ -692,7 +720,13 @@ fn animate_test_subject(
         let Ok(blood) = bloods.get(surface.subject) else {
             continue;
         };
-        apply_part_tint(&mut materials, &material.0, surface.base_color, &blood.0);
+        apply_part_tint(
+            &mut materials,
+            &material.0,
+            surface.base_color,
+            &surface.base_alpha_mode,
+            &blood.0,
+        );
     }
 }
 
@@ -749,6 +783,23 @@ mod tests {
         assert!(tinted.green > tinted.red && tinted.green > tinted.blue);
         assert!(tinted.red < base.red);
         assert!(tinted.blue < base.blue);
+    }
+
+    #[test]
+    fn obscured_status_fades_the_body_without_erasing_it() {
+        let mut blood = ChemBloodstream::default();
+        blood.add_status(StatusKind::Obscured, 4.0, 1.5);
+
+        let tinted = status_tint(Color::WHITE, &blood).to_srgba();
+        assert!(
+            tinted.alpha < 0.5,
+            "concealment should visibly fade the body"
+        );
+        assert!(
+            tinted.alpha >= 0.2,
+            "the wearer must remain readable and targetable"
+        );
+        assert!(blood.concealment() > 0.0);
     }
 
     #[test]

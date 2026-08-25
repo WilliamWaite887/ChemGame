@@ -134,6 +134,9 @@ impl Departments {
 pub struct CrewDef {
     pub name: String,
     pub role: String,
+    /// Retained for compatibility with the authored roster; the current
+    /// department outfit system supplies presentation color instead.
+    #[allow(dead_code)]
     pub color: [f32; 3],
 }
 
@@ -371,6 +374,7 @@ pub(crate) struct CrewBody {
 pub(crate) struct CrewSurface {
     pub(crate) crew: Entity,
     pub(crate) base_color: Color,
+    pub(crate) base_alpha_mode: AlphaMode,
 }
 
 #[derive(Component)]
@@ -617,11 +621,13 @@ fn tag_crew_surfaces(
             continue;
         };
         let base_color = source.base_color;
+        let base_alpha_mode = source.alpha_mode;
         commands.entity(entity).insert((
             MeshMaterial3d(materials.add(source)),
             CrewSurface {
                 crew: visual.crew,
                 base_color,
+                base_alpha_mode,
             },
         ));
     }
@@ -825,8 +831,9 @@ fn start_crew_at_their_department(
 }
 
 /// Crew respond to mind/body chemistry instead of merely carrying a hidden
-/// bloodstream. Drowsy people abandon their visit, paranoid people flee, and
-/// a chemically incapacitated person remains down until the sedative clears;
+/// bloodstream. Drowsy or paranoid people abandon their visit, Happiness
+/// makes residents linger socially, and strong Sadness makes them withdraw.
+/// A chemically incapacitated person remains down until the sedative clears;
 /// their already-marked leaving route then resumes toward help.
 fn react_to_chemical_statuses(
     mut crew: Query<(&Bloodstream, &mut CrewRoute, Option<&mut Ambient>)>,
@@ -834,19 +841,27 @@ fn react_to_chemical_statuses(
     for (blood, mut route, ambient) in &mut crew {
         let sedated = blood.0.status(StatusKind::Sedated).intensity > 0.0;
         let paranoid = blood.0.status(StatusKind::Paranoid).intensity > 0.0;
-        if route.phase != CrewPhase::Leaving && (sedated || paranoid || blood.0.incapacitated()) {
+        let sadness = blood.0.status(StatusKind::Sadness).intensity;
+        if route.phase != CrewPhase::Leaving
+            && (sedated || paranoid || sadness >= 0.75 || blood.0.incapacitated())
+        {
             route.leave();
         }
 
         // Euphoric residents linger instead of immediately resuming their
         // station circuit: benign and social, distinct from drunken
         // staggering or paranoia's flight response.
-        if blood.0.status(StatusKind::Euphoric).intensity > 0.0
-            && route.pending.is_none()
-            && route.index >= route.waypoints.len()
-        {
+        let euphoria = blood.0.status(StatusKind::Euphoric).intensity;
+        let happiness = blood.0.status(StatusKind::Happiness).intensity;
+        let positive_mood = euphoria.max(happiness);
+        if positive_mood > 0.0 && route.pending.is_none() && route.index >= route.waypoints.len() {
             if let Some(mut ambient) = ambient {
-                ambient.dwell = ambient.dwell.max(2.5);
+                let linger = if happiness > 0.0 {
+                    2.5 + happiness.min(2.0)
+                } else {
+                    2.5
+                };
+                ambient.dwell = ambient.dwell.max(linger);
             }
         }
     }
@@ -1330,6 +1345,7 @@ mod tests {
             crate::orders::Order {
                 reagent: chem_sim::ReagentId(0),
                 specific: false,
+                minimum_purity: 0.0,
                 amount: Units::whole(5),
                 plea: "Regression test order".to_string(),
                 patience: 60.0,
@@ -1625,6 +1641,43 @@ mod tests {
         app.update();
 
         assert_eq!(app.world().get::<Ambient>(resident).unwrap().dwell, 2.5);
+    }
+
+    #[test]
+    fn happiness_and_sadness_change_npc_social_behavior() {
+        let mut app = App::new();
+        app.add_systems(Update, react_to_chemical_statuses);
+
+        let route = || CrewRoute {
+            waypoints: Vec::new(),
+            index: 0,
+            phase: CrewPhase::Waiting,
+            pending: None,
+            counter_bound: false,
+            delivery_lane: DeliveryLane::Public,
+            lane_offset: 0.0,
+        };
+        let mut happy_blood = Bloodstream::default();
+        happy_blood.0.add_status(StatusKind::Happiness, 10.0, 1.5);
+        let happy = app
+            .world_mut()
+            .spawn((happy_blood, route(), Ambient { dwell: 0.1 }))
+            .id();
+
+        let mut sad_blood = Bloodstream::default();
+        sad_blood.0.add_status(StatusKind::Sadness, 10.0, 1.0);
+        let sad = app
+            .world_mut()
+            .spawn((sad_blood, route(), Ambient { dwell: 8.0 }))
+            .id();
+
+        app.update();
+
+        assert_eq!(app.world().get::<Ambient>(happy).unwrap().dwell, 4.0);
+        assert_eq!(
+            app.world().get::<CrewRoute>(sad).unwrap().phase,
+            CrewPhase::Leaving
+        );
     }
 
     #[test]

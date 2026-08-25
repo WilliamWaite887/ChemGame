@@ -80,6 +80,7 @@ impl Plugin for AddictionPlugin {
                 (
                     promote_script,
                     note_doses,
+                    treat_opioid_habits,
                     notice_the_high,
                     generate_addict_visits,
                     handle_addict_resolutions,
@@ -319,6 +320,67 @@ fn note_doses(
     }
 }
 
+/// Naloxone reduces persistent opioid dependence on the same slow clock that
+/// records addictive doses. Its ordinary reagent effects handle the immediate
+/// overdose; this is the career-persistent half of the treatment.
+///
+/// The list is intentionally narrow. ChemGame does not yet carry drug-family
+/// tags, and treating a methamphetamine or Hyperzine habit with an opioid
+/// antagonist would be worse than an explicit, auditable adaptation.
+const NALOXONE_RECOVERY_PER_READ: f64 = 1.0;
+
+fn is_opioid_habit(reagent: &str) -> bool {
+    matches!(reagent, "morphine" | "krokodil" | "fentanyl")
+}
+
+fn treat_opioid_habits(
+    db: Res<ChemDb>,
+    script: Option<Res<Script>>,
+    clock: Option<Res<DoseClock>>,
+    mut addictions: ResMut<Addictions>,
+    crew: Query<(&CrewMember, &Bloodstream)>,
+) {
+    let (Some(script), Some(clock), Some(naloxone)) =
+        (script, clock, db.reagents.id_of("naloxone"))
+    else {
+        return;
+    };
+    if !clock.0.just_finished() {
+        return;
+    }
+
+    let treated: Vec<String> = crew
+        .iter()
+        .filter(|(_, blood)| blood.0.blood.volume_of(naloxone) >= Units::ONE)
+        .filter_map(|(member, _)| {
+            addictions
+                .0
+                .get(&member.name)
+                .is_some_and(|habit| is_opioid_habit(&habit.reagent))
+                .then(|| member.name.clone())
+        })
+        .collect();
+    if treated.is_empty() {
+        return;
+    }
+
+    for name in &treated {
+        let habit = addictions
+            .0
+            .get_mut(name)
+            .expect("the read-only treatment scan found this habit");
+        habit.weight = (habit.weight - NALOXONE_RECOVERY_PER_READ).max(0.0);
+        habit.dry_for = 0.0;
+        habit.withdrawn = false;
+    }
+    // A fully treated trace no longer needs a persistent save entry. A habit
+    // below `hooked_at` remains as partial exposure, so relapse still has a
+    // readable cost rather than Naloxone acting as a complete memory wipe.
+    addictions
+        .0
+        .retain(|_, habit| habit.weight > 0.0 || habit.hooked(&script));
+}
+
 // ---------------------------------------------------------------------------
 // The risk
 // ---------------------------------------------------------------------------
@@ -475,6 +537,7 @@ fn generate_addict_visits(
         Order {
             reagent,
             specific: false,
+            minimum_purity: 0.0,
             amount,
             plea: plea.clone(),
             patience,
@@ -655,7 +718,13 @@ mod tests {
             .add_message::<OrderResolved>()
             .add_systems(
                 Update,
-                (note_doses, notice_the_high, handle_withdrawal).chain(),
+                (
+                    note_doses,
+                    treat_opioid_habits,
+                    notice_the_high,
+                    handle_withdrawal,
+                )
+                    .chain(),
             );
         app
     }
@@ -765,6 +834,80 @@ mod tests {
         }
 
         assert!(app.world().resource::<Addictions>().0.is_empty());
+    }
+
+    #[test]
+    fn naloxone_treatment_reduces_an_opioid_habit_and_resets_withdrawal() {
+        let mut app = addiction_app();
+        dosed_crew(&mut app, "Dr. Vance", "Medical", "naloxone", 10);
+        let hooked_at = app.world().resource::<Script>().hooked_at;
+        app.world_mut().resource_mut::<Addictions>().0.insert(
+            "Dr. Vance".to_string(),
+            Habit {
+                reagent: "morphine".to_string(),
+                weight: hooked_at + 0.4,
+                dry_for: 500.0,
+                withdrawn: true,
+            },
+        );
+
+        let tick = interval(&app);
+        advance(&mut app, tick + 0.01);
+
+        let addictions = app.world().resource::<Addictions>();
+        let habit = &addictions.0["Dr. Vance"];
+        assert!(
+            habit.weight < hooked_at,
+            "one course should break a new habit"
+        );
+        assert_eq!(habit.dry_for, 0.0);
+        assert!(!habit.withdrawn);
+    }
+
+    #[test]
+    fn naloxone_treatment_recognizes_a_fentanyl_habit_as_opioid_dependence() {
+        let mut app = addiction_app();
+        dosed_crew(&mut app, "Dr. Vance", "Medical", "naloxone", 10);
+        app.world_mut().resource_mut::<Addictions>().0.insert(
+            "Dr. Vance".to_string(),
+            Habit {
+                reagent: "fentanyl".to_string(),
+                weight: 5.0,
+                dry_for: 100.0,
+                withdrawn: true,
+            },
+        );
+
+        let tick = interval(&app);
+        advance(&mut app, tick + 0.01);
+
+        let addictions = app.world().resource::<Addictions>();
+        let habit = &addictions.0["Dr. Vance"];
+        assert_eq!(habit.weight, 4.0);
+        assert_eq!(habit.dry_for, 0.0);
+        assert!(!habit.withdrawn);
+    }
+
+    #[test]
+    fn naloxone_does_not_treat_a_stimulant_habit() {
+        let mut app = addiction_app();
+        dosed_crew(&mut app, "Dr. Vance", "Medical", "naloxone", 10);
+        app.world_mut().resource_mut::<Addictions>().0.insert(
+            "Dr. Vance".to_string(),
+            Habit {
+                reagent: "methamphetamine".to_string(),
+                weight: 5.0,
+                dry_for: 20.0,
+                withdrawn: false,
+            },
+        );
+
+        let tick = interval(&app);
+        advance(&mut app, tick + 0.01);
+
+        let addictions = app.world().resource::<Addictions>();
+        assert_eq!(addictions.0["Dr. Vance"].weight, 5.0);
+        assert!(addictions.0["Dr. Vance"].dry_for > 20.0);
     }
 
     // -- the risk ----------------------------------------------------------

@@ -369,6 +369,7 @@ pub(crate) struct ChemistBody {
 pub(crate) struct ChemistSurface {
     pub(crate) chemist: Entity,
     pub(crate) base_color: Color,
+    pub(crate) base_alpha_mode: AlphaMode,
 }
 
 #[derive(Component)]
@@ -489,11 +490,13 @@ fn tag_chemist_surfaces(
             continue;
         };
         let base_color = source.base_color;
+        let base_alpha_mode = source.alpha_mode;
         commands.entity(entity).insert((
             MeshMaterial3d(materials.add(source)),
             ChemistSurface {
                 chemist: visual.chemist,
                 base_color,
+                base_alpha_mode,
             },
         ));
     }
@@ -952,6 +955,35 @@ fn push_out(position: Vec3, center: Vec3, half_extents: Vec3) -> Vec3 {
         resolved.z += overlap_z * dz.signum();
     }
     resolved
+}
+
+/// Resolves an externally-forced body displacement against the same walls and
+/// walkable floors as ordinary player movement. Chemical pulses use this so a
+/// dramatic shove cannot put a player through a wall or outside the station.
+pub(crate) fn resolve_forced_body_position<'a>(
+    start: Vec3,
+    displacement: Vec3,
+    solids: impl IntoIterator<Item = (&'a Transform, &'a Solid)> + Clone,
+    areas: Option<&lab::WalkableAreas>,
+) -> Vec3 {
+    // Resolve in short segments. Checking only the final destination lets a
+    // strong pulse tunnel clean through a thin wall when that destination is
+    // already beyond the solid's far face.
+    let segments = (displacement.length() / (PLAYER_RADIUS * 0.5))
+        .ceil()
+        .max(1.0) as usize;
+    let step = displacement / segments as f32;
+    let mut position = start;
+    for _ in 0..segments {
+        position += step;
+        for (solid_transform, solid) in solids.clone() {
+            position = push_out(position, solid_transform.translation, solid.half_extents);
+        }
+        if let Some(areas) = areas {
+            position = areas.contain_on_surface(position, PLAYER_RADIUS, EYE_HEIGHT);
+        }
+    }
+    position
 }
 
 #[cfg(test)]

@@ -21,7 +21,7 @@ use crate::chem_data::ChemDb;
 use crate::chem_world::{
     assess_exposure, order_authorizes_dose, spawn_puddle, ChemicalExposure, ExposureSource,
 };
-use crate::containers::{Container, ContainerKind, HeldBy};
+use crate::containers::{ArmedCharge, Container, ContainerKind, HeldBy};
 use crate::machines::{chemist_entity, ReactionsFired};
 use crate::net::is_authority;
 use crate::player::Chemist;
@@ -298,10 +298,36 @@ fn handle_apply_held(
         };
         let kind = container.kind;
 
+        // A chemical charge is sealed. F is deliberately not another way to
+        // pour or splash its payload.
+        if kind.charge_fuse().is_some() {
+            continue;
+        }
+
+        if kind == ContainerKind::PhPaper {
+            let Some(target) = request.target.filter(|target| *target != held_entity) else {
+                continue;
+            };
+            let Ok(sample) = containers.get(target) else {
+                continue;
+            };
+            if sample.solution.is_empty() {
+                continue;
+            }
+            let reading = ContainerKind::used_ph_paper(sample.solution.ph());
+            if let Ok(mut strip) = containers.get_mut(held_entity) {
+                strip.kind = reading;
+            }
+            commands
+                .entity(held_entity)
+                .insert(crate::interaction::Interactable::new(reading.label()));
+            continue;
+        }
+
         if kind != ContainerKind::Syringe {
             // A pill has no open liquid surface; R remains its only deliberate
             // use. Beakers and bottles share the hand-pour interaction.
-            if kind == ContainerKind::Pill {
+            if matches!(kind, ContainerKind::Pill | ContainerKind::Patch) {
                 continue;
             }
 
@@ -315,7 +341,7 @@ fn handle_apply_held(
                     if !amount.is_positive() {
                         continue;
                     }
-                    let moved = containers
+                    let mut moved = containers
                         .get_mut(held_entity)
                         .map(|mut source| source.mutate(&db, |solution| solution.split(amount)).0)
                         .unwrap_or_else(|_| chem_sim::Solution::unbounded());
@@ -333,9 +359,8 @@ fn handle_apply_held(
                                     + moved.temperature.0 * moved_volume)
                                     / combined;
                             }
-                            for (reagent, amount) in moved.iter() {
-                                let _ = solution.add(reagent, amount);
-                            }
+                            let moved_volume = moved.total_volume();
+                            let _ = moved.transfer_to(solution, moved_volume);
                         });
                         if let Some(message) = ReactionsFired::from_report(target, &report) {
                             fired.write(message);
@@ -442,7 +467,7 @@ fn handle_apply_held(
 
             // Proportional, because `transfer_to` is: you cannot syringe the
             // oxygen out of a mixed beaker and leave the sugar behind.
-            let drawn = {
+            let mut drawn = {
                 let Ok(mut source) = containers.get_mut(source_entity) else {
                     continue;
                 };
@@ -450,9 +475,8 @@ fn handle_apply_held(
             };
             if let Ok(mut syringe) = containers.get_mut(held_entity) {
                 syringe.mutate(&db, |solution| {
-                    for (reagent, amount) in drawn.iter() {
-                        let _ = solution.add(reagent, amount);
-                    }
+                    let drawn_volume = drawn.total_volume();
+                    let _ = drawn.transfer_to(solution, drawn_volume);
                 });
             }
             continue;
@@ -547,8 +571,26 @@ fn handle_consume(
             continue;
         };
 
+        if let Some(fuse) = container.kind.charge_fuse() {
+            let position = transforms
+                .get(player)
+                .map(|transform| transform.translation + transform.forward() * 0.45)
+                .unwrap_or(Vec3::ZERO);
+            commands.entity(entity).remove::<HeldBy>().insert((
+                ArmedCharge {
+                    remaining_secs: fuse,
+                    owner: player,
+                },
+                Transform::from_translation(position),
+            ));
+            continue;
+        }
+        if container.kind == ContainerKind::SprayBottle {
+            continue;
+        }
+
         // A pill is swallowed whole; anything you drink from gives a mouthful.
-        let whole = matches!(container.kind, ContainerKind::Pill);
+        let whole = matches!(container.kind, ContainerKind::Pill | ContainerKind::Patch);
         let amount = if whole {
             container.solution.total_volume()
         } else {
@@ -560,14 +602,17 @@ fn handle_consume(
         }
 
         let snapshot = dose.clone();
-        let assessment = assess_exposure(&snapshot, Route::Ingested, &body, &blood, &db);
-        blood
-            .0
-            .receive(&mut dose, Route::Ingested, &mut body.0, &db);
+        let route = if container.kind == ContainerKind::Patch {
+            Route::Patched
+        } else {
+            Route::Ingested
+        };
+        let assessment = assess_exposure(&snapshot, route, &body, &blood, &db);
+        blood.0.receive(&mut dose, route, &mut body.0, &db);
         exposures.write(ChemicalExposure {
             actor: Some(player),
             target: player,
-            route: Route::Ingested,
+            route,
             source: ExposureSource::Direct,
             solution: snapshot,
             authorized: true,
@@ -1088,6 +1133,45 @@ mod tests {
     }
 
     #[test]
+    fn ph_paper_consumes_one_strip_and_reports_only_an_approximate_band() {
+        let mut app = test_app();
+        let (_player, strip) = chemist_holding(&mut app, ContainerKind::PhPaper, "water", 0);
+        let db = app.world().resource::<ChemDb>().0.clone();
+        let acid = db.reagent("sulphuric_acid");
+        let mut sample = Container::new(ContainerKind::Beaker);
+        let _ = sample
+            .solution
+            .add_profiled(acid, Units::whole(10), 1.0, db.reagents.get(acid).ph);
+        let target = app
+            .world_mut()
+            .spawn((sample, Transform::from_xyz(1.0, 1.0, 0.0)))
+            .id();
+
+        apply(&mut app, Some(target));
+
+        assert_eq!(
+            app.world().get::<Container>(strip).unwrap().kind,
+            ContainerKind::PhPaperStrongAcid
+        );
+        assert_eq!(
+            app.world()
+                .get::<crate::interaction::Interactable>(strip)
+                .unwrap()
+                .label,
+            "pH Paper — strong acid (0–2)"
+        );
+        assert_eq!(
+            app.world()
+                .get::<Container>(target)
+                .unwrap()
+                .solution
+                .total_volume(),
+            Units::whole(10),
+            "testing does not consume the sample"
+        );
+    }
+
+    #[test]
     fn a_syringe_draws_up_to_its_capacity_and_no_further() {
         let mut app = test_app();
         let (_, syringe) = chemist_holding(&mut app, ContainerKind::Syringe, "water", 0);
@@ -1308,6 +1392,7 @@ mod tests {
                 crate::orders::Order {
                     reagent: arithrazine,
                     specific: true,
+                    minimum_purity: 0.0,
                     amount: Units::whole(10),
                     plea: String::new(),
                     patience: 30.0,

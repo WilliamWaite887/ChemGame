@@ -611,6 +611,10 @@ fn update_prompt(
                     .and_then(|(_, container)| {
                         let empty = container.solution.total_volume().is_zero();
                         match (container.kind, empty) {
+                            (ContainerKind::PhPaper, _) => focus
+                                .target
+                                .filter(|target| containers.contains(*target))
+                                .map(|_| "[F]  test approximate pH".to_string()),
                             (ContainerKind::Syringe, true) => focus
                                 .target
                                 .filter(|target| containers.contains(*target))
@@ -618,6 +622,13 @@ fn update_prompt(
                             (ContainerKind::Syringe, false) => Some("[F]  inject".to_string()),
                             (_, true) => None,
                             (ContainerKind::Pill, false) => Some("[R]  swallow".to_string()),
+                            (ContainerKind::Patch, false) => Some("[R]  apply patch".to_string()),
+                            (ContainerKind::SprayBottle, false) => {
+                                Some("[F]  spray chemical".to_string())
+                            }
+                            (kind, false) if kind.charge_fuse().is_some() => {
+                                Some("[R]  arm and place charge".to_string())
+                            }
                             (kind, false) => {
                                 let application = match focus.target {
                                     Some(target) if containers.contains(target) => {

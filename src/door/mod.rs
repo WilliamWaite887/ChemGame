@@ -1,22 +1,3 @@
-//! Map-authored automatic sliding airlocks for department entrances and
-//! maintenance crossovers. Each door keeps a stable semantic identity and a
-//! matching navigation bridge across hot reload and replication.
-//!
-//! Two sprite-faced slabs, the same "scaled unit cube" style as the rest of
-//! the lab (there is no glTF/scene-loading pipeline in this codebase to load a
-//! modelled one from) — but real state: a closed door blocks the player like a
-//! wall, not just looks shut. The powered proximity entrance remains
-//! traversable to route planning so approaching crew can reach its sensor and
-//! open it themselves.
-//!
-//! A door is exactly as tall as its opening, so a shut one seals the doorway
-//! to the ceiling rather than leaving a strip of the next room over the top.
-//! Its face comes from one `assets/textures/door_*.png` per department, each
-//! the whole closed double door; the two leaves show the left and right halves
-//! of it through a UV transform, so the parting line drawn down the middle of
-//! the sprite lands on the joint between them. See [`DoorSkin`] for why a
-//! maintenance crossover is the one door that wears no department color.
-//!
 //! [`Door`] follows the exact shape `machines::Thermostat` already
 //! established for "a bool that must read the same on every peer": a plain
 //! replicated component, decided by the authority, reacted to everywhere
@@ -84,6 +65,9 @@ pub struct Door {
     pub bridge_id: String,
     pub along_x: bool,
     pub skin: DoorSkin,
+    /// Seconds the airlock remains failed open after an EMP.
+    #[serde(default)]
+    pub disabled_for: f32,
 }
 
 /// Which paint a door wears.
@@ -266,6 +250,7 @@ fn spawn_door_at(commands: &mut Commands, id: &str, placement: &DoorPlacement) {
             bridge_id: placement.bridge_id.clone(),
             along_x: along_x(placement.transform),
             skin: DoorSkin::from_spot_id(id),
+            disabled_for: 0.0,
         },
         placement.transform,
         Visibility::default(),
@@ -362,16 +347,21 @@ fn dress_door(
 /// `Transform` distance checks against the door's own position.
 #[allow(clippy::type_complexity)]
 fn decide_door_state(
+    time: Res<Time>,
     mut doors: Query<(&Transform, &mut Door, Option<&Corroded>)>,
     chemists: Query<&Transform, (With<Chemist>, Without<Door>)>,
     crew: Query<&Transform, (With<CrewMember>, Without<Chemist>, Without<Door>)>,
 ) {
     for (door_transform, mut door, corroded) in &mut doors {
+        door.disabled_for = (door.disabled_for - time.delta_secs()).max(0.0);
         let near = |transform: &Transform| {
             transform.translation.distance(door_transform.translation) <= DOOR_PROXIMITY
         };
         let breached = corroded.is_some_and(|corrosion| corrosion.strength >= STRUCTURAL_CORROSION);
-        let wants_open = breached || chemists.iter().any(near) || crew.iter().any(near);
+        let wants_open = door.disabled_for > 0.0
+            || breached
+            || chemists.iter().any(near)
+            || crew.iter().any(near);
         if door.open != wants_open {
             door.open = wants_open;
         }
@@ -436,7 +426,8 @@ mod tests {
 
     fn test_app() -> App {
         let mut app = App::new();
-        app.add_systems(Update, decide_door_state);
+        app.init_resource::<Time>()
+            .add_systems(Update, decide_door_state);
         app
     }
 
@@ -449,6 +440,7 @@ mod tests {
                     bridge_id: format!("test.{doorway_index}"),
                     along_x: run.along_x,
                     skin: DoorSkin::Chemistry,
+                    disabled_for: 0.0,
                 },
                 Transform::from_translation(run.point(center)),
             ))

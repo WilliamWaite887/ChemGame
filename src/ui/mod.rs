@@ -22,15 +22,15 @@ use crate::crew::{AtCounter, CrewMember};
 use crate::interaction::{leave_machine, Interactable, InteractionMode, LeaveMachineRequested};
 use crate::knowledge::{
     product_name, reaction_categories, BuyHintRequested, Knowledge, RecipeDiscovered,
-    UnlockAllRequested, UpgradeDispenserRequested, HINT_COST,
+    UnlockAllRequested, HINT_COST,
 };
 use crate::machines::{
     slotted_container, slotted_container_b, stored_in, AgitateDirection, AgitateRequested,
     AgitationRun, AnalyzeRequested, Buffer, BufferDirection, BufferTransferRequested,
     DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested, GrindRequested, Hopper,
-    Machine, MachineKind, MachineSlot, PackageRequested, SetHeaterPower, SetTargetTemperature,
-    TakeRequested, Thermostat, LOCKER_CAPACITY, TEMPERATURE_MARKS, TEMPERATURE_MAX,
-    TEMPERATURE_MIN,
+    HplcReport, Machine, MachineKind, MachineSlot, PackageRequested, PurifyRequested,
+    SetHeaterPower, SetTargetTemperature, TakeRequested, Thermostat, HPLC_RECIPE_REQUIREMENT,
+    LOCKER_CAPACITY, TEMPERATURE_MARKS, TEMPERATURE_MAX, TEMPERATURE_MIN,
 };
 use crate::orders::{reference_category, Department, DevelopmentOrder, Order, Shift};
 use crate::player::LocalPlayer;
@@ -112,6 +112,7 @@ impl Plugin for UiPlugin {
                 .run_if(in_state(AppState::Playing)),
         )
         .init_resource::<BookView>()
+        .init_resource::<HplcView>()
         .init_resource::<BoardTab>()
         .init_resource::<LastPanel>()
         .init_resource::<LastSignState>()
@@ -137,7 +138,6 @@ pub(crate) struct Selected;
 enum PanelAction {
     SetAmount(Units),
     Dispense(ReagentId),
-    UpgradeDispenser,
     UnlockAll,
     /// Which slot to act on. Every machine but the Mixing Chamber only ever
     /// has slot `A`; the panel bodies for those simply never build a `B`
@@ -152,14 +152,21 @@ enum PanelAction {
     Agitate(AgitateDirection),
     Package(ContainerKind),
     Analyze,
+    /// Locally highlights a band in the analyzer. The actual separation is
+    /// still requested by [`PanelAction::Purify`]'s single Start button.
+    SelectHplc(ReagentId),
+    Purify(ReagentId),
     Grind {
         all: bool,
     },
     TogglePower,
     BuyHint(ReactionId),
     ShowCategory(Option<Category>),
+    ShowBookFilter(BookFilter),
+    SetBookPage(usize),
     OpenRecipe(ReactionId),
     CloseRecipe,
+    CloseBook,
     ToggleAcceptingOrders,
     CallItAShift,
     OpenUpAgain,
@@ -195,11 +202,93 @@ enum BoardTab {
 /// Local presentation state: it is neither replicated nor saved, because which
 /// page a chemist happens to have open is nobody else's business and is not
 /// worth a line in `save.ron`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum BookFilter {
+    #[default]
+    All,
+    Recorded,
+    Ready,
+    Frontier,
+    Locked,
+}
+
+impl BookFilter {
+    const ALL: [Self; 5] = [
+        Self::All,
+        Self::Recorded,
+        Self::Ready,
+        Self::Frontier,
+        Self::Locked,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Recorded => "Recorded",
+            Self::Ready => "Ready",
+            Self::Frontier => "Frontier",
+            Self::Locked => "Locked",
+        }
+    }
+}
+
+/// How close a recipe is to being usable. This is deliberately based on the
+/// player's actual notebook and obtainable reagents, not on an authored tier:
+/// when they discover a precursor, its downstream methods move forward too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum RecipeState {
+    Recorded,
+    Ready,
+    Frontier,
+    Locked,
+}
+
+impl RecipeState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Recorded => "RECORDED",
+            Self::Ready => "READY TO STUDY",
+            Self::Frontier => "ON THE FRONTIER",
+            Self::Locked => "LOCKED",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Self::Recorded => GOOD_TEXT,
+            Self::Ready => Color::srgb(0.42, 0.76, 0.94),
+            Self::Frontier => Color::srgb(0.90, 0.72, 0.34),
+            Self::Locked => TEXT_DIM,
+        }
+    }
+}
+
 #[derive(Resource, Default)]
 struct BookView {
     category: Option<Category>,
+    filter: BookFilter,
+    page: usize,
     /// The recipe whose tree screen is open, if any. `None` is the list.
     open_recipe: Option<ReactionId>,
+}
+
+/// The analyzer band this player has highlighted.
+///
+/// Selection is presentation state, like the open page of the research book:
+/// it is neither saved nor replicated. The separation result itself remains
+/// authoritative and replicated through [`HplcReport`].
+#[derive(Resource, Default)]
+struct HplcView {
+    selected: Option<ReagentId>,
+}
+
+/// Local-only panel state bundled so [`sync_panel`] remains within Bevy's
+/// system-parameter arity while the book and analyzer each keep independent
+/// presentation state.
+#[derive(SystemParam)]
+struct PanelViews<'w> {
+    book: Res<'w, BookView>,
+    hplc: Res<'w, HplcView>,
 }
 
 /// Everything the open panel displays, flattened for comparison.
@@ -225,10 +314,20 @@ struct PanelSignature {
     mode: InteractionMode,
     container: Option<Entity>,
     contents: Vec<(ReagentId, Units)>,
+    /// Per-reagent purity and pH fingerprints. The HPLC renders these values,
+    /// and two reagents can trade quality while leaving the aggregate average
+    /// unchanged, so the aggregate `quality` tuple cannot invalidate it alone.
+    profiles: Vec<(ReagentId, i16, i16)>,
+    /// pH to two decimals and average purity to whole percent, matching the
+    /// visible readout. Buffering may change pH without changing any amount,
+    /// so `contents` alone cannot invalidate the panel.
+    quality: Option<(i16, i16)>,
     /// The Mixing Chamber's second beaker. `None` for every other machine,
     /// which never has one.
     container_b: Option<Entity>,
     contents_b: Vec<(ReagentId, Units)>,
+    profiles_b: Vec<(ReagentId, i16, i16)>,
+    quality_b: Option<(i16, i16)>,
     buffer: Vec<(ReagentId, Units)>,
     hopper: Vec<ProduceId>,
     /// What the open locker holds, already rendered to the lines the panel
@@ -245,11 +344,16 @@ struct PanelSignature {
     /// updates smoothly without rebuilding the entire panel every frame.
     agitation: Option<(Entity, MachineSlot, i32, i32)>,
     amount: Option<Units>,
+    /// Whole seconds of EMP lockout remaining. The coarse bucket keeps the
+    /// warning live without rebuilding a complex instrument every frame.
+    disabled_seconds: u16,
     known_recipes: usize,
     /// The book's open heading. Here rather than tracked separately because
     /// switching tab is exactly the same kind of change as any other: it
     /// alters what the panel shows, so it rebuilds the panel.
     book_category: Option<Category>,
+    book_filter: BookFilter,
+    book_page: usize,
     /// The recipe whose tree screen is open, if any — same rationale as
     /// `book_category`: opening or closing it changes what the panel shows.
     book_recipe: Option<ReactionId>,
@@ -291,6 +395,11 @@ struct PanelSignature {
     /// uses for exactly the same reason.
     temperature: Option<i32>,
     powered: bool,
+    /// Latest analyzer result, if this machine has run a separation.
+    hplc_report: Option<HplcReport>,
+    /// Local analyzer band selection. Included so choosing a row immediately
+    /// repaints the chromatogram and Start button without touching chemistry.
+    hplc_selection: Option<ReagentId>,
 }
 
 impl Default for PanelSignature {
@@ -305,16 +414,23 @@ impl Default for PanelSignature {
             mode: InteractionMode::UsingMachine(Entity::PLACEHOLDER),
             container: None,
             contents: Vec::new(),
+            profiles: Vec::new(),
+            quality: None,
             container_b: None,
             contents_b: Vec::new(),
+            profiles_b: Vec::new(),
+            quality_b: None,
             buffer: Vec::new(),
             hopper: Vec::new(),
             stored: Vec::new(),
             reacting: false,
             agitation: None,
             amount: None,
+            disabled_seconds: u16::MAX,
             known_recipes: usize::MAX,
             book_category: None,
+            book_filter: BookFilter::All,
+            book_page: 0,
             book_recipe: None,
             department_standing: Vec::new(),
             // Neither `true` nor `false` alone is guaranteed to differ from
@@ -331,6 +447,8 @@ impl Default for PanelSignature {
             arc: None,
             temperature: Some(i32::MAX),
             powered: true,
+            hplc_report: None,
+            hplc_selection: None,
         }
     }
 }
@@ -416,6 +534,26 @@ fn panel_temperature(kelvin: Kelvin) -> i32 {
     (kelvin.0 / 5.0).round() as i32
 }
 
+fn panel_quality(solution: &chem_sim::Solution) -> (i16, i16) {
+    (
+        (solution.ph() * 100.0).round() as i16,
+        (solution.average_purity() * 100.0).round() as i16,
+    )
+}
+
+fn panel_profiles(solution: &chem_sim::Solution) -> Vec<(ReagentId, i16, i16)> {
+    solution
+        .iter()
+        .map(|(reagent, _)| {
+            (
+                reagent,
+                (solution.purity_of(reagent) * 100.0).round() as i16,
+                (solution.reagent_ph(reagent) * 100.0).round() as i16,
+            )
+        })
+        .collect()
+}
+
 /// The optional fittings a panel draws from: not every machine has an amount
 /// dial, a buffer or a hopper, and the panel body decides what to do with the
 /// ones its machine happens to carry.
@@ -429,6 +567,7 @@ type MachineParts<'w, 's> = Query<
         Option<&'static Hopper>,
         Option<&'static Thermostat>,
         Option<&'static AgitationRun>,
+        Option<&'static HplcReport>,
     ),
 >;
 
@@ -581,7 +720,7 @@ fn sync_panel(
     containers: SlotContents,
     storage: StorageView,
     knowledge: Res<Knowledge>,
-    book: Res<BookView>,
+    views: PanelViews,
     catalog: Option<Res<ProduceCatalog>>,
     campaign: Option<Res<Campaign>>,
     arc_script: Option<Res<crate::arc::Script>>,
@@ -635,22 +774,30 @@ fn sync_panel(
         contents: loaded
             .map(|container| container.solution.iter().collect())
             .unwrap_or_default(),
+        profiles: loaded
+            .map(|container| panel_profiles(&container.solution))
+            .unwrap_or_default(),
+        quality: loaded.map(|container| panel_quality(&container.solution)),
         container_b: loaded_entity_b,
         contents_b: loaded_b
             .map(|container| container.solution.iter().collect())
             .unwrap_or_default(),
+        profiles_b: loaded_b
+            .map(|container| panel_profiles(&container.solution))
+            .unwrap_or_default(),
+        quality_b: loaded_b.map(|container| panel_quality(&container.solution)),
         buffer: machine_parts
-            .and_then(|(_, _, buffer, _, _, _)| buffer)
+            .and_then(|(_, _, buffer, _, _, _, _)| buffer)
             .map(|buffer| buffer.0.iter().collect())
             .unwrap_or_default(),
         hopper: machine_parts
-            .and_then(|(_, _, _, hopper, _, _)| hopper)
+            .and_then(|(_, _, _, hopper, _, _, _)| hopper)
             .map(|hopper| hopper.0.clone())
             .unwrap_or_default(),
         stored: stored.clone(),
         reacting,
         agitation: machine_parts
-            .and_then(|(_, _, _, _, _, run)| run)
+            .and_then(|(_, _, _, _, _, run, _)| run)
             .map(|run| {
                 (
                     run.destination,
@@ -660,11 +807,16 @@ fn sync_panel(
                 )
             }),
         amount: machine_parts
-            .and_then(|(_, amount, _, _, _, _)| amount)
+            .and_then(|(_, amount, _, _, _, _, _)| amount)
             .map(|a| a.0),
+        disabled_seconds: machine_parts
+            .map(|(machine, ..)| machine.disabled_for.ceil().max(0.0) as u16)
+            .unwrap_or(0),
         known_recipes: knowledge.known_count(),
-        book_category: book.category,
-        book_recipe: book.open_recipe,
+        book_category: views.book.category,
+        book_filter: views.book.filter,
+        book_page: views.book.page,
+        book_recipe: views.book.open_recipe,
         department_standing: Department::ALL
             .into_iter()
             .map(|dept| (dept, shift.standing(dept)))
@@ -682,8 +834,13 @@ fn sync_panel(
             .and(loaded)
             .map(|container| panel_temperature(container.solution.temperature)),
         powered: machine_parts
-            .and_then(|(_, _, _, _, thermostat, _)| thermostat)
+            .and_then(|(_, _, _, _, thermostat, _, _)| thermostat)
             .is_some_and(|thermostat| thermostat.powered),
+        hplc_report: machine_parts
+            .filter(|(machine, ..)| machine.kind == MachineKind::Analyzer)
+            .and_then(|(_, _, _, _, _, _, report)| report)
+            .copied(),
+        hplc_selection: views.hplc.selected,
     };
 
     if signature == previous.0 {
@@ -703,8 +860,7 @@ fn sync_panel(
             &mut commands,
             &db,
             &knowledge,
-            book.category,
-            book.open_recipe,
+            &views.book,
             at_machine.is_some(),
         );
         return;
@@ -712,7 +868,8 @@ fn sync_panel(
     if open_machine.is_none() {
         return;
     }
-    let Some((machine, amount, buffer, hopper, thermostat, agitation)) = machine_parts else {
+    let Some((machine, amount, buffer, hopper, thermostat, agitation, hplc_report)) = machine_parts
+    else {
         return;
     };
 
@@ -747,6 +904,16 @@ fn sync_panel(
                 ))
                 .with_children(|panel| {
                     panel.spawn(heading(machine.kind.label()));
+                    if machine.disabled_for > 0.0 {
+                        panel.spawn(label(
+                            format!(
+                                "⚠ ELECTROMAGNETIC LOCKOUT — controls recovering in {:.0}s",
+                                machine.disabled_for.ceil()
+                            ),
+                            15.0,
+                            ERROR_TEXT,
+                        ));
+                    }
 
                     match machine.kind {
                         MachineKind::ChemMaster5000 => {
@@ -756,7 +923,14 @@ fn sync_panel(
                             mixing_chamber_body(panel, &db, buffer, loaded, loaded_b, agitation);
                         }
                         MachineKind::Analyzer => {
-                            analyzer_body(panel, &db, &knowledge, loaded);
+                            analyzer_body(
+                                panel,
+                                &db,
+                                &knowledge,
+                                loaded,
+                                hplc_report,
+                                views.hplc.selected,
+                            );
                         }
                         MachineKind::Grinder => {
                             grinder_body(panel, &db, catalog.as_deref(), hopper, loaded, reacting);
@@ -777,7 +951,7 @@ fn sync_panel(
                             );
                         }
                         MachineKind::ReactionChamber => {
-                            heater_body(panel, &db, thermostat, loaded, reacting);
+                            heater_body(panel, &db, &knowledge, thermostat, loaded, reacting);
                         }
                         MachineKind::Locker => {
                             locker_body(panel, &stored);
@@ -1218,81 +1392,26 @@ fn dispenser_body(
         TEXT,
     ));
 
-    // One upgrade purchase unlocks a whole tier at once, replacing the old
-    // per-reagent unlock buttons below. Same "drawn dead rather than drawn
-    // live and silently doing nothing" rule `standing_board_body` already
-    // uses for an unaffordable requisition — clicking it either way sends
-    // the same request, and `Knowledge::upgrade_dispenser` re-checks
-    // affordability server-side, so a dead button is just inert, never wrong.
-    if let Some(cost) = knowledge.next_upgrade_cost() {
-        let affordable = knowledge.research_points >= cost;
-        let caption = format!(
-            "Upgrade dispenser to tier {}  ({cost} research)",
-            knowledge.dispenser_tier() + 1
-        );
-        let mut entity = panel.spawn(button(caption, PanelAction::UpgradeDispenser));
-        if !affordable {
-            entity.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
-        }
-    }
-
-    if knowledge.next_upgrade_cost().is_some() || knowledge.known_count() < db.reactions.len() {
+    if knowledge.known_count() < db.reactions.len() {
         panel.spawn(button(
             "PLAYTEST: unlock all chemistry",
             PanelAction::UnlockAll,
         ));
     }
 
-    // Grouped by tier rather than the old flat, unsorted list — locked and
-    // unlocked reagents no longer interleave, and each tier reads as one
-    // step of the dispenser's own progression rather than 17 separate
-    // purchases.
+    // Every standard base reagent is available immediately. Complexity now
+    // comes from recipes, process control and sourced ingredients.
     let mut reagents: Vec<&chem_sim::Reagent> = db.reagents.dispensable().collect();
-    reagents.sort_by(|a, b| a.tier.cmp(&b.tier).then_with(|| a.name.cmp(&b.name)));
-
-    let mut index = 0;
-    while index < reagents.len() {
-        let tier = reagents[index].tier;
-        let end = reagents[index..].partition_point(|r| r.tier == tier) + index;
-        let unlocked = knowledge.dispenser_tier() >= tier;
-
-        panel.spawn(label(
-            if tier == 0 {
-                "Starting".to_string()
-            } else {
-                format!("Tier {tier}")
-            },
-            12.0,
-            TEXT_DIM,
-        ));
-        // Only the very next tier previews its reagents by name — a chemist
-        // can see what the *next* upgrade buys, but anything further out
-        // stays a mystery until they've climbed that far, so the tier list
-        // reads as a roadmap rather than a spoiler.
-        let revealed = tier <= knowledge.dispenser_tier() + 1;
-        panel.spawn(wrap_row()).with_children(|row| {
-            for reagent in &reagents[index..end] {
-                if unlocked {
-                    row.spawn(button(
-                        reagent.name.clone(),
-                        PanelAction::Dispense(reagent.id),
-                    ));
-                } else {
-                    // Not yet unlocked at this dispenser tier: shown so a
-                    // chemist can see what's coming, but inert — upgrading
-                    // is the only way to reach it, not a per-reagent buy.
-                    let caption = if revealed {
-                        reagent.name.clone()
-                    } else {
-                        "???".to_string()
-                    };
-                    let mut entity = row.spawn(button(caption, PanelAction::Dispense(reagent.id)));
-                    entity.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
-                }
-            }
-        });
-        index = end;
-    }
+    reagents.sort_by(|a, b| a.name.cmp(&b.name));
+    panel.spawn(label("Base stock", 12.0, TEXT_DIM));
+    panel.spawn(wrap_row()).with_children(|row| {
+        for reagent in reagents {
+            row.spawn(button(
+                reagent.name.clone(),
+                PanelAction::Dispense(reagent.id),
+            ));
+        }
+    });
 
     container_readout(panel, db, loaded, reacting, true);
 }
@@ -1331,127 +1450,652 @@ fn temp_at_fraction(fraction: f32) -> f32 {
     TEMPERATURE_MIN + (TEMPERATURE_MAX - TEMPERATURE_MIN) * fraction.clamp(0.0, 1.0)
 }
 
-/// The reaction chamber: a dial, a switch, and a thermometer.
-///
-/// Deliberately spare. The machine does nothing on its own — everything
-/// interesting happens because the chemistry noticed the temperature changed —
-/// so the panel's whole job is telling you where you are and where you are
-/// headed.
+#[derive(Clone, Debug, PartialEq)]
+struct ChamberForecast {
+    product: String,
+    target: String,
+    ph_target: Option<PhTarget>,
+    lines: Vec<String>,
+    ready: bool,
+    hazardous: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PhTarget {
+    min: f32,
+    max: f32,
+    optimum: Option<f32>,
+}
+
+fn reaction_is_hazardous(reaction: &chem_sim::Reaction, temperature: Kelvin) -> bool {
+    reaction.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            chem_sim::ReactionEffect::Explosion(_)
+                | chem_sim::ReactionEffect::ExplosionProfile { .. }
+                | chem_sim::ReactionEffect::Pulse { .. }
+                | chem_sim::ReactionEffect::PulseProfile { .. }
+                | chem_sim::ReactionEffect::Emp(_)
+                | chem_sim::ReactionEffect::EmpProfile { .. }
+                | chem_sim::ReactionEffect::Electric(_)
+                | chem_sim::ReactionEffect::ElectricProfile { .. }
+        )
+    }) || (reaction.is_overheated(temperature)
+        && matches!(reaction.overheat, chem_sim::Overheat::Detonate { .. }))
+}
+
+fn chamber_target(reaction: &chem_sim::Reaction) -> String {
+    let mut controls = Vec::new();
+    match (reaction.min_temp, reaction.max_temp) {
+        (Some(minimum), Some(maximum)) => {
+            controls.push(format!("{:.0}–{:.0}K", minimum.0, maximum.0));
+        }
+        (Some(minimum), None) => controls.push(format!("≥{:.0}K", minimum.0)),
+        (None, Some(maximum)) => controls.push(format!("≤{:.0}K", maximum.0)),
+        (None, None) => {}
+    }
+    match (reaction.min_ph, reaction.max_ph) {
+        (Some(minimum), Some(maximum)) => controls.push(format!("pH {minimum:.1}–{maximum:.1}")),
+        (Some(minimum), None) => controls.push(format!("pH ≥{minimum:.1}")),
+        (None, Some(maximum)) => controls.push(format!("pH ≤{maximum:.1}")),
+        (None, None) => {}
+    }
+    if let Some(minimum) = reaction.min_purity {
+        controls.push(format!("≥{:.0}% pure", minimum * 100.0));
+    }
+    if controls.is_empty() {
+        "ambient".to_string()
+    } else {
+        controls.join("  ·  ")
+    }
+}
+
+fn ph_target(reaction: &chem_sim::Reaction) -> Option<PhTarget> {
+    (reaction.min_ph.is_some() || reaction.max_ph.is_some()).then_some(PhTarget {
+        min: reaction.min_ph.unwrap_or(0.0),
+        max: reaction.max_ph.unwrap_or(14.0),
+        optimum: reaction.optimal_ph,
+    })
+}
+
+fn represented_chamber_reactions<'a>(
+    db: &'a ChemDb,
+    knowledge: &Knowledge,
+    solution: &chem_sim::Solution,
+) -> Vec<&'a chem_sim::Reaction> {
+    let mut candidates: Vec<_> = db
+        .reactions
+        .iter()
+        .filter(|reaction| {
+            reaction.process.is_ambient()
+                && knowledge.is_known(reaction.id)
+                && reaction
+                    .reactants
+                    .iter()
+                    .all(|(reagent, _)| solution.volume_of(*reagent).is_positive())
+        })
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| product_name(db, a.id).cmp(&product_name(db, b.id)))
+    });
+    candidates
+}
+
+fn highest_priority<'a>(reactions: &[&'a chem_sim::Reaction]) -> Option<&'a chem_sim::Reaction> {
+    reactions.iter().copied().fold(None, |selected, reaction| {
+        Some(match selected {
+            Some(current) if current.priority >= reaction.priority => current,
+            _ => reaction,
+        })
+    })
+}
+
+/// The best known ambient method represented by the loaded ingredients.
+/// Locked methods remain absent: feedback helps execute earned knowledge
+/// without disclosing the recipe book.
+fn chamber_forecast(
+    db: &ChemDb,
+    knowledge: &Knowledge,
+    solution: &chem_sim::Solution,
+) -> Option<ChamberForecast> {
+    let ingredients_present = |reaction: &chem_sim::Reaction| {
+        reaction.process.is_ambient()
+            && reaction
+                .reactants
+                .iter()
+                .all(|(reagent, _)| solution.volume_of(*reagent).is_positive())
+    };
+    let candidates: Vec<&chem_sim::Reaction> =
+        represented_chamber_reactions(db, knowledge, solution)
+            .into_iter()
+            .filter(|reaction| ingredients_present(reaction))
+            .collect();
+    let active: Vec<&chem_sim::Reaction> = candidates
+        .iter()
+        .copied()
+        .filter(|reaction| reaction.max_scale(solution).is_some())
+        .collect();
+    let reaction = highest_priority(&active).or_else(|| highest_priority(&candidates))?;
+    let ready = reaction.max_scale(solution).is_some();
+    let mut lines = Vec::new();
+    let temperature = solution.temperature;
+
+    if let Some(minimum) = reaction.min_temp {
+        if temperature < minimum {
+            lines.push(format!(
+                "Temperature low: {temperature}; heat to at least {minimum}."
+            ));
+        }
+    }
+    if let Some(maximum) = reaction.max_temp {
+        if temperature > maximum {
+            lines.push(format!(
+                "Temperature high: {temperature}; cool to {maximum} or below."
+            ));
+        }
+    }
+    let ph = solution.ph();
+    match (reaction.min_ph, reaction.max_ph) {
+        (Some(minimum), _) if ph < minimum => lines.push(format!(
+            "pH too acidic: {ph:.1}; add basic buffer to reach {minimum:.1} or above."
+        )),
+        (_, Some(maximum)) if ph > maximum => lines.push(format!(
+            "pH too alkaline: {ph:.1}; add acidic buffer to reach {maximum:.1} or below."
+        )),
+        _ if reaction.min_ph.is_some() || reaction.max_ph.is_some() => lines.push(format!(
+            "pH {ph:.1} is inside the operating range{}.",
+            reaction
+                .optimal_ph
+                .map(|optimum| format!("; optimum {optimum:.1}"))
+                .unwrap_or_default()
+        )),
+        _ => {}
+    }
+    let purity = solution.average_purity();
+    if let Some(minimum) = reaction.min_purity {
+        if purity < minimum {
+            lines.push(format!(
+                "Input purity too low: {:.0}%; requires {:.0}%.",
+                purity * 100.0,
+                minimum * 100.0
+            ));
+        } else {
+            lines.push(format!(
+                "Input purity {:.0}% meets the {:.0}% minimum.",
+                purity * 100.0,
+                minimum * 100.0
+            ));
+        }
+    }
+    for higher in candidates
+        .iter()
+        .copied()
+        .filter(|other| other.priority > reaction.priority)
+    {
+        let missing: Vec<&str> = higher
+            .catalysts
+            .iter()
+            .filter(|(reagent, amount)| !solution.contains_at_least(*reagent, *amount))
+            .map(|(reagent, _)| db.reagents.get(*reagent).name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            lines.push(format!(
+                "Safer {} route blocked: missing {}.",
+                product_name(db, higher.id),
+                missing.join(", ")
+            ));
+        }
+    }
+    if ready {
+        let rate = reaction
+            .step_limit(1.0, temperature)
+            .map(|amount| format!("approximately {amount} reaction-u/s"))
+            .unwrap_or_else(|| "instant once conditions are met".to_string());
+        lines.push(format!(
+            "Process ready: {rate}; predicted output purity {:.0}%.",
+            reaction.product_purity(solution) * 100.0
+        ));
+    }
+    if reaction.is_overheated(temperature) {
+        lines.push("DANGER: batch is beyond its authored overheat threshold.".to_string());
+    }
+    let hazardous = reaction_is_hazardous(reaction, temperature);
+    if hazardous {
+        lines.push("DANGER: this method releases explosive energy.".to_string());
+    }
+
+    Some(ChamberForecast {
+        product: product_name(db, reaction.id),
+        target: chamber_target(reaction),
+        ph_target: ph_target(reaction),
+        lines,
+        ready,
+        hazardous,
+    })
+}
+
+fn ph_fraction(ph: f32) -> f32 {
+    (ph / 14.0).clamp(0.0, 1.0)
+}
+
+/// Keeps a fixed-width marker visible at both clipped ends of the pH track.
+fn ph_marker_percent(ph: f32) -> f32 {
+    1.0 + ph_fraction(ph) * 98.0
+}
+
+fn buffer_guidance(forecast: Option<&ChamberForecast>, ph: f32) -> String {
+    if let Some(line) = forecast.and_then(|forecast| {
+        forecast
+            .lines
+            .iter()
+            .find(|line| line.contains("add acidic buffer") || line.contains("add basic buffer"))
+    }) {
+        return line.clone();
+    }
+    let Some(target) = forecast.and_then(|forecast| forecast.ph_target) else {
+        return "Buffer: no adjustment indicated.".to_string();
+    };
+    let Some(optimum) = target.optimum else {
+        return "Buffer: pH is inside the operating range.".to_string();
+    };
+    if ph > optimum + 0.05 {
+        format!(
+            "pH is usable; add acidic buffer toward the {optimum:.1} optimum for better purity."
+        )
+    } else if ph < optimum - 0.05 {
+        format!("pH is usable; add basic buffer toward the {optimum:.1} optimum for better purity.")
+    } else {
+        format!("Buffer: pH is at the {optimum:.1} optimum.")
+    }
+}
+
+fn ph_gauge(section: &mut ChildSpawnerCommands, ph: f32, target: Option<PhTarget>) {
+    section
+        .spawn((
+            Node {
+                position_type: PositionType::Relative,
+                width: percent(100),
+                height: px(14),
+                margin: UiRect::vertical(px(5)),
+                border_radius: BorderRadius::all(px(7)),
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.10, 0.11, 0.14)),
+        ))
+        .with_children(|track| {
+            for (width, color) in [
+                (43.0, Color::srgb(0.82, 0.30, 0.23)),
+                (14.0, Color::srgb(0.30, 0.76, 0.39)),
+                (43.0, Color::srgb(0.34, 0.38, 0.86)),
+            ] {
+                track.spawn((
+                    Node {
+                        width: percent(width),
+                        height: percent(100),
+                        ..default()
+                    },
+                    BackgroundColor(color),
+                ));
+            }
+            if let Some(target) = target {
+                track.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: percent(ph_fraction(target.min) * 100.0),
+                        width: percent((ph_fraction(target.max) - ph_fraction(target.min)) * 100.0),
+                        height: percent(100),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.95, 0.97, 1.0, 0.34)),
+                ));
+                if let Some(optimum) = target.optimum {
+                    track.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: percent(ph_marker_percent(optimum)),
+                            width: px(2),
+                            height: percent(100),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(1.0, 1.0, 1.0)),
+                    ));
+                }
+            }
+            track.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: percent(ph_marker_percent(ph)),
+                    width: px(4),
+                    height: percent(100),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.06, 0.07, 0.09)),
+            ));
+        });
+}
+
+/// Reaction-chamber instrument panel. It exposes the actual process controls
+/// and forecasts known methods without pretending the chamber owns buffer
+/// reservoirs: buffers still have to be prepared and added as reagents.
 fn heater_body(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
+    knowledge: &Knowledge,
     thermostat: Option<&Thermostat>,
     loaded: Option<&Container>,
     reacting: bool,
 ) {
     let thermostat = thermostat.copied().unwrap_or_default();
-
-    panel.spawn(label(
-        "Heats and cools whatever is loaded. Some reactions will not start until \
-         it is hot enough; some come apart if it gets hotter still.",
-        13.0,
-        TEXT_DIM,
-    ));
-
     let current = loaded.map(|container| container.solution.temperature);
-    panel.spawn(label(
-        match current {
-            Some(temperature) => format!(
-                "Sample  {temperature}          Target  {}          {}",
-                thermostat.target,
-                if thermostat.powered { "RUNNING" } else { "OFF" }
-            ),
-            None => "No container loaded. Carry a beaker over and press E.".to_string(),
-        },
-        15.0,
-        // Warm as it climbs, so a chamber running away is visible without
-        // reading the number.
-        match current {
-            Some(t) if t.0 >= 420.0 => Color::srgb(0.98, 0.45, 0.30),
-            Some(t) if t.0 >= 350.0 => Color::srgb(0.95, 0.78, 0.40),
-            _ => TEXT,
-        },
-    ));
+    let forecast =
+        loaded.and_then(|container| chamber_forecast(db, knowledge, &container.solution));
 
     panel
         .spawn(Node {
             width: percent(100),
             justify_content: JustifyContent::SpaceBetween,
-            margin: UiRect::top(px(10)),
+            align_items: AlignItems::Center,
             ..default()
         })
-        .with_children(|row| {
-            row.spawn(label("Target temperature", 14.0, TEXT));
-            row.spawn((
-                Text::new(format!("{:.0}K", thermostat.target.0)),
-                TextFont::from_font_size(14.0),
-                TextColor(TEXT_DIM),
-                TempSliderReadout,
-            ));
-        });
-
-    // `Button` so `Interaction` is tracked for it — that is what tells
-    // `drag_thermostat_slider` a press started on the track at all.
-    panel
-        .spawn((
-            Button,
-            Node {
-                width: percent(100),
-                height: px(TEMP_SLIDER_TRACK_HEIGHT),
-                margin: UiRect::bottom(px(4)),
-                border_radius: BorderRadius::all(px(TEMP_SLIDER_TRACK_HEIGHT / 2.0)),
-                ..default()
-            },
-            BackgroundColor(SECTION_BG),
-            TempSlider,
-        ))
-        .with_children(|track| {
-            track.spawn((
-                Node {
-                    width: percent(temp_fraction_of(thermostat.target.0) * 100.0),
-                    height: percent(100),
-                    border_radius: BorderRadius::all(px(TEMP_SLIDER_TRACK_HEIGHT / 2.0)),
-                    ..default()
+        .with_children(|header| {
+            header.spawn(label("PROCESS CONTROLS", 12.0, TEXT_DIM));
+            let mut power = header.spawn(button(
+                if thermostat.powered {
+                    "● Chamber on"
+                } else {
+                    "○ Chamber off"
                 },
-                BackgroundColor(BUTTON_ACTIVE),
-                TempSliderFill,
+                PanelAction::TogglePower,
             ));
-            // Non-interactive tick marks at the real recipe thresholds — not
-            // buttons any more, just a hint of where the meaningful
-            // temperatures sit along an otherwise plain dial.
-            for kelvin in TEMPERATURE_MARKS {
-                track.spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: percent(temp_fraction_of(kelvin) * 100.0),
-                        width: px(2),
-                        height: percent(100),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
-                ));
+            if thermostat.powered {
+                power.insert(BackgroundColor(BUTTON_ACTIVE));
             }
         });
 
-    panel.spawn(row()).with_children(|row| {
-        let mut entity = row.spawn(button(
-            if thermostat.powered {
-                "Stop"
-            } else {
-                "Start heating"
-            },
-            PanelAction::TogglePower,
-        ));
-        if thermostat.powered {
-            entity.insert(BackgroundColor(BUTTON_ACTIVE));
-        }
-        row.spawn(button(
-            "Eject container",
-            PanelAction::Eject(MachineSlot::A),
-        ));
-    });
+    panel
+        .spawn(Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(8),
+            ..default()
+        })
+        .with_children(|controls| {
+            controls
+                .spawn((
+                    Node {
+                        flex_basis: percent(0),
+                        flex_grow: 1.15,
+                        flex_direction: FlexDirection::Column,
+                        padding: UiRect::all(px(10)),
+                        row_gap: px(4),
+                        border_radius: BorderRadius::all(px(5)),
+                        ..default()
+                    },
+                    BackgroundColor(SECTION_BG),
+                ))
+                .with_children(|thermal| {
+                    thermal.spawn(label("THERMAL CONTROL", 11.0, TEXT_DIM));
+                    thermal
+                        .spawn(Node {
+                            width: percent(100),
+                            justify_content: JustifyContent::SpaceBetween,
+                            align_items: AlignItems::End,
+                            ..default()
+                        })
+                        .with_children(|readout| {
+                            readout.spawn(label(
+                                current
+                                    .map(|value| format!("Reading  {:.0} K", value.0))
+                                    .unwrap_or_else(|| "Reading  — K".to_string()),
+                                15.0,
+                                Color::srgb(0.66, 0.78, 0.92),
+                            ));
+                            readout.spawn((
+                                Text::new(format!("Target  {:.0} K", thermostat.target.0)),
+                                TextFont::from_font_size(14.0),
+                                TextColor(Color::srgb(0.52, 0.75, 0.96)),
+                                TempSliderReadout,
+                            ));
+                        });
 
-    container_readout(panel, db, loaded, reacting, false);
+                    thermal
+                        .spawn((
+                            Button,
+                            Node {
+                                position_type: PositionType::Relative,
+                                width: percent(100),
+                                height: px(TEMP_SLIDER_TRACK_HEIGHT),
+                                margin: UiRect::vertical(px(8)),
+                                border_radius: BorderRadius::all(
+                                    px(TEMP_SLIDER_TRACK_HEIGHT / 2.0),
+                                ),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.08, 0.09, 0.12)),
+                            TempSlider,
+                        ))
+                        .with_children(|track| {
+                            track.spawn((
+                                Node {
+                                    width: percent(temp_fraction_of(thermostat.target.0) * 100.0),
+                                    height: percent(100),
+                                    border_radius: BorderRadius::all(px(
+                                        TEMP_SLIDER_TRACK_HEIGHT / 2.0
+                                    )),
+                                    ..default()
+                                },
+                                BackgroundColor(BUTTON_ACTIVE),
+                                TempSliderFill,
+                            ));
+                            for kelvin in TEMPERATURE_MARKS {
+                                track.spawn((
+                                    Node {
+                                        position_type: PositionType::Absolute,
+                                        left: percent(temp_fraction_of(kelvin) * 100.0),
+                                        width: px(2),
+                                        height: percent(100),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.42)),
+                                ));
+                            }
+                        });
+                    thermal.spawn(label(
+                        "173 K     recipe thresholds     600 K",
+                        10.0,
+                        TEXT_DIM,
+                    ));
+                });
+
+            controls
+                .spawn((
+                    Node {
+                        flex_basis: percent(0),
+                        flex_grow: 1.0,
+                        flex_direction: FlexDirection::Column,
+                        padding: UiRect::all(px(10)),
+                        row_gap: px(4),
+                        border_radius: BorderRadius::all(px(5)),
+                        ..default()
+                    },
+                    BackgroundColor(SECTION_BG),
+                ))
+                .with_children(|quality| {
+                    quality.spawn(label("SOLUTION CONTROL", 11.0, TEXT_DIM));
+                    if let Some(container) = loaded {
+                        let ph = container.solution.ph();
+                        quality.spawn(label(
+                            format!(
+                                "pH  {:.2}       purity  {:.0}%",
+                                ph,
+                                container.solution.average_purity() * 100.0
+                            ),
+                            15.0,
+                            TEXT,
+                        ));
+                        ph_gauge(quality, ph, forecast.as_ref().and_then(|f| f.ph_target));
+                        let guidance = buffer_guidance(forecast.as_ref(), ph);
+                        quality.spawn(label(guidance, 11.0, TEXT_DIM));
+                        quality.spawn(label(
+                            "Acidic/basic buffer is added to the beaker as reagent.",
+                            10.0,
+                            TEXT_DIM,
+                        ));
+                    } else {
+                        quality.spawn(label("pH  —       purity  —", 15.0, TEXT_DIM));
+                        ph_gauge(quality, 7.0, None);
+                        quality.spawn(label("Load a beaker to begin monitoring.", 11.0, TEXT_DIM));
+                    }
+                });
+        });
+
+    panel.spawn(label("REACTION MONITOR", 12.0, TEXT_DIM));
+    panel
+        .spawn((section(), BackgroundColor(SECTION_BG)))
+        .with_children(|monitor| {
+            monitor
+                .spawn(Node {
+                    width: percent(100),
+                    padding: UiRect::horizontal(px(5)),
+                    ..default()
+                })
+                .with_children(|header| {
+                    header.spawn(hplc_cell("METHOD", 220.0, 10.0, TEXT_DIM));
+                    header.spawn(hplc_cell("STATUS", 100.0, 10.0, TEXT_DIM));
+                    header.spawn(hplc_cell("TARGET", 330.0, 10.0, TEXT_DIM));
+                });
+            match loaded {
+                Some(container) => {
+                    let represented =
+                        represented_chamber_reactions(db, knowledge, &container.solution);
+                    if represented.is_empty() {
+                        monitor.spawn(label(
+                            "No known ambient method is represented by this sample.",
+                            12.0,
+                            TEXT_DIM,
+                        ));
+                    }
+                    for reaction in represented.into_iter().take(3) {
+                        let ready = reaction.max_scale(&container.solution).is_some();
+                        let hazardous =
+                            reaction_is_hazardous(reaction, container.solution.temperature);
+                        monitor
+                            .spawn(Node {
+                                width: percent(100),
+                                min_height: px(26),
+                                padding: UiRect::axes(px(5), px(3)),
+                                ..default()
+                            })
+                            .with_children(|row| {
+                                row.spawn(hplc_cell(
+                                    product_name(db, reaction.id),
+                                    220.0,
+                                    12.0,
+                                    TEXT,
+                                ));
+                                row.spawn(hplc_cell(
+                                    if ready { "READY" } else { "BLOCKED" },
+                                    100.0,
+                                    11.0,
+                                    if ready { GOOD_TEXT } else { HPLC_IMPURITY },
+                                ));
+                                row.spawn(hplc_cell(
+                                    if hazardous {
+                                        format!("⚠  {}", chamber_target(reaction))
+                                    } else {
+                                        chamber_target(reaction)
+                                    },
+                                    330.0,
+                                    11.0,
+                                    if hazardous { ERROR_TEXT } else { TEXT_DIM },
+                                ));
+                            });
+                    }
+                    if let Some(forecast) = &forecast {
+                        monitor.spawn(label(
+                            format!("PRIMARY   {}   •   {}", forecast.product, forecast.target),
+                            12.0,
+                            if forecast.hazardous {
+                                ERROR_TEXT
+                            } else if forecast.ready {
+                                GOOD_TEXT
+                            } else {
+                                HPLC_IMPURITY
+                            },
+                        ));
+                        for line in forecast.lines.iter().take(3) {
+                            monitor.spawn(label(
+                                line,
+                                11.0,
+                                if line.starts_with("DANGER:") {
+                                    ERROR_TEXT
+                                } else {
+                                    TEXT_DIM
+                                },
+                            ));
+                        }
+                    }
+                }
+                None => {
+                    monitor.spawn(label(
+                        "Load a sample to forecast known methods.",
+                        12.0,
+                        TEXT_DIM,
+                    ));
+                }
+            }
+        });
+
+    panel
+        .spawn((section(), BackgroundColor(SECTION_BG)))
+        .with_children(|beaker| {
+            beaker
+                .spawn(Node {
+                    width: percent(100),
+                    justify_content: JustifyContent::SpaceBetween,
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|header| {
+                    header.spawn(label(
+                        loaded
+                            .map(|container| {
+                                format!(
+                                    "BEAKER   {} / {}",
+                                    container.solution.total_volume(),
+                                    container.kind.capacity()
+                                )
+                            })
+                            .unwrap_or_else(|| "BEAKER   — / —".to_string()),
+                        13.0,
+                        TEXT,
+                    ));
+                    header.spawn(button("Eject", PanelAction::Eject(MachineSlot::A)));
+                });
+            if let Some(container) = loaded {
+                if container.solution.is_empty() {
+                    beaker.spawn(label("Empty.", 12.0, TEXT_DIM));
+                } else {
+                    beaker.spawn(wrap_row()).with_children(|contents| {
+                        for (reagent, amount) in container.solution.iter() {
+                            contents.spawn(label(
+                                format!("{amount} {}   ", db.reagents.get(reagent).name),
+                                11.0,
+                                TEXT_DIM,
+                            ));
+                        }
+                    });
+                }
+            } else {
+                beaker.spawn(label("Carry a beaker over and press E.", 12.0, TEXT_DIM));
+            }
+            if reacting {
+                beaker.spawn(label("◌ Reaction in progress", 11.0, GOOD_TEXT));
+            }
+        });
 }
 
 /// Drags the reaction chamber's dial while the mouse is held on it.
@@ -1681,6 +2325,14 @@ fn mixing_chamber_body(
             format!("Syringe  ({})", ContainerKind::Syringe.capacity()),
             PanelAction::Package(ContainerKind::Syringe),
         ));
+        row.spawn(button(
+            format!("Patch  ({})", ContainerKind::Patch.capacity()),
+            PanelAction::Package(ContainerKind::Patch),
+        ));
+        row.spawn(button(
+            format!("Spray  ({})", ContainerKind::SprayBottle.capacity()),
+            PanelAction::Package(ContainerKind::SprayBottle),
+        ));
     });
 }
 
@@ -1749,6 +2401,237 @@ fn mixing_chamber_beaker(
                 });
             }
         });
+    panel.spawn(label("Sealed demolition charges", 12.0, TEXT_DIM));
+    panel.spawn(row()).with_children(|row| {
+        for (kind, fuse) in [
+            (ContainerKind::ChemicalCharge5, 5),
+            (ContainerKind::ChemicalCharge10, 10),
+            (ContainerKind::ChemicalCharge20, 20),
+        ] {
+            row.spawn(button(
+                format!("Charge {fuse}s"),
+                PanelAction::Package(kind),
+            ));
+        }
+    });
+    panel.spawn(label("Laboratory tools", 12.0, TEXT_DIM));
+    panel.spawn(row()).with_children(|row| {
+        row.spawn(button(
+            "pH paper",
+            PanelAction::Package(ContainerKind::PhPaper),
+        ));
+    });
+}
+
+const HPLC_CLEAN: Color = Color::srgb(0.24, 0.86, 0.58);
+const HPLC_IMPURITY: Color = Color::srgb(0.96, 0.62, 0.20);
+const HPLC_INVERSE: Color = Color::srgb(0.88, 0.12, 0.48);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HplcProfile {
+    Clean,
+    Impure,
+    Recoverable,
+}
+
+impl HplcProfile {
+    fn of(purity: f32, recoverable: bool) -> Self {
+        if recoverable {
+            Self::Recoverable
+        } else if purity < 0.98 {
+            Self::Impure
+        } else {
+            Self::Clean
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Clean => "CLEAN",
+            Self::Impure => "IMPURITY",
+            Self::Recoverable => "INVERSE",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Self::Clean => HPLC_CLEAN,
+            Self::Impure => HPLC_IMPURITY,
+            Self::Recoverable => HPLC_INVERSE,
+        }
+    }
+}
+
+fn selected_hplc_reagent(
+    solution: &chem_sim::Solution,
+    requested: Option<ReagentId>,
+) -> Option<ReagentId> {
+    requested
+        .filter(|reagent| solution.volume_of(*reagent).is_positive())
+        .or_else(|| solution.iter().next().map(|(reagent, _)| reagent))
+}
+
+fn hplc_cell(text: impl Into<String>, width: f32, size: f32, color: Color) -> impl Bundle {
+    (
+        Text::new(text.into()),
+        TextFont::from_font_size(size),
+        TextColor(color),
+        Node {
+            width: px(width),
+            flex_shrink: 0.0,
+            ..default()
+        },
+    )
+}
+
+/// A compact chromatogram. The x position is a stable presentation band, not
+/// a fake scientific mass measurement; height is the reagent's share and the
+/// orange cap is the measured impurity fraction. Authored inverse material is
+/// magenta because the HPLC can recover its paired useful reagent.
+fn hplc_graph(
+    section: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    solution: &chem_sim::Solution,
+    selected: ReagentId,
+) {
+    let bands: Vec<_> = solution.iter().collect();
+    let total = solution.total_volume().as_f32().max(0.01);
+
+    section
+        .spawn((
+            Node {
+                position_type: PositionType::Relative,
+                width: percent(100),
+                height: px(164),
+                border_radius: BorderRadius::all(px(3)),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.045, 0.052, 0.065)),
+        ))
+        .with_children(|graph| {
+            graph.spawn((
+                Text::new("ABSORBANCE"),
+                TextFont::from_font_size(10.0),
+                TextColor(TEXT_DIM),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(8),
+                    top: px(5),
+                    ..default()
+                },
+            ));
+            graph.spawn((
+                Text::new("RETENTION  →"),
+                TextFont::from_font_size(10.0),
+                TextColor(TEXT_DIM),
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: px(8),
+                    bottom: px(3),
+                    ..default()
+                },
+            ));
+
+            for bottom in [42.0, 82.0, 122.0] {
+                graph.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(30),
+                        bottom: px(bottom),
+                        width: percent(94),
+                        height: px(1),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.50, 0.56, 0.65, 0.14)),
+                ));
+            }
+            graph.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(30),
+                    bottom: px(22),
+                    width: percent(94),
+                    height: px(2),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.70, 0.74, 0.80)),
+            ));
+            graph.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(29),
+                    bottom: px(22),
+                    width: px(2),
+                    height: px(126),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.70, 0.74, 0.80)),
+            ));
+
+            for (index, (reagent, amount)) in bands.iter().copied().enumerate() {
+                let definition = db.reagents.get(reagent);
+                let purity = solution.purity_of(reagent);
+                let profile = HplcProfile::of(purity, definition.recovers_to.is_some());
+                let position = 10.0 + 82.0 * (index as f32 + 0.5) / bands.len() as f32;
+                let height = (34.0 + amount.as_f32() / total * 92.0).clamp(34.0, 126.0);
+
+                if reagent == selected {
+                    graph.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: percent(position - 2.5),
+                            bottom: px(22),
+                            width: percent(5),
+                            height: px(126),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.25, 0.92, 0.58, 0.10)),
+                    ));
+                }
+
+                // Total measured band. Impure and inverse-capable material
+                // carry their diagnostic colour behind the clean fraction.
+                graph.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: percent(position),
+                        bottom: px(23),
+                        width: px(9),
+                        height: px(height),
+                        ..default()
+                    },
+                    BackgroundColor(profile.color()),
+                ));
+                if profile == HplcProfile::Impure {
+                    graph.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: percent(position),
+                            bottom: px(23),
+                            width: px(5),
+                            height: px((height * purity).max(3.0)),
+                            ..default()
+                        },
+                        BackgroundColor(HPLC_CLEAN),
+                    ));
+                }
+                graph.spawn((
+                    Text::new((index + 1).to_string()),
+                    TextFont::from_font_size(10.0),
+                    TextColor(if reagent == selected {
+                        HPLC_CLEAN
+                    } else {
+                        TEXT_DIM
+                    }),
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: percent(position),
+                        bottom: px(3),
+                        ..default()
+                    },
+                ));
+            }
+        });
 }
 
 fn analyzer_body(
@@ -1756,47 +2639,168 @@ fn analyzer_body(
     db: &ChemDb,
     knowledge: &Knowledge,
     loaded: Option<&Container>,
+    report: Option<&HplcReport>,
+    requested_selection: Option<ReagentId>,
 ) {
-    panel.spawn(label(
-        "Breaks a sample down and works out how it was put together.",
-        13.0,
-        TEXT_DIM,
-    ));
+    let calibrated = knowledge.known_count() >= HPLC_RECIPE_REQUIREMENT;
+    let selected = loaded
+        .and_then(|container| selected_hplc_reagent(&container.solution, requested_selection));
+
+    panel
+        .spawn(Node {
+            width: percent(100),
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|header| {
+            header.spawn(label(
+                if calibrated {
+                    "HPLC / MASS PROFILE   •   CALIBRATED".to_string()
+                } else {
+                    format!(
+                        "HPLC / MASS PROFILE   •   CALIBRATING {}/{}",
+                        knowledge.known_count(),
+                        HPLC_RECIPE_REQUIREMENT
+                    )
+                },
+                12.0,
+                if calibrated { GOOD_TEXT } else { HPLC_IMPURITY },
+            ));
+            if let Some(reagent) = selected.filter(|_| calibrated) {
+                let definition = db.reagents.get(reagent);
+                let text = definition
+                    .recovers_to
+                    .as_deref()
+                    .and_then(|key| db.reagents.id_of(key))
+                    .map(|recovered| {
+                        format!("Start recovery → {}", db.reagents.get(recovered).name)
+                    })
+                    .unwrap_or_else(|| format!("Start purification → {}", definition.name));
+                header.spawn(button(text, PanelAction::Purify(reagent)));
+            }
+        });
 
     panel
         .spawn((section(), BackgroundColor(SECTION_BG)))
         .with_children(|section| {
             let Some(container) = loaded else {
                 section.spawn(label(
-                    "No sample loaded. Carry a container over and press E.",
+                    "INPUT SAMPLE   —   no container loaded. Carry one over and press E.",
                     14.0,
                     TEXT_DIM,
                 ));
                 return;
             };
             if container.solution.is_empty() {
-                section.spawn(label("Sample is empty.", 14.0, TEXT_DIM));
+                section.spawn(label(
+                    "INPUT SAMPLE   —   container is empty.",
+                    14.0,
+                    TEXT_DIM,
+                ));
+                section.spawn(button("Eject", PanelAction::Eject(MachineSlot::A)));
                 return;
             }
+            let selected = selected.expect("a non-empty solution has a selectable reagent");
 
-            // Percentages rather than raw units: composition is what the
-            // machine measures, and it is what identifies a mixture.
-            let total = container.solution.total_volume().as_f32().max(0.01);
-            for (reagent, quantity) in container.solution.iter() {
-                let share = quantity.as_f32() / total * 100.0;
-                section.spawn(label(
-                    format!(
-                        "{:<16} {:>8}   {:>5.1}%",
-                        db.reagents.get(reagent).name,
-                        quantity.to_string(),
-                        share
-                    ),
-                    14.0,
-                    TEXT,
-                ));
-            }
+            section.spawn(label(
+                format!(
+                    "INPUT SAMPLE   {} / {}   •   pH {:.2}   •   {:.0}% average purity",
+                    container.solution.total_volume(),
+                    container.kind.capacity(),
+                    container.solution.ph(),
+                    container.solution.average_purity() * 100.0,
+                ),
+                13.0,
+                TEXT,
+            ));
+            hplc_graph(section, db, &container.solution, selected);
+            section.spawn(wrap_row()).with_children(|legend| {
+                for (name, color) in [
+                    ("■ clean fraction", HPLC_CLEAN),
+                    ("■ impurity", HPLC_IMPURITY),
+                    ("■ recoverable inverse", HPLC_INVERSE),
+                    ("▯ selected band", Color::srgb(0.45, 0.95, 0.68)),
+                ] {
+                    legend.spawn(label(name, 11.0, color));
+                }
+            });
 
-            let unknown: Vec<&str> = db
+            section
+                .spawn(Node {
+                    width: percent(100),
+                    padding: UiRect::axes(px(8), px(3)),
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn(hplc_cell("BAND / REAGENT", 250.0, 11.0, TEXT_DIM));
+                    row.spawn(hplc_cell("VOLUME", 100.0, 11.0, TEXT_DIM));
+                    row.spawn(hplc_cell("PURITY", 90.0, 11.0, TEXT_DIM));
+                    row.spawn(hplc_cell("PROFILE", 130.0, 11.0, TEXT_DIM));
+                });
+
+            section
+                .spawn((
+                    Node {
+                        width: percent(100),
+                        max_height: px(154),
+                        flex_direction: FlexDirection::Column,
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    ScrollPosition::default(),
+                    ScrollPane,
+                ))
+                .with_children(|table| {
+                    for (index, (reagent, amount)) in container.solution.iter().enumerate() {
+                        let definition = db.reagents.get(reagent);
+                        let purity = container.solution.purity_of(reagent);
+                        let profile = HplcProfile::of(purity, definition.recovers_to.is_some());
+                        let is_selected = reagent == selected;
+                        let mut row = table.spawn((
+                            Button,
+                            Node {
+                                width: percent(100),
+                                min_height: px(30),
+                                padding: UiRect::axes(px(8), px(4)),
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                            BackgroundColor(if is_selected {
+                                Color::srgb(0.12, 0.34, 0.27)
+                            } else {
+                                Color::srgba(0.05, 0.06, 0.08, 0.55)
+                            }),
+                            PanelAction::SelectHplc(reagent),
+                        ));
+                        if is_selected {
+                            row.insert(Selected);
+                        }
+                        row.with_children(|row| {
+                            let [r, g, b] = definition.color;
+                            row.spawn(hplc_cell(
+                                format!("{:02}   {}", index + 1, definition.name),
+                                250.0,
+                                13.0,
+                                Color::srgb(0.45 + r * 0.55, 0.45 + g * 0.55, 0.45 + b * 0.55),
+                            ));
+                            row.spawn(hplc_cell(amount.to_string(), 100.0, 13.0, TEXT));
+                            row.spawn(hplc_cell(
+                                format!("{:.0}%", purity * 100.0),
+                                90.0,
+                                13.0,
+                                if purity >= 0.98 {
+                                    GOOD_TEXT
+                                } else {
+                                    HPLC_IMPURITY
+                                },
+                            ));
+                            row.spawn(hplc_cell(profile.label(), 130.0, 12.0, profile.color()));
+                        });
+                    }
+                });
+
+            let unknown = db
                 .reactions
                 .iter()
                 .filter(|reaction| !knowledge.is_known(reaction.id))
@@ -1805,28 +2809,48 @@ fn analyzer_body(
                         .product_ids()
                         .any(|id| container.solution.volume_of(id).is_positive())
                 })
-                .map(|reaction| reaction.key.as_str())
-                .collect();
-
+                .count();
             section.spawn(row()).with_children(|row| {
-                row.spawn(button("Identify method", PanelAction::Analyze));
-                row.spawn(button("Eject", PanelAction::Eject(MachineSlot::A)));
+                row.spawn(button("Identify methods", PanelAction::Analyze));
+                row.spawn(button("Eject sample", PanelAction::Eject(MachineSlot::A)));
+                row.spawn(label(
+                    if unknown == 0 {
+                        "No unrecorded signatures".to_string()
+                    } else {
+                        format!("{unknown} unrecorded signature(s)")
+                    },
+                    12.0,
+                    if unknown == 0 { TEXT_DIM } else { GOOD_TEXT },
+                ));
             });
-
-            section.spawn(label(
-                if unknown.is_empty() {
-                    "Nothing here you have not already written up.".to_string()
-                } else {
-                    format!("{} unrecorded method(s) present.", unknown.len())
-                },
-                13.0,
-                if unknown.is_empty() {
-                    TEXT_DIM
-                } else {
-                    Color::srgb(0.70, 0.85, 0.60)
-                },
-            ));
         });
+
+    if let Some(report) = report {
+        let source = &db.reagents.get(report.source).name;
+        let product = &db.reagents.get(report.product).name;
+        panel.spawn(label(
+            if report.recovered_inverse {
+                format!(
+                    "LAST RUN   {source} {:.0}% → {product} {} at {:.0}%   •   reject {}",
+                    report.input_purity * 100.0,
+                    report.product_amount,
+                    report.product_purity * 100.0,
+                    report.reject_amount,
+                )
+            } else {
+                format!(
+                    "LAST RUN   {source} {} at {:.0}% → {} at {:.0}%   •   reject {}",
+                    report.input_amount,
+                    report.input_purity * 100.0,
+                    report.product_amount,
+                    report.product_purity * 100.0,
+                    report.reject_amount,
+                )
+            },
+            12.0,
+            GOOD_TEXT,
+        ));
+    }
 }
 
 fn grinder_body(
@@ -2034,8 +3058,27 @@ fn container_readout(
             if container.solution.is_empty() {
                 section.spawn(label("Empty.", 14.0, TEXT_DIM));
             } else {
+                section.spawn(label(
+                    format!(
+                        "pH {:.2}   ·   purity {:.0}%   ·   {}",
+                        container.solution.ph(),
+                        container.solution.average_purity() * 100.0,
+                        container.solution.temperature
+                    ),
+                    13.0,
+                    Color::srgb(0.66, 0.78, 0.92),
+                ));
                 for (reagent, quantity) in container.solution.iter() {
-                    section.spawn(reagent_name(db, reagent, quantity));
+                    section.spawn(label(
+                        format!(
+                            "{}  {}   ({:.0}% pure)",
+                            quantity,
+                            db.reagents.get(reagent).name,
+                            container.solution.purity_of(reagent) * 100.0
+                        ),
+                        14.0,
+                        TEXT,
+                    ));
                 }
             }
 
@@ -2072,8 +3115,7 @@ fn spawn_reference_book(
     commands: &mut Commands,
     db: &ChemDb,
     knowledge: &Knowledge,
-    selected: Option<Category>,
-    open_recipe: Option<ReactionId>,
+    view: &BookView,
     // Opened over a machine panel, which the same key closes back onto. Only
     // the header line differs, but it is the line that tells the player they
     // have not just walked away from the dispenser.
@@ -2096,23 +3138,40 @@ fn spawn_reference_book(
             screen
                 .spawn((
                     Node {
-                        width: px(1040),
+                        width: percent(92),
+                        max_width: px(1180),
+                        height: vh(86),
                         flex_direction: FlexDirection::Column,
                         padding: UiRect::all(px(20)),
-                        row_gap: px(8),
+                        row_gap: px(10),
                         border_radius: BorderRadius::all(px(8)),
                         ..default()
                     },
                     BackgroundColor(PANEL_BG),
                 ))
                 .with_children(|book| {
-                    book.spawn(row()).with_children(|header| {
-                        header.spawn(heading("Reference Book"));
+                    book.spawn(Node {
+                        width: percent(100),
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::SpaceBetween,
+                        ..default()
+                    })
+                    .with_children(|header| {
+                        header.spawn(heading("Chemistry Research Book"));
+                        header.spawn(button(
+                            if at_machine {
+                                "‹ Back to machine"
+                            } else {
+                                "‹ Back to lab"
+                            },
+                            PanelAction::CloseBook,
+                        ));
                     });
                     book.spawn(label(
                         format!(
-                            "{} of {} recipes recorded   ·   {} research   ·   \
-                             scroll to read   ·   B or Esc to {}",
+                            "{} of {} methods recorded   ·   {} research   ·   \
+                             B or Esc to {}",
                             knowledge.known_count(),
                             db.reactions.len(),
                             knowledge.research_points,
@@ -2126,16 +3185,24 @@ fn spawn_reference_book(
                         TEXT_DIM,
                     ));
 
+                    let progress = RecipeProgress::new(db, knowledge);
                     book.spawn(Node {
                         column_gap: px(16),
                         align_items: AlignItems::Start,
+                        flex_grow: 1.0,
                         ..default()
                     })
-                    .with_children(|columns| match open_recipe {
-                        Some(id) => spawn_recipe_tree(columns, db, knowledge, db.reactions.get(id)),
+                    .with_children(|columns| match view.open_recipe {
+                        Some(id) => spawn_recipe_tree(
+                            columns,
+                            db,
+                            knowledge,
+                            &progress,
+                            db.reactions.get(id),
+                        ),
                         None => {
-                            book_sidebar(columns, db, knowledge, selected);
-                            book_entries(columns, db, knowledge, selected);
+                            book_sidebar(columns, db, knowledge, view.category);
+                            book_entries(columns, db, knowledge, &progress, view);
                         }
                     });
                 });
@@ -2151,7 +3218,7 @@ fn book_sidebar(
 ) {
     columns
         .spawn(Node {
-            width: px(240),
+            width: px(210),
             flex_direction: FlexDirection::Column,
             row_gap: px(4),
             flex_shrink: 0.0,
@@ -2179,15 +3246,108 @@ fn book_sidebar(
         });
 }
 
-/// The scrolling pane of entries for whichever heading is open.
+const BOOK_PAGE_SIZE: usize = 6;
+
+/// Everything needed to classify the notebook without re-walking the reaction
+/// graph once for every badge. `ready_products` are one successful experiment
+/// away; permitting those as inputs defines the next visible frontier.
+struct RecipeProgress {
+    available: HashSet<ReagentId>,
+    ready_products: HashSet<ReagentId>,
+}
+
+impl RecipeProgress {
+    fn new(db: &ChemDb, knowledge: &Knowledge) -> Self {
+        let available = knowledge.available_reagents(db);
+        let ready_products = db
+            .reactions
+            .iter()
+            .filter(|reaction| !knowledge.is_known(reaction.id))
+            .filter(|reaction| reaction_inputs_are_in(reaction, &available))
+            .flat_map(|reaction| reaction.product_ids())
+            .collect();
+        Self {
+            available,
+            ready_products,
+        }
+    }
+
+    fn state(&self, knowledge: &Knowledge, reaction: &chem_sim::Reaction) -> RecipeState {
+        if knowledge.is_known(reaction.id) {
+            return RecipeState::Recorded;
+        }
+        if reaction_inputs_are_in(reaction, &self.available) {
+            return RecipeState::Ready;
+        }
+        if reaction
+            .reactants
+            .iter()
+            .chain(reaction.catalysts.iter())
+            .all(|(id, _)| self.available.contains(id) || self.ready_products.contains(id))
+        {
+            return RecipeState::Frontier;
+        }
+        RecipeState::Locked
+    }
+}
+
+fn reaction_inputs_are_in(reaction: &chem_sim::Reaction, reagents: &HashSet<ReagentId>) -> bool {
+    reaction
+        .reactants
+        .iter()
+        .chain(reaction.catalysts.iter())
+        .all(|(id, _)| reagents.contains(id))
+}
+
+fn filter_matches(filter: BookFilter, state: RecipeState) -> bool {
+    matches!(filter, BookFilter::All)
+        || matches!(
+            (filter, state),
+            (BookFilter::Recorded, RecipeState::Recorded)
+                | (BookFilter::Ready, RecipeState::Ready)
+                | (BookFilter::Frontier, RecipeState::Frontier)
+                | (BookFilter::Locked, RecipeState::Locked)
+        )
+}
+
+/// The browse screen: category navigation stays fixed at the left while the
+/// right side holds state filters, a bounded page of large cards and paging.
 fn book_entries(
     columns: &mut ChildSpawnerCommands,
     db: &ChemDb,
     knowledge: &Knowledge,
-    selected: Option<Category>,
+    progress: &RecipeProgress,
+    view: &BookView,
 ) {
-    let heading_text = selected.map(|category| (category.label(), category.blurb()));
-    let visible = recipes_in(db, knowledge, selected);
+    let (title, blurb) = view
+        .category
+        .map(|category| (category.label(), category.blurb()))
+        .unwrap_or((
+            "All chemistry",
+            "Browse every recorded and discoverable method.",
+        ));
+    let all = recipes_in(db, knowledge, view.category);
+    let state_count = |wanted| {
+        all.iter()
+            .filter(|reaction| progress.state(knowledge, reaction) == wanted)
+            .count()
+    };
+    let recorded = state_count(RecipeState::Recorded);
+    let ready = state_count(RecipeState::Ready);
+    let frontier = state_count(RecipeState::Frontier);
+    let locked = state_count(RecipeState::Locked);
+    let mut visible: Vec<_> = all
+        .into_iter()
+        .filter(|reaction| filter_matches(view.filter, progress.state(knowledge, reaction)))
+        .collect();
+    visible.sort_by_key(|reaction| {
+        (
+            progress.state(knowledge, reaction),
+            crate::knowledge::product_name(db, reaction.id),
+        )
+    });
+
+    let (page, page_count, first, last) = book_page_window(visible.len(), view.page);
 
     columns
         .spawn((
@@ -2195,7 +3355,7 @@ fn book_entries(
                 flex_grow: 1.0,
                 flex_direction: FlexDirection::Column,
                 row_gap: px(8),
-                max_height: vh(66),
+                max_height: vh(68),
                 overflow: Overflow::scroll_y(),
                 ..default()
             },
@@ -2203,72 +3363,160 @@ fn book_entries(
             ScrollPane,
         ))
         .with_children(|pane| {
-            if let Some((name, blurb)) = heading_text {
-                pane.spawn(label(name.to_string(), 15.0, TEXT));
-                pane.spawn(label(blurb.to_string(), 13.0, TEXT_DIM));
-            }
+            pane.spawn(label(title, 20.0, TEXT));
+            pane.spawn(label(blurb, 14.0, TEXT_DIM));
+
+            pane.spawn(wrap_row()).with_children(|filters| {
+                for filter in BookFilter::ALL {
+                    let count = match filter {
+                        BookFilter::All => recorded + ready + frontier + locked,
+                        BookFilter::Recorded => recorded,
+                        BookFilter::Ready => ready,
+                        BookFilter::Frontier => frontier,
+                        BookFilter::Locked => locked,
+                    };
+                    let mut entity = filters.spawn(button(
+                        format!("{}  {count}", filter.label()),
+                        PanelAction::ShowBookFilter(filter),
+                    ));
+                    if filter == view.filter {
+                        entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
+                    }
+                }
+            });
+            pane.spawn(label(
+                "Recorded: full method   ·   Ready: materials obtainable   ·   Frontier: one precursor away",
+                13.0,
+                TEXT_DIM,
+            ));
 
             if visible.is_empty() {
                 pane.spawn(label(
-                    "Nothing under this heading yet.".to_string(),
-                    13.0,
+                    "No methods match this view. Try another status or category.",
+                    14.0,
                     TEXT_DIM,
                 ));
                 return;
             }
 
-            for reaction in visible {
-                book_entry(pane, db, knowledge, reaction);
-            }
+            pane.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                flex_wrap: FlexWrap::Wrap,
+                align_content: AlignContent::FlexStart,
+                column_gap: px(10),
+                row_gap: px(10),
+                ..default()
+            })
+            .with_children(|cards| {
+                for reaction in &visible[first..last] {
+                    book_entry(cards, db, knowledge, progress, reaction);
+                }
+            });
+
+            pane.spawn(row()).with_children(|pager| {
+                if page > 0 {
+                    pager.spawn(button(
+                        "‹ Previous page",
+                        PanelAction::SetBookPage(page - 1),
+                    ));
+                }
+                pager.spawn(label(
+                    format!(
+                        "Page {} of {}   ·   showing {}–{} of {} methods",
+                        page + 1,
+                        page_count,
+                        first + 1,
+                        last,
+                        visible.len()
+                    ),
+                    13.0,
+                    TEXT_DIM,
+                ));
+                if page + 1 < page_count {
+                    pager.spawn(button(
+                        "Next page ›",
+                        PanelAction::SetBookPage(page + 1),
+                    ));
+                }
+            });
         });
 }
 
-/// One recipe, as a compact clickable row. Tap it to open the full formula
-/// tree — that is where the method, hints and "Study further" purchase now
-/// live, so this only needs enough to help a chemist recognise what they're
-/// looking for.
+fn book_page_window(total: usize, requested_page: usize) -> (usize, usize, usize, usize) {
+    let page_count = total.div_ceil(BOOK_PAGE_SIZE).max(1);
+    let page = requested_page.min(page_count - 1);
+    let first = page * BOOK_PAGE_SIZE;
+    let last = (first + BOOK_PAGE_SIZE).min(total);
+    (page, page_count, first, last)
+}
+
+/// One method card. It carries only the information needed to choose a recipe;
+/// the exact formula and full effect audit belong on the detail screen.
 fn book_entry(
     pane: &mut ChildSpawnerCommands,
     db: &ChemDb,
     knowledge: &Knowledge,
+    progress: &RecipeProgress,
     reaction: &chem_sim::Reaction,
 ) {
-    let known = knowledge.is_known(reaction.id);
+    let state = progress.state(knowledge, reaction);
     let title = product_name(db, reaction.id);
     let product = reaction
         .products
         .first()
         .map(|(id, _)| db.reagents.get(*id));
+    let mut card = section();
+    card.width = percent(48.5);
+    card.min_height = px(116);
 
-    pane.spawn((Button, section(), PanelAction::OpenRecipe(reaction.id)))
-        .with_children(|entry| {
-            entry.spawn(label(
-                if known {
-                    title.clone()
-                } else {
-                    format!("{title}   —   not yet worked out")
-                },
-                16.0,
-                if known { TEXT } else { TEXT_DIM },
-            ));
+    pane.spawn((
+        Button,
+        card,
+        BackgroundColor(SECTION_BG),
+        PanelAction::OpenRecipe(reaction.id),
+    ))
+    .with_children(|entry| {
+        entry.spawn(label(state.label(), 11.0, state.color()));
+        entry.spawn(label(title, 18.0, TEXT));
 
-            if let Some(treats) = product.and_then(|p| p.treats.as_ref()) {
-                entry.spawn(label(treats.clone(), 13.0, TEXT_DIM));
+        if let Some(treats) = product.and_then(|p| p.treats.as_ref()) {
+            entry.spawn(label(treats.clone(), 14.0, TEXT_DIM));
+        }
+
+        entry.spawn(label(recipe_complexity_line(reaction), 13.0, TEXT_DIM));
+    });
+}
+
+fn recipe_complexity_line(reaction: &chem_sim::Reaction) -> String {
+    let mut traits = vec![format!(
+        "{} input{}",
+        reaction.reactants.len() + reaction.catalysts.len(),
+        if reaction.reactants.len() + reaction.catalysts.len() == 1 {
+            ""
+        } else {
+            "s"
+        }
+    )];
+    traits.push(match reaction.process {
+        chem_sim::ReactionProcess::Ambient => {
+            if reaction.min_temp.is_some() || reaction.max_temp.is_some() {
+                "temperature-controlled".to_string()
+            } else {
+                "direct mixture".to_string()
             }
-
-            entry.spawn(label(
-                if known {
-                    "Tap to see the formula.".to_string()
-                } else {
-                    format!(
-                        "{} ingredients — tap to research.",
-                        reaction.reactants.len()
-                    )
-                },
-                12.0,
-                TEXT_DIM,
-            ));
-        });
+        }
+        chem_sim::ReactionProcess::Agitated { .. } => "staged mixing".to_string(),
+    });
+    if !reaction.catalysts.is_empty() {
+        traits.push("catalyst".to_string());
+    }
+    if reaction.min_ph.is_some() || reaction.max_ph.is_some() {
+        traits.push("pH-sensitive".to_string());
+    }
+    if reaction.min_purity.is_some() {
+        traits.push("purity-sensitive".to_string());
+    }
+    traits.join("  ·  ")
 }
 
 /// How many levels of "what feeds this" the tree draws before giving up and
@@ -2286,6 +3534,7 @@ fn spawn_recipe_tree(
     columns: &mut ChildSpawnerCommands,
     db: &ChemDb,
     knowledge: &Knowledge,
+    progress: &RecipeProgress,
     root: &chem_sim::Reaction,
 ) {
     columns
@@ -2313,7 +3562,7 @@ fn spawn_recipe_tree(
                 ))
                 .with_children(|pane| {
                     let mut visited = HashSet::new();
-                    render_recipe_node(pane, db, knowledge, root, 0, &mut visited);
+                    render_recipe_node(pane, db, knowledge, progress, root, 0, &mut visited);
                 });
         });
 }
@@ -2331,6 +3580,7 @@ fn render_recipe_node(
     pane: &mut ChildSpawnerCommands,
     db: &ChemDb,
     knowledge: &Knowledge,
+    progress: &RecipeProgress,
     reaction: &chem_sim::Reaction,
     depth: usize,
     visited: &mut HashSet<ReactionId>,
@@ -2349,6 +3599,7 @@ fn render_recipe_node(
     }
 
     let known = knowledge.is_known(reaction.id);
+    let state = progress.state(knowledge, reaction);
     let title = product_name(db, reaction.id);
     let product = reaction
         .products
@@ -2365,52 +3616,73 @@ fn render_recipe_node(
         BorderColor::from(TEXT_DIM),
     ))
     .with_children(|entry| {
-        entry.spawn(label(
-            if known {
-                title.clone()
-            } else {
-                format!("{title}   —   not yet worked out")
-            },
-            16.0,
-            if known { TEXT } else { TEXT_DIM },
-        ));
+        entry.spawn(label(state.label(), 11.0, state.color()));
+        entry.spawn(label(title.clone(), if depth == 0 { 22.0 } else { 16.0 }, TEXT));
 
         if depth == 0 {
             if let Some(treats) = product.and_then(|p| p.treats.as_ref()) {
-                entry.spawn(label(treats.clone(), 13.0, TEXT_DIM));
+                entry.spawn(label(treats.clone(), 15.0, TEXT_DIM));
             }
         }
 
         if known {
-            entry.spawn(label(recipe_line(db, reaction), 14.0, TEXT));
-            entry.spawn(label(
-                preparation_line(db, reaction),
-                13.0,
-                Color::srgb(0.66, 0.78, 0.92),
-            ));
-            entry.spawn(label(condition_line(reaction), 12.0, TEXT_DIM));
-            if let Some(overdose) = product.and_then(|p| p.overdose) {
-                entry.spawn(label(
-                    format!("Overdoses above {overdose} in a single dose."),
-                    13.0,
-                    Color::srgb(0.90, 0.62, 0.45),
-                ));
-            }
             if depth == 0 {
+                entry.spawn(label("FORMULA", 11.0, Color::srgb(0.60, 0.74, 0.92)));
+                entry.spawn(label(recipe_line(db, reaction), 16.0, TEXT));
+                entry.spawn(label("PROCESS", 11.0, Color::srgb(0.60, 0.74, 0.92)));
+                entry.spawn(label(
+                    preparation_line(db, reaction),
+                    14.0,
+                    Color::srgb(0.70, 0.81, 0.96),
+                ));
+                entry.spawn(label(condition_line(reaction), 13.0, TEXT_DIM));
+                if let Some(overdose) = product.and_then(|p| p.overdose) {
+                    entry.spawn(label(
+                        format!("Overdoses above {overdose} in a single dose."),
+                        14.0,
+                        Color::srgb(0.90, 0.62, 0.45),
+                    ));
+                }
                 if let Some(product) = product {
+                    entry.spawn(label(
+                        "EFFECTS & HANDLING",
+                        11.0,
+                        Color::srgb(0.60, 0.74, 0.92),
+                    ));
                     for line in reagent_profile_lines(product) {
-                        entry.spawn(label(line, 12.0, TEXT_DIM));
+                        entry.spawn(label(line, 13.0, TEXT_DIM));
                     }
                 }
+            } else {
+                // Dependencies remain useful as a tree, but do not repeat the
+                // full workstation, overdose and material profile at every
+                // level. Their own detail screen is one click away from the
+                // browse view when that information is needed.
+                entry.spawn(label(recipe_line(db, reaction), 13.0, TEXT_DIM));
             }
             return;
         }
 
         entry.spawn(label(
-            format!("{} ingredients.", reaction.reactants.len()),
-            13.0,
+            match state {
+                RecipeState::Ready => {
+                    "All required materials are obtainable. Experiment or spend research to reveal the method."
+                        .to_string()
+                }
+                RecipeState::Frontier => {
+                    "One nearby precursor discovery will bring this method within reach."
+                        .to_string()
+                }
+                RecipeState::Locked => {
+                    "Its dependency chain has not reached the current research frontier."
+                        .to_string()
+                }
+                RecipeState::Recorded => unreachable!("recorded recipes are known"),
+            },
+            14.0,
             TEXT_DIM,
         ));
+        entry.spawn(label(recipe_complexity_line(reaction), 13.0, TEXT_DIM));
         for hint in knowledge.visible_hints(db, reaction.id) {
             entry.spawn(label(
                 format!("· {hint}"),
@@ -2442,11 +3714,15 @@ fn render_recipe_node(
     // A locked node's own ingredients stay hidden — the same spoiler
     // discipline the hint system already enforces everywhere else.
     if known {
+        if depth == 0 {
+            pane.spawn(label("DEPENDENCIES", 12.0, Color::srgb(0.60, 0.74, 0.92)));
+        }
         for &(reagent_id, amount) in &reaction.reactants {
             render_ingredient_node(
                 pane,
                 db,
                 knowledge,
+                progress,
                 reagent_id,
                 amount,
                 false,
@@ -2459,6 +3735,7 @@ fn render_recipe_node(
                 pane,
                 db,
                 knowledge,
+                progress,
                 reagent_id,
                 amount,
                 true,
@@ -2480,6 +3757,7 @@ fn render_ingredient_node(
     pane: &mut ChildSpawnerCommands,
     db: &ChemDb,
     knowledge: &Knowledge,
+    progress: &RecipeProgress,
     reagent: ReagentId,
     amount: Units,
     catalyst: bool,
@@ -2494,7 +3772,7 @@ fn render_ingredient_node(
                 entry.spawn(label("catalyst, not consumed:", 11.0, TEXT_DIM));
             });
         }
-        render_recipe_node(pane, db, knowledge, producer, depth, visited);
+        render_recipe_node(pane, db, knowledge, progress, producer, depth, visited);
         return;
     }
 
@@ -2657,7 +3935,18 @@ fn condition_line(reaction: &chem_sim::Reaction) -> String {
             chem_sim::Overheat::Ruin => format!("; batch is ruined above {threshold}"),
         })
         .unwrap_or_default();
-    format!("{temperature}{overheat}.  {processing}.")
+    let quality = match (reaction.min_ph, reaction.optimal_ph, reaction.max_ph) {
+        (Some(min), Some(optimum), Some(max)) => {
+            format!("  pH: {min:.1}–{max:.1}, optimum {optimum:.1}.")
+        }
+        (Some(min), _, Some(max)) => format!("  pH: {min:.1}–{max:.1}."),
+        _ => String::new(),
+    };
+    let purity = reaction
+        .min_purity
+        .map(|minimum| format!("  Minimum purity: {:.0}%.", minimum * 100.0))
+        .unwrap_or_default();
+    format!("{temperature}{overheat}.  {processing}.{quality}{purity}")
 }
 
 /// Body, crash, route and station behavior for the product of a known recipe.
@@ -2675,6 +3964,21 @@ fn reagent_profile_lines(reagent: &chem_sim::Reagent) -> Vec<String> {
 
     let mut lines = Vec::new();
     lines.push(format!(
+        "Chemical profile: pH {:.1}, {}.",
+        reagent.ph,
+        if reagent.controlled {
+            "controlled substance"
+        } else {
+            "unrestricted"
+        }
+    ));
+    if let Some(explosive) = reagent.explosive {
+        lines.push(format!(
+            "Energetic hazard: activates at {:.0} K (strength {:.1}, modifier {:.1}).",
+            explosive.activation_temp.0, explosive.strength, explosive.modifier
+        ));
+    }
+    lines.push(format!(
         "Bodily effects: {}",
         if body.is_empty() {
             if reagent.intentionally_inert {
@@ -2686,6 +3990,15 @@ fn reagent_profile_lines(reagent: &chem_sim::Reagent) -> Vec<String> {
             body
         }
     ));
+    if !reagent.targeted_purges.is_empty() {
+        let targets = reagent
+            .targeted_purges
+            .iter()
+            .map(|(target, amount)| format!("{} {amount}/tick", target.replace('_', " ")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("Targeted bloodstream purge: {targets}."));
+    }
     lines.push(format!(
         "Overdose effects: {}",
         if overdose.is_empty() {
@@ -2705,7 +4018,7 @@ fn reagent_profile_lines(reagent: &chem_sim::Reagent) -> Vec<String> {
         "Application routes: environmental release; no therapeutic body route."
             .to_string()
     } else {
-        "Application routes: inject (full/fast), ingest (slow/60%), splash, smoke or puddle contact (15%)."
+        "Application routes: inject (full/fast), ingest (slow/60%), patch (full/topical), splash, smoke or puddle contact (15%)."
             .to_string()
     });
     lines.push(format!(
@@ -2729,8 +4042,38 @@ fn effect_list(effects: &[chem_sim::ReagentEffect]) -> String {
             chem_sim::ReagentEffect::Harm(kind, amount) => {
                 format!("deal {} {amount}/tick", kind.label().to_lowercase())
             }
+            chem_sim::ReagentEffect::VolumeScaledHarm(kind, amount) => format!(
+                "deal {} {amount}/tick per unit in blood",
+                kind.label().to_lowercase()
+            ),
             chem_sim::ReagentEffect::Contact(kind, amount) => format!(
                 "{} contact damage {amount}/10u",
+                kind.label().to_lowercase()
+            ),
+            chem_sim::ReagentEffect::TopicalHeal(kind, amount) => format!(
+                "heal {} {amount}/10u topically",
+                kind.label().to_lowercase()
+            ),
+            chem_sim::ReagentEffect::ConditionalHeal {
+                required,
+                kind,
+                amount,
+            } => format!(
+                "heal {} {amount}/tick while {}",
+                kind.label().to_lowercase(),
+                required.label().to_lowercase()
+            ),
+            chem_sim::ReagentEffect::ConditionalHarm {
+                existing,
+                kind,
+                amount,
+            } => format!(
+                "deal {} {amount}/tick while {} damage is already present",
+                kind.label().to_lowercase(),
+                existing.label().to_lowercase()
+            ),
+            chem_sim::ReagentEffect::CriticalHeal(kind, amount) => format!(
+                "heal {} {amount}/tick while critically injured",
                 kind.label().to_lowercase()
             ),
             chem_sim::ReagentEffect::Status {
@@ -2738,6 +4081,29 @@ fn effect_list(effects: &[chem_sim::ReagentEffect]) -> String {
                 seconds,
                 intensity,
             } => format!("{} ({seconds:.0}s, x{intensity:.1})", kind.label()),
+            chem_sim::ReagentEffect::DelayedStatus {
+                after_ticks,
+                kind,
+                seconds,
+                intensity,
+            } => format!(
+                "after {:.0}s: {} ({seconds:.0}s, x{intensity:.1})",
+                *after_ticks as f32 * chem_sim::TICK_SECONDS,
+                kind.label()
+            ),
+            chem_sim::ReagentEffect::AccumulatedHarm(kind, amount) => format!(
+                "on final clearance: deal {} {amount} per exposure tick",
+                kind.label().to_lowercase()
+            ),
+            chem_sim::ReagentEffect::DelayedHarm {
+                after_ticks,
+                kind,
+                amount,
+            } => format!(
+                "after {:.0}s: deal {} {amount}/tick",
+                *after_ticks as f32 * chem_sim::TICK_SECONDS,
+                kind.label().to_lowercase()
+            ),
             chem_sim::ReagentEffect::Counter {
                 kind,
                 seconds,
@@ -2748,6 +4114,9 @@ fn effect_list(effects: &[chem_sim::ReagentEffect]) -> String {
             ),
             chem_sim::ReagentEffect::Purge(amount) => {
                 format!("purge {amount}u harmful reagents/tick")
+            }
+            chem_sim::ReagentEffect::MedicinePurge(amount) => {
+                format!("purge {amount}u medicines/tick")
             }
         })
         .collect::<Vec<_>>()
@@ -2779,6 +4148,21 @@ fn world_effect_text(effect: &chem_sim::WorldEffect) -> String {
         }
         chem_sim::WorldEffect::Flash { radius, seconds } => {
             format!("blinding flash {radius:.1}m for {seconds:.0}s")
+        }
+        chem_sim::WorldEffect::ExpandFoam {
+            radius,
+            seconds,
+            solid,
+        } => {
+            let kind = if *solid {
+                "solid foam barrier"
+            } else {
+                "chemical foam"
+            };
+            format!("expands as {kind} {radius:.1}m for {seconds:.0}s")
+        }
+        chem_sim::WorldEffect::Extinguish { radius, seconds } => {
+            format!("extinguishes a {radius:.1}m area by {seconds:.0}s")
         }
     }
 }
@@ -2974,6 +4358,11 @@ fn update_order_queue(
                         .unwrap_or_else(|| db.reagents.get(order.reagent).name.clone())
                 };
                 let reagent = &want;
+                let quality = if order.minimum_purity > 0.0 {
+                    format!("  ·  ≥{:.0}% purity", order.minimum_purity * 100.0)
+                } else {
+                    String::new()
+                };
                 let heading = if *development {
                     format!("OPTIONAL R&D \u{2014} {}", member.name)
                 } else {
@@ -2982,15 +4371,19 @@ fn update_order_queue(
                 if *at_counter {
                     let remaining = order.remaining() as u32;
                     format!(
-                        "{}\n  {} {}  ·  {}:{:02}",
+                        "{}\n  {} {}{}  ·  {}:{:02}",
                         heading,
                         order.amount,
                         reagent,
+                        quality,
                         remaining / 60,
                         remaining % 60
                     )
                 } else {
-                    format!("{}\n  {} {}  ·  on the way", heading, order.amount, reagent)
+                    format!(
+                        "{}\n  {} {}{}  ·  on the way",
+                        heading, order.amount, reagent, quality
+                    )
                 }
             });
 
@@ -3946,6 +5339,7 @@ struct PanelMessages<'w> {
     transfer: MessageWriter<'w, BufferTransferRequested>,
     package: MessageWriter<'w, PackageRequested>,
     analyze: MessageWriter<'w, AnalyzeRequested>,
+    purify: MessageWriter<'w, PurifyRequested>,
     grind: MessageWriter<'w, GrindRequested>,
     set_power: MessageWriter<'w, SetHeaterPower>,
     toggle_accepting: MessageWriter<'w, ToggleAcceptingOrders>,
@@ -3953,7 +5347,6 @@ struct PanelMessages<'w> {
     open_up: MessageWriter<'w, OpenUpAgain>,
     requisition: MessageWriter<'w, RequisitionRequested>,
     leave_machine: MessageWriter<'w, LeaveMachineRequested>,
-    upgrade_dispenser: MessageWriter<'w, UpgradeDispenserRequested>,
     unlock_all: MessageWriter<'w, UnlockAllRequested>,
     buy_hint: MessageWriter<'w, BuyHintRequested>,
     play: MessageWriter<'w, PlaySfx>,
@@ -3980,6 +5373,7 @@ fn handle_panel_clicks(
     // rare branch was also an exclusive-access constraint against every system
     // that merely reads the notebook.
     mut book: ResMut<BookView>,
+    mut hplc_view: ResMut<HplcView>,
     mut board_tab: ResMut<BoardTab>,
 ) {
     let Some((player, mut mode)) = modes.iter_mut().next() else {
@@ -4004,16 +5398,24 @@ fn handle_panel_clicks(
                 });
                 continue;
             }
-            PanelAction::UpgradeDispenser => {
-                out.upgrade_dispenser.write(UpgradeDispenserRequested);
-                continue;
-            }
             PanelAction::UnlockAll => {
                 out.unlock_all.write(UnlockAllRequested);
                 continue;
             }
             PanelAction::ShowCategory(category) => {
                 book.category = *category;
+                book.page = 0;
+                book.open_recipe = None;
+                continue;
+            }
+            PanelAction::ShowBookFilter(filter) => {
+                book.filter = *filter;
+                book.page = 0;
+                book.open_recipe = None;
+                continue;
+            }
+            PanelAction::SetBookPage(page) => {
+                book.page = *page;
                 continue;
             }
             PanelAction::OpenRecipe(reaction) => {
@@ -4023,6 +5425,10 @@ fn handle_panel_clicks(
             PanelAction::CloseRecipe => {
                 book.open_recipe = None;
                 continue;
+            }
+            PanelAction::CloseBook => {
+                *mode = mode.toggled_book();
+                return;
             }
             PanelAction::ShowBoardTab(tab) => {
                 *board_tab = *tab;
@@ -4107,6 +5513,15 @@ fn handle_panel_clicks(
             PanelAction::Analyze => {
                 out.analyze.write(AnalyzeRequested { machine });
             }
+            PanelAction::SelectHplc(reagent) => {
+                hplc_view.selected = Some(*reagent);
+            }
+            PanelAction::Purify(reagent) => {
+                out.purify.write(PurifyRequested {
+                    machine,
+                    reagent: *reagent,
+                });
+            }
             PanelAction::Grind { all } => {
                 out.grind.write(GrindRequested { machine, all: *all });
             }
@@ -4147,11 +5562,13 @@ fn handle_panel_clicks(
             }
             // Handled above, before the machine guard.
             PanelAction::BuyHint(_)
-            | PanelAction::UpgradeDispenser
             | PanelAction::UnlockAll
             | PanelAction::ShowCategory(_)
+            | PanelAction::ShowBookFilter(_)
+            | PanelAction::SetBookPage(_)
             | PanelAction::OpenRecipe(_)
             | PanelAction::CloseRecipe
+            | PanelAction::CloseBook
             | PanelAction::ShowBoardTab(_)
             | PanelAction::Close => {}
         }
@@ -4237,6 +5654,117 @@ mod tests {
     }
 
     #[test]
+    fn ph_gauge_clamps_to_the_instrument_scale() {
+        assert_eq!(ph_fraction(-1.0), 0.0);
+        assert_eq!(ph_fraction(7.0), 0.5);
+        assert_eq!(ph_fraction(15.0), 1.0);
+        assert_eq!(ph_marker_percent(0.0), 1.0);
+        assert_eq!(ph_marker_percent(14.0), 99.0);
+    }
+
+    #[test]
+    fn chamber_recommends_the_optimum_even_inside_a_legal_ph_range() {
+        let forecast = ChamberForecast {
+            product: "Test medicine".to_string(),
+            target: "pH 5.0–9.0".to_string(),
+            ph_target: Some(PhTarget {
+                min: 5.0,
+                max: 9.0,
+                optimum: Some(7.0),
+            }),
+            lines: vec!["pH 6.0 is inside the operating range; optimum 7.0.".to_string()],
+            ready: true,
+            hazardous: false,
+        };
+
+        assert!(buffer_guidance(Some(&forecast), 6.0).contains("basic buffer"));
+        assert!(buffer_guidance(Some(&forecast), 8.0).contains("acidic buffer"));
+        assert!(buffer_guidance(Some(&forecast), 7.0).contains("at the 7.0 optimum"));
+    }
+
+    #[test]
+    fn hplc_selection_falls_back_when_the_sample_changes() {
+        let (db, _) = book_fixture();
+        let water = db.reagent("water");
+        let oxygen = db.reagent("oxygen");
+        let mut sample = chem_sim::Solution::unbounded();
+        let definition = db.reagents.get(water);
+        let _ = sample.add_profiled(water, Units::whole(5), 1.0, definition.ph);
+
+        assert_eq!(selected_hplc_reagent(&sample, Some(water)), Some(water));
+        assert_eq!(
+            selected_hplc_reagent(&sample, Some(oxygen)),
+            Some(water),
+            "a stale local selection must not leave Start pointed at absent material"
+        );
+    }
+
+    #[test]
+    fn hplc_profiles_distinguish_quality_and_recoverable_inverse_material() {
+        assert_eq!(HplcProfile::of(1.0, false), HplcProfile::Clean);
+        assert_eq!(HplcProfile::of(0.97, false), HplcProfile::Impure);
+        assert_eq!(HplcProfile::of(1.0, true), HplcProfile::Recoverable);
+    }
+
+    #[test]
+    fn chamber_targets_compact_all_authored_operating_constraints() {
+        let (db, _) = book_fixture();
+        let reaction = db.reactions.find("nitric_acid").unwrap();
+        let target = chamber_target(reaction);
+
+        assert!(target.contains("480K"));
+        if reaction.min_ph.is_some() || reaction.max_ph.is_some() {
+            assert!(target.contains("pH"));
+        }
+        if reaction.min_purity.is_some() {
+            assert!(target.contains("pure"));
+        }
+    }
+
+    #[test]
+    fn panel_quality_notices_buffering_without_an_amount_change() {
+        let (db, _) = book_fixture();
+        let water = db.reagent("water");
+        let mut sample = chem_sim::Solution::unbounded();
+        let _ = sample.add_profiled(water, Units::whole(10), 1.0, 7.0);
+        let before_contents: Vec<_> = sample.iter().collect();
+        let before_quality = panel_quality(&sample);
+
+        sample.shift_ph(-2.0);
+
+        assert_eq!(before_contents, sample.iter().collect::<Vec<_>>());
+        assert_ne!(before_quality, panel_quality(&sample));
+    }
+
+    #[test]
+    fn panel_profiles_notice_quality_swaps_hidden_by_the_average() {
+        let (db, _) = book_fixture();
+        let water = db.reagent("water");
+        let oxygen = db.reagent("oxygen");
+        let mut first = chem_sim::Solution::unbounded();
+        let mut second = chem_sim::Solution::unbounded();
+        for (solution, water_purity, oxygen_purity) in
+            [(&mut first, 0.9, 0.7), (&mut second, 0.7, 0.9)]
+        {
+            let _ = solution.add_profiled(
+                water,
+                Units::whole(10),
+                water_purity,
+                db.reagents.get(water).ph,
+            );
+            let _ = solution.add_profiled(
+                oxygen,
+                Units::whole(10),
+                oxygen_purity,
+                db.reagents.get(oxygen).ph,
+            );
+        }
+
+        assert_eq!(panel_quality(&first), panel_quality(&second));
+        assert_ne!(panel_profiles(&first), panel_profiles(&second));
+    }
+
+    #[test]
     fn the_dial_range_covers_every_recipe_threshold_with_margin() {
         // The whole reason 173-600K was chosen: 100K of headroom past the
         // lowest and highest temperatures anything in the data gates on.
@@ -4246,6 +5774,59 @@ mod tests {
                 "{kelvin}K threshold sits outside the dial's own range"
             );
         }
+    }
+
+    #[test]
+    fn chamber_forecast_explains_a_known_blocked_temperature_without_leaking_methods() {
+        let (db, mut knowledge) = book_fixture();
+        let chemistry = db.0.clone();
+        knowledge.unlock_all(&chemistry);
+        let mut sample = chem_sim::Solution::unbounded();
+        for key in ["fluorosulfuric_acid", "hydrogen_peroxide", "nitrogen"] {
+            let reagent = db.reagent(key);
+            let definition = db.reagents.get(reagent);
+            let _ = sample.add_profiled(reagent, Units::ONE, 1.0, definition.ph);
+        }
+
+        let forecast = chamber_forecast(&db, &knowledge, &sample).unwrap();
+        assert_eq!(forecast.product, "Nitric Acid");
+        assert!(!forecast.ready);
+        assert!(forecast
+            .lines
+            .iter()
+            .any(|line| line.contains("heat to at least 480.0K")));
+
+        let fresh_knowledge = Knowledge::new(&chemistry);
+        assert!(
+            chamber_forecast(&db, &fresh_knowledge, &sample).is_none(),
+            "the equipment must not reveal an unrecorded recipe"
+        );
+    }
+
+    #[test]
+    fn chamber_forecast_calls_out_an_unstabilized_explosive_route() {
+        let (db, mut knowledge) = book_fixture();
+        let chemistry = db.0.clone();
+        knowledge.unlock_all(&chemistry);
+        let mut sample = chem_sim::Solution::unbounded();
+        for key in ["glycerol", "sulphuric_acid", "nitric_acid"] {
+            let reagent = db.reagent(key);
+            let definition = db.reagents.get(reagent);
+            let _ = sample.add_profiled(reagent, Units::ONE, 1.0, definition.ph);
+        }
+
+        let forecast = chamber_forecast(&db, &knowledge, &sample).unwrap();
+        assert_eq!(forecast.product, "Ash");
+        assert!(forecast.ready);
+        assert!(forecast.hazardous);
+        assert!(forecast
+            .lines
+            .iter()
+            .any(|line| line.contains("missing Stabilizing Agent")));
+        assert!(forecast
+            .lines
+            .iter()
+            .any(|line| line.starts_with("DANGER:")));
     }
 
     #[test]
@@ -4396,6 +5977,59 @@ mod tests {
 
         assert_eq!(total, db.reactions.len());
         assert_eq!(known, knowledge.known_count());
+    }
+
+    #[test]
+    fn ready_badges_match_the_actual_experiment_frontier() {
+        let (db, knowledge) = book_fixture();
+        let progress = RecipeProgress::new(&db, &knowledge);
+        let badged: HashSet<_> = db
+            .reactions
+            .iter()
+            .filter(|reaction| progress.state(&knowledge, reaction) == RecipeState::Ready)
+            .map(|reaction| reaction.id)
+            .collect();
+        let reachable: HashSet<_> = knowledge.frontier(&db).into_iter().collect();
+
+        assert_eq!(badged, reachable);
+    }
+
+    #[test]
+    fn book_progress_states_partition_every_recipe() {
+        let (db, knowledge) = book_fixture();
+        let progress = RecipeProgress::new(&db, &knowledge);
+        let counts = [
+            RecipeState::Recorded,
+            RecipeState::Ready,
+            RecipeState::Frontier,
+            RecipeState::Locked,
+        ]
+        .map(|state| {
+            db.reactions
+                .iter()
+                .filter(|reaction| progress.state(&knowledge, reaction) == state)
+                .count()
+        });
+
+        assert_eq!(counts.into_iter().sum::<usize>(), db.reactions.len());
+        assert_eq!(counts[0], knowledge.known_count());
+    }
+
+    #[test]
+    fn book_pages_never_grow_back_into_an_unbounded_list() {
+        let (db, _) = book_fixture();
+        let total = db.reactions.len();
+        let (page, pages, first, last) = book_page_window(total, usize::MAX);
+        assert_eq!(pages, total.div_ceil(BOOK_PAGE_SIZE));
+        assert_eq!(
+            page,
+            pages - 1,
+            "a stale page selection clamps to the final page"
+        );
+        assert_eq!(last, total);
+        assert!(last - first <= BOOK_PAGE_SIZE);
+
+        assert_eq!(book_page_window(0, 5), (0, 1, 0, 0));
     }
 
     #[test]

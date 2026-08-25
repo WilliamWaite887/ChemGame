@@ -10,6 +10,25 @@ use serde::{Deserialize, Serialize};
 use crate::effect::{ReagentEffect, WorldEffect};
 use crate::units::{Kelvin, Units};
 
+fn neutral_ph() -> f32 {
+    7.0
+}
+
+/// How an energetic reagent behaves when heated past its activation point.
+///
+/// Kept on the reagent rather than on a particular container so every future
+/// delivery form (beaker, charge, foam payload) uses one authoritative profile.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ExplosiveProfile {
+    /// Energy contributed by each unit present.
+    pub strength: f32,
+    /// Flat contribution from the most energetic compound in a mixture.
+    #[serde(default)]
+    pub modifier: f32,
+    /// Temperature at which the stable compound initiates.
+    pub activation_temp: Kelvin,
+}
+
 /// Units a body works through per metabolism tick when a reagent does not say
 /// otherwise. /tg/station's default, and the rate every medicine is balanced
 /// against.
@@ -155,7 +174,8 @@ impl Category {
 ///
 /// Serialisable because solutions cross the wire in co-op. The id is a
 /// position in the loaded reagent list, so both ends must agree on the data
-/// files — which is enforced by replicon's protocol hash, not by us.
+/// files. The game layer includes the catalog in its LAN/Steam compatibility
+/// fingerprint.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct ReagentId(pub u32);
 
@@ -174,6 +194,23 @@ pub struct ReagentDef {
     pub name: String,
     /// Liquid colour, used to tint the beaker contents.
     pub color: [f32; 3],
+    /// Gameplay pH used for reaction control and analyzer readouts. This is a
+    /// deliberately approachable model rather than a molarity simulation.
+    #[serde(default = "neutral_ph")]
+    pub ph: f32,
+    /// Energetic profile, if heating this reagent can initiate a blast.
+    #[serde(default)]
+    pub explosive: Option<ExplosiveProfile>,
+    /// Controlled material even when it is not filed as an illicit drug.
+    #[serde(default)]
+    pub controlled: bool,
+    /// Optional related inverse form produced by a reaction-quality branch.
+    #[serde(default)]
+    pub inverse: Option<String>,
+    /// One-way HPLC recovery target. Only failed inverse products set this;
+    /// the useful paired reagent may still name `inverse` for documentation.
+    #[serde(default)]
+    pub recovers_to: Option<String>,
     /// Dose above which this does harm rather than good. `None` means safe at
     /// any dose.
     #[serde(default)]
@@ -228,6 +265,11 @@ pub struct ReagentDef {
     /// What it does each tick while it is in a bloodstream.
     #[serde(default)]
     pub effects: Vec<ReagentEffect>,
+    /// Specific reagents removed from the bloodstream each tick. Unlike the
+    /// broad harmful/medicine purge effects, this records authored antidote
+    /// and counter-drug relationships without deleting unrelated chemistry.
+    #[serde(default)]
+    pub targeted_purges: Vec<(String, Units)>,
     /// Applied **in addition to** `effects` once the dose passes `overdose`.
     ///
     /// Stacking rather than replacing is what makes an overdose read the way it
@@ -275,6 +317,11 @@ pub struct Reagent {
     pub key: String,
     pub name: String,
     pub color: [f32; 3],
+    pub ph: f32,
+    pub explosive: Option<ExplosiveProfile>,
+    pub controlled: bool,
+    pub inverse: Option<String>,
+    pub recovers_to: Option<String>,
     pub overdose: Option<Units>,
     pub dispensable: bool,
     pub tier: u32,
@@ -284,6 +331,7 @@ pub struct Reagent {
     pub potency: u32,
     pub metabolism: Option<Units>,
     pub effects: Vec<ReagentEffect>,
+    pub targeted_purges: Vec<(String, Units)>,
     pub overdose_effects: Vec<ReagentEffect>,
     pub critical_overdose: Option<Units>,
     pub critical_effects: Vec<ReagentEffect>,
@@ -314,6 +362,7 @@ impl Reagent {
                 .chain(&self.critical_effects)
                 .chain(&self.after_effects)
                 .any(|effect| effect.is_harmful())
+            || !self.targeted_purges.is_empty()
             || self.world_effects.iter().any(|effect| effect.is_harmful())
     }
 
@@ -322,6 +371,8 @@ impl Reagent {
     /// overdose does not make a therapeutic dose a purge target.
     pub fn is_harmful_at(&self, volume: Units) -> bool {
         self.effects.iter().any(|effect| effect.is_harmful())
+            || self.after_effects.iter().any(|effect| effect.is_harmful())
+            || !self.targeted_purges.is_empty()
             || matches!(self.overdose, Some(threshold) if volume > threshold)
                 && self
                     .overdose_effects
@@ -360,6 +411,11 @@ impl ReagentRegistry {
             key: def.id,
             name: def.name,
             color: def.color,
+            ph: def.ph.clamp(0.0, 14.0),
+            explosive: def.explosive,
+            controlled: def.controlled,
+            inverse: def.inverse,
+            recovers_to: def.recovers_to,
             overdose: def.overdose,
             dispensable: def.dispensable,
             tier: def.tier,
@@ -369,6 +425,7 @@ impl ReagentRegistry {
             potency: def.potency,
             metabolism: def.metabolism,
             effects: def.effects,
+            targeted_purges: def.targeted_purges,
             overdose_effects: def.overdose_effects,
             critical_overdose: def.critical_overdose,
             critical_effects: def.critical_effects,

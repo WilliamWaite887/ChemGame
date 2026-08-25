@@ -107,6 +107,7 @@ struct TestSubjectFaceConfigured;
 pub(crate) struct TestSubjectSurface {
     pub(crate) subject: Entity,
     pub(crate) base_color: Color,
+    pub(crate) base_alpha_mode: AlphaMode,
 }
 
 #[derive(Component)]
@@ -225,7 +226,7 @@ fn spawn_character_lab(mut commands: Commands, db: Res<ChemDb>) {
         let reagent = db.reagent(key);
         let reagent_name = db.reagents.get(reagent).name.clone();
         let mut sample = Container::new(ContainerKind::Bottle);
-        refill_sample(&mut sample, reagent);
+        refill_sample(&mut sample, reagent, db.reagents.get(reagent).ph);
         commands.spawn((
             Name::new(format!("{reagent_name} effect sample")),
             sample,
@@ -238,9 +239,11 @@ fn spawn_character_lab(mut commands: Commands, db: Res<ChemDb>) {
     }
 }
 
-fn refill_sample(container: &mut Container, reagent: ReagentId) {
+fn refill_sample(container: &mut Container, reagent: ReagentId, ph: f32) {
     container.solution = Solution::new(container.kind.capacity());
-    let _ = container.solution.add(reagent, Units::whole(SAMPLE_UNITS));
+    let _ = container
+        .solution
+        .add_profiled(reagent, Units::whole(SAMPLE_UNITS), 1.0, ph);
 }
 
 fn dress_test_subjects(
@@ -322,11 +325,13 @@ fn tag_test_subject_surfaces(
             continue;
         };
         let base_color = source.base_color;
+        let base_alpha_mode = source.alpha_mode;
         commands.entity(entity).insert((
             MeshMaterial3d(materials.add(source)),
             TestSubjectSurface {
                 subject,
                 base_color,
+                base_alpha_mode,
             },
         ));
     }
@@ -523,6 +528,7 @@ fn locomotion_facing(direction: f32) -> Quat {
 }
 
 fn reset_subject_and_samples(
+    db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<InteractRequested>>,
     chemists: Query<(Entity, &Chemist)>,
     transforms: Query<&Transform>,
@@ -547,7 +553,7 @@ fn reset_subject_and_samples(
         body.0 = chem_sim::Vitals::default();
         blood.0 = chem_sim::Bloodstream::default();
         for (dose, mut container) in &mut samples {
-            refill_sample(&mut container, dose.0);
+            refill_sample(&mut container, dose.0, db.reagents.get(dose.0).ph);
         }
     }
 }

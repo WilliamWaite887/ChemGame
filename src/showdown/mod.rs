@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::arc::{ArcOutcome, Campaign, Script, ShowdownForm};
 use crate::audio::{EmitWorldSfx, Sfx};
-use crate::body::Body;
+use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, HeldBy};
 use crate::crew::{spawn_crew_member, CrewDef, CrewPhase, CrewRoute};
@@ -514,14 +514,18 @@ fn run_pursuers(
     time: Res<Time>,
     nav: Option<Res<NavGraph>>,
     areas: Option<Res<WalkableAreas>>,
-    mut pursuers: Query<(&mut Transform, &mut Pursuit)>,
+    mut pursuers: Query<(&mut Transform, &mut Pursuit, Option<&Bloodstream>)>,
     mut chemists: Query<(Entity, &Transform, &mut Body, &Chemist), Without<Pursuit>>,
     mut felt: MessageWriter<ToClients<HazardFelt>>,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     let dt = time.delta_secs();
 
-    for (mut transform, mut pursuit) in &mut pursuers {
+    for (mut transform, mut pursuit, blood) in &mut pursuers {
+        if blood.is_some_and(|blood| blood.0.status(chem_sim::StatusKind::Pacified).intensity > 0.0)
+        {
+            continue;
+        }
         pursuit.cooldown -= dt;
         pursuit.repath_in -= dt;
 
@@ -1204,6 +1208,52 @@ mod tests {
             ))
             .id();
         (assailant, chemist)
+    }
+
+    #[test]
+    fn pax_stops_hostile_pursuit_without_sedating_the_subject() {
+        let mut areas = WalkableAreas::default();
+        areas.push(
+            Bounds {
+                min_x: -4.0,
+                max_x: 4.0,
+                min_z: -2.0,
+                max_z: 2.0,
+            },
+            None,
+        );
+        let mut app = pursuit_app(areas);
+        let (assailant, chemist) =
+            spawn_pursuit_pair(&mut app, Vec3::ZERO, Vec3::new(3.0, 0.0, 0.0));
+        let mut blood = Bloodstream::default();
+        blood.0.add_status(chem_sim::StatusKind::Pacified, 8.0, 1.0);
+        app.world_mut().entity_mut(assailant).insert(blood);
+        let before = app.world().get::<Transform>(assailant).unwrap().translation;
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f32(2.0));
+
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Transform>(assailant).unwrap().translation,
+            before,
+            "pacification should halt pursuit"
+        );
+        assert_eq!(
+            app.world().get::<Body>(chemist).unwrap().0.total(),
+            Units::ZERO,
+            "pacification prevents attacks without requiring sedation"
+        );
+        assert_eq!(
+            app.world()
+                .get::<Bloodstream>(assailant)
+                .unwrap()
+                .0
+                .status(chem_sim::StatusKind::Sedated)
+                .intensity,
+            0.0
+        );
     }
 
     #[test]

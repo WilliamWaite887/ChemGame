@@ -58,12 +58,25 @@ pub fn research_for_delivery(potency: u32) -> u32 {
     RESEARCH_PER_SUCCESS + potency.saturating_sub(1)
 }
 
+/// Research value after accounting for the quality of the delivered portion.
+///
+/// Accepted low-purity medicine remains useful, but cannot pay the same as a
+/// clean batch. One point is retained for any successful delivery so early
+/// low-potency orders never become a progression dead end.
+pub fn research_for_delivery_at_purity(potency: u32, purity: f32) -> u32 {
+    let clean_value = research_for_delivery(potency);
+    ((clean_value as f32 * purity.clamp(0.0, 1.0)).ceil() as u32).max(1)
+}
+
 /// Research points to upgrade the dispenser from tier `N` to `N+1`, indexed
 /// by `N` (index 0 = tier 0→1, etc.). Each entry is the sum of what the
 /// reagents in that tier used to cost individually under the old
 /// per-reagent unlock economy (M11) — the total to fully upgrade is still
 /// 213, only the unit of purchase moved from one reagent to a whole tier.
 /// See the tier comment block in `assets/data/chem.reagents.ron`.
+/// Base stock is no longer a progression lock. Kept as an empty table so old
+/// saves can still deserialize their historical tier field without it buying
+/// access the new chemistry curve deliberately grants at shift start.
 pub const DISPENSER_TIER_COSTS: [u32; 7] = [24, 27, 48, 15, 54, 21, 24];
 
 /// Distinct reagents a beaker can hold when it reacts and still count as a
@@ -86,10 +99,6 @@ impl Plugin for KnowledgePlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<RecipeDiscovered>()
             .add_server_message::<KnowledgeSync>(Channel::Ordered)
-            // Not `add_mapped_client_message` — it carries no `Entity` at
-            // all (unlocking is career-wide, not tied to a machine), so
-            // there is nothing for `MapEntities` to translate.
-            .add_client_message::<UpgradeDispenserRequested>(Channel::Ordered)
             // A deliberately explicit playtest escape hatch. It still goes
             // through the authority so a guest cannot unlock only their local
             // notebook and be overwritten by the next sync.
@@ -104,7 +113,6 @@ impl Plugin for KnowledgePlugin {
                     // The shared notebook belongs to the lab, so the server
                     // owns it and only the server writes the save file.
                     (
-                        handle_dispenser_upgrade,
                         handle_unlock_all,
                         handle_hint_purchase,
                         learn_from_experiments,
@@ -120,31 +128,8 @@ impl Plugin for KnowledgePlugin {
     }
 }
 
-/// A client asking to upgrade the dispenser to its next tier. Deliberately
-/// not tied to a machine — the upgrade is a career-wide upgrade, not
-/// something one specific dispenser owns, the same way [`RecipeDiscovered`]
-/// and buying a hint aren't either. Carries no payload: there is only ever
-/// one next tier. Like [`BuyHintRequested`], this crosses the network properly:
-/// the server is the only one that ever calls
-/// [`Knowledge::upgrade_dispenser`], via [`handle_dispenser_upgrade`], so a
-/// joining client's purchase is never quietly overwritten by the next
-/// [`KnowledgeSync`].
-#[derive(Message, Serialize, Deserialize)]
-pub struct UpgradeDispenserRequested;
-
-fn handle_dispenser_upgrade(
-    db: Res<ChemDb>,
-    mut requests: MessageReader<FromClient<UpgradeDispenserRequested>>,
-    mut knowledge: ResMut<Knowledge>,
-) {
-    for _ in requests.read() {
-        knowledge.upgrade_dispenser(&db);
-    }
-}
-
 /// A playtester asking to bypass progression and expose the complete chemistry
-/// sandbox. This unlocks both dispenser tiers and recipes; doing only one
-/// leaves half the graph unusable and makes the button misleading.
+/// sandbox. Base stock is already open, so this reveals every recipe.
 #[derive(Message, Serialize, Deserialize)]
 pub struct UnlockAllRequested;
 
@@ -160,8 +145,8 @@ fn handle_unlock_all(
 
 /// A client asking to spend [`HINT_COST`] on the next hint for one recipe.
 ///
-/// Career-wide like [`UpgradeDispenserRequested`], and for the same reason: the
-/// notebook belongs to the lab, not to whoever happens to be clicking. This
+/// Career-wide because the notebook belongs to the lab, not to whoever happens
+/// to be clicking. This
 /// button used to mutate the local `Knowledge` directly, which worked on the
 /// host and did nothing at all for a guest — their purchase was silently
 /// overwritten by the very next [`KnowledgeSync`], costing them the hint and
@@ -337,36 +322,13 @@ impl Knowledge {
 
     /// Whether the dispenser will actually hand this over right now.
     pub fn is_reagent_unlocked(&self, data: &ChemData, reagent: ReagentId) -> bool {
-        data.reagents.get(reagent).tier <= self.dispenser_tier
-    }
-
-    /// The dispenser's current upgrade tier.
-    pub fn dispenser_tier(&self) -> u32 {
-        self.dispenser_tier
+        data.reagents.get(reagent).dispensable
     }
 
     /// Research points to upgrade the dispenser to its next tier, or `None`
     /// if it is already at the highest tier.
     pub fn next_upgrade_cost(&self) -> Option<u32> {
-        DISPENSER_TIER_COSTS
-            .get(self.dispenser_tier as usize)
-            .copied()
-    }
-
-    /// Spends research points to upgrade the dispenser to its next tier,
-    /// unlocking every reagent in that tier at once. Returns false if
-    /// already at the highest tier or the chemist cannot afford it — never
-    /// partially spends.
-    pub fn upgrade_dispenser(&mut self, _data: &ChemData) -> bool {
-        let Some(cost) = self.next_upgrade_cost() else {
-            return false;
-        };
-        if self.research_points < cost {
-            return false;
-        }
-        self.research_points -= cost;
-        self.dispenser_tier += 1;
-        true
+        None
     }
 
     /// Exposes every dispenser reagent and recipe without spending research.
@@ -384,16 +346,47 @@ impl Knowledge {
         self.available_reagents_at_tier(data, self.dispenser_tier)
     }
 
-    /// What this notebook could produce if the dispenser were at `tier`.
-    /// Known recipes still matter; this only changes the equipment input set.
-    fn available_reagents_at_tier(&self, data: &ChemData, tier: u32) -> HashSet<ReagentId> {
+    /// What can be made from dispenser stock plus chemistry physically in the
+    /// lab right now.
+    ///
+    /// The book intentionally treats produce as a discoverable root, but a
+    /// timed order must not pretend a randomly delivered Koibean or
+    /// Glowshroom is already on the counter. Order generation uses this
+    /// inventory-aware view; recipe guidance continues to use
+    /// [`Self::available_reagents`].
+    pub fn available_reagents_with_inventory(
+        &self,
+        data: &ChemData,
+        inventory: impl IntoIterator<Item = ReagentId>,
+    ) -> HashSet<ReagentId> {
         let mut available: HashSet<ReagentId> = data
             .reagents
             .dispensable()
-            .filter(|reagent| reagent.tier <= tier)
             .map(|reagent| reagent.id)
             .collect();
+        available.extend(inventory);
+        self.close_known_reactions(data, available)
+    }
 
+    /// What this notebook could produce if the dispenser were at `tier`.
+    /// Known recipes still matter; this only changes the equipment input set.
+    fn available_reagents_at_tier(&self, data: &ChemData, tier: u32) -> HashSet<ReagentId> {
+        let _ = tier;
+        // External grinder inputs are roots of the same dependency graph as
+        // dispenser stock. Omitting them here made produce-backed recipes
+        // physically craftable but invisible to frontier badges and order
+        // reachability — exactly the progression systems that are supposed
+        // to teach the player where those ingredients come from.
+        let available: HashSet<ReagentId> = data.reagents.raw().map(|reagent| reagent.id).collect();
+
+        self.close_known_reactions(data, available)
+    }
+
+    fn close_known_reactions(
+        &self,
+        data: &ChemData,
+        mut available: HashSet<ReagentId>,
+    ) -> HashSet<ReagentId> {
         // Known recipes feed each other, so keep going until nothing new
         // appears rather than making a single pass.
         loop {
@@ -449,6 +442,32 @@ impl Knowledge {
             }
         }
 
+        development.retain(|reagent| !current.contains(reagent));
+        development
+    }
+
+    /// One-recipe development frontier constrained by current physical stock.
+    pub fn development_reagents_with_inventory(
+        &self,
+        data: &ChemData,
+        inventory: impl IntoIterator<Item = ReagentId>,
+    ) -> HashSet<ReagentId> {
+        let current = self.available_reagents_with_inventory(data, inventory);
+        let mut development = current.clone();
+        for reaction in data
+            .reactions
+            .iter()
+            .filter(|reaction| !self.is_known(reaction.id))
+        {
+            if reaction
+                .reactants
+                .iter()
+                .chain(&reaction.catalysts)
+                .all(|(reagent, _)| current.contains(reagent))
+            {
+                development.extend(reaction.product_ids());
+            }
+        }
         development.retain(|reagent| !current.contains(reagent));
         development
     }
@@ -774,20 +793,17 @@ mod tests {
     // -- dispenser tiers -----------------------------------------------------
 
     #[test]
-    fn every_starting_ingredients_reagent_is_unlocked_free() {
-        // Every base reagent the 3 starting recipes need must be tier 0, or a
-        // fresh chemist could not even make what they're supposed to already
-        // know. Derived from the data rather than hardcoded, so a future edit
-        // to a starting recipe's own ingredients can't silently strand it
-        // behind a lock.
+    fn every_starting_ingredient_is_available_from_a_fresh_dispenser() {
+        // Derived from the data rather than hardcoded, so a future edit to a
+        // starting recipe cannot silently strand it behind a source mistake.
         let data = data();
+        let knowledge = Knowledge::new(&data);
         for key in STARTING_RECIPES {
             let reaction = data.reactions.find(key).unwrap();
             for &(reagent, _) in reaction.reactants.iter().chain(reaction.catalysts.iter()) {
-                assert_eq!(
-                    data.reagents.get(reagent).tier,
-                    0,
-                    "'{}', needed by starting recipe '{key}', is locked",
+                assert!(
+                    knowledge.is_reagent_unlocked(&data, reagent),
+                    "'{}', needed by starting recipe '{key}', is unavailable",
                     data.reagents.get(reagent).key
                 );
             }
@@ -795,62 +811,24 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_chemist_can_only_dispense_the_starting_reagents() {
+    fn a_fresh_chemist_can_dispense_every_base_reagent() {
         let data = data();
         let knowledge = Knowledge::new(&data);
         let dispensable_count = data.reagents.dispensable().count();
         let unlocked_count = knowledge.dispensable(&data).len();
-        assert!(
-            unlocked_count < dispensable_count,
-            "some dispensable reagents must start locked, or the feature does nothing"
-        );
-        for reagent in knowledge.dispensable(&data) {
-            assert_eq!(data.reagents.get(reagent).tier, 0);
-        }
+        assert_eq!(unlocked_count, dispensable_count);
     }
 
     #[test]
-    fn upgrading_spends_research_and_advances_one_tier_at_a_time() {
-        let data = data();
-        let mut knowledge = Knowledge::new(&data);
-        let hydrogen = data.reagent("hydrogen"); // tier 1
-        let cost = DISPENSER_TIER_COSTS[0];
-
-        assert!(
-            !knowledge.upgrade_dispenser(&data),
-            "cannot upgrade with no research"
-        );
-        assert!(!knowledge.is_reagent_unlocked(&data, hydrogen));
-
-        knowledge.award_research(cost);
-        assert!(knowledge.upgrade_dispenser(&data));
-        assert_eq!(knowledge.research_points, 0);
-        assert_eq!(knowledge.dispenser_tier(), 1);
-        assert!(knowledge.is_reagent_unlocked(&data, hydrogen));
-
-        // The next tier is a separate purchase — this one didn't come free.
-        knowledge.award_research(cost);
-        assert!(
-            !knowledge.upgrade_dispenser(&data),
-            "tier 2 costs more than tier 1 did"
-        );
-        assert_eq!(knowledge.research_points, cost);
-    }
-
-    #[test]
-    fn upgrading_past_the_top_tier_does_nothing() {
+    fn there_is_no_dispenser_upgrade_track() {
         let data = data();
         let mut knowledge = Knowledge::new(&data);
         knowledge.award_research(1000);
-        for _ in 0..DISPENSER_TIER_COSTS.len() {
-            assert!(knowledge.upgrade_dispenser(&data));
-        }
         assert_eq!(knowledge.next_upgrade_cost(), None);
-        let leftover = knowledge.research_points;
-        assert!(!knowledge.upgrade_dispenser(&data));
+        assert_eq!(knowledge.research_points, 1000);
         assert_eq!(
-            knowledge.research_points, leftover,
-            "nothing should have been spent"
+            knowledge.dispensable(&data).len(),
+            data.reagents.dispensable().count()
         );
     }
 
@@ -880,23 +858,36 @@ mod tests {
         assert!(preview.contains(&data.reagent("bicaridine")));
         assert!(preview.contains(&data.reagent("mannitol")));
         assert!(!preview.contains(&data.reagent("inaprovaline")));
-        assert!(!preview.contains(&data.reagent("dermaline")));
-        assert!(!preview.contains(&data.reagent("hyronalin")));
+        assert!(preview.contains(&data.reagent("dermaline")));
+        assert!(preview.contains(&data.reagent("hyronalin")));
     }
 
     #[test]
-    fn a_dispenser_upgrade_survives_a_save_round_trip() {
+    fn external_sources_advance_the_same_dependency_frontier_as_dispenser_stock() {
         let data = data();
-        let mut original = Knowledge::new(&data);
-        let hydrogen = data.reagent("hydrogen");
-        original.award_research(DISPENSER_TIER_COSTS[0]);
-        assert!(original.upgrade_dispenser(&data));
+        let mut knowledge = Knowledge::new(&data);
+        let carpotoxin = data.reagent("carpotoxin");
+        let cryptobiolin = data.reactions.find("cryptobiolin").unwrap().id;
+        let rezadone = data.reactions.find("rezadone").unwrap().id;
 
+        assert!(knowledge.available_reagents(&data).contains(&carpotoxin));
+        assert!(knowledge.frontier(&data).contains(&cryptobiolin));
+        assert!(!knowledge.frontier(&data).contains(&rezadone));
+
+        knowledge.learn(cryptobiolin);
+        assert!(knowledge.frontier(&data).contains(&rezadone));
+    }
+
+    #[test]
+    fn base_reagent_access_survives_a_save_round_trip() {
+        let data = data();
+        let original = Knowledge::new(&data);
+        let hydrogen = data.reagent("hydrogen");
         let text = ron::ser::to_string(&original.to_save(&data)).unwrap();
         let restored = Knowledge::from_save(&data, ron::from_str(&text).unwrap());
 
         assert!(restored.is_reagent_unlocked(&data, hydrogen));
-        assert_eq!(restored.dispenser_tier(), 1);
+        assert_eq!(restored.next_upgrade_cost(), None);
     }
 
     fn learn_app() -> App {
@@ -984,18 +975,13 @@ mod tests {
             .collect();
         frontier.sort();
 
-        // Only 6 of the 23 dispensable reagents are unlocked at career start
-        // (oxygen, carbon, sugar, silicon, nitrogen, potassium — exactly what
-        // the 3 starting recipes need), so the frontier this early is much
-        // smaller than the recipe graph alone would suggest: bicaridine
-        // (inaprovaline + carbon) and tricordrazine (inaprovaline + dylovene)
-        // are the only locked recipes buildable from starting knowledge and
-        // unlocked reagents alone. Everything else needs at least one locked
-        // reagent — dermaline needs phosphorus, hyronalin needs radium, and
-        // so on — regardless of how close it looks in the recipe graph.
-        // `every_starting_ingredients_reagent_is_unlocked_free` pins the
-        // other half of this: the 6 that must never end up locked.
-        assert_eq!(frontier, vec!["bicaridine", "tricordrazine"]);
+        assert!(frontier.contains(&"bicaridine"));
+        assert!(frontier.contains(&"chlorine_trifluoride"));
+        assert!(frontier.contains(&"morphine"));
+        assert!(
+            !frontier.contains(&"rdx"),
+            "deep products still require learned intermediates"
+        );
     }
 
     #[test]
@@ -1014,18 +1000,6 @@ mod tests {
 
         assert!(knowledge.learn(hyronalin), "learning it should be news");
         assert!(!knowledge.learn(hyronalin), "learning it twice should not");
-
-        // Knowing the recipe and being able to make it right now are
-        // different things: `available_reagents` only counts hyronalin
-        // itself as available once *its* ingredients (radium, tier 5) are
-        // unlocked too, and arithrazine additionally needs hydrogen (tier 1,
-        // already covered by reaching tier 5). Neither is what this test is
-        // actually about (frontier growth on learning, not the dispenser
-        // tier economy), so max out the dispenser directly.
-        knowledge.award_research(DISPENSER_TIER_COSTS.iter().sum());
-        for _ in 0..DISPENSER_TIER_COSTS.len() {
-            assert!(knowledge.upgrade_dispenser(&data));
-        }
 
         assert!(
             knowledge
@@ -1152,6 +1126,39 @@ mod tests {
         // Illicit reagents and precursors carry no potency at all and must
         // still pay something, or an antagonist delivery would be free.
         assert_eq!(research_for_delivery(0), RESEARCH_PER_SUCCESS);
+    }
+
+    #[test]
+    fn timed_order_reachability_requires_external_stock_to_physically_exist() {
+        let data = data();
+        let mut knowledge = Knowledge::new(&data);
+        knowledge.unlock_all(&data);
+        let rezadone = data.reagent("rezadone");
+        let regenerative = data.reagent("regenerative_jelly");
+        let carpotoxin = data.reagent("carpotoxin");
+        let omnizine = data.reagent("omnizine");
+        let slime_jelly = data.reagent("slime_jelly");
+
+        let no_delivery = knowledge.available_reagents_with_inventory(&data, []);
+        assert!(!no_delivery.contains(&rezadone));
+        assert!(!no_delivery.contains(&regenerative));
+
+        let with_koibean = knowledge.available_reagents_with_inventory(&data, [carpotoxin]);
+        assert!(with_koibean.contains(&rezadone));
+
+        let only_half_the_jelly_sources =
+            knowledge.available_reagents_with_inventory(&data, [omnizine]);
+        assert!(!only_half_the_jelly_sources.contains(&regenerative));
+        let both_jelly_sources =
+            knowledge.available_reagents_with_inventory(&data, [omnizine, slime_jelly]);
+        assert!(both_jelly_sources.contains(&regenerative));
+    }
+
+    #[test]
+    fn impure_deliveries_pay_less_research_without_stalling_progression() {
+        assert_eq!(research_for_delivery_at_purity(3, 1.0), 3);
+        assert_eq!(research_for_delivery_at_purity(3, 0.5), 2);
+        assert_eq!(research_for_delivery_at_purity(1, 0.1), 1);
     }
 
     #[test]

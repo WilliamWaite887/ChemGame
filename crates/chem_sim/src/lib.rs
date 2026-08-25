@@ -33,17 +33,21 @@ pub mod solution;
 pub mod thermal;
 pub mod units;
 
+use std::collections::HashSet;
+
 pub use body::{
     blast_radius, explosion_damage, metabolise, Bloodstream, ExposureReport, Health, StatusState,
-    TickReport, Vitals, ANALGESIC_COLLAPSE_BONUS, COLLAPSE, MAX_DAMAGE_PER_KIND, RECOVER,
-    STABILIZED_COLLAPSE_BONUS, TICK_SECONDS,
+    TickReport, Vitals, ANALGESIC_COLLAPSE_BONUS, COLLAPSE, CRITICAL_DAMAGE, MAX_DAMAGE_PER_KIND,
+    RECOVER, STABILIZED_COLLAPSE_BONUS, TICK_SECONDS,
 };
 pub use effect::{Damage, DamageKind, ReagentEffect, Route, StatusKind, WorldEffect};
 pub use reaction::{
-    ChemDataError, Reaction, ReactionActivation, ReactionDef, ReactionEffect, ReactionId,
-    ReactionProcess, ReactionProcessDef, ReactionSet,
+    ChemDataError, PulseKind, Reaction, ReactionActivation, ReactionDef, ReactionEffect,
+    ReactionId, ReactionProcess, ReactionProcessDef, ReactionSet,
 };
-pub use reagent::{Category, Reagent, ReagentDef, ReagentId, ReagentRegistry, DEFAULT_METABOLISM};
+pub use reagent::{
+    Category, ExplosiveProfile, Reagent, ReagentDef, ReagentId, ReagentRegistry, DEFAULT_METABOLISM,
+};
 pub use resolver::{
     is_reacting, is_reacting_with_activation, resolve, resolve_step, resolve_step_with_activation,
     resolve_with_activation, ReactionEvent, ResolveReport, MAX_ITERATIONS,
@@ -64,18 +68,112 @@ impl ChemData {
         reagent_defs: Vec<ReagentDef>,
         reaction_defs: Vec<ReactionDef>,
     ) -> Result<Self, ChemDataError> {
+        let mut reagent_keys = HashSet::new();
+        for def in &reagent_defs {
+            if !reagent_keys.insert(def.id.clone()) {
+                return Err(ChemDataError::DuplicateReagent {
+                    reagent: def.id.clone(),
+                });
+            }
+            validate_reagent_def(def)?;
+        }
+        let mut reaction_keys = HashSet::new();
+        for def in &reaction_defs {
+            if !reaction_keys.insert(def.id.clone()) {
+                return Err(ChemDataError::DuplicateReaction {
+                    reaction: def.id.clone(),
+                });
+            }
+            validate_reaction_def(def)?;
+        }
+
         let mut reagents = ReagentRegistry::new();
         for def in reagent_defs {
             reagents.insert(def);
+        }
+        for reagent in reagents.iter() {
+            if let Some(inverse) = reagent.inverse.as_deref() {
+                if reagents.id_of(inverse).is_none() {
+                    return Err(ChemDataError::UnknownInverse {
+                        reagent: reagent.key.clone(),
+                        inverse: inverse.to_string(),
+                    });
+                }
+            }
+            if let Some(target) = reagent.recovers_to.as_deref() {
+                if reagents.id_of(target).is_none() {
+                    return Err(ChemDataError::UnknownRecoveryTarget {
+                        reagent: reagent.key.clone(),
+                        target: target.to_string(),
+                    });
+                }
+                if target == reagent.key {
+                    return Err(ChemDataError::InvalidRecoveryTarget {
+                        reagent: reagent.key.clone(),
+                    });
+                }
+            }
+            for (target, amount) in &reagent.targeted_purges {
+                if reagents.id_of(target).is_none() {
+                    return Err(ChemDataError::UnknownPurgeTarget {
+                        reagent: reagent.key.clone(),
+                        target: target.clone(),
+                    });
+                }
+                if !amount.is_positive() {
+                    return Err(ChemDataError::InvalidPurgeAmount {
+                        reagent: reagent.key.clone(),
+                        target: target.clone(),
+                    });
+                }
+            }
         }
         let mut reactions = ReactionSet::new();
         for def in reaction_defs {
             reactions.insert(def, &reagents)?;
         }
+        validate_reachability(&reagents, &reactions)?;
         Ok(ChemData {
             reagents,
             reactions,
         })
+    }
+
+    /// Everything physically synthesizable from dispenser stock plus the
+    /// supplied station inventory, without considering recipe knowledge.
+    ///
+    /// Hidden antagonist requests use this view: their customer may know a
+    /// formula the player has not discovered, but cannot fairly demand an
+    /// external botanical ingredient that has not actually arrived.
+    pub fn reachable_reagents_with_inventory(
+        &self,
+        inventory: impl IntoIterator<Item = ReagentId>,
+    ) -> HashSet<ReagentId> {
+        let mut reachable: HashSet<ReagentId> = self
+            .reagents
+            .dispensable()
+            .map(|reagent| reagent.id)
+            .collect();
+        reachable.extend(inventory);
+        loop {
+            let mut grew = false;
+            for reaction in self.reactions.iter() {
+                if reaction
+                    .reactants
+                    .iter()
+                    .chain(&reaction.catalysts)
+                    .all(|(reagent, _)| reachable.contains(reagent))
+                {
+                    for product in reaction.product_ids() {
+                        grew |= reachable.insert(product);
+                    }
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        reachable
     }
 
     /// Loads from RON source. The game feeds the same strings in through
@@ -93,4 +191,193 @@ impl ChemData {
             .id_of(key)
             .unwrap_or_else(|| panic!("no reagent '{key}' in the chemistry data"))
     }
+}
+
+fn validate_reagent_def(def: &ReagentDef) -> Result<(), ChemDataError> {
+    let invalid = |field| ChemDataError::InvalidReagentField {
+        reagent: def.id.clone(),
+        field,
+    };
+    if def.id.trim().is_empty() {
+        return Err(invalid("id"));
+    }
+    if def.name.trim().is_empty() {
+        return Err(invalid("name"));
+    }
+    if def
+        .color
+        .iter()
+        .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+    {
+        return Err(invalid("color"));
+    }
+    if !def.ph.is_finite() || !(0.0..=14.0).contains(&def.ph) {
+        return Err(invalid("pH"));
+    }
+    if def.overdose.is_some_and(|value| !value.is_positive()) {
+        return Err(invalid("overdose threshold"));
+    }
+    if def.metabolism.is_some_and(|value| !value.is_positive()) {
+        return Err(invalid("metabolism rate"));
+    }
+    if def
+        .critical_overdose
+        .is_some_and(|value| !value.is_positive())
+    {
+        return Err(invalid("critical overdose threshold"));
+    }
+    if matches!((def.overdose, def.critical_overdose), (Some(first), Some(critical)) if critical <= first)
+    {
+        return Err(invalid("critical overdose threshold"));
+    }
+    if def
+        .boils_at
+        .is_some_and(|value| !value.0.is_finite() || value.0 <= 0.0)
+    {
+        return Err(invalid("boiling point"));
+    }
+    if !def.addictive.is_finite() || def.addictive < 0.0 {
+        return Err(invalid("addictiveness"));
+    }
+    if let Some(explosive) = def.explosive {
+        if !explosive.strength.is_finite()
+            || explosive.strength <= 0.0
+            || !explosive.modifier.is_finite()
+            || explosive.modifier < 0.0
+            || !explosive.activation_temp.0.is_finite()
+            || explosive.activation_temp.0 <= 0.0
+        {
+            return Err(invalid("explosive profile"));
+        }
+    }
+    if def
+        .effects
+        .iter()
+        .chain(&def.overdose_effects)
+        .chain(&def.critical_effects)
+        .chain(&def.after_effects)
+        .any(|effect| !effect.magnitude().is_finite() || effect.magnitude() <= 0.0)
+    {
+        return Err(invalid("body effect"));
+    }
+    if def
+        .world_effects
+        .iter()
+        .any(|effect| !effect.magnitude().is_finite() || effect.magnitude() <= 0.0)
+    {
+        return Err(invalid("world effect"));
+    }
+    Ok(())
+}
+
+fn validate_reaction_def(def: &ReactionDef) -> Result<(), ChemDataError> {
+    let invalid = |field| ChemDataError::InvalidReactionField {
+        reaction: def.id.clone(),
+        field,
+    };
+    if def.id.trim().is_empty() {
+        return Err(invalid("id"));
+    }
+    for (field, ingredients) in [
+        ("reactant amount", def.reactants.as_slice()),
+        ("catalyst amount", def.catalysts.as_slice()),
+        ("product amount", def.products.as_slice()),
+    ] {
+        if ingredients.iter().any(|(_, amount)| !amount.is_positive()) {
+            return Err(invalid(field));
+        }
+        let mut names = HashSet::new();
+        if ingredients.iter().any(|(name, _)| !names.insert(name)) {
+            return Err(invalid("duplicate ingredient"));
+        }
+    }
+    if def
+        .reactants
+        .iter()
+        .any(|(name, _)| def.catalysts.iter().any(|(other, _)| name == other))
+    {
+        return Err(invalid("reactant/catalyst overlap"));
+    }
+    let valid_temperature =
+        |value: Option<Kelvin>| value.is_none_or(|value| value.0.is_finite() && value.0 > 0.0);
+    if !valid_temperature(def.min_temp)
+        || !valid_temperature(def.max_temp)
+        || !valid_temperature(def.overheat_temp)
+        || matches!((def.min_temp, def.max_temp), (Some(min), Some(max)) if min > max)
+    {
+        return Err(invalid("temperature range"));
+    }
+    if !def.ph_shift.is_finite() {
+        return Err(invalid("pH drift"));
+    }
+    if def.rate.is_some_and(|rate| !rate.is_positive()) {
+        return Err(invalid("reaction rate"));
+    }
+    let valid_overheat = match def.overheat {
+        Overheat::ReducedYield { over } => over.is_finite() && over > 0.0,
+        Overheat::Detonate { power } => power.is_finite() && power > 0.0,
+        Overheat::Ruin => true,
+    };
+    if !valid_overheat {
+        return Err(invalid("overheat profile"));
+    }
+    let valid_effects = def.effects.iter().all(|effect| match *effect {
+        ReactionEffect::Heat(value) => value.is_finite(),
+        ReactionEffect::Smoke(value) | ReactionEffect::Explosion(value) => {
+            value.is_finite() && value > 0.0
+        }
+        ReactionEffect::ExplosionProfile { strength, modifier } => {
+            strength.is_finite() && strength > 0.0 && modifier.is_finite() && modifier >= 0.0
+        }
+        ReactionEffect::Pulse { power, .. } => power.is_finite() && power > 0.0,
+        ReactionEffect::PulseProfile {
+            strength, modifier, ..
+        } => strength.is_finite() && strength > 0.0 && modifier.is_finite() && modifier >= 0.0,
+        ReactionEffect::Emp(value) | ReactionEffect::Electric(value) => {
+            value.is_finite() && value > 0.0
+        }
+        ReactionEffect::EmpProfile { strength, modifier }
+        | ReactionEffect::ElectricProfile { strength, modifier } => {
+            strength.is_finite() && strength > 0.0 && modifier.is_finite() && modifier >= 0.0
+        }
+    });
+    if !valid_effects {
+        return Err(invalid("reaction effect"));
+    }
+    Ok(())
+}
+
+fn validate_reachability(
+    reagents: &ReagentRegistry,
+    reactions: &ReactionSet,
+) -> Result<(), ChemDataError> {
+    let mut reachable: HashSet<ReagentId> = reagents.raw().map(|reagent| reagent.id).collect();
+    loop {
+        let mut grew = false;
+        for reaction in reactions.iter() {
+            if reaction
+                .reactants
+                .iter()
+                .chain(&reaction.catalysts)
+                .all(|(reagent, _)| reachable.contains(reagent))
+            {
+                for (product, _) in &reaction.products {
+                    grew |= reachable.insert(*product);
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    if let Some(product) = reactions
+        .iter()
+        .flat_map(|reaction| reaction.products.iter().map(|(reagent, _)| *reagent))
+        .find(|reagent| !reachable.contains(reagent))
+    {
+        return Err(ChemDataError::UnreachableReactionProduct {
+            reagent: reagents.get(product).key.clone(),
+        });
+    }
+    Ok(())
 }

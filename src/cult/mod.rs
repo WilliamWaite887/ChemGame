@@ -556,9 +556,12 @@ fn spawn_stage_consequences(
     // The payment is physical stock at the counter, not an invisible bonus.
     if let Some(reagent) = db.reagents.id_of(&stage.reward_reagent) {
         let mut vial = Container::new(ContainerKind::Bottle);
-        let _ = vial
-            .solution
-            .add(reagent, Units::whole(stage.reward_amount as i32));
+        let _ = vial.solution.add_profiled(
+            reagent,
+            Units::whole(stage.reward_amount as i32),
+            1.0,
+            db.reagents.get(reagent).ph,
+        );
         commands.spawn((
             vial,
             Transform::from_translation(REWARD_SPOT),
@@ -653,18 +656,19 @@ fn aggro_cultists(
     mut commands: Commands,
     arc_script: Option<Res<crate::arc::Script>>,
     idle: IdleCultists,
-    chemists: Query<&Transform, With<Chemist>>,
+    chemists: Query<(&Transform, &crate::body::Bloodstream), With<Chemist>>,
 ) {
     let Some(arc_script) = arc_script else {
         return;
     };
     let tuning = arc_script.showdown;
     for (entity, transform) in &idle {
-        let noticed = chemists.iter().any(|chemist_transform| {
+        let noticed = chemists.iter().any(|(chemist_transform, blood)| {
+            let detection_radius = GUARD_AGGRO_RADIUS * (1.0 - blood.0.concealment());
             transform
                 .translation
                 .distance_squared(chemist_transform.translation)
-                <= GUARD_AGGRO_RADIUS * GUARD_AGGRO_RADIUS
+                <= detection_radius * detection_radius
         });
         if noticed {
             commands
@@ -1364,6 +1368,7 @@ mod tests {
                 client: bevy_replicon::prelude::ClientId::Server,
             },
             Transform::from_xyz(1.0, 0.0, 0.0),
+            crate::body::Bloodstream::default(),
         ));
 
         app.update();
@@ -1375,6 +1380,39 @@ mod tests {
         assert!(
             app.world().get::<crate::showdown::Pursuit>(far).is_none(),
             "nothing should chase from clear across the map"
+        );
+    }
+
+    #[test]
+    fn saturn_x_concealment_shortens_hostile_visual_detection() {
+        let mut app = campaign_app();
+        app.add_systems(Update, aggro_cultists);
+        let guard = app
+            .world_mut()
+            .spawn((
+                Cultist {
+                    wards_incident: Some(3),
+                },
+                Transform::from_xyz(0.0, 0.0, 0.0),
+            ))
+            .id();
+        let mut blood = crate::body::Bloodstream::default();
+        blood
+            .0
+            .add_status(chem_sim::StatusKind::Obscured, 10.0, 1.5);
+        app.world_mut().spawn((
+            Chemist {
+                client: bevy_replicon::prelude::ClientId::Server,
+            },
+            Transform::from_xyz(4.0, 0.0, 0.0),
+            blood,
+        ));
+
+        app.update();
+
+        assert!(
+            app.world().get::<crate::showdown::Pursuit>(guard).is_none(),
+            "a concealed chemist beyond the shortened radius should remain unnoticed"
         );
     }
 

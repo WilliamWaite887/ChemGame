@@ -85,7 +85,7 @@ pub struct ProduceDef {
 /// An interned produce handle, the same shape as `ReagentId`.
 ///
 /// A plain index keeps replication to a `u32`. Both ends load the same data
-/// file, which replicon's protocol hash already enforces.
+/// file, which the network compatibility fingerprint includes explicitly.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct ProduceId(pub u32);
 
@@ -510,6 +510,209 @@ mod tests {
                 def.id
             );
         }
+    }
+
+    #[test]
+    fn koibeans_are_the_physical_source_of_carpotoxin() {
+        let config = config();
+        let koibean = config
+            .kinds
+            .iter()
+            .find(|kind| kind.id == "koibean")
+            .expect("the Rezadone branch needs a deliverable Koibean source");
+
+        assert!(koibean
+            .yields
+            .iter()
+            .any(|(reagent, amount)| reagent == "carpotoxin" && *amount >= Units::whole(12)));
+        assert!(koibean
+            .yields
+            .iter()
+            .any(|(reagent, _)| reagent == "plant_fibre"));
+    }
+
+    #[test]
+    fn rare_botany_supplies_both_regenerative_jelly_inputs_dirty() {
+        let config = config();
+        for (produce, reagent) in [("ambrosia_deus", "omnizine"), ("glowshroom", "slime_jelly")] {
+            let kind = config
+                .kinds
+                .iter()
+                .find(|kind| kind.id == produce)
+                .unwrap_or_else(|| panic!("missing {produce} source"));
+            assert!(kind.yields.iter().any(|(key, _)| key == reagent));
+            assert!(kind.yields.iter().any(|(key, _)| key == "plant_fibre"));
+        }
+    }
+
+    #[test]
+    fn tobacco_is_a_dirty_botanical_source_of_nicotine() {
+        let config = config();
+        let tobacco = config
+            .kinds
+            .iter()
+            .find(|kind| kind.id == "tobacco")
+            .expect("the Nicotine branch needs a deliverable Tobacco source");
+
+        assert!(tobacco
+            .yields
+            .iter()
+            .any(|(reagent, amount)| reagent == "nicotine" && *amount >= Units::whole(10)));
+        assert!(tobacco
+            .yields
+            .iter()
+            .any(|(reagent, _)| reagent == "plant_fibre"));
+    }
+
+    #[test]
+    fn coffee_cherries_are_a_dirty_botanical_source_for_pump_up() {
+        let config = config();
+        let cherries = config
+            .kinds
+            .iter()
+            .find(|kind| kind.id == "coffee_cherries")
+            .expect("the Pump-Up branch needs a deliverable Coffee source");
+
+        assert!(cherries
+            .yields
+            .iter()
+            .any(|(reagent, amount)| reagent == "coffee" && *amount >= Units::whole(12)));
+        assert!(cherries
+            .yields
+            .iter()
+            .any(|(reagent, _)| reagent == "plant_fibre"));
+    }
+
+    #[test]
+    fn psychedelic_mushrooms_are_a_dirty_source_of_slow_hallucinogen() {
+        let config = config();
+        let mushroom = config
+            .kinds
+            .iter()
+            .find(|kind| kind.id == "psychedelic_mushroom")
+            .expect("the narcotics table needs a deliverable Mushroom Hallucinogen source");
+
+        assert!(mushroom
+            .yields
+            .iter()
+            .any(|(reagent, amount)| reagent == "mushroom_hallucinogen"
+                && *amount >= Units::whole(10)));
+        assert!(mushroom
+            .yields
+            .iter()
+            .any(|(reagent, _)| reagent == "plant_fibre"));
+    }
+
+    #[test]
+    fn fermentation_culture_supplies_both_external_maintenance_inputs_dirty() {
+        let config = config();
+        let culture = config
+            .kinds
+            .iter()
+            .find(|kind| kind.id == "fermentation_culture")
+            .expect("the maintenance ladder needs Tea and Universal Enzyme");
+
+        for reagent in ["tea", "universal_enzyme", "plant_fibre"] {
+            assert!(
+                culture.yields.iter().any(|(key, _)| key == reagent),
+                "fermentation culture does not yield {reagent}"
+            );
+        }
+    }
+
+    #[test]
+    fn kronkus_fruit_is_a_dirty_physical_source_for_kronkaine() {
+        let config = config();
+        let fruit = config
+            .kinds
+            .iter()
+            .find(|kind| kind.id == "kronkus_fruit")
+            .expect("the Kronkaine branch needs a deliverable Kronkus source");
+
+        assert!(fruit
+            .yields
+            .iter()
+            .any(|(reagent, amount)| reagent == "kronkus_extract" && *amount >= Units::whole(15)));
+        assert!(fruit
+            .yields
+            .iter()
+            .any(|(reagent, _)| reagent == "plant_fibre"));
+    }
+
+    #[test]
+    fn specialist_poison_plants_supply_amanitin_and_curare_dirty() {
+        let config = config();
+        for (produce, reagent) in [("destroying_angel", "amanitin"), ("curare_vine", "curare")] {
+            let kind = config
+                .kinds
+                .iter()
+                .find(|kind| kind.id == produce)
+                .unwrap_or_else(|| panic!("missing {produce} source"));
+            assert!(kind
+                .yields
+                .iter()
+                .any(|(key, amount)| key == reagent && *amount >= Units::whole(10)));
+            assert!(kind.yields.iter().any(|(key, _)| key == "plant_fibre"));
+        }
+    }
+
+    #[test]
+    fn toxic_botany_and_pufferfish_supply_their_specialist_toxins_dirty() {
+        let config = config();
+        let berries = config
+            .kinds
+            .iter()
+            .find(|kind| kind.id == "death_berries")
+            .expect("Tirizene needs a Death Berry source");
+        assert!(berries
+            .yields
+            .iter()
+            .any(|(key, amount)| key == "tirizene" && *amount >= Units::whole(12)));
+        assert!(berries
+            .yields
+            .iter()
+            .any(|(key, amount)| key == "coniine" && *amount >= Units::whole(10)));
+        assert!(berries.yields.iter().any(|(key, _)| key == "plant_fibre"));
+
+        for (produce, reagent) in [("fly_amanita", "amatoxin"), ("omega_weed", "histamine")] {
+            let kind = config
+                .kinds
+                .iter()
+                .find(|kind| kind.id == produce)
+                .unwrap_or_else(|| panic!("missing {produce} source"));
+            assert!(kind
+                .yields
+                .iter()
+                .any(|(key, amount)| key == reagent && *amount >= Units::whole(10)));
+            assert!(kind.yields.iter().any(|(key, _)| key == "plant_fibre"));
+        }
+
+        for (produce, reagent) in [
+            ("bungo_fruit", "bungotoxin"),
+            ("giant_spider_venom_sac", "venom"),
+        ] {
+            let kind = config
+                .kinds
+                .iter()
+                .find(|kind| kind.id == produce)
+                .unwrap_or_else(|| panic!("missing {produce} source"));
+            assert!(kind
+                .yields
+                .iter()
+                .any(|(key, amount)| key == reagent && *amount >= Units::whole(10)));
+            assert!(kind.yields.len() >= 2, "{produce} should grind dirty");
+        }
+
+        let fish = config
+            .kinds
+            .iter()
+            .find(|kind| kind.id == "toxic_pufferfish")
+            .expect("Tetrodotoxin needs a Toxic Pufferfish source");
+        assert!(fish
+            .yields
+            .iter()
+            .any(|(key, amount)| key == "tetrodotoxin" && *amount >= Units::whole(10)));
+        assert!(fish.yields.iter().any(|(key, _)| key == "saltwater"));
     }
 
     #[test]

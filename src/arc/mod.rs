@@ -766,6 +766,7 @@ fn generate_counter_orders(
         Order {
             reagent,
             specific: false,
+            minimum_purity: 0.0,
             amount,
             plea: step.plea.clone(),
             patience,

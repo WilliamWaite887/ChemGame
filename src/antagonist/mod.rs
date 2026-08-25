@@ -20,11 +20,16 @@ use rand::prelude::*;
 use serde::Deserialize;
 
 use crate::chem_data::ChemDb;
+use crate::containers::Container;
 use crate::crew::{spawn_crew_member, CrewMember};
 use crate::interaction::Interactable;
 use crate::net::is_authority;
-use crate::orders::{deliverable_amount, IllicitOrder, Order, OrderResolved, Shift, StationData};
+use crate::orders::{
+    deliverable_amount, physical_reagent_inventory, IllicitOrder, Order, OrderResolved, Shift,
+    StationData,
+};
 use crate::player::Chemist;
+use crate::produce::{Produce, ProduceCatalog};
 use crate::radio::{PendingBroadcasts, RadioEntry, RadioLog};
 use crate::shift::{self, current_rules};
 use crate::AppState;
@@ -250,6 +255,9 @@ fn generate_antagonist_orders(
     mut broadcasts: ResMut<PendingBroadcasts>,
     active: Query<&CrewMember, crate::crew::NotResident>,
     chemists: Query<(), With<Chemist>>,
+    containers: Query<&Container>,
+    produce: Query<&Produce>,
+    produce_catalog: Option<Res<ProduceCatalog>>,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
@@ -280,10 +288,17 @@ fn generate_antagonist_orders(
     // Only requests whose `min_standing` floor the current underworld
     // standing already clears — a reliable dealer sees bolder pretexts as
     // their standing grows, without any UI ever naming the mechanism.
+    let inventory = physical_reagent_inventory(&containers, &produce, produce_catalog.as_deref());
+    let reachable = db.reachable_reagents_with_inventory(inventory);
     let in_standing: Vec<&AntagonistRequestDef> = script
         .requests
         .iter()
         .filter(|request| request.min_standing <= underworld.0)
+        .filter(|request| {
+            db.reagents
+                .id_of(&request.reagent)
+                .is_some_and(|reagent| reachable.contains(&reagent))
+        })
         .collect();
     let Some(request) = in_standing.choose(&mut rng).copied() else {
         return;
@@ -331,6 +346,7 @@ fn generate_antagonist_orders(
             // `IllicitOrder` is what makes this exact, not this field — the
             // two never stack. See `Order::specific`'s own doc comment.
             specific: false,
+            minimum_purity: 0.0,
             amount,
             plea: request.pretext.clone(),
             patience,
@@ -546,15 +562,76 @@ mod tests {
                 .reagents
                 .id_of(&request.reagent)
                 .unwrap_or_else(|| panic!("'{}' names no real reagent", request.reagent));
+            let reagent = data.reagents.get(reagent);
             assert!(
-                data.reagents
-                    .get(reagent)
-                    .categories
-                    .contains(&chem_sim::Category::Illicit),
-                "'{}' is requested by an antagonist but is not Category::Illicit",
+                reagent.categories.contains(&chem_sim::Category::Illicit) || reagent.controlled,
+                "'{}' is requested by an antagonist but is neither illicit nor controlled",
                 request.reagent
             );
         }
+    }
+
+    #[test]
+    fn external_controlled_requests_wait_for_their_physical_sources() {
+        let data = chem_sim::ChemData::from_ron(
+            include_str!("../../assets/data/chem.reagents.ron"),
+            include_str!("../../assets/data/chem.reactions.ron"),
+        )
+        .unwrap();
+
+        let without_delivery = data.reachable_reagents_with_inventory([]);
+        assert!(without_delivery.contains(&data.reagent("blastoff")));
+        assert!(!without_delivery.contains(&data.reagent("kronkaine")));
+        assert!(!without_delivery.contains(&data.reagent("saturn_x")));
+        assert!(!without_delivery.contains(&data.reagent("amanitin")));
+        assert!(!without_delivery.contains(&data.reagent("curare")));
+        assert!(!without_delivery.contains(&data.reagent("tirizene")));
+        assert!(!without_delivery.contains(&data.reagent("tiring_solution")));
+        assert!(!without_delivery.contains(&data.reagent("tetrodotoxin")));
+        assert!(!without_delivery.contains(&data.reagent("pancuronium")));
+        assert!(!without_delivery.contains(&data.reagent("amatoxin")));
+        assert!(!without_delivery.contains(&data.reagent("coniine")));
+        assert!(!without_delivery.contains(&data.reagent("histamine")));
+        assert!(!without_delivery.contains(&data.reagent("bungotoxin")));
+        assert!(!without_delivery.contains(&data.reagent("venom")));
+        assert!(without_delivery.contains(&data.reagent("initropidril")));
+        assert!(without_delivery.contains(&data.reagent("sodium_thiopental")));
+        assert!(without_delivery.contains(&data.reagent("polonium")));
+        assert!(without_delivery.contains(&data.reagent("fentanyl")));
+        assert!(without_delivery.contains(&data.reagent("lead_acetate")));
+        assert!(without_delivery.contains(&data.reagent("itching_powder")));
+        assert!(without_delivery.contains(&data.reagent("rotatium")));
+
+        let with_botany = data.reachable_reagents_with_inventory([
+            data.reagent("kronkus_extract"),
+            data.reagent("tea"),
+            data.reagent("plant_fibre"),
+        ]);
+        assert!(with_botany.contains(&data.reagent("kronkaine")));
+        assert!(with_botany.contains(&data.reagent("saturn_x")));
+
+        let with_toxic_botany = data.reachable_reagents_with_inventory([
+            data.reagent("amanitin"),
+            data.reagent("curare"),
+            data.reagent("tirizene"),
+            data.reagent("tetrodotoxin"),
+            data.reagent("amatoxin"),
+            data.reagent("coniine"),
+            data.reagent("histamine"),
+            data.reagent("bungotoxin"),
+            data.reagent("venom"),
+        ]);
+        assert!(with_toxic_botany.contains(&data.reagent("amanitin")));
+        assert!(with_toxic_botany.contains(&data.reagent("curare")));
+        assert!(with_toxic_botany.contains(&data.reagent("tirizene")));
+        assert!(with_toxic_botany.contains(&data.reagent("tiring_solution")));
+        assert!(with_toxic_botany.contains(&data.reagent("tetrodotoxin")));
+        assert!(with_toxic_botany.contains(&data.reagent("pancuronium")));
+        assert!(with_toxic_botany.contains(&data.reagent("amatoxin")));
+        assert!(with_toxic_botany.contains(&data.reagent("coniine")));
+        assert!(with_toxic_botany.contains(&data.reagent("histamine")));
+        assert!(with_toxic_botany.contains(&data.reagent("bungotoxin")));
+        assert!(with_toxic_botany.contains(&data.reagent("venom")));
     }
 
     // -- deepened Traitor: min_standing / gap tightening --------------------

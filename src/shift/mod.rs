@@ -273,6 +273,7 @@ pub fn spawn_scripted_visit(
         crate::orders::Order {
             reagent: visit.reagent,
             specific: true,
+            minimum_purity: 0.0,
             amount,
             plea: visit.plea.clone(),
             patience,
@@ -706,9 +707,10 @@ fn gift_container(
             - (station.transform.rotation * Vec3::X) * 0.6,
     );
     let amount = ContainerKind::Bottle.capacity();
+    let ph = db.reagents.get(reagent).ph;
     commands.queue(move |world: &mut World| {
         if let Some(mut container) = world.get_mut::<Container>(token) {
-            let _ = container.solution.add(reagent, amount);
+            let _ = container.solution.add_profiled(reagent, amount, 1.0, ph);
         }
     });
 }
@@ -1348,6 +1350,11 @@ mod tests {
             plea: String::new(),
             specific_plea: String::new(),
             themes: themes.iter().map(|theme| theme.to_string()).collect(),
+            minimum_successes: 0,
+            minimum_recipes_known: 0,
+            exact: false,
+            minimum_purity: 0.0,
+            patience_scale: 1.0,
         }
     }
 
@@ -1565,7 +1572,7 @@ mod tests {
     }
 
     #[test]
-    fn the_service_pool_is_exactly_three_starters_and_nine_staged_medicines() {
+    fn the_service_pool_includes_medicine_and_progressive_demolition_emergencies() {
         let base = config();
         let actual: std::collections::BTreeSet<&str> = base
             .requests
@@ -1585,6 +1592,38 @@ mod tests {
             "potassium_iodide",
             "mannitol",
             "saline_glucose",
+            "firefighting_foam",
+            "chemical_foam",
+            "metal_foam",
+            "carbon_dioxide",
+            "pax",
+            "pyrosium",
+            "sonic_powder",
+            "sorium",
+            "liquid_dark_matter",
+            "gunpowder",
+            "nitroglycerin",
+            "rdx",
+            "teslium",
+            "tatp",
+            "libital",
+            "lenturi",
+            "granibitaluri",
+            "rezadone",
+            "oculine",
+            "diphenhydramine",
+            "antihol",
+            "modafinil",
+            "naloxone",
+            "hercuri",
+            "syriniver",
+            "pyroxadone",
+            "regenerative_jelly",
+            "penthrite",
+            "psicodine",
+            "ammoniated_mercury",
+            "neurine",
+            "seiver",
         ]
         .into_iter()
         .collect();
@@ -1592,9 +1631,85 @@ mod tests {
         assert_eq!(actual, expected);
         assert_eq!(
             base.requests.len(),
-            12,
+            44,
             "order-facing medicines must be unique"
         );
+    }
+
+    #[test]
+    fn service_demand_covers_every_supported_treatment_family() {
+        let orders = config();
+        let chemistry = chem_sim::ChemData::from_ron(
+            include_str!("../../assets/data/chem.reagents.ron"),
+            include_str!("../../assets/data/chem.reactions.ron"),
+        )
+        .expect("chemistry data should parse");
+        let demanded: std::collections::BTreeSet<chem_sim::Category> = orders
+            .requests
+            .iter()
+            .flat_map(|request| {
+                chemistry
+                    .reagents
+                    .get(chemistry.reagent(&request.reagent))
+                    .categories
+                    .iter()
+                    .copied()
+            })
+            .filter(|category| category.is_legitimately_orderable())
+            .collect();
+        let expected: std::collections::BTreeSet<chem_sim::Category> = [
+            chem_sim::Category::Trauma,
+            chem_sim::Category::Burns,
+            chem_sim::Category::Antitoxins,
+            chem_sim::Category::Airloss,
+            chem_sim::Category::Radiation,
+            chem_sim::Category::Stimulants,
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            demanded, expected,
+            "every supported treatment family needs recurring service demand"
+        );
+    }
+
+    #[test]
+    fn exact_purity_demands_form_a_staged_mastery_curve() {
+        let base = config();
+        let maximum_quality_at = |successes: u32, recipes_known: usize| {
+            base.requests
+                .iter()
+                .filter(|request| {
+                    request.exact
+                        && request.minimum_successes <= successes
+                        && request.minimum_recipes_known <= recipes_known
+                })
+                .map(|request| request.minimum_purity)
+                .fold(0.0_f32, f32::max)
+        };
+
+        for (successes, expected) in [(0, 0.0), (10, 0.0), (15, 0.75), (30, 0.85), (45, 0.90)] {
+            assert!(
+                (maximum_quality_at(successes, usize::MAX) - expected).abs() < 0.001,
+                "after {successes} successes the quality frontier should be {expected:.0}%"
+            );
+        }
+        assert!((maximum_quality_at(60, 23) - 0.90).abs() < 0.001);
+        assert!((maximum_quality_at(60, 24) - 0.95).abs() < 0.001);
+
+        let mastery = base
+            .requests
+            .iter()
+            .find(|request| request.reagent == "lenturi")
+            .unwrap();
+        assert!(mastery.patience_scale >= 2.0);
+        assert_eq!(
+            mastery.minimum_recipes_known,
+            crate::machines::HPLC_RECIPE_REQUIREMENT,
+            "the mastery request must not precede analyzer calibration"
+        );
+        assert!(mastery.amounts.iter().all(|amount| amount % 4 == 0));
     }
 
     // -- forecast weighting -----------------------------------------------
@@ -2017,6 +2132,7 @@ mod tests {
             .spawn(crate::orders::Order {
                 reagent: chem_sim::ReagentId(0),
                 specific: false,
+                minimum_purity: 0.0,
                 amount: chem_sim::Units::whole(20),
                 plea: String::new(),
                 patience: 120.0,

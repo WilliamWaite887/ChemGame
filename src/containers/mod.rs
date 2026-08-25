@@ -5,6 +5,7 @@
 //! a beaker sit on a bench, be carried by either chemist, or be locked in a
 //! machine slot without any of those being a special case.
 
+use bevy::ecs::entity::MapEntities;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use chem_sim::{resolve_step, ResolveReport, Solution, Units};
@@ -15,7 +16,7 @@ use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::interaction::{InteractRequested, Interactable};
 use crate::lab::{self, Solid};
-use crate::machines::chemist_entity;
+use crate::machines::{chemist_entity, ReactionsFired};
 use crate::net::is_authority;
 use crate::player::{Chemist, LocalPlayer, PlayerCamera};
 use crate::produce::Produce;
@@ -50,7 +51,7 @@ impl Plugin for ContainerPlugin {
             .add_systems(
                 Update,
                 (
-                    (handle_pickup, handle_drop).run_if(is_authority),
+                    (handle_pickup, handle_drop, tick_armed_charges).run_if(is_authority),
                     (
                         request_drop.run_if(crate::settings::not_paused),
                         // Runs everywhere: a replicated beaker arrives as
@@ -77,6 +78,22 @@ pub enum ContainerKind {
     /// Draws from a container and injects. The only route that delivers a whole
     /// dose at once, which is what makes it worth the trip to the Mixing Chamber.
     Syringe,
+    /// Sealed energetic payloads. Separate appended variants keep the fuse
+    /// choice serializable without adding mutable configuration to every
+    /// ordinary bottle and beaker.
+    ChemicalCharge5,
+    ChemicalCharge10,
+    ChemicalCharge20,
+    SprayBottle,
+    Patch,
+    /// A fresh single-use strip. Used colors are separate appended variants
+    /// so the approximate reading replicates without another component.
+    PhPaper,
+    PhPaperStrongAcid,
+    PhPaperAcid,
+    PhPaperNeutral,
+    PhPaperBase,
+    PhPaperStrongBase,
 }
 
 impl ContainerKind {
@@ -87,6 +104,17 @@ impl ContainerKind {
             ContainerKind::Bottle => Units::whole(30),
             ContainerKind::Pill => Units::whole(20),
             ContainerKind::Syringe => Units::whole(15),
+            ContainerKind::ChemicalCharge5
+            | ContainerKind::ChemicalCharge10
+            | ContainerKind::ChemicalCharge20 => Units::whole(50),
+            ContainerKind::SprayBottle => Units::whole(30),
+            ContainerKind::Patch => Units::whole(10),
+            ContainerKind::PhPaper
+            | ContainerKind::PhPaperStrongAcid
+            | ContainerKind::PhPaperAcid
+            | ContainerKind::PhPaperNeutral
+            | ContainerKind::PhPaperBase
+            | ContainerKind::PhPaperStrongBase => Units::ZERO,
         }
     }
 
@@ -97,6 +125,17 @@ impl ContainerKind {
             ContainerKind::Bottle => "Bottle",
             ContainerKind::Pill => "Pill",
             ContainerKind::Syringe => "Syringe",
+            ContainerKind::ChemicalCharge5 => "Chemical Charge (5s)",
+            ContainerKind::ChemicalCharge10 => "Chemical Charge (10s)",
+            ContainerKind::ChemicalCharge20 => "Chemical Charge (20s)",
+            ContainerKind::SprayBottle => "Spray Bottle",
+            ContainerKind::Patch => "Chemical Patch",
+            ContainerKind::PhPaper => "Unused pH Paper",
+            ContainerKind::PhPaperStrongAcid => "pH Paper — strong acid (0–2)",
+            ContainerKind::PhPaperAcid => "pH Paper — acidic (3–5)",
+            ContainerKind::PhPaperNeutral => "pH Paper — near neutral (6–8)",
+            ContainerKind::PhPaperBase => "pH Paper — basic (9–11)",
+            ContainerKind::PhPaperStrongBase => "pH Paper — strong base (12–14)",
         }
     }
 
@@ -108,6 +147,17 @@ impl ContainerKind {
             ContainerKind::Bottle => (0.035, 0.10),
             ContainerKind::Pill => (0.022, 0.012),
             ContainerKind::Syringe => (0.012, 0.09),
+            ContainerKind::ChemicalCharge5
+            | ContainerKind::ChemicalCharge10
+            | ContainerKind::ChemicalCharge20 => (0.065, 0.10),
+            ContainerKind::SprayBottle => (0.035, 0.12),
+            ContainerKind::Patch => (0.025, 0.008),
+            ContainerKind::PhPaper
+            | ContainerKind::PhPaperStrongAcid
+            | ContainerKind::PhPaperAcid
+            | ContainerKind::PhPaperNeutral
+            | ContainerKind::PhPaperBase
+            | ContainerKind::PhPaperStrongBase => (0.018, 0.004),
         }
     }
 
@@ -119,8 +169,32 @@ impl ContainerKind {
     pub fn is_single_dose(self) -> bool {
         matches!(
             self,
-            ContainerKind::Pill | ContainerKind::Bottle | ContainerKind::Syringe
+            ContainerKind::Pill
+                | ContainerKind::Bottle
+                | ContainerKind::Syringe
+                | ContainerKind::Patch
         )
+    }
+
+    pub fn charge_fuse(self) -> Option<f32> {
+        match self {
+            ContainerKind::ChemicalCharge5 => Some(5.0),
+            ContainerKind::ChemicalCharge10 => Some(10.0),
+            ContainerKind::ChemicalCharge20 => Some(20.0),
+            _ => None,
+        }
+    }
+
+    /// Approximate band shown by a one-use strip. Exact pH remains analyzer
+    /// territory, so the portable tool is useful without replacing machinery.
+    pub fn used_ph_paper(ph: f32) -> Self {
+        match ph.clamp(0.0, 14.0) {
+            value if value < 3.0 => ContainerKind::PhPaperStrongAcid,
+            value if value < 6.0 => ContainerKind::PhPaperAcid,
+            value if value < 9.0 => ContainerKind::PhPaperNeutral,
+            value if value < 12.0 => ContainerKind::PhPaperBase,
+            _ => ContainerKind::PhPaperStrongBase,
+        }
     }
 }
 
@@ -129,6 +203,42 @@ impl ContainerKind {
 pub struct Container {
     pub kind: ContainerKind,
     pub solution: Solution,
+}
+
+/// A placed charge counting down on the authority. It remains pickable and
+/// movable; only delivering, drinking and pouring are forbidden by its kind.
+#[derive(Component, Clone, Debug, Serialize, Deserialize, MapEntities)]
+pub struct ArmedCharge {
+    pub remaining_secs: f32,
+    #[entities]
+    pub owner: Entity,
+}
+
+fn tick_armed_charges(
+    time: Res<Time>,
+    db: Option<Res<ChemDb>>,
+    mut charges: Query<(Entity, &mut ArmedCharge, &mut Container)>,
+    mut fired: MessageWriter<ReactionsFired>,
+) {
+    let Some(db) = db else {
+        return;
+    };
+    for (entity, mut armed, mut container) in &mut charges {
+        armed.remaining_secs -= time.delta_secs();
+        if armed.remaining_secs > 0.0 {
+            continue;
+        }
+        let (_, report) = container.mutate(&db, |solution| {
+            solution.temperature = chem_sim::Kelvin(600.0)
+        });
+        if let Some(message) = ReactionsFired::from_report(entity, &report) {
+            fired.write(message);
+        }
+        // A valid charge always reports an explosion and is despawned by the
+        // hazard consumer. Leaving attribution attached until then ensures
+        // the blast is credited even across deferred command boundaries.
+        armed.remaining_secs = f32::INFINITY;
+    }
 }
 
 impl Container {
@@ -331,6 +441,13 @@ fn spawn_starting_glassware(mut commands: Commands) {
         ContainerKind::Syringe,
         Vec3::new(-0.7, bench_top, -1.2),
     );
+    for x in [-0.35f32, -0.20, -0.05] {
+        spawn_container(
+            &mut commands,
+            ContainerKind::PhPaper,
+            Vec3::new(x, bench_top, -1.2),
+        );
+    }
 }
 
 /// A chemist wants to put down whatever they are carrying.

@@ -94,13 +94,35 @@ pub enum StatusKind {
     Mutating,
     /// Clear perception and steadier motor control.
     Focused,
+    /// A sustained positive mood. Crew linger socially while it is active.
+    Happiness,
+    /// A sustained negative mood. Strong intensity makes crew withdraw from
+    /// visits rather than behaving like generic sedation or paranoia.
+    Sadness,
+    /// The body's outline is chemically suppressed. Presentation fades the
+    /// wearer and hostile observers use the aggregate concealment value when
+    /// deciding whether someone close enough has actually been noticed.
+    Obscured,
+    /// Speech and radio reporting are chemically suppressed without taking
+    /// movement or interaction control away from the affected player.
+    Muted,
+    /// Prevents hostile NPC pursuit and attacks without sedating, slowing, or
+    /// taking ordinary movement/control away from the affected character.
+    Pacified,
 }
 
 impl StatusKind {
+    /// Ordered wire schema for the enum's postcard representation.
+    ///
+    /// The network compatibility fingerprint includes this literal. Keep it
+    /// in the same append-only order as [`Self::ALL`] so a status addition or
+    /// reorder cannot silently connect peers that disagree about enum tags.
+    pub const NETWORK_SCHEMA: &'static str = "Sluggish|Hastened|Blurred|Unsteady|Drunk|Irradiated|Stabilized|Sedated|Euphoric|Hallucinating|Paranoid|Analgesic|Burning|Chilled|RadiationShield|Choking|Mutating|Focused|Happiness|Sadness|Obscured|Muted|Pacified";
+
     /// Stable iteration order for audits, replication registration and UI.
     /// New variants are appended so existing binary enum discriminants remain
     /// stable for old statuses.
-    pub const ALL: [StatusKind; 18] = [
+    pub const ALL: [StatusKind; 23] = [
         StatusKind::Sluggish,
         StatusKind::Hastened,
         StatusKind::Blurred,
@@ -119,6 +141,11 @@ impl StatusKind {
         StatusKind::Choking,
         StatusKind::Mutating,
         StatusKind::Focused,
+        StatusKind::Happiness,
+        StatusKind::Sadness,
+        StatusKind::Obscured,
+        StatusKind::Muted,
+        StatusKind::Pacified,
     ];
 
     /// Damage this status deals per metabolism tick at the given intensity.
@@ -183,6 +210,11 @@ impl StatusKind {
             StatusKind::Choking => "Choking",
             StatusKind::Mutating => "Mutating",
             StatusKind::Focused => "Focused",
+            StatusKind::Happiness => "Happiness",
+            StatusKind::Sadness => "Sadness",
+            StatusKind::Obscured => "Obscured",
+            StatusKind::Muted => "Muted",
+            StatusKind::Pacified => "Pacified",
         }
     }
 
@@ -201,6 +233,7 @@ impl StatusKind {
             StatusKind::Chilled => (1.0 - 0.18 * intensity).max(0.35),
             StatusKind::Choking => (1.0 - 0.08 * intensity).max(0.65),
             StatusKind::Focused => (1.0 + 0.03 * intensity).min(1.12),
+            StatusKind::Sadness => (1.0 - 0.08 * intensity).max(0.65),
             _ => 1.0,
         }
     }
@@ -219,6 +252,8 @@ impl StatusKind {
             StatusKind::Hallucinating => 0.80 * intensity,
             StatusKind::Paranoid => 0.15 * intensity,
             StatusKind::Focused => -0.40 * intensity,
+            StatusKind::Happiness => 0.05 * intensity,
+            StatusKind::Sadness => 0.15 * intensity,
             _ => 0.0,
         }
     }
@@ -235,6 +270,28 @@ impl StatusKind {
             StatusKind::Chilled => 0.25 * intensity,
             StatusKind::Mutating => 0.20 * intensity,
             StatusKind::Focused => -0.50 * intensity,
+            _ => 0.0,
+        }
+    }
+
+    /// Fraction of visual detection suppressed at this intensity.
+    ///
+    /// Capped below one so concealment helps rather than becoming an
+    /// uncounterable immunity. Game layers can turn this into a shorter
+    /// detection radius while the presentation layer fades the same body.
+    pub fn concealment(self, intensity: f32) -> f32 {
+        match self {
+            StatusKind::Obscured => (0.45 * intensity.max(0.0)).min(0.80),
+            _ => 0.0,
+        }
+    }
+
+    /// Fraction of ordinary verbal reporting suppressed by this status.
+    /// Witnesses remain able to report what they saw, so muting creates
+    /// counterplay rather than erasing consequences in a populated room.
+    pub fn communication_suppression(self, intensity: f32) -> f32 {
+        match self {
+            StatusKind::Muted => (0.5 * intensity.max(0.0)).min(1.0),
             _ => 0.0,
         }
     }
@@ -256,6 +313,9 @@ impl StatusKind {
                 | StatusKind::Chilled
                 | StatusKind::Choking
                 | StatusKind::Mutating
+                | StatusKind::Sadness
+                | StatusKind::Muted
+                | StatusKind::Pacified
         )
     }
 }
@@ -271,6 +331,11 @@ pub enum ReagentEffect {
     Heal(DamageKind, Units),
     /// Deals this much damage per tick.
     Harm(DamageKind, Units),
+    /// Deals the authored damage for every unit of this reagent currently in
+    /// active blood. This is reserved for concentration-driven poisons such
+    /// as Venom, where dilution and prompt purging must reduce the danger
+    /// continuously instead of only crossing a single overdose threshold.
+    VolumeScaledHarm(DamageKind, Units),
     /// One-off, the moment the dose lands, scaled by the route it came in by.
     /// Acid is worse in a syringe than in a cup.
     Contact(DamageKind, Units),
@@ -291,6 +356,54 @@ pub enum ReagentEffect {
     /// tick. Whether a reagent is harmful is evaluated at its current dose, so
     /// therapeutic medicine below its overdose threshold is left alone.
     Purge(Units),
+    /// Removes this many units of every reagent filed under a legitimate
+    /// treatment category. Used by counter-medicine toxins such as Anacea;
+    /// unlike `Purge`, therapeutic doses are deliberately valid targets.
+    MedicinePurge(Units),
+    /// One-off repair when applied by splash or a dedicated patch. The
+    /// magnitude is quoted per 10u absorbed, like `Contact`, but injections
+    /// and ingestion do not receive the topical bonus.
+    TopicalHeal(DamageKind, Units),
+    /// Repairs damage per tick only while the named status is currently
+    /// active. This makes authored emergency medicines depend on readable body
+    /// state without putting recipe-specific conditionals in the simulator.
+    ConditionalHeal {
+        required: StatusKind,
+        kind: DamageKind,
+        amount: Units,
+    },
+    /// Deals damage only while the patient already has damage in the named
+    /// channel. Heparin uses existing brute trauma as the readable proxy for
+    /// an open bleeding wound in the current four-channel body model.
+    ConditionalHarm {
+        existing: DamageKind,
+        kind: DamageKind,
+        amount: Units,
+    },
+    /// Repairs damage per tick only while the patient's total damage is in
+    /// the critical range. Emergency medicines can therefore be powerful
+    /// without replacing ordinary treatment for a walking patient.
+    CriticalHeal(DamageKind, Units),
+    /// Begins applying a status only after the reagent has survived this many
+    /// metabolism ticks in active blood. This makes delayed poisons readable
+    /// and deterministic without recipe-specific timers in the game layer.
+    DelayedStatus {
+        after_ticks: u32,
+        kind: StatusKind,
+        seconds: f32,
+        intensity: f32,
+    },
+    /// One-shot harm multiplied by the number of metabolism ticks the reagent
+    /// survived. Used by poisons which remain quiet until they clear.
+    AccumulatedHarm(DamageKind, Units),
+    /// Deals damage every metabolism tick after the authored onset. Multiple
+    /// tiers may stack, allowing a poison to have a quiet warning period and
+    /// then escalate deterministically without bespoke simulator code.
+    DelayedHarm {
+        after_ticks: u32,
+        kind: DamageKind,
+        amount: Units,
+    },
 }
 
 impl ReagentEffect {
@@ -300,11 +413,22 @@ impl ReagentEffect {
     /// something corrosive as a "here is what the last chemist made" sample.
     pub fn is_harmful(self) -> bool {
         match self {
-            ReagentEffect::Harm(..) | ReagentEffect::Contact(..) => true,
-            ReagentEffect::Status { kind, .. } => kind.is_harmful(),
-            ReagentEffect::Heal(..) | ReagentEffect::Counter { .. } | ReagentEffect::Purge(..) => {
-                false
+            ReagentEffect::Harm(..)
+            | ReagentEffect::VolumeScaledHarm(..)
+            | ReagentEffect::Contact(..)
+            | ReagentEffect::ConditionalHarm { .. }
+            | ReagentEffect::AccumulatedHarm(..)
+            | ReagentEffect::DelayedHarm { .. }
+            | ReagentEffect::MedicinePurge(..) => true,
+            ReagentEffect::Status { kind, .. } | ReagentEffect::DelayedStatus { kind, .. } => {
+                kind.is_harmful()
             }
+            ReagentEffect::Heal(..)
+            | ReagentEffect::Counter { .. }
+            | ReagentEffect::Purge(..)
+            | ReagentEffect::TopicalHeal(..)
+            | ReagentEffect::ConditionalHeal { .. }
+            | ReagentEffect::CriticalHeal(..) => false,
         }
     }
 
@@ -314,14 +438,25 @@ impl ReagentEffect {
         match self {
             ReagentEffect::Heal(_, amount)
             | ReagentEffect::Harm(_, amount)
+            | ReagentEffect::VolumeScaledHarm(_, amount)
             | ReagentEffect::Contact(_, amount)
-            | ReagentEffect::Purge(amount) => amount.as_f64(),
+            | ReagentEffect::TopicalHeal(_, amount)
+            | ReagentEffect::CriticalHeal(_, amount)
+            | ReagentEffect::AccumulatedHarm(_, amount)
+            | ReagentEffect::Purge(amount)
+            | ReagentEffect::MedicinePurge(amount) => amount.as_f64(),
             ReagentEffect::Status {
                 seconds, intensity, ..
             }
             | ReagentEffect::Counter {
                 seconds, intensity, ..
+            }
+            | ReagentEffect::DelayedStatus {
+                seconds, intensity, ..
             } => (seconds.min(intensity)) as f64,
+            ReagentEffect::ConditionalHeal { amount, .. }
+            | ReagentEffect::ConditionalHarm { amount, .. } => amount.as_f64(),
+            ReagentEffect::DelayedHarm { amount, .. } => amount.as_f64(),
         }
     }
 }
@@ -350,6 +485,16 @@ pub enum WorldEffect {
     Chill { kelvin_per_unit: f32 },
     /// Applies a sight/sensory flash within `radius` for `seconds`.
     Flash { radius: f32, seconds: f32 },
+    /// Expands the released mixture across an area while preserving its
+    /// contents, quality, and owner. Solid foam also becomes a temporary
+    /// collision barrier until its carrier expires.
+    ExpandFoam {
+        radius: f32,
+        seconds: f32,
+        solid: bool,
+    },
+    /// Suppresses burning bodies and ignited chemical material in an area.
+    Extinguish { radius: f32, seconds: f32 },
 }
 
 impl WorldEffect {
@@ -360,7 +505,11 @@ impl WorldEffect {
             WorldEffect::Clean { strength } | WorldEffect::Corrode { strength } => strength,
             WorldEffect::Ignite { intensity, seconds } => intensity.min(seconds),
             WorldEffect::ReleaseSmoke { radius, seconds }
-            | WorldEffect::Flash { radius, seconds } => radius.min(seconds),
+            | WorldEffect::Flash { radius, seconds }
+            | WorldEffect::ExpandFoam {
+                radius, seconds, ..
+            }
+            | WorldEffect::Extinguish { radius, seconds } => radius.min(seconds),
             WorldEffect::Slippery { seconds } => seconds,
             WorldEffect::Flammable { intensity, seconds } => intensity.min(seconds),
             WorldEffect::Chill { kelvin_per_unit } => kelvin_per_unit,
@@ -368,7 +517,12 @@ impl WorldEffect {
     }
 
     pub fn is_harmful(self) -> bool {
-        !matches!(self, WorldEffect::Clean { .. })
+        !matches!(
+            self,
+            WorldEffect::Clean { .. }
+                | WorldEffect::Extinguish { .. }
+                | WorldEffect::ExpandFoam { solid: false, .. }
+        )
     }
 }
 
@@ -384,6 +538,9 @@ pub enum Route {
     Ingested,
     /// Splashed or breathed. Very little of it.
     Touched,
+    /// A sealed patch. The whole dose lands without becoming an injection,
+    /// preserving topical effects and route-specific gameplay.
+    Patched,
 }
 
 impl Route {
@@ -393,6 +550,7 @@ impl Route {
             Route::Injected => Units::ONE,
             Route::Ingested => Units::from_raw(60),
             Route::Touched => Units::from_raw(15),
+            Route::Patched => Units::ONE,
         }
     }
 
@@ -409,6 +567,16 @@ impl Route {
             Route::Injected => 2.0,
             Route::Ingested => 1.0,
             Route::Touched => 0.5,
+            Route::Patched => 1.0,
+        }
+    }
+
+    /// Multiplier for one-off topical repair. Splashing can trigger it, but
+    /// only the small absorbed share lands; patches deliver the full dose.
+    pub fn topical_scale(self) -> f32 {
+        match self {
+            Route::Touched | Route::Patched => 1.0,
+            Route::Injected | Route::Ingested => 0.0,
         }
     }
 
@@ -417,6 +585,7 @@ impl Route {
             Route::Injected => "injected",
             Route::Ingested => "swallowed",
             Route::Touched => "splashed",
+            Route::Patched => "patched",
         }
     }
 }

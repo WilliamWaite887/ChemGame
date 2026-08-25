@@ -3,9 +3,10 @@
 // `yields` are absolute units per item, not ratios: grinding is extraction,
 // not a reaction, so the resolver is never involved in deciding the amounts.
 //
-// Every kind yields plant fibre alongside its extract, and that is the whole
-// design. A ground beaker always holds two reagents, which `grade` reports as
-// Impure — so the grinder is the fast route to a medicine, but never the last
+// Botanical kinds yield plant fibre alongside their extract. Exceptional
+// organic specimens may use a source-appropriate contaminant instead. A
+// ground beaker always holds at least two reagents, which `grade` reports as
+// Impure — so the grinder is the fast route to a chemical, but never the last
 // step. Cleaning it up is what the Mixing Chamber is for.
 //
 // Poppy is the dirtiest because bicaridine is the most valuable thing here,
@@ -33,6 +34,121 @@
             name: "Poppy",
             color: (0.78, 0.22, 0.24),
             yields: [("bicaridine", 10), ("plant_fibre", 10)],
+        ),
+        (
+            id: "corn",
+            name: "Corn",
+            color: (0.92, 0.76, 0.22),
+            yields: [("corn_oil", 18), ("plant_fibre", 7)],
+        ),
+        (
+            id: "koibean",
+            name: "Koibean",
+            color: (0.18, 0.42, 0.38),
+            yields: [("carpotoxin", 12), ("plant_fibre", 8)],
+        ),
+        (
+            id: "ambrosia_deus",
+            name: "Ambrosia Deus",
+            color: (0.48, 0.72, 0.44),
+            yields: [("omnizine", 10), ("plant_fibre", 10)],
+        ),
+        (
+            id: "glowshroom",
+            name: "Glowshroom",
+            color: (0.46, 0.22, 0.66),
+            yields: [("slime_jelly", 10), ("plant_fibre", 10)],
+        ),
+        (
+            id: "tobacco",
+            name: "Tobacco Leaves",
+            color: (0.37, 0.51, 0.27),
+            yields: [("nicotine", 10), ("plant_fibre", 10)],
+        ),
+        (
+            id: "coffee_cherries",
+            name: "Coffee Cherries",
+            color: (0.53, 0.12, 0.08),
+            yields: [("coffee", 12), ("plant_fibre", 8)],
+        ),
+        (
+            id: "psychedelic_mushroom",
+            name: "Psychedelic Mushroom",
+            color: (0.58, 0.12, 0.66),
+            yields: [("mushroom_hallucinogen", 10), ("plant_fibre", 10)],
+        ),
+        (
+            id: "fermentation_culture",
+            name: "Tea Fermentation Culture",
+            color: (0.43, 0.34, 0.16),
+            yields: [("tea", 12), ("universal_enzyme", 5), ("plant_fibre", 8)],
+        ),
+        (
+            id: "kronkus_fruit",
+            name: "Kronkus Fruit",
+            color: (0.52, 0.24, 0.65),
+            yields: [("kronkus_extract", 15), ("plant_fibre", 8)],
+        ),
+        (
+            id: "destroying_angel",
+            name: "Destroying Angel",
+            color: (0.82, 0.80, 0.70),
+            yields: [("amanitin", 10), ("plant_fibre", 10)],
+        ),
+        (
+            id: "curare_vine",
+            name: "Curare Vine",
+            color: (0.38, 0.58, 0.20),
+            yields: [("curare", 10), ("plant_fibre", 10)],
+        ),
+        (
+            id: "death_berries",
+            name: "Death Berries",
+            color: (0.36, 0.12, 0.14),
+            yields: [("tirizene", 12), ("coniine", 10), ("plant_fibre", 8)],
+        ),
+        (
+            id: "fly_amanita",
+            name: "Fly Amanita",
+            color: (0.76, 0.18, 0.12),
+            yields: [("amatoxin", 12), ("plant_fibre", 8)],
+        ),
+        (
+            id: "omega_weed",
+            name: "Omega Weed",
+            color: (0.42, 0.65, 0.18),
+            yields: [("histamine", 10), ("plant_fibre", 10)],
+        ),
+        (
+            id: "bungo_fruit",
+            name: "Bungo Fruit",
+            color: (0.72, 0.82, 0.24),
+            yields: [("bungotoxin", 10), ("plant_fibre", 10)],
+        ),
+        (
+            // Cargo's specimen courier stands in for a live giant-spider
+            // encounter. Histamine is the dirty biological contaminant.
+            id: "giant_spider_venom_sac",
+            name: "Giant Spider Venom Sac",
+            color: (0.82, 0.90, 0.76),
+            yields: [("venom", 12), ("histamine", 3)],
+        ),
+        (
+            // The existing courier loop stands in for a cross-department
+            // xenobiology delivery. Saltwater is the specimen contaminant,
+            // avoiding the fiction that a fish grinds into plant fibre.
+            id: "toxic_pufferfish",
+            name: "Toxic Pufferfish Specimen",
+            color: (0.72, 0.76, 0.66),
+            yields: [("tetrodotoxin", 10), ("saltwater", 10)],
+        ),
+        (
+            // Cargo salvage replaces TG's unsupported geyser source. Plasma
+            // is the dirty mineral fraction left alongside the useful oxide.
+            id: "hyper_plasmium_geode",
+            name: "Salvaged Hyper-Plasmium Geode",
+            color: (0.30, 0.08, 0.38),
+            yields: [("hyper_plasmium_oxide", 12), ("plasma", 8)],
         ),
     ],
 )

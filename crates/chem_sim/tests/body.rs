@@ -217,9 +217,441 @@ fn contact_damage_scales_with_the_route() {
     assert_eq!(CONTACT_REFERENCE_DOSE, Units::whole(10));
 }
 
+#[test]
+fn a_patch_delivers_the_full_dose_and_its_topical_repair_bonus() {
+    let data = real();
+    let salve = data.reagent("miners_salve");
+    let apply = |route| {
+        let mut vitals = Vitals {
+            damage: Damage {
+                brute: Units::whole(10),
+                burn: Units::whole(10),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut blood = Bloodstream::new();
+        let mut d = dose(&data, "miners_salve", 10);
+        blood.receive(&mut d, route, &mut vitals, &data);
+        (vitals, blood)
+    };
+
+    let (patched_vitals, patched_blood) = apply(Route::Patched);
+    assert_eq!(patched_vitals.damage.brute, Units::whole(6));
+    assert_eq!(patched_vitals.damage.burn, Units::whole(6));
+    assert_eq!(patched_blood.blood.volume_of(salve), Units::whole(10));
+
+    let (injected_vitals, injected_blood) = apply(Route::Injected);
+    assert_eq!(injected_vitals.damage.brute, Units::whole(10));
+    assert_eq!(injected_vitals.damage.burn, Units::whole(10));
+    assert_eq!(injected_blood.blood.volume_of(salve), Units::whole(10));
+}
+
 // ---------------------------------------------------------------------------
 // Damage and collapse
 // ---------------------------------------------------------------------------
+
+#[test]
+fn pyroxadone_heals_only_while_the_patient_is_burning() {
+    let data = real();
+    let treat = |burning: bool| {
+        let mut vitals = Vitals {
+            damage: Damage {
+                brute: Units::whole(20),
+                burn: Units::whole(20),
+                toxin: Units::whole(20),
+                oxygen: Units::whole(20),
+            },
+            ..Default::default()
+        };
+        let mut blood = Bloodstream::new();
+        let mut d = dose(&data, "pyroxadone", 5);
+        blood.receive(&mut d, Route::Injected, &mut vitals, &data);
+        if burning {
+            blood.add_status(StatusKind::Burning, 10.0, 2.0);
+        }
+        metabolise(&mut vitals, &mut blood, &data)
+    };
+
+    assert_eq!(treat(false).healed, Damage::default());
+    assert_eq!(
+        treat(true).healed,
+        Damage {
+            brute: Units::whole(2),
+            burn: Units::whole(3),
+            toxin: Units::whole(2),
+            oxygen: Units::whole(4),
+        }
+    );
+}
+
+#[test]
+fn regenerative_jelly_heals_all_four_damage_types() {
+    let data = real();
+    let mut vitals = Vitals {
+        damage: Damage {
+            brute: Units::whole(10),
+            burn: Units::whole(10),
+            toxin: Units::whole(10),
+            oxygen: Units::whole(10),
+        },
+        ..Default::default()
+    };
+    let mut blood = Bloodstream::new();
+    let mut d = dose(&data, "regenerative_jelly", 4);
+    blood.receive(&mut d, Route::Injected, &mut vitals, &data);
+
+    assert_eq!(
+        metabolise(&mut vitals, &mut blood, &data).healed,
+        Damage {
+            brute: Units::from_f64(1.5),
+            burn: Units::from_f64(1.5),
+            toxin: Units::from_f64(1.5),
+            oxygen: Units::from_f64(1.5),
+        }
+    );
+}
+
+#[test]
+fn penthrite_only_repairs_a_critically_injured_patient() {
+    let data = real();
+    let treat = |damage_each: i32| {
+        let mut vitals = Vitals {
+            damage: Damage {
+                brute: Units::whole(damage_each),
+                burn: Units::whole(damage_each),
+                toxin: Units::whole(damage_each),
+                oxygen: Units::whole(damage_each),
+            },
+            ..Default::default()
+        };
+        let mut blood = Bloodstream::new();
+        let mut d = dose(&data, "penthrite", 5);
+        blood.receive(&mut d, Route::Injected, &mut vitals, &data);
+        metabolise(&mut vitals, &mut blood, &data)
+    };
+
+    assert_eq!(treat(19).healed, Damage::default());
+    assert_eq!(
+        treat(20).healed,
+        Damage {
+            brute: Units::whole(2),
+            burn: Units::whole(2),
+            toxin: Units::whole(2),
+            oxygen: Units::whole(6),
+        }
+    );
+}
+
+#[test]
+fn psicodine_suppresses_three_readable_cognitive_impairments() {
+    let data = real();
+    let mut vitals = Vitals::default();
+    let mut blood = Bloodstream::new();
+    blood.add_status(StatusKind::Hallucinating, 12.0, 2.0);
+    blood.add_status(StatusKind::Paranoid, 12.0, 2.0);
+    blood.add_status(StatusKind::Unsteady, 12.0, 2.0);
+    let before = [
+        blood.status(StatusKind::Hallucinating).intensity,
+        blood.status(StatusKind::Paranoid).intensity,
+        blood.status(StatusKind::Unsteady).intensity,
+    ];
+
+    let mut d = dose(&data, "psicodine", 5);
+    blood.receive(&mut d, Route::Injected, &mut vitals, &data);
+    metabolise(&mut vitals, &mut blood, &data);
+
+    let after = [
+        blood.status(StatusKind::Hallucinating).intensity,
+        blood.status(StatusKind::Paranoid).intensity,
+        blood.status(StatusKind::Unsteady).intensity,
+    ];
+    assert!(after
+        .iter()
+        .zip(before)
+        .all(|(after, before)| *after < before));
+    assert!(blood.status(StatusKind::Focused).intensity > 0.0);
+}
+
+#[test]
+fn sulfonal_incapacitates_only_after_twenty_two_ticks_and_keeps_its_clock_on_save() {
+    let data = real();
+    let mut vitals = Vitals::default();
+    let mut blood = Bloodstream::new();
+    let mut poison = dose(&data, "sulfonal", 2);
+    blood.receive(&mut poison, Route::Injected, &mut vitals, &data);
+
+    for _ in 0..10 {
+        metabolise(&mut vitals, &mut blood, &data);
+    }
+    let saved = ron::ser::to_string(&blood).unwrap();
+    let mut blood: Bloodstream = ron::from_str(&saved).unwrap();
+    for _ in 0..11 {
+        metabolise(&mut vitals, &mut blood, &data);
+    }
+    assert!(
+        !blood.incapacitated(),
+        "the delayed poison fired before tick 22"
+    );
+
+    metabolise(&mut vitals, &mut blood, &data);
+    assert!(blood.incapacitated());
+    assert_eq!(vitals.damage.toxin, Units::whole(11));
+}
+
+#[test]
+fn anacea_purges_medicine_without_removing_an_unrelated_poison() {
+    let data = real();
+    let mut vitals = Vitals::default();
+    let mut blood = Bloodstream::new();
+    for (reagent, amount) in [("bicaridine", 6), ("cyanide", 6), ("anacea", 2)] {
+        let mut incoming = dose(&data, reagent, amount);
+        blood.receive(&mut incoming, Route::Injected, &mut vitals, &data);
+    }
+
+    let report = metabolise(&mut vitals, &mut blood, &data);
+    let bicaridine = data.reagent("bicaridine");
+    let cyanide = data.reagent("cyanide");
+
+    assert!(report.purged.contains(&(bicaridine, Units::whole(5))));
+    assert!(!report.purged.iter().any(|(id, _)| *id == cyanide));
+    assert!(blood.blood.volume_of(cyanide) > Units::whole(5));
+}
+
+#[test]
+fn nicotine_is_a_mild_stimulant_until_its_fifteen_unit_overdose() {
+    let data = real();
+    let mut vitals = Vitals::default();
+    let mut blood = Bloodstream::new();
+    blood.add_status(StatusKind::Sedated, 12.0, 2.0);
+
+    let mut ordinary = dose(&data, "nicotine", 5);
+    blood.receive(&mut ordinary, Route::Injected, &mut vitals, &data);
+    let ordinary_report = metabolise(&mut vitals, &mut blood, &data);
+
+    assert_eq!(ordinary_report.harmed, Damage::default());
+    assert!(blood.status(StatusKind::Focused).intensity > 0.0);
+    assert!(blood.status(StatusKind::Sedated).intensity < 2.0);
+
+    let mut overdose_vitals = Vitals::default();
+    let mut overdose_blood = Bloodstream::new();
+    let mut overdose = dose(&data, "nicotine", 16);
+    overdose_blood.receive(&mut overdose, Route::Injected, &mut overdose_vitals, &data);
+    let overdose_report = metabolise(&mut overdose_vitals, &mut overdose_blood, &data);
+
+    assert_eq!(overdose_report.harmed.oxygen, Units::from_f64(1.1));
+    assert_eq!(overdose_report.harmed.toxin, Units::from_f64(0.1));
+    assert!(overdose_report
+        .overdosing
+        .contains(&data.reagent("nicotine")));
+}
+
+#[test]
+fn aranesp_trades_stimulation_for_damage_and_epoetin_escalates_over_time() {
+    let data = real();
+    let mut vitals = Vitals::default();
+    let mut blood = Bloodstream::new();
+    let mut stimulant = dose(&data, "aranesp", 5);
+    blood.receive(&mut stimulant, Route::Injected, &mut vitals, &data);
+
+    let report = metabolise(&mut vitals, &mut blood, &data);
+    assert_eq!(report.harmed.oxygen, Units::from_f64(0.5));
+    assert_eq!(report.harmed.toxin, Units::from_f64(0.5));
+    assert!(blood.status(StatusKind::Hastened).intensity > 0.0);
+    assert!(blood.status(StatusKind::Focused).intensity > 0.0);
+
+    let mut patient = Vitals::default();
+    patient.damage.oxygen = Units::whole(20);
+    let mut treatment = Bloodstream::new();
+    let mut inverse = dose(&data, "epoetin_alfa", 12);
+    treatment.receive(&mut inverse, Route::Injected, &mut patient, &data);
+    for _ in 0..9 {
+        metabolise(&mut patient, &mut treatment, &data);
+    }
+    assert_eq!(treatment.status(StatusKind::Blurred).intensity, 0.0);
+
+    let tenth = metabolise(&mut patient, &mut treatment, &data);
+    assert_eq!(tenth.healed.oxygen, Units::ONE);
+    assert!(treatment.status(StatusKind::Blurred).intensity > 0.0);
+    for _ in 0..21 {
+        metabolise(&mut patient, &mut treatment, &data);
+    }
+    assert!(treatment.status(StatusKind::Unsteady).intensity > 0.0);
+    assert!(treatment.status(StatusKind::Hallucinating).intensity > 0.0);
+}
+
+#[test]
+fn happiness_changes_mood_while_sadness_strips_its_exact_counter_drugs() {
+    let data = real();
+    let mut vitals = Vitals::default();
+    let mut blood = Bloodstream::new();
+    blood.add_status(StatusKind::Sadness, 10.0, 2.0);
+    blood.add_status(StatusKind::Paranoid, 10.0, 2.0);
+    blood.add_status(StatusKind::Unsteady, 10.0, 2.0);
+    let mut happy = dose(&data, "happiness", 10);
+    blood.receive(&mut happy, Route::Injected, &mut vitals, &data);
+
+    let report = metabolise(&mut vitals, &mut blood, &data);
+    assert_eq!(report.harmed.toxin, Units::from_f64(0.2));
+    assert!(blood.status(StatusKind::Happiness).intensity > 0.0);
+    assert!(blood.status(StatusKind::Sadness).intensity < 2.0);
+    assert!(blood.status(StatusKind::Paranoid).intensity < 2.0);
+    assert!(blood.status(StatusKind::Unsteady).intensity < 2.0);
+
+    let mut target_vitals = Vitals::default();
+    let mut target_blood = Bloodstream::new();
+    for (key, amount) in [
+        ("happiness", 6),
+        ("psicodine", 6),
+        ("cyanide", 6),
+        ("sadness", 2),
+    ] {
+        let mut incoming = dose(&data, key, amount);
+        target_blood.receive(&mut incoming, Route::Injected, &mut target_vitals, &data);
+    }
+    let purge = metabolise(&mut target_vitals, &mut target_blood, &data);
+    for key in ["happiness", "psicodine"] {
+        assert!(purge.purged.contains(&(data.reagent(key), Units::whole(5))));
+    }
+    assert!(!purge
+        .purged
+        .iter()
+        .any(|(id, _)| *id == data.reagent("cyanide")));
+}
+
+#[test]
+fn pump_up_resists_collapse_but_overdose_compounds_its_breathing_risk() {
+    let data = real();
+    let mut vitals = Vitals::default();
+    let mut blood = Bloodstream::new();
+    let mut ordinary = dose(&data, "pump_up", 5);
+    blood.receive(&mut ordinary, Route::Injected, &mut vitals, &data);
+
+    let report = metabolise(&mut vitals, &mut blood, &data);
+    assert_eq!(report.harmed.oxygen, Units::from_f64(0.15));
+    assert_eq!(report.harmed.toxin, Units::ZERO);
+    assert!(blood.status(StatusKind::Stabilized).intensity > 0.0);
+    assert!(blood.status(StatusKind::Focused).intensity > 0.0);
+    assert_eq!(blood.collapse_threshold(), Units::whole(125));
+
+    let mut overdose_vitals = Vitals::default();
+    let mut overdose_blood = Bloodstream::new();
+    let mut overdose = dose(&data, "pump_up", 31);
+    overdose_blood.receive(&mut overdose, Route::Injected, &mut overdose_vitals, &data);
+    let overdose_report = metabolise(&mut overdose_vitals, &mut overdose_blood, &data);
+
+    assert_eq!(overdose_report.harmed.oxygen, Units::from_f64(0.9));
+    assert_eq!(overdose_report.harmed.toxin, Units::from_f64(0.3));
+    assert!(overdose_report
+        .overdosing
+        .contains(&data.reagent("pump_up")));
+    assert!(overdose_blood.status(StatusKind::Unsteady).intensity >= 1.2);
+}
+
+#[test]
+fn mushroom_hallucinogen_is_slow_lived_and_overdose_deepens_disorientation() {
+    let data = real();
+    let reagent = data.reagent("mushroom_hallucinogen");
+    let definition = data.reagents.get(reagent);
+    assert_eq!(definition.rate(), Units::from_f64(0.08));
+
+    let mut vitals = Vitals::default();
+    let mut blood = Bloodstream::new();
+    let mut ordinary = dose(&data, "mushroom_hallucinogen", 5);
+    blood.receive(&mut ordinary, Route::Injected, &mut vitals, &data);
+    let report = metabolise(&mut vitals, &mut blood, &data);
+
+    assert!(report.overdosing.is_empty());
+    assert!(blood.status(StatusKind::Hallucinating).intensity > 0.0);
+    assert!(blood.status(StatusKind::Drunk).intensity > 0.0);
+    assert!(blood.status(StatusKind::Unsteady).intensity > 0.0);
+    assert_eq!(blood.blood.volume_of(reagent), Units::from_f64(4.92));
+
+    let mut overdose_vitals = Vitals::default();
+    let mut overdose_blood = Bloodstream::new();
+    let mut overdose = dose(&data, "mushroom_hallucinogen", 31);
+    overdose_blood.receive(&mut overdose, Route::Injected, &mut overdose_vitals, &data);
+    let overdose_report = metabolise(&mut overdose_vitals, &mut overdose_blood, &data);
+
+    assert!(overdose_report.overdosing.contains(&reagent));
+    assert!(overdose_blood.status(StatusKind::Paranoid).intensity > 0.0);
+    assert!(overdose_blood.status(StatusKind::Blurred).intensity > 0.0);
+    assert!(overdose_blood.status(StatusKind::Unsteady).intensity >= 1.0);
+}
+
+#[test]
+fn maintenance_ladder_trades_harsher_refinement_for_distinct_survival_benefits() {
+    let data = real();
+
+    let tick = |key: &str, amount: i32| {
+        let mut vitals = Vitals::default();
+        let mut blood = Bloodstream::new();
+        blood.add_status(StatusKind::Sedated, 10.0, 2.0);
+        blood.add_status(StatusKind::Unsteady, 10.0, 2.0);
+        let mut incoming = dose(&data, key, amount);
+        blood.receive(&mut incoming, Route::Injected, &mut vitals, &data);
+        let report = metabolise(&mut vitals, &mut blood, &data);
+        (blood, report)
+    };
+
+    let (tar, tar_report) = tick("maintenance_tar", 5);
+    assert_eq!(tar_report.harmed.toxin, Units::from_f64(1.5));
+    assert!(tar.status(StatusKind::Stabilized).intensity > 0.0);
+    assert!(tar.status(StatusKind::Sedated).intensity < 2.0);
+
+    let (sludge, sludge_report) = tick("maintenance_sludge", 5);
+    assert_eq!(sludge_report.harmed.toxin, Units::from_f64(0.5));
+    assert!(sludge.status(StatusKind::Analgesic).intensity > 0.0);
+
+    let (powder, powder_report) = tick("maintenance_powder", 5);
+    assert_eq!(powder_report.harmed.toxin, Units::from_f64(0.1));
+    assert!(powder.status(StatusKind::Focused).intensity > 0.0);
+    assert!(powder.status(StatusKind::Unsteady).intensity < 2.0);
+
+    for (key, amount, toxin) in [
+        ("maintenance_tar", 31, 9.5),
+        ("maintenance_sludge", 26, 2.0),
+        ("maintenance_powder", 16, 3.1),
+    ] {
+        let (_, report) = tick(key, amount);
+        assert!(report.overdosing.contains(&data.reagent(key)));
+        assert_eq!(report.harmed.toxin, Units::from_f64(toxin), "{key}");
+    }
+}
+
+#[test]
+fn final_narcotics_have_distinct_speed_motor_and_concealment_identities() {
+    let data = real();
+
+    let tick = |key: &str, amount: i32| {
+        let mut vitals = Vitals::default();
+        let mut blood = Bloodstream::new();
+        let mut incoming = dose(&data, key, amount);
+        blood.receive(&mut incoming, Route::Injected, &mut vitals, &data);
+        let report = metabolise(&mut vitals, &mut blood, &data);
+        (blood, report)
+    };
+
+    let (kronkaine, kronkaine_report) = tick("kronkaine", 5);
+    assert!(kronkaine_report.harmed.toxin.is_positive());
+    assert!(kronkaine.status(StatusKind::Hastened).intensity >= 1.8);
+    assert!(kronkaine.status(StatusKind::Focused).intensity >= 1.2);
+
+    let (blastoff, blastoff_report) = tick("blastoff", 5);
+    assert!(blastoff_report.harmed.oxygen.is_positive());
+    assert!(blastoff.status(StatusKind::Hallucinating).intensity > 0.0);
+    assert!(blastoff.motor_instability() > kronkaine.motor_instability());
+
+    let (saturn_x, saturn_report) = tick("saturn_x", 5);
+    assert!(saturn_report.harmed.toxin.is_positive());
+    assert!(saturn_x.status(StatusKind::Obscured).intensity >= 1.5);
+    assert!(saturn_x.concealment() >= 0.65);
+
+    for (key, amount) in [("kronkaine", 21), ("blastoff", 31), ("saturn_x", 26)] {
+        let (_, report) = tick(key, amount);
+        assert!(report.overdosing.contains(&data.reagent(key)), "{key}");
+    }
+}
 
 #[test]
 fn damage_clamps_at_zero_and_at_the_ceiling() {
@@ -487,10 +919,14 @@ fn status_aggregates_provide_deterministic_gameplay_inputs() {
     blood.add_status(StatusKind::Chilled, 8.0, 1.0);
     blood.add_status(StatusKind::Hallucinating, 8.0, 1.0);
     blood.add_status(StatusKind::Unsteady, 8.0, 1.0);
+    blood.add_status(StatusKind::Obscured, 8.0, 1.0);
+    blood.add_status(StatusKind::Muted, 8.0, 1.0);
 
     assert!(blood.movement_multiplier() < 1.0);
     assert!(blood.perception_distortion() > 0.0);
     assert!(blood.motor_instability() > 0.0);
+    assert!(blood.concealment() > 0.0);
+    assert!(blood.communication_suppression() > 0.0);
 }
 
 #[test]
@@ -500,9 +936,14 @@ fn every_status_has_a_mechanical_or_behavioral_signal() {
             || kind.movement_multiplier(1.0) != 1.0
             || kind.perception_distortion(1.0) != 0.0
             || kind.motor_instability(1.0) != 0.0
+            || kind.concealment(1.0) != 0.0
+            || kind.communication_suppression(1.0) != 0.0
             || matches!(
                 kind,
-                StatusKind::Stabilized | StatusKind::Analgesic | StatusKind::RadiationShield
+                StatusKind::Stabilized
+                    | StatusKind::Analgesic
+                    | StatusKind::RadiationShield
+                    | StatusKind::Pacified
             );
         assert!(
             signalled,
@@ -536,6 +977,401 @@ fn purge_accelerates_only_currently_harmful_reagents() {
         Units::whole(5) - chem_sim::DEFAULT_METABOLISM,
         "therapeutic medicine is not a purge target"
     );
+}
+
+#[test]
+fn naloxone_purges_morphine_and_reverses_its_acute_sedation() {
+    let data = real();
+    let morphine = data.reagent("morphine");
+    let mut vitals = Vitals::default();
+    let mut blood = Bloodstream::new();
+    for (key, amount) in [("morphine", 10), ("naloxone", 5)] {
+        let mut d = dose(&data, key, amount);
+        blood.receive(&mut d, Route::Injected, &mut vitals, &data);
+    }
+
+    let report = metabolise(&mut vitals, &mut blood, &data);
+
+    assert!(report
+        .purged
+        .iter()
+        .any(|(id, amount)| *id == morphine && *amount == Units::whole(3)));
+    assert!(
+        blood.status(StatusKind::Sedated).intensity < 0.8,
+        "the antagonist should reverse Morphine's ordinary sedative effect"
+    );
+}
+
+#[test]
+fn mute_toxin_exposes_a_communication_suppression_signal() {
+    let data = real();
+    let (mut vitals, mut blood) = injected(&data, "mute_toxin", 2);
+
+    metabolise(&mut vitals, &mut blood, &data);
+
+    assert!(blood.status(StatusKind::Muted).intensity > 0.0);
+    assert!(blood.communication_suppression() >= 0.5);
+}
+
+#[test]
+fn heparin_only_worsens_an_existing_physical_injury() {
+    let data = real();
+    let (mut healthy_vitals, mut healthy_blood) = injected(&data, "heparin", 1);
+    let healthy = metabolise(&mut healthy_vitals, &mut healthy_blood, &data);
+    assert!(healthy.harmed.is_zero());
+
+    let (mut injured_vitals, mut injured_blood) = injected(&data, "heparin", 1);
+    injured_vitals.apply(Damage::of(DamageKind::Brute, Units::whole(5)));
+    let injured = metabolise(&mut injured_vitals, &mut injured_blood, &data);
+
+    assert_eq!(injured.harmed.brute, Units::whole(2));
+    assert_eq!(injured.harmed.oxygen, Units::from_f64(0.5));
+}
+
+#[test]
+fn amanitin_terminal_damage_scales_with_completed_exposure_ticks() {
+    let data = real();
+    let amanitin = data.reagent("amanitin");
+    let (mut vitals, mut blood) = injected(&data, "amanitin", 1);
+
+    for tick in 1..=4 {
+        let report = metabolise(&mut vitals, &mut blood, &data);
+        assert!(
+            report.harmed.is_zero(),
+            "Amanitin fired early on tick {tick}"
+        );
+        assert!(!report.after_effects.contains(&amanitin));
+    }
+    let terminal = metabolise(&mut vitals, &mut blood, &data);
+
+    assert_eq!(terminal.harmed.toxin, Units::whole(15));
+    assert_eq!(terminal.after_effects, vec![amanitin]);
+}
+
+#[test]
+fn purging_amanitin_early_does_not_fake_its_terminal_metabolism_effect() {
+    let data = real();
+    let amanitin = data.reagent("amanitin");
+    let mut vitals = Vitals::default();
+    let mut blood = Bloodstream::new();
+    for (key, amount) in [("amanitin", 1), ("pentetic_acid", 2)] {
+        let mut d = dose(&data, key, amount);
+        blood.receive(&mut d, Route::Injected, &mut vitals, &data);
+    }
+
+    let report = metabolise(&mut vitals, &mut blood, &data);
+
+    assert!(report
+        .purged
+        .iter()
+        .any(|(id, amount)| *id == amanitin && *amount == Units::whole(1)));
+    assert!(!report.after_effects.contains(&amanitin));
+    assert_eq!(report.harmed.toxin, Units::ZERO);
+}
+
+#[test]
+fn curare_builds_steady_harm_before_delayed_paralysis() {
+    let data = real();
+    let (mut vitals, mut blood) = injected(&data, "curare", 2);
+
+    for tick in 1..=10 {
+        let report = metabolise(&mut vitals, &mut blood, &data);
+        assert_eq!(report.harmed.oxygen, Units::whole(1));
+        assert_eq!(report.harmed.toxin, Units::whole(1));
+        assert_eq!(
+            blood.status(StatusKind::Sedated).intensity,
+            0.0,
+            "Curare paralyzed before its eleventh cycle on tick {tick}",
+        );
+    }
+    metabolise(&mut vitals, &mut blood, &data);
+
+    assert!(blood.status(StatusKind::Sedated).intensity >= 3.0);
+    assert!(blood.incapacitated());
+}
+
+#[test]
+fn epinephrine_is_lexorins_specific_fast_counteragent() {
+    let data = real();
+    let lexorin = data.reagent("lexorin");
+    let mut vitals = Vitals::default();
+    let mut blood = Bloodstream::new();
+    for (key, amount) in [("lexorin", 5), ("epinephrine", 1)] {
+        let mut d = dose(&data, key, amount);
+        blood.receive(&mut d, Route::Injected, &mut vitals, &data);
+    }
+
+    let report = metabolise(&mut vitals, &mut blood, &data);
+
+    assert!(report
+        .purged
+        .iter()
+        .any(|(id, amount)| *id == lexorin && *amount == Units::whole(2)));
+    assert_eq!(blood.blood.volume_of(lexorin), Units::from_f64(2.6));
+    assert!(blood.status(StatusKind::Choking).intensity > 0.0);
+}
+
+#[test]
+fn tirizene_and_tiring_solution_are_distinct_nonlethal_slowdowns() {
+    let data = real();
+    let (mut tirizene_vitals, mut tirizene_blood) = injected(&data, "tirizene", 2);
+    let tirizene_report = metabolise(&mut tirizene_vitals, &mut tirizene_blood, &data);
+    let (mut tiring_vitals, mut tiring_blood) = injected(&data, "tiring_solution", 2);
+    let tiring_report = metabolise(&mut tiring_vitals, &mut tiring_blood, &data);
+
+    assert!(tirizene_report.harmed.is_zero());
+    assert!(tiring_report.harmed.is_zero());
+    assert!(tirizene_blood.movement_multiplier() < 1.0);
+    assert!(tiring_blood.movement_multiplier() < tirizene_blood.movement_multiplier());
+
+    let before = tiring_blood.status(StatusKind::Sluggish).intensity;
+    let mut antidote = dose(&data, "synaptizine", 1);
+    tiring_blood.receive(&mut antidote, Route::Injected, &mut tiring_vitals, &data);
+    let counter = metabolise(&mut tiring_vitals, &mut tiring_blood, &data);
+    assert!(counter.purged.iter().any(|(id, amount)| {
+        *id == data.reagent("tiring_solution") && *amount == Units::from_f64(1.4)
+    }));
+    metabolise(&mut tiring_vitals, &mut tiring_blood, &data);
+    assert!(tiring_blood.status(StatusKind::Sluggish).intensity < before);
+}
+
+#[test]
+fn tetrodotoxin_has_a_warning_phase_then_stacked_damage_thresholds() {
+    let data = real();
+    let (mut vitals, mut blood) = injected(&data, "tetrodotoxin", 5);
+
+    for tick in 1..=6 {
+        let report = metabolise(&mut vitals, &mut blood, &data);
+        assert!(
+            report.harmed.is_zero(),
+            "Tetrodotoxin harmed on tick {tick}"
+        );
+        assert_eq!(blood.status(StatusKind::Muted).intensity, 0.0);
+    }
+    let warning = metabolise(&mut vitals, &mut blood, &data);
+    assert!(warning.harmed.is_zero());
+    assert!(blood.status(StatusKind::Muted).intensity > 0.0);
+
+    for _ in 8..=12 {
+        assert!(metabolise(&mut vitals, &mut blood, &data).harmed.is_zero());
+    }
+    let paralysis = metabolise(&mut vitals, &mut blood, &data);
+    assert_eq!(paralysis.harmed.oxygen, Units::whole(2));
+    assert_eq!(paralysis.harmed.toxin, Units::whole(2));
+    assert!(blood.incapacitated());
+
+    for _ in 14..=20 {
+        metabolise(&mut vitals, &mut blood, &data);
+    }
+    let organ_phase = metabolise(&mut vitals, &mut blood, &data);
+    assert_eq!(organ_phase.harmed.oxygen, Units::whole(4));
+    assert_eq!(organ_phase.harmed.toxin, Units::whole(4));
+
+    for _ in 22..=28 {
+        metabolise(&mut vitals, &mut blood, &data);
+    }
+    let lethal_phase = metabolise(&mut vitals, &mut blood, &data);
+    assert_eq!(lethal_phase.harmed.oxygen, Units::whole(8));
+    assert_eq!(lethal_phase.harmed.toxin, Units::whole(8));
+}
+
+#[test]
+fn pancuronium_is_silent_until_its_tenth_cycle_paralysis() {
+    let data = real();
+    let (mut vitals, mut blood) = injected(&data, "pancuronium", 2);
+
+    for tick in 1..=9 {
+        let report = metabolise(&mut vitals, &mut blood, &data);
+        assert!(report.harmed.is_zero(), "Pancuronium harmed on tick {tick}");
+        assert!(!blood.incapacitated());
+    }
+    let onset = metabolise(&mut vitals, &mut blood, &data);
+
+    assert_eq!(onset.harmed.oxygen, Units::whole(3));
+    assert!(blood.incapacitated());
+    assert!(blood.status(StatusKind::Choking).intensity > 0.0);
+}
+
+#[test]
+fn sodium_thiopental_knocks_out_without_direct_damage_after_ten_cycles() {
+    let data = real();
+    let (mut vitals, mut blood) = injected(&data, "sodium_thiopental", 4);
+
+    for tick in 1..=9 {
+        let report = metabolise(&mut vitals, &mut blood, &data);
+        assert!(report.harmed.is_zero(), "Thiopental harmed on tick {tick}");
+        assert!(!blood.incapacitated());
+    }
+    let onset = metabolise(&mut vitals, &mut blood, &data);
+
+    assert!(onset.harmed.is_zero());
+    assert!(blood.incapacitated());
+}
+
+#[test]
+fn initropidril_escalates_from_toxin_damage_into_rapid_collapse() {
+    let data = real();
+    let (mut vitals, mut blood) = injected(&data, "initropidril", 2);
+
+    for _ in 1..=3 {
+        let report = metabolise(&mut vitals, &mut blood, &data);
+        assert_eq!(report.harmed.toxin, Units::from_f64(2.5));
+        assert_eq!(report.harmed.oxygen, Units::ZERO);
+    }
+    let respiratory = metabolise(&mut vitals, &mut blood, &data);
+    assert_eq!(respiratory.harmed.toxin, Units::from_f64(2.5));
+    assert_eq!(respiratory.harmed.oxygen, Units::from_f64(7.5));
+
+    for _ in 5..=7 {
+        metabolise(&mut vitals, &mut blood, &data);
+    }
+    metabolise(&mut vitals, &mut blood, &data);
+    assert!(blood.incapacitated());
+}
+
+#[test]
+fn botanical_toxins_cover_direct_persistent_and_overdose_sensitive_harm() {
+    let data = real();
+
+    let (mut amatoxin_vitals, mut amatoxin_blood) = injected(&data, "amatoxin", 2);
+    let amatoxin = metabolise(&mut amatoxin_vitals, &mut amatoxin_blood, &data);
+    assert_eq!(amatoxin.harmed.toxin, Units::from_f64(2.5));
+
+    let (mut coniine_vitals, mut coniine_blood) = injected(&data, "coniine", 1);
+    let coniine = metabolise(&mut coniine_vitals, &mut coniine_blood, &data);
+    assert_eq!(coniine.harmed.toxin, Units::from_f64(1.75));
+    assert_eq!(coniine.harmed.oxygen, Units::ONE);
+    assert!(coniine_blood.status(StatusKind::Choking).intensity > 0.0);
+    assert!(
+        coniine_blood.blood.volume_of(data.reagent("coniine")) > Units::from_f64(0.9),
+        "Coniine should retain its exceptionally slow clearance"
+    );
+
+    let (mut ordinary_vitals, mut ordinary_blood) = injected(&data, "histamine", 20);
+    let ordinary = metabolise(&mut ordinary_vitals, &mut ordinary_blood, &data);
+    assert_eq!(ordinary.harmed.brute, Units::from_f64(0.4));
+    assert_eq!(ordinary.harmed.toxin, Units::ZERO);
+    assert_eq!(ordinary.harmed.oxygen, Units::ZERO);
+    assert_eq!(ordinary_blood.status(StatusKind::Blurred).intensity, 0.4);
+
+    let (mut overdose_vitals, mut overdose_blood) = injected(&data, "histamine", 31);
+    let overdose = metabolise(&mut overdose_vitals, &mut overdose_blood, &data);
+    assert!(overdose.overdosing.contains(&data.reagent("histamine")));
+    assert_eq!(overdose.harmed.brute, Units::from_f64(2.4));
+    assert_eq!(overdose.harmed.toxin, Units::whole(2));
+    assert_eq!(overdose.harmed.oxygen, Units::whole(2));
+    assert_eq!(overdose_blood.status(StatusKind::Blurred).intensity, 1.2);
+}
+
+#[test]
+fn polonium_creates_a_persistent_radiological_threat_with_existing_counterplay() {
+    let data = real();
+    let (mut vitals, mut blood) = injected(&data, "polonium", 2);
+
+    let first = metabolise(&mut vitals, &mut blood, &data);
+    assert_eq!(first.harmed.toxin, Units::whole(4));
+    assert_eq!(blood.status(StatusKind::Irradiated).intensity, 4.0);
+    assert!(
+        blood.blood.volume_of(data.reagent("polonium")) > Units::from_f64(1.9),
+        "the isotope should clear much more slowly than ordinary chemistry"
+    );
+
+    let mut chelator = dose(&data, "pentetic_acid", 3);
+    blood.receive(&mut chelator, Route::Injected, &mut vitals, &data);
+    metabolise(&mut vitals, &mut blood, &data);
+    // Polonium refreshes Irradiated on the treatment tick even as Pentetic
+    // Acid purges the last isotope. The following tick demonstrates that the
+    // chelator then wins once there is no active source to refresh the status.
+    metabolise(&mut vitals, &mut blood, &data);
+    assert!(
+        blood.status(StatusKind::Irradiated).intensity < 4.0,
+        "Pentetic Acid should lower the isotope's irradiation intensity"
+    );
+}
+
+#[test]
+fn fentanyl_impairs_immediately_and_knocks_out_after_eighteen_cycles() {
+    let data = real();
+    let (mut vitals, mut blood) = injected(&data, "fentanyl", 4);
+
+    for tick in 1..=17 {
+        let report = metabolise(&mut vitals, &mut blood, &data);
+        assert_eq!(report.harmed.toxin, Units::from_f64(2.5));
+        assert!(
+            !blood.incapacitated(),
+            "Fentanyl collapsed early on tick {tick}"
+        );
+        assert!(blood.status(StatusKind::Unsteady).intensity > 0.0);
+    }
+
+    metabolise(&mut vitals, &mut blood, &data);
+    assert!(blood.incapacitated());
+}
+
+#[test]
+fn bungotoxin_and_lead_acetate_adapt_unsupported_organs_into_readable_harm() {
+    let data = real();
+    let (mut bungo_vitals, mut bungo_blood) = injected(&data, "bungotoxin", 3);
+
+    for tick in 1..=11 {
+        let report = metabolise(&mut bungo_vitals, &mut bungo_blood, &data);
+        assert_eq!(report.harmed.toxin, Units::whole(2));
+        assert_eq!(report.harmed.oxygen, Units::ONE);
+        assert!(
+            !bungo_blood.incapacitated(),
+            "Bungotoxin fainted early on tick {tick}"
+        );
+    }
+    metabolise(&mut bungo_vitals, &mut bungo_blood, &data);
+    assert!(bungo_blood.incapacitated());
+    assert!(bungo_blood.status(StatusKind::Choking).intensity > 0.0);
+
+    let (mut lead_vitals, mut lead_blood) = injected(&data, "lead_acetate", 2);
+    let lead = metabolise(&mut lead_vitals, &mut lead_blood, &data);
+    assert_eq!(lead.harmed.brute, Units::ONE);
+    assert_eq!(lead.harmed.toxin, Units::ONE);
+    assert!(lead_blood.status(StatusKind::Blurred).intensity > 0.0);
+}
+
+#[test]
+fn venom_damage_falls_with_every_unit_removed_from_the_bloodstream() {
+    let data = real();
+    let (mut vitals, mut blood) = injected(&data, "venom", 10);
+
+    let first = metabolise(&mut vitals, &mut blood, &data);
+    assert_eq!(first.harmed.toxin, Units::ONE);
+    assert_eq!(first.harmed.brute, Units::whole(3));
+
+    let second = metabolise(&mut vitals, &mut blood, &data);
+    assert_eq!(second.harmed.toxin, Units::from_f64(0.99));
+    assert_eq!(second.harmed.brute, Units::from_f64(2.97));
+}
+
+#[test]
+fn itching_powder_works_through_touch_and_rotatium_waits_twenty_cycles() {
+    let data = real();
+    let mut touch_vitals = Vitals::default();
+    let mut touch_blood = Bloodstream::new();
+    let mut irritant = dose(&data, "itching_powder", 10);
+    let exposure = touch_blood.receive(&mut irritant, Route::Touched, &mut touch_vitals, &data);
+    assert_eq!(exposure.absorbed, Units::from_f64(1.5));
+    let touch = metabolise(&mut touch_vitals, &mut touch_blood, &data);
+    assert_eq!(touch.harmed.brute, Units::from_f64(0.2));
+    assert!(touch_blood.status(StatusKind::Unsteady).intensity > 0.0);
+
+    let (mut rotatium_vitals, mut rotatium_blood) = injected(&data, "rotatium", 5);
+    for tick in 1..=19 {
+        let report = metabolise(&mut rotatium_vitals, &mut rotatium_blood, &data);
+        assert_eq!(report.harmed.toxin, Units::from_f64(0.5));
+        assert_eq!(
+            rotatium_blood.status(StatusKind::Blurred).intensity,
+            0.0,
+            "Rotatium distorted vision early on tick {tick}"
+        );
+    }
+    metabolise(&mut rotatium_vitals, &mut rotatium_blood, &data);
+    assert!(rotatium_blood.status(StatusKind::Blurred).intensity > 0.0);
+    assert!(rotatium_blood.status(StatusKind::Unsteady).intensity >= 2.0);
 }
 
 #[test]
@@ -661,6 +1497,14 @@ fn no_effect_is_written_with_a_meaningless_magnitude() {
                 reagent.key
             );
         }
+        for (target, amount) in &reagent.targeted_purges {
+            assert!(
+                amount.is_positive(),
+                "'{}' targets '{target}' with a meaningless purge amount",
+                reagent.key
+            );
+            assert!(data.reagents.id_of(target).is_some());
+        }
     }
 }
 
@@ -674,7 +1518,7 @@ fn every_crafted_compound_has_an_explicit_identity() {
 
     assert_eq!(
         products.len(),
-        41,
+        145,
         "the audit should cover every shipped product"
     );
     for id in products {
@@ -712,6 +1556,38 @@ fn drug_like_compounds_do_not_share_a_complete_effect_signature() {
         "methamphetamine",
         "mindbreaker_toxin",
         "zombie_powder",
+        "aranesp",
+        "happiness",
+        "sadness",
+        "pump_up",
+        "mushroom_hallucinogen",
+        "maintenance_tar",
+        "maintenance_sludge",
+        "maintenance_powder",
+        "kronkaine",
+        "blastoff",
+        "saturn_x",
+        "mute_toxin",
+        "heparin",
+        "amanitin",
+        "curare",
+        "lexorin",
+        "initropidril",
+        "tirizene",
+        "tiring_solution",
+        "tetrodotoxin",
+        "pancuronium",
+        "sodium_thiopental",
+        "amatoxin",
+        "coniine",
+        "histamine",
+        "polonium",
+        "fentanyl",
+        "bungotoxin",
+        "lead_acetate",
+        "venom",
+        "itching_powder",
+        "rotatium",
     ];
     let mut seen = std::collections::HashMap::<String, &str>::new();
     for key in keys {
@@ -738,6 +1614,11 @@ fn flagship_compounds_expose_their_new_systemic_profiles() {
                 |effect| matches!(effect, ReagentEffect::Status { kind, .. } if *kind == expected),
             )
         };
+    let has_counter = |key: &str, expected: StatusKind| {
+        data.reagents.get(data.reagent(key)).effects.iter().any(
+            |effect| matches!(effect, ReagentEffect::Counter { kind, .. } if *kind == expected),
+        )
+    };
     assert!(has_status("inaprovaline", StatusKind::Stabilized));
     assert!(has_status("chloral_hydrate", StatusKind::Sedated));
     assert!(has_status("space_drugs", StatusKind::Euphoric));
@@ -756,6 +1637,76 @@ fn flagship_compounds_expose_their_new_systemic_profiles() {
     assert!(has_status("cyanide", StatusKind::Choking));
     assert!(has_status("unstable_mutagen", StatusKind::Mutating));
     assert!(has_status("synaptizine", StatusKind::Focused));
+    assert!(has_status("seiver", StatusKind::RadiationShield));
+    assert!(has_status("neurine", StatusKind::Focused));
+    assert!(has_counter("seiver", StatusKind::Irradiated));
+    assert!(has_counter("neurine", StatusKind::Unsteady));
+    assert!(has_counter("neurine", StatusKind::Blurred));
+    assert!(has_counter("diphenhydramine", StatusKind::Hastened));
+    assert!(has_counter("oculine", StatusKind::Blurred));
+    assert!(has_status("cryptobiolin", StatusKind::Unsteady));
+    assert!(has_status("cryptobiolin", StatusKind::Blurred));
+    assert!(has_counter("antihol", StatusKind::Drunk));
+    assert!(has_counter("antihol", StatusKind::Unsteady));
+    assert!(has_counter("modafinil", StatusKind::Sedated));
+    assert!(has_counter("modafinil", StatusKind::Unsteady));
+    assert!(has_counter("modafinil", StatusKind::Chilled));
+    assert!(has_status("modafinil", StatusKind::Focused));
+    assert!(has_counter("naloxone", StatusKind::Sedated));
+    assert!(has_counter("naloxone", StatusKind::Choking));
+    assert!(has_counter("hercuri", StatusKind::Burning));
+    assert!(has_status("hercuri", StatusKind::Chilled));
+    assert!(has_status("herignis", StatusKind::Burning));
+    assert!(has_status("nitrous_oxide", StatusKind::Sedated));
+    assert!(has_status("nitrous_oxide", StatusKind::Hallucinating));
+    assert!(has_status("miners_salve", StatusKind::Analgesic));
+    let hercuri = data.reagents.get(data.reagent("hercuri"));
+    assert!(hercuri.effects.iter().any(
+        |effect| matches!(effect, ReagentEffect::Heal(DamageKind::Burn, amount) if *amount == Units::whole(3))
+    ));
+    assert!(hercuri.world_effects.iter().any(
+        |effect| matches!(effect, WorldEffect::Chill { kelvin_per_unit } if (*kelvin_per_unit - 2.0).abs() < 0.001)
+    ));
+    let syriniver = data.reagents.get(data.reagent("syriniver"));
+    assert_eq!(syriniver.overdose, Some(Units::whole(6)));
+    assert!(syriniver.effects.iter().any(
+        |effect| matches!(effect, ReagentEffect::Heal(DamageKind::Toxin, amount) if *amount == Units::whole(3))
+    ));
+    assert!(syriniver.effects.iter().any(
+        |effect| matches!(effect, ReagentEffect::Purge(amount) if *amount == Units::whole(2))
+    ));
+    let naloxone = data.reagents.get(data.reagent("naloxone"));
+    assert!(naloxone.effects.iter().any(
+        |effect| matches!(effect, ReagentEffect::Purge(amount) if *amount == Units::whole(3))
+    ));
+    assert!(naloxone.effects.iter().any(
+        |effect| matches!(effect, ReagentEffect::Heal(DamageKind::Oxygen, amount) if *amount == Units::ONE)
+    ));
+
+    let modafinil = data.reagents.get(data.reagent("modafinil"));
+    assert!(modafinil.overdose_effects.iter().any(|effect| matches!(
+        effect,
+        ReagentEffect::Status {
+            kind: StatusKind::Choking,
+            ..
+        }
+    )));
+    assert!(modafinil
+        .critical_effects
+        .iter()
+        .any(|effect| matches!(effect, ReagentEffect::Harm(DamageKind::Oxygen, _))));
+
+    let rezadone = data.reagents.get(data.reagent("rezadone"));
+    for damage in [DamageKind::Brute, DamageKind::Burn] {
+        assert!(rezadone
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, ReagentEffect::Heal(kind, _) if *kind == damage)));
+    }
+    assert!(rezadone
+        .overdose_effects
+        .iter()
+        .any(|effect| matches!(effect, ReagentEffect::Harm(DamageKind::Toxin, _))));
 
     assert!(data
         .reagents
@@ -763,6 +1714,14 @@ fn flagship_compounds_expose_their_new_systemic_profiles() {
         .effects
         .iter()
         .any(|effect| matches!(effect, ReagentEffect::Purge(_))));
+    for key in ["calomel", "ammoniated_mercury"] {
+        assert!(data
+            .reagents
+            .get(data.reagent(key))
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, ReagentEffect::Purge(_))));
+    }
     assert!(data
         .reagents
         .get(data.reagent("space_cleaner"))
@@ -795,6 +1754,8 @@ fn every_new_field_round_trips_through_ron() {
              Counter(kind: Irradiated, seconds: 2.0, intensity: 1.0),
              Purge(0.5),
          ],
+         targeted_purges: [("other", 1)],
+         recovers_to: Some("other"),
          overdose_effects: [Harm(Toxin, 1)],
          critical_effects: [Harm(Toxin, 4)],
          after_effects: [Status(kind: Sluggish, seconds: 8.0, intensity: 1.0)],
@@ -827,6 +1788,11 @@ fn every_new_field_round_trips_through_ron() {
     assert_eq!(pinned.rate(), Units::from_f64(0.2));
     assert_eq!(pinned.boils_at.map(|k| k.0), Some(323.15));
     assert_eq!(pinned.effects.len(), 6);
+    assert_eq!(
+        pinned.targeted_purges,
+        vec![("other".to_string(), Units::ONE)]
+    );
+    assert_eq!(pinned.recovers_to.as_deref(), Some("other"));
     assert_eq!(
         pinned.effects[3],
         ReagentEffect::Status {

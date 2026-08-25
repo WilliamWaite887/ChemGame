@@ -50,6 +50,7 @@ impl Plugin for ChemWorldPlugin {
                 (
                     (
                         initialize_puddle_profile,
+                        extinguish_with_new_puddles,
                         clean_with_new_puddles,
                         affect_world_with_new_puddles,
                         spread_puddle_ignition,
@@ -93,6 +94,15 @@ pub struct ChemicalPuddle {
     pub ignition_intensity: f32,
     /// Surface cold applied to anyone who touches it.
     pub chill_intensity: f32,
+    /// Radius retained by a foam carrier even as its liquid payload is dosed.
+    #[serde(default)]
+    pub foam_radius: f32,
+    /// Visual height of expanded foam. Zero is an ordinary puddle.
+    #[serde(default)]
+    pub foam_height: f32,
+    /// Solid foam temporarily blocks movement until this entity expires.
+    #[serde(default)]
+    pub foam_solid: bool,
     /// Cleaning wash acts on overlaps, never merges into them, then quickly
     /// evaporates. This preserves any second world effect on the same reagent
     /// (hydrogen peroxide also corrodes) until that one-shot pass runs.
@@ -113,6 +123,9 @@ impl ChemicalPuddle {
             flammable_remaining: 0.0,
             ignition_intensity: 0.0,
             chill_intensity: 0.0,
+            foam_radius: 0.0,
+            foam_height: 0.0,
+            foam_solid: false,
             cleaner: false,
         }
     }
@@ -190,6 +203,25 @@ pub fn assess_exposure(
             ReagentEffect::Heal(kind, amount) => {
                 amount.is_positive() && body.0.damage.get(kind).is_positive()
             }
+            ReagentEffect::TopicalHeal(kind, amount) => {
+                route.topical_scale() > 0.0
+                    && amount.is_positive()
+                    && body.0.damage.get(kind).is_positive()
+            }
+            ReagentEffect::ConditionalHeal {
+                required,
+                kind,
+                amount,
+            } => {
+                amount.is_positive()
+                    && blood.0.status(required).intensity > 0.0
+                    && body.0.damage.get(kind).is_positive()
+            }
+            ReagentEffect::CriticalHeal(kind, amount) => {
+                amount.is_positive()
+                    && body.0.total() >= chem_sim::CRITICAL_DAMAGE
+                    && body.0.damage.get(kind).is_positive()
+            }
             ReagentEffect::Counter {
                 kind,
                 seconds,
@@ -201,6 +233,12 @@ pub fn assess_exposure(
                     && blood.0.status(kind).intensity > 0.0
             }
             ReagentEffect::Purge(amount) => amount.is_positive() && current_has_harmful_reagent,
+            ReagentEffect::MedicinePurge(..)
+            | ReagentEffect::VolumeScaledHarm(..)
+            | ReagentEffect::DelayedStatus { .. }
+            | ReagentEffect::ConditionalHarm { .. }
+            | ReagentEffect::AccumulatedHarm(..)
+            | ReagentEffect::DelayedHarm { .. } => false,
             // Stabilization really does address any current injury by raising
             // the collapse threshold. Other status additions are preventive,
             // recreational, or harmful rather than treatment of an existing
@@ -358,37 +396,81 @@ fn initialize_puddle_profile(
         let mut ignited_here = false;
 
         for (reagent, amount) in contents {
+            let purity = puddle.solution.purity_of(reagent).clamp(0.0, 1.0);
             for effect in &db.reagents.get(reagent).world_effects {
                 match *effect {
-                    WorldEffect::Clean { .. } => is_cleaner = true,
+                    WorldEffect::Clean { strength } => {
+                        is_cleaner |= strength * purity > 0.0;
+                    }
                     WorldEffect::Ignite { intensity, seconds } => {
-                        ignited_here |= !puddle.ignited;
-                        puddle.ignited = true;
-                        puddle.ignition_intensity = puddle.ignition_intensity.max(intensity);
-                        puddle.remaining = puddle.remaining.max(seconds);
+                        let intensity = intensity * purity;
+                        let seconds = seconds * purity;
+                        if intensity > 0.0 && seconds > 0.0 {
+                            ignited_here |= !puddle.ignited;
+                            puddle.ignited = true;
+                            puddle.ignition_intensity = puddle.ignition_intensity.max(intensity);
+                            puddle.remaining = puddle.remaining.max(seconds);
+                        }
                     }
                     WorldEffect::ReleaseSmoke { radius, seconds } => {
-                        smoke_radius = smoke_radius.max(radius);
-                        smoke_seconds = smoke_seconds.max(seconds);
+                        // Area scales by sqrt so its affected area, not its
+                        // diameter, remains proportional to chemical quality.
+                        smoke_radius = smoke_radius.max(radius * purity.sqrt());
+                        smoke_seconds = smoke_seconds.max(seconds * purity);
                     }
                     WorldEffect::Slippery { seconds } => {
-                        puddle.slippery = puddle.slippery.max(seconds);
+                        puddle.slippery = puddle.slippery.max(seconds * purity);
                     }
                     WorldEffect::Flammable { intensity, seconds } => {
-                        puddle.flammable_intensity = puddle.flammable_intensity.max(intensity);
-                        puddle.flammable_remaining = puddle.flammable_remaining.max(seconds);
+                        puddle.flammable_intensity =
+                            puddle.flammable_intensity.max(intensity * purity);
+                        puddle.flammable_remaining =
+                            puddle.flammable_remaining.max(seconds * purity);
                     }
                     WorldEffect::Chill { kelvin_per_unit } => {
                         puddle.solution.temperature.0 = (puddle.solution.temperature.0
-                            - kelvin_per_unit * amount.as_f32())
-                        .max(120.0);
+                            - kelvin_per_unit * amount.as_f32() * purity)
+                            .max(120.0);
                         puddle.chill_intensity = puddle
                             .chill_intensity
-                            .max((kelvin_per_unit / 2.0).clamp(0.25, 2.5));
+                            .max((kelvin_per_unit * purity / 2.0).clamp(0.0, 2.5));
                     }
-                    WorldEffect::Corrode { .. } | WorldEffect::Flash { .. } => {}
+                    WorldEffect::ExpandFoam {
+                        radius,
+                        seconds,
+                        solid,
+                    } => {
+                        let radius = radius * purity.sqrt();
+                        let seconds = seconds * purity;
+                        if radius > 0.0 && seconds > 0.0 {
+                            let first_foam = puddle.foam_radius <= 0.0;
+                            puddle.foam_radius = puddle.foam_radius.max(radius);
+                            puddle.radius = puddle.radius.max(radius);
+                            puddle.remaining = if first_foam {
+                                seconds
+                            } else {
+                                puddle.remaining.max(seconds)
+                            };
+                            puddle.foam_height =
+                                puddle.foam_height.max(if solid { 1.2 } else { 0.12 });
+                            puddle.foam_solid |= solid;
+                        }
+                    }
+                    WorldEffect::Corrode { .. }
+                    | WorldEffect::Flash { .. }
+                    | WorldEffect::Extinguish { .. } => {}
                 }
             }
+        }
+
+        if puddle.foam_solid {
+            commands.entity(entity).insert(crate::lab::Solid {
+                half_extents: Vec3::new(
+                    puddle.foam_radius * 0.55,
+                    puddle.foam_height * 0.5,
+                    puddle.foam_radius * 0.55,
+                ),
+            });
         }
 
         if smoke_radius > 0.0 {
@@ -426,6 +508,62 @@ fn initialize_puddle_profile(
     }
 }
 
+/// Area extinguishers act once when released. A `ParamSet` separates reading
+/// the new carrier from mutating every puddle it reaches, preserving the
+/// source mixture for ordinary contact exposure afterward.
+fn extinguish_with_new_puddles(
+    db: Res<ChemDb>,
+    mut sets: ParamSet<(
+        Query<(Entity, &Transform, &ChemicalPuddle), Added<ChemicalPuddle>>,
+        Query<(Entity, &Transform, &mut ChemicalPuddle)>,
+    )>,
+    mut bodies: Query<(&Transform, &mut Bloodstream)>,
+) {
+    let sources: Vec<(Entity, Vec3, f32, f32)> = sets
+        .p0()
+        .iter()
+        .filter_map(|(entity, transform, puddle)| {
+            let mut radius = 0.0f32;
+            let mut seconds = 0.0f32;
+            for (reagent, _) in puddle.solution.iter() {
+                let purity = puddle.solution.purity_of(reagent).clamp(0.0, 1.0);
+                for effect in &db.reagents.get(reagent).world_effects {
+                    if let WorldEffect::Extinguish {
+                        radius: authored_radius,
+                        seconds: authored_seconds,
+                    } = *effect
+                    {
+                        radius = radius.max(authored_radius * purity.sqrt());
+                        seconds = seconds.max(authored_seconds * purity);
+                    }
+                }
+            }
+            (radius > 0.0 && seconds > 0.0).then_some((
+                entity,
+                transform.translation,
+                radius,
+                seconds,
+            ))
+        })
+        .collect();
+
+    for (source, position, radius, seconds) in sources {
+        for (entity, transform, mut puddle) in sets.p1().iter_mut() {
+            if entity != source && horizontal_distance(position, transform.translation) <= radius {
+                puddle.ignited = false;
+                puddle.ignition_intensity = 0.0;
+            }
+        }
+        for (transform, mut blood) in &mut bodies {
+            if horizontal_distance(position, transform.translation) <= radius {
+                blood
+                    .0
+                    .counter_status(StatusKind::Burning, seconds, seconds);
+            }
+        }
+    }
+}
+
 /// Cleaner removes overlapping chemical material instead of merely tinting
 /// it. A `ParamSet` makes the added-cleaner read and all-puddle mutation
 /// explicitly disjoint in time.
@@ -443,10 +581,17 @@ fn clean_with_new_puddles(
             let strength = puddle
                 .solution
                 .iter()
-                .flat_map(|(id, _)| db.reagents.get(id).world_effects.iter())
-                .filter_map(|effect| match effect {
-                    WorldEffect::Clean { strength } => Some(*strength),
-                    _ => None,
+                .filter_map(|(id, _)| {
+                    let purity = puddle.solution.purity_of(id).clamp(0.0, 1.0);
+                    db.reagents
+                        .get(id)
+                        .world_effects
+                        .iter()
+                        .filter_map(|effect| match effect {
+                            WorldEffect::Clean { strength } => Some(*strength * purity),
+                            _ => None,
+                        })
+                        .reduce(f32::max)
                 })
                 .fold(0.0f32, f32::max);
             (strength > 0.0).then_some((entity, transform.translation, strength))
@@ -496,9 +641,14 @@ fn affect_world_with_new_puddles(
         let mut corrosion_heard = false;
         let mut flash_heard = false;
         for (reagent, _) in puddle.solution.iter() {
+            let purity = puddle.solution.purity_of(reagent).clamp(0.0, 1.0);
             for effect in &db.reagents.get(reagent).world_effects {
                 match *effect {
                     WorldEffect::Corrode { strength } => {
+                        let strength = strength * purity;
+                        if strength <= 0.0 {
+                            continue;
+                        }
                         corrosion_heard = true;
                         let radius = 0.65 + strength * 0.45;
                         for (entity, door_transform, corroded) in &mut doors {
@@ -535,6 +685,11 @@ fn affect_world_with_new_puddles(
                         }
                     }
                     WorldEffect::Flash { radius, seconds } => {
+                        let radius = radius * purity.sqrt();
+                        let seconds = seconds * purity;
+                        if radius <= 0.0 || seconds <= 0.0 {
+                            continue;
+                        }
                         flash_heard = true;
                         for (body_transform, mut blood) in &mut bodies {
                             if horizontal_distance(
@@ -643,6 +798,10 @@ fn merge_puddles(
         keep.flammable_remaining = keep.flammable_remaining.max(consume.flammable_remaining);
         keep.ignition_intensity = keep.ignition_intensity.max(consume.ignition_intensity);
         keep.chill_intensity = keep.chill_intensity.max(consume.chill_intensity);
+        keep.foam_radius = keep.foam_radius.max(consume.foam_radius);
+        keep.foam_height = keep.foam_height.max(consume.foam_height);
+        keep.foam_solid |= consume.foam_solid;
+        keep.radius = keep.radius.max(keep.foam_radius);
         keep.cleaner |= consume.cleaner;
         keep.owner = match (keep.owner, consume.owner) {
             (Some(left), Some(right)) if left == right => Some(left),
@@ -651,6 +810,15 @@ fn merge_puddles(
         };
         merged.insert(left);
         merged.insert(right);
+        if keep.foam_solid {
+            commands.entity(left).insert(crate::lab::Solid {
+                half_extents: Vec3::new(
+                    keep.foam_radius * 0.55,
+                    keep.foam_height * 0.5,
+                    keep.foam_radius * 0.55,
+                ),
+            });
+        }
         commands.entity(right).despawn();
     }
 }
@@ -741,7 +909,7 @@ fn expose_bodies_to_puddles(
                 overdose: assessment.overdose,
             });
         }
-        puddle.radius = radius_for(puddle.solution.total_volume());
+        puddle.radius = radius_for(puddle.solution.total_volume()).max(puddle.foam_radius);
     }
 }
 
@@ -781,6 +949,7 @@ fn respond_to_unwanted_exposure(
         &CrewMember,
         &mut CrewRoute,
         &Transform,
+        &Bloodstream,
         Option<&ReportedChemicalIncident>,
     )>,
     witnesses: Query<(Entity, &Transform), With<CrewMember>>,
@@ -790,7 +959,8 @@ fn respond_to_unwanted_exposure(
         if exposure.authorized {
             continue;
         }
-        let Ok((victim, mut route, victim_transform, reported)) = victims.get_mut(exposure.target)
+        let Ok((victim, mut route, victim_transform, blood, reported)) =
+            victims.get_mut(exposure.target)
         else {
             continue;
         };
@@ -814,6 +984,18 @@ fn respond_to_unwanted_exposure(
                         == Some(room)
                 })
         });
+        let muted = blood.0.communication_suppression() >= 0.5;
+        if muted && !witnessed {
+            // The victim still recognizes the attack and leaves, but cannot
+            // identify it over the radio while the status is active. Mark the
+            // exposure handled so one lingering puddle cannot repeatedly try
+            // to manufacture a report from the same event.
+            route.leave();
+            commands
+                .entity(exposure.target)
+                .insert(ReportedChemicalIncident);
+            continue;
+        }
         let severity = if exposure.illicit || exposure.overdose {
             3
         } else if exposure.harmful {
@@ -857,12 +1039,17 @@ fn respond_to_unwanted_exposure(
                 ExposureSource::Smoke => "exposed to chemical smoke",
                 ExposureSource::Puddle => "exposed through a chemical spill",
             };
+            let reporter = if muted {
+                format!("A witness reports {} being", victim.name)
+            } else {
+                format!("{} reports being", victim.name)
+            };
             radio.push(
                 RadioEntry::new(
                     crate::radio::RadioChannel::Security,
                     format!(
-                        "{} reports being {} with {} in the lab{}.{}",
-                        victim.name,
+                        "{} {} with {} in the lab{}.{}",
+                        reporter,
                         action,
                         composition,
                         if witnessed { " with witnesses" } else { "" },
@@ -900,9 +1087,11 @@ fn build_puddle_visuals(
             ..default()
         });
         commands.spawn((
-            Mesh3d(meshes.add(Cylinder::new(1.0, 0.012))),
+            Mesh3d(meshes.add(Cylinder::new(1.0, 1.0))),
             MeshMaterial3d(material.clone()),
-            Transform::from_scale(Vec3::new(puddle.radius, 1.0, puddle.radius)),
+            Transform::from_translation(Vec3::Y * puddle.foam_height.max(0.012) * 0.5).with_scale(
+                Vec3::new(puddle.radius, puddle.foam_height.max(0.012), puddle.radius),
+            ),
             PuddleVisual { material },
             ChildOf(entity),
         ));
@@ -921,7 +1110,9 @@ fn update_puddle_visuals(
     for (puddle, children) in &puddles {
         for child in children.iter() {
             if let Ok((mut transform, visual)) = visuals.get_mut(child) {
-                transform.scale = Vec3::new(puddle.radius, 1.0, puddle.radius);
+                let height = puddle.foam_height.max(0.012);
+                transform.translation.y = height * 0.5;
+                transform.scale = Vec3::new(puddle.radius, height, puddle.radius);
                 if let Some(mut material) = materials.get_mut(&visual.material) {
                     let [r, g, b] = puddle.solution.color(&db.reagents);
                     material.base_color = if puddle.ignited {
@@ -962,7 +1153,15 @@ mod tests {
 
     fn solution(db: &ChemDb, reagent: &str, amount: i32) -> Solution {
         let mut solution = Solution::unbounded();
-        let _ = solution.add(db.reagent(reagent), Units::whole(amount));
+        let id = db.reagent(reagent);
+        let _ = solution.add_profiled(id, Units::whole(amount), 1.0, db.reagents.get(id).ph);
+        solution
+    }
+
+    fn solution_at_purity(db: &ChemDb, reagent: &str, amount: i32, purity: f32) -> Solution {
+        let mut solution = Solution::unbounded();
+        let id = db.reagent(reagent);
+        let _ = solution.add_profiled(id, Units::whole(amount), purity, db.reagents.get(id).ph);
         solution
     }
 
@@ -971,6 +1170,104 @@ mod tests {
         assert_eq!(radius_for(Units::ZERO), MIN_RADIUS);
         assert!(radius_for(Units::whole(40)) > radius_for(Units::whole(5)));
         assert_eq!(radius_for(Units::whole(10_000)), MAX_RADIUS);
+    }
+
+    #[test]
+    fn chemical_foam_expands_while_preserving_payload_quality_and_owner() {
+        let db = chemistry();
+        let mut app = App::new();
+        let owner = app.world_mut().spawn_empty().id();
+        let mut payload = solution(&db, "chemical_foam", 10);
+        let cyanide = db.reagent("cyanide");
+        assert!(payload
+            .add_profiled(cyanide, Units::whole(5), 0.60, db.reagents.get(cyanide).ph,)
+            .is_zero());
+        let foam = app
+            .world_mut()
+            .spawn((
+                ChemicalPuddle::from_solution(payload, Some(owner)),
+                Transform::default(),
+            ))
+            .id();
+        app.insert_resource(db)
+            .add_systems(Update, initialize_puddle_profile);
+
+        app.update();
+
+        let puddle = app.world().get::<ChemicalPuddle>(foam).unwrap();
+        assert!((puddle.radius - 3.0).abs() < 0.001);
+        assert_eq!(puddle.owner, Some(owner));
+        assert!((puddle.solution.purity_of(cyanide) - 0.60).abs() < 0.001);
+        assert!(app.world().get::<crate::lab::Solid>(foam).is_none());
+    }
+
+    #[test]
+    fn metal_foam_forms_a_temporary_solid_barrier() {
+        let db = chemistry();
+        let mut app = App::new();
+        let foam = app
+            .world_mut()
+            .spawn((
+                ChemicalPuddle::from_solution(solution(&db, "metal_foam", 10), None),
+                Transform::default(),
+            ))
+            .id();
+        app.insert_resource(db)
+            .init_resource::<Time>()
+            .add_systems(Update, (initialize_puddle_profile, age_puddles).chain());
+
+        app.update();
+        let puddle = app.world().get::<ChemicalPuddle>(foam).unwrap();
+        assert!(puddle.foam_solid);
+        assert!((puddle.foam_radius - 2.2).abs() < 0.001);
+        assert!(app.world().get::<crate::lab::Solid>(foam).is_some());
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f32(37.0));
+        app.update();
+        assert!(
+            app.world().get_entity(foam).is_err(),
+            "the temporary material and its collision disappear together"
+        );
+    }
+
+    #[test]
+    fn carbon_dioxide_extinguishes_bodies_and_nearby_chemical_fire() {
+        let db = chemistry();
+        let mut app = App::new();
+        let mut burning = ChemicalPuddle::from_solution(solution(&db, "oil", 10), None);
+        burning.ignited = true;
+        burning.ignition_intensity = 2.0;
+        let fire = app
+            .world_mut()
+            .spawn((burning, Transform::from_xyz(1.0, 0.0, 0.0)))
+            .id();
+        let mut blood = Bloodstream::default();
+        blood.0.add_status(StatusKind::Burning, 7.0, 2.0);
+        let body = app
+            .world_mut()
+            .spawn((Transform::from_xyz(-1.0, 0.0, 0.0), blood))
+            .id();
+        app.world_mut().spawn((
+            ChemicalPuddle::from_solution(solution(&db, "carbon_dioxide", 10), None),
+            Transform::default(),
+        ));
+        app.insert_resource(db)
+            .add_systems(Update, extinguish_with_new_puddles);
+
+        app.update();
+
+        assert!(!app.world().get::<ChemicalPuddle>(fire).unwrap().ignited);
+        assert_eq!(
+            app.world()
+                .get::<Bloodstream>(body)
+                .unwrap()
+                .0
+                .status(StatusKind::Burning)
+                .intensity,
+            0.0
+        );
     }
 
     #[test]
@@ -988,6 +1285,7 @@ mod tests {
         let order = Order {
             reagent: bicaridine,
             specific: true,
+            minimum_purity: 0.0,
             amount: Units::whole(15),
             plea: String::new(),
             patience: 30.0,
@@ -1038,6 +1336,31 @@ mod tests {
             &db,
         );
         assert!(matching_treatment.helpful);
+    }
+
+    #[test]
+    fn penthrite_is_recognized_as_critical_care_and_as_a_hazard() {
+        let db = chemistry();
+        let blood = Bloodstream::default();
+        let dose = solution(&db, "penthrite", 5);
+
+        let healthy = assess_exposure(&dose, Route::Injected, &Body::default(), &blood, &db);
+        assert!(!healthy.helpful);
+        assert!(
+            healthy.harmful,
+            "its explosive classification remains visible"
+        );
+
+        let mut critical = Body::default();
+        critical.0.damage = chem_sim::Damage {
+            brute: Units::whole(20),
+            burn: Units::whole(20),
+            toxin: Units::whole(20),
+            oxygen: Units::whole(20),
+        };
+        let assessment = assess_exposure(&dose, Route::Injected, &critical, &blood, &db);
+        assert!(assessment.helpful);
+        assert!(assessment.harmful);
     }
 
     #[test]
@@ -1167,6 +1490,39 @@ mod tests {
     }
 
     #[test]
+    fn impure_cleaner_has_proportionally_less_world_strength() {
+        let db = chemistry();
+        let oil = db.reagent("oil");
+        let mut app = App::new();
+        let residue = app
+            .world_mut()
+            .spawn((
+                ChemicalPuddle::from_solution(solution(&db, "oil", 20), None),
+                Transform::default(),
+            ))
+            .id();
+        app.world_mut().spawn((
+            ChemicalPuddle::from_solution(solution_at_purity(&db, "space_cleaner", 10, 0.25), None),
+            Transform::from_xyz(0.2, 0.0, 0.0),
+        ));
+        app.insert_resource(db).add_systems(
+            Update,
+            (initialize_puddle_profile, clean_with_new_puddles).chain(),
+        );
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .get::<ChemicalPuddle>(residue)
+                .unwrap()
+                .solution
+                .volume_of(oil),
+            Units::whole(14),
+        );
+    }
+
+    #[test]
     fn cleaner_cannot_merge_into_and_increase_persistent_residue() {
         let db = chemistry();
         let oil = db.reagent("oil");
@@ -1262,6 +1618,34 @@ mod tests {
     }
 
     #[test]
+    fn impure_flash_powder_has_a_smaller_effective_radius() {
+        let db = chemistry();
+        let mut app = App::new();
+        app.world_mut().spawn((
+            ChemicalPuddle::from_solution(solution_at_purity(&db, "flash_powder", 5, 0.25), None),
+            Transform::default(),
+        ));
+        let target = app
+            .world_mut()
+            .spawn((Transform::from_xyz(3.5, 0.0, 0.0), Bloodstream::default()))
+            .id();
+        app.insert_resource(db)
+            .add_systems(Update, affect_world_with_new_puddles);
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .get::<Bloodstream>(target)
+                .unwrap()
+                .0
+                .status(StatusKind::Blurred)
+                .remaining,
+            0.0,
+        );
+    }
+
+    #[test]
     fn thermite_marks_a_nearby_door_as_corroded() {
         let db = chemistry();
         let mut app = App::new();
@@ -1277,6 +1661,7 @@ mod tests {
                     bridge_id: "test.door".into(),
                     along_x: true,
                     skin: crate::door::DoorSkin::Maintenance,
+                    disabled_for: 0.0,
                 },
                 Transform::from_xyz(0.4, 0.0, 0.0),
             ))
@@ -1476,6 +1861,7 @@ mod tests {
                 },
                 CrewRoute::arrival(0.0),
                 Transform::default(),
+                Bloodstream::default(),
             ))
             .id();
         if with_witness {
@@ -1573,6 +1959,70 @@ mod tests {
             .unwrap()
             .text
             .contains("with witnesses"));
+    }
+
+    #[test]
+    fn mute_toxin_blocks_an_isolated_victims_report_but_not_their_escape() {
+        let (mut app, actor, victim) = abuse_app(false);
+        app.world_mut()
+            .get_mut::<Bloodstream>(victim)
+            .unwrap()
+            .0
+            .add_status(chem_sim::StatusKind::Muted, 8.0, 1.5);
+        write_abuse(&mut app, actor, victim);
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .resource::<crate::antagonist::SecuritySuspicion>()
+                .0,
+            0,
+        );
+        assert!(app.world().resource::<RadioLog>().entries.is_empty());
+        assert!(app
+            .world()
+            .resource::<Shift>()
+            .department_standing
+            .is_empty());
+        assert_eq!(
+            app.world().get::<CrewRoute>(victim).unwrap().phase,
+            CrewPhase::Leaving,
+            "silencing a victim must not make them ignore an attack",
+        );
+        assert!(app
+            .world()
+            .get::<ReportedChemicalIncident>(victim)
+            .is_some());
+    }
+
+    #[test]
+    fn a_witness_can_report_for_a_muted_victim() {
+        let (mut app, actor, victim) = abuse_app(true);
+        app.world_mut()
+            .get_mut::<Bloodstream>(victim)
+            .unwrap()
+            .0
+            .add_status(chem_sim::StatusKind::Muted, 8.0, 1.5);
+        write_abuse(&mut app, actor, victim);
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .resource::<crate::antagonist::SecuritySuspicion>()
+                .0,
+            3,
+        );
+        let report = &app
+            .world()
+            .resource::<RadioLog>()
+            .entries
+            .back()
+            .unwrap()
+            .text;
+        assert!(report.contains("A witness reports Patient being"));
+        assert!(report.contains("with witnesses"));
     }
 
     #[test]

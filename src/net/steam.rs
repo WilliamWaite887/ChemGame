@@ -79,6 +79,7 @@ pub const STEAM_APP_ID: u32 = 5_103_230;
 pub(super) const LOBBY_CAPACITY: usize = 4;
 pub(super) const MAX_REMOTE_CLIENTS: usize = super::MAX_REMOTE_CLIENTS;
 const _: () = assert!(MAX_REMOTE_CLIENTS + 1 == LOBBY_CAPACITY);
+const PROTOCOL_LOBBY_KEY: &str = "chem_protocol";
 
 /// The lobby currently being hosted, once Steam has actually created it.
 ///
@@ -419,6 +420,15 @@ fn poll_lobby_creation(
     };
     match SteamServerTransport::new(&client, config) {
         Ok(transport) => {
+            let protocol = format!("{:016x}", super::PROTOCOL_ID);
+            if !client
+                .matchmaking()
+                .set_lobby_data(lobby, PROTOCOL_LOBBY_KEY, &protocol)
+            {
+                error!("could not publish the chemistry protocol for Steam lobby {lobby:?}");
+                client.matchmaking().leave_lobby(lobby);
+                return;
+            }
             commands.insert_resource(server);
             commands.insert_resource(transport);
             commands.insert_resource(HostedLobby(lobby));
@@ -548,6 +558,21 @@ fn poll_lobby_join(
             return;
         }
     };
+
+    let expected_protocol = format!("{:016x}", super::PROTOCOL_ID);
+    let advertised_protocol = client.matchmaking().lobby_data(lobby, PROTOCOL_LOBBY_KEY);
+    if advertised_protocol.as_deref() != Some(expected_protocol.as_str()) {
+        client.matchmaking().leave_lobby(lobby);
+        let reason = match advertised_protocol {
+            Some(_) => "the host is running an incompatible chemistry build",
+            None => "the host did not publish a chemistry compatibility fingerprint",
+        };
+        error!("refusing Steam lobby {lobby:?}: {reason}");
+        failed.write(ConnectFailed {
+            reason: reason.to_string(),
+        });
+        return;
+    }
 
     let host = client.matchmaking().lobby_owner(lobby);
     commands.insert_resource(JoinedLobby(lobby));

@@ -256,8 +256,9 @@ fn handle_saboteur_resolution(
                 // Through `mutate`, not a raw `solution.add`, so the splash
                 // resolves reactions and re-tints the liquid exactly as if the
                 // player had poured it in themselves.
+                let ph = db.reagents.get(contaminant).ph;
                 container.mutate(&db, |solution| {
-                    let _ = solution.add(contaminant, amount);
+                    let _ = solution.add_profiled(contaminant, amount, 1.0, ph);
                 });
 
                 let line = script

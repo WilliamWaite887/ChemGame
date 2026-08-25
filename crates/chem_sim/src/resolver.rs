@@ -151,12 +151,17 @@ fn resolve_step_inner(
             None => spent.push((reaction.id, scale)),
         }
         let overheated = reaction.is_overheated(solution.temperature);
+        let product_purity = reaction.product_purity(solution);
         apply(
             solution,
             reaction,
             scale,
             reaction.yield_factor(solution.temperature),
+            product_purity,
         );
+        if reaction.ph_shift != 0.0 {
+            solution.shift_ph(reaction.ph_shift * scale.as_f32());
+        }
         report.events.push(ReactionEvent {
             reaction: reaction.id,
             scale,
@@ -165,10 +170,44 @@ fn resolve_step_inner(
             report.overheated.push(reaction.id);
         }
         for effect in &reaction.effects {
-            report.effects.push(effect.clone());
-            if let ReactionEffect::Heat(kelvin_per_unit) = effect {
-                solution.temperature =
-                    Kelvin(solution.temperature.0 + kelvin_per_unit * scale.as_f32());
+            match effect {
+                ReactionEffect::Heat(kelvin_per_unit) => {
+                    report.effects.push(effect.clone());
+                    solution.temperature =
+                        Kelvin(solution.temperature.0 + kelvin_per_unit * scale.as_f32());
+                }
+                ReactionEffect::ExplosionProfile { strength, modifier } => {
+                    report.effects.push(ReactionEffect::Explosion(
+                        strength * scale.as_f32() + modifier,
+                    ));
+                }
+                ReactionEffect::PulseProfile {
+                    kind,
+                    strength,
+                    modifier,
+                } => {
+                    report.effects.push(ReactionEffect::Pulse {
+                        kind: *kind,
+                        power: strength * scale.as_f32() + modifier,
+                    });
+                }
+                ReactionEffect::EmpProfile { strength, modifier } => {
+                    report
+                        .effects
+                        .push(ReactionEffect::Emp(strength * scale.as_f32() + modifier));
+                }
+                ReactionEffect::ElectricProfile { strength, modifier } => {
+                    report.effects.push(ReactionEffect::Electric(
+                        strength * scale.as_f32() + modifier,
+                    ));
+                }
+                ReactionEffect::Smoke(_)
+                | ReactionEffect::Explosion(_)
+                | ReactionEffect::Pulse { .. }
+                | ReactionEffect::Emp(_)
+                | ReactionEffect::Electric(_) => {
+                    report.effects.push(effect.clone());
+                }
             }
         }
 
@@ -257,7 +296,7 @@ fn best_reaction<'a>(
         let Some(scale) = reaction.max_scale(solution) else {
             continue;
         };
-        let scale = match reaction.step_limit(dt) {
+        let scale = match reaction.step_limit(dt, solution.temperature) {
             Some(limit) => {
                 let used = spent
                     .iter()
@@ -294,7 +333,13 @@ fn process_allows(reaction: &Reaction, activation: Option<&ReactionActivation>) 
 /// `yield_factor` scales the **products only**. Reactants are always consumed
 /// in full: an overheated reaction wastes what it was given, which is the whole
 /// point of letting one overheat rather than simply stopping it.
-fn apply(solution: &mut Solution, reaction: &Reaction, scale: Units, yield_factor: Units) {
+fn apply(
+    solution: &mut Solution,
+    reaction: &Reaction,
+    scale: Units,
+    yield_factor: Units,
+    product_purity: f32,
+) {
     for &(id, required) in &reaction.reactants {
         let consumed = required.scaled(scale, Units::ONE);
         let removed = solution.remove(id, consumed);
@@ -310,6 +355,6 @@ fn apply(solution: &mut Solution, reaction: &Reaction, scale: Units, yield_facto
         let amount = produced
             .scaled(scale, Units::ONE)
             .scaled(yield_factor, Units::ONE);
-        let _overflow = solution.add(id, amount);
+        let _overflow = solution.add_profiled(id, amount, product_purity, reaction.product_ph(id));
     }
 }

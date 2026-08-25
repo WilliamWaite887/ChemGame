@@ -27,13 +27,15 @@ use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRe
 use crate::body::{Bloodstream, Body};
 use crate::character_lab::{LocomotionPreview, TestSubject};
 use crate::chem_world::ChemicalPuddle;
-use crate::containers::{Container, HeldBy, InSlot, InSlotB, Stored};
+use crate::containers::{ArmedCharge, Container, HeldBy, InSlot, InSlotB, Stored};
 use crate::crew::{AtCounter, CrewAppearance, CrewMember, NeedsMedicalEvacuation};
 use crate::cult::{Cultist, RitualAnchor};
 use crate::door::{Corroded, Door};
 use crate::hazards::{ActiveHazard, SmokeCloud, SmokeOwner, SmokePayload};
 use crate::interaction::Interactable;
-use crate::machines::{AgitationRun, Buffer, DispenseAmount, Hopper, Machine, Thermostat};
+use crate::machines::{
+    AgitationRun, Buffer, DispenseAmount, Hopper, HplcReport, Machine, Thermostat,
+};
 use crate::orders::{CounterOrder, CrisisOrder, DevelopmentOrder, Order};
 use crate::player::Player;
 use crate::produce::Produce;
@@ -43,11 +45,47 @@ use crate::AppState;
 
 pub mod steam;
 
-/// Arbitrary; both ends must agree. The low byte is an explicit schema
-/// revision so replicated chemistry additions cannot accidentally keep an old
-/// handshake compatible.
-const PROTOCOL_REVISION: u64 = 8;
-const PROTOCOL_ID: u64 = 0x43_48_45_4d_00_00_00_00 | PROTOCOL_REVISION;
+/// Explicit revision for replicated Rust types that are not represented by
+/// the authored chemistry catalogs below. Bump it when one of those wire
+/// shapes changes incompatibly.
+const PROTOCOL_REVISION: u64 = 9;
+
+/// FNV-1a is deliberately small and `const`: the protocol id is derived at
+/// compile time from every catalog whose list position crosses the wire.
+/// That closes the dangerous gap where two builds could share a hand-written
+/// revision while interpreting the same `ReagentId`, `ReactionId` or
+/// `ProduceId` as different things.
+const fn fingerprint_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
+    let mut index = 0;
+    while index < bytes.len() {
+        hash ^= bytes[index] as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        index += 1;
+    }
+    hash
+}
+
+const fn chemistry_protocol_id(
+    reagents: &[u8],
+    reactions: &[u8],
+    produce: &[u8],
+    statuses: &[u8],
+    revision: u64,
+) -> u64 {
+    let hash = fingerprint_bytes(0xcbf2_9ce4_8422_2325, &revision.to_le_bytes());
+    let hash = fingerprint_bytes(hash, reagents);
+    let hash = fingerprint_bytes(hash, reactions);
+    let hash = fingerprint_bytes(hash, produce);
+    fingerprint_bytes(hash, statuses)
+}
+
+pub(super) const PROTOCOL_ID: u64 = chemistry_protocol_id(
+    include_bytes!("../../assets/data/chem.reagents.ron"),
+    include_bytes!("../../assets/data/chem.reactions.ron"),
+    include_bytes!("../../assets/data/station.produce.ron"),
+    chem_sim::StatusKind::NETWORK_SCHEMA.as_bytes(),
+    PROTOCOL_REVISION,
+);
 const DEFAULT_PORT: u16 = 5327;
 /// The host is a local chemist, leaving three network seats in a four-person
 /// lab. Both direct and Steam transports use this same value.
@@ -507,6 +545,7 @@ fn resync_on_join(
 fn register_replication(app: &mut App) {
     app.replicate::<Transform>()
         .replicate::<Container>()
+        .replicate::<ArmedCharge>()
         .replicate::<HeldBy>()
         .replicate::<InSlot>()
         // The Mixing Chamber's second beaker slot. Same reasoning as `InSlot`
@@ -521,6 +560,9 @@ fn register_replication(app: &mut App) {
         // Carries the Mixing Chamber's otherwise non-derivable preparation
         // provenance plus its visible batch clock.
         .replicate::<AgitationRun>()
+        // Persists the analyzer's latest yield/purity accounting after the
+        // source sample has changed, and gives every peer the same result.
+        .replicate::<HplcReport>()
         .replicate::<Hopper>()
         .replicate::<DispenseAmount>()
         // `Order` used to carry a `Timer`, which is not `Serialize` — that is
@@ -953,6 +995,7 @@ mod tests {
             Machine {
                 kind: crate::machines::MachineKind::ChemMaster5000,
                 in_use_by: Some(chemist),
+                disabled_for: 0.0,
             },
         ));
 
@@ -1273,9 +1316,25 @@ mod tests {
     #[test]
     fn chemistry_schema_and_four_person_capacity_are_pinned() {
         assert_eq!(
-            PROTOCOL_ID & 0xff,
-            8,
-            "replicated NPC appearance identity needs revision 8"
+            PROTOCOL_ID,
+            chemistry_protocol_id(
+                include_bytes!("../../assets/data/chem.reagents.ron"),
+                include_bytes!("../../assets/data/chem.reactions.ron"),
+                include_bytes!("../../assets/data/station.produce.ron"),
+                chem_sim::StatusKind::NETWORK_SCHEMA.as_bytes(),
+                PROTOCOL_REVISION,
+            )
+        );
+        assert_ne!(
+            PROTOCOL_ID,
+            chemistry_protocol_id(
+                b"changed reagent catalog",
+                include_bytes!("../../assets/data/chem.reactions.ron"),
+                include_bytes!("../../assets/data/station.produce.ron"),
+                chem_sim::StatusKind::NETWORK_SCHEMA.as_bytes(),
+                PROTOCOL_REVISION,
+            ),
+            "catalog changes must invalidate multiplayer compatibility"
         );
         assert_eq!(MAX_REMOTE_CLIENTS, 3);
         assert_eq!(steam::LOBBY_CAPACITY, 4);

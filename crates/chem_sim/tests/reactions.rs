@@ -809,11 +809,25 @@ fn unknown_reagents_in_reactions_are_rejected() {
 }
 
 #[test]
+fn targeted_purges_must_name_a_real_reagent_with_a_positive_amount() {
+    let unknown = r#"[
+        (id: "a", name: "A", color: (1.0, 0.0, 0.0), targeted_purges: [("missing", 1)])
+    ]"#;
+    assert!(ChemData::from_ron(unknown, "[]").is_err());
+
+    let zero = r#"[
+        (id: "a", name: "A", color: (1.0, 0.0, 0.0), targeted_purges: [("b", 0)]),
+        (id: "b", name: "B", color: (0.0, 1.0, 0.0))
+    ]"#;
+    assert!(ChemData::from_ron(zero, "[]").is_err());
+}
+
+#[test]
 fn agitation_sides_must_exactly_partition_recipe_inputs_regardless_of_order() {
     let reagents = r#"[
-        (id: "a", name: "A", color: (1.0, 0.0, 0.0)),
-        (id: "b", name: "B", color: (0.0, 1.0, 0.0)),
-        (id: "c", name: "C", color: (0.0, 0.0, 1.0)),
+        (id: "a", name: "A", color: (1.0, 0.0, 0.0), dispensable: true),
+        (id: "b", name: "B", color: (0.0, 1.0, 0.0), dispensable: true),
+        (id: "c", name: "C", color: (0.0, 0.0, 1.0), dispensable: true),
         (id: "d", name: "D", color: (1.0, 1.0, 1.0)),
     ]"#;
     // Side A deliberately lists B before A. Definition order has no bearing
@@ -831,6 +845,52 @@ fn agitation_sides_must_exactly_partition_recipe_inputs_regardless_of_order() {
              side_a: [("a", 1), ("b", 1)], side_b: [("c", 1)])),
     ]"#;
     assert!(ChemData::from_ron(reagents, wrong_ratio).is_err());
+}
+
+#[test]
+fn duplicate_catalog_keys_are_rejected_instead_of_silently_ignored() {
+    let duplicate_reagents = r#"[
+        (id: "a", name: "A", color: (1.0, 0.0, 0.0), dispensable: true),
+        (id: "a", name: "Other A", color: (0.0, 1.0, 0.0), dispensable: true),
+    ]"#;
+    assert!(ChemData::from_ron(duplicate_reagents, "[]")
+        .unwrap_err()
+        .to_string()
+        .contains("defined more than once"));
+
+    let reagents = r#"[
+        (id: "a", name: "A", color: (1.0, 0.0, 0.0), dispensable: true),
+        (id: "b", name: "B", color: (0.0, 1.0, 0.0)),
+    ]"#;
+    let reactions = r#"[
+        (id: "mix", reactants: [("a", 1)], products: [("b", 1)]),
+        (id: "mix", reactants: [("a", 1)], products: [("b", 1)]),
+    ]"#;
+    assert!(ChemData::from_ron(reagents, reactions)
+        .unwrap_err()
+        .to_string()
+        .contains("defined more than once"));
+}
+
+#[test]
+fn invalid_numeric_profiles_and_unreachable_cycles_fail_closed() {
+    let bad_ph = r#"[
+        (id: "a", name: "A", color: (1.0, 0.0, 0.0), ph: 15.0, dispensable: true),
+    ]"#;
+    assert!(ChemData::from_ron(bad_ph, "[]").is_err());
+
+    let cyclic_reagents = r#"[
+        (id: "a", name: "A", color: (1.0, 0.0, 0.0)),
+        (id: "b", name: "B", color: (0.0, 1.0, 0.0)),
+    ]"#;
+    let cyclic_reactions = r#"[
+        (id: "make_a", reactants: [("b", 1)], products: [("a", 1)]),
+        (id: "make_b", reactants: [("a", 1)], products: [("b", 1)]),
+    ]"#;
+    assert!(ChemData::from_ron(cyclic_reagents, cyclic_reactions)
+        .unwrap_err()
+        .to_string()
+        .contains("circular dependency"));
 }
 
 #[test]
@@ -871,10 +931,397 @@ fn agitation_matching_is_ratio_aware_order_independent_and_reversible() {
 #[test]
 fn seed_data_loads_completely() {
     let data = data();
-    assert_eq!(data.reagents.dispensable().count(), 23);
-    assert_eq!(data.reactions.len(), 41);
+    assert_eq!(data.reagents.dispensable().count(), 30);
+    assert_eq!(data.reactions.len(), 162);
     for recipe in STARTING_RECIPES {
         assert!(data.reactions.find(recipe).is_some(), "missing {recipe}");
+    }
+}
+
+#[test]
+fn pump_up_concentrates_seven_units_of_external_inputs_into_five() {
+    let data = data();
+    let mut solution = beaker(&data, 50, &[("epinephrine", 4), ("coffee", 10)]);
+
+    let report = resolve(&mut solution, &data.reactions);
+
+    assert!(report.reacted());
+    assert_contents(&data, &solution, &[("pump_up", 10)]);
+    let reaction = data.reactions.find("pump_up").unwrap();
+    assert_eq!(reaction.min_purity, Some(0.30));
+    assert_eq!(reaction.min_ph, Some(5.0));
+    assert_eq!(reaction.max_ph, Some(9.0));
+}
+
+#[test]
+fn maintenance_drugs_form_a_three_stage_low_yield_refinement_ladder() {
+    let data = data();
+
+    let (mut slurry, activation) =
+        agitated_batch(&data, 50, &[("plant_fibre", 3)], &[("welding_fuel", 3)]);
+    let report = resolve_with_activation(&mut slurry, &data.reactions, &activation);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("organic_slurry").unwrap().id));
+    assert_contents(&data, &slurry, &[("organic_slurry", 3)]);
+
+    let mut tar = beaker(
+        &data,
+        50,
+        &[("organic_slurry", 2), ("tea", 2), ("welding_fuel", 2)],
+    );
+    resolve(&mut tar, &data.reactions);
+    assert_contents(
+        &data,
+        &tar,
+        &[("maintenance_tar", 6), ("sulphuric_acid", 2)],
+    );
+
+    let mut sludge = beaker(
+        &data,
+        100,
+        &[
+            ("maintenance_tar", 18),
+            ("fluorosulfuric_acid", 6),
+            ("hydrogen_peroxide", 5),
+        ],
+    );
+    resolve(&mut sludge, &data.reactions);
+    assert_contents(
+        &data,
+        &sludge,
+        &[("maintenance_sludge", 6), ("hydrogen_peroxide", 5)],
+    );
+
+    let mut powder = beaker(
+        &data,
+        100,
+        &[
+            ("maintenance_sludge", 6),
+            ("nitric_acid", 1),
+            ("universal_enzyme", 1),
+            ("acetone_oxide", 5),
+        ],
+    );
+    resolve(&mut powder, &data.reactions);
+    assert_contents(
+        &data,
+        &powder,
+        &[("maintenance_powder", 1), ("acetone_oxide", 5)],
+    );
+}
+
+#[test]
+fn final_narcotics_preserve_their_authored_ratios_and_source_depth() {
+    let data = data();
+
+    let mut kronkaine = beaker(
+        &data,
+        50,
+        &[("kronkus_extract", 6), ("welding_fuel", 4), ("ammonia", 2)],
+    );
+    resolve(&mut kronkaine, &data.reactions);
+    assert_contents(&data, &kronkaine, &[("kronkaine", 12)]);
+
+    let mut blastoff = beaker(&data, 50, &[("cyanide", 4), ("silver", 4), ("lye", 2)]);
+    resolve(&mut blastoff, &data.reactions);
+    assert_contents(&data, &blastoff, &[("blastoff", 10)]);
+
+    let mut saturn_x = beaker(
+        &data,
+        50,
+        &[("lead", 2), ("water", 2), ("maintenance_tar", 4)],
+    );
+    resolve(&mut saturn_x, &data.reactions);
+    assert_contents(&data, &saturn_x, &[("saturn_x", 8)]);
+
+    for key in ["kronkaine", "blastoff", "saturn_x"] {
+        let reaction = data.reactions.find(key).unwrap();
+        assert_eq!(reaction.min_purity, Some(0.40), "{key}");
+        assert!(reaction.rate.is_some(), "{key} should be a monitored batch");
+    }
+}
+
+#[test]
+fn specialist_toxins_preserve_their_ratios_and_operating_windows() {
+    let data = data();
+
+    let mut mute = beaker(&data, 50, &[("uranium", 4), ("water", 2), ("carbon", 2)]);
+    resolve(&mut mute, &data.reactions);
+    assert_contents(&data, &mute, &[("mute_toxin", 4)]);
+
+    let mut heparin = beaker(
+        &data,
+        50,
+        &[("formaldehyde", 3), ("sodium_chloride", 3), ("lithium", 3)],
+    );
+    resolve(&mut heparin, &data.reactions);
+    assert_contents(&data, &heparin, &[("heparin", 9)]);
+
+    let mut lexorin = beaker(
+        &data,
+        50,
+        &[("salbutamol", 3), ("plasma", 3), ("hydrogen", 3)],
+    );
+    resolve(&mut lexorin, &data.reactions);
+    assert_contents(&data, &lexorin, &[("lexorin", 9)]);
+
+    let mute = data.reactions.find("mute_toxin").unwrap();
+    assert_eq!(
+        (mute.min_ph, mute.optimal_ph, mute.max_ph),
+        (Some(6.0), Some(12.2), Some(14.0))
+    );
+    assert_eq!(mute.min_purity, Some(0.40));
+    let heparin = data.reactions.find("heparin").unwrap();
+    assert_eq!(
+        (heparin.min_ph, heparin.optimal_ph, heparin.max_ph),
+        (Some(5.0), Some(8.0), Some(9.5))
+    );
+    assert_eq!(heparin.min_purity, Some(0.60));
+    let lexorin = data.reactions.find("lexorin").unwrap();
+    assert_eq!(
+        (lexorin.min_ph, lexorin.optimal_ph, lexorin.max_ph),
+        (Some(1.8), Some(4.0), Some(7.0))
+    );
+    assert_eq!(lexorin.min_purity, Some(0.40));
+    assert!(lexorin.ph_shift < 0.0);
+}
+
+#[test]
+fn poison_kit_adaptations_add_two_dependency_steps_and_two_expert_syntheses() {
+    let data = data();
+
+    let mut tiring = beaker(&data, 50, &[("tirizene", 4), ("saline_glucose", 2)]);
+    resolve(&mut tiring, &data.reactions);
+    assert_contents(&data, &tiring, &[("tiring_solution", 6)]);
+
+    let mut pancuronium = beaker(
+        &data,
+        50,
+        &[("curare", 2), ("salbutamol", 2), ("sodium_chloride", 2)],
+    );
+    pancuronium.temperature = Kelvin(320.0);
+    resolve(&mut pancuronium, &data.reactions);
+    assert_contents(&data, &pancuronium, &[("pancuronium", 6)]);
+
+    let mut thiopental = beaker(&data, 50, &[("sulfonal", 2), ("sodium", 2), ("ethanol", 2)]);
+    thiopental.temperature = Kelvin(400.0);
+    resolve(&mut thiopental, &data.reactions);
+    assert_contents(&data, &thiopental, &[("sodium_thiopental", 6)]);
+
+    let mut initropidril = beaker(
+        &data,
+        50,
+        &[("cyanide", 2), ("nitric_acid", 2), ("plasma", 2)],
+    );
+    initropidril.temperature = Kelvin(450.0);
+    resolve(&mut initropidril, &data.reactions);
+    assert_contents(&data, &initropidril, &[("initropidril", 6)]);
+
+    for (key, purity) in [
+        ("tiring_solution", 0.30),
+        ("pancuronium", 0.60),
+        ("sodium_thiopental", 0.50),
+        ("initropidril", 0.70),
+    ] {
+        let reaction = data.reactions.find(key).unwrap();
+        assert_eq!(reaction.min_purity, Some(purity), "{key}");
+        assert!(reaction.rate.is_some(), "{key} should be a monitored batch");
+    }
+}
+
+#[test]
+fn isotope_and_opiate_refinements_require_their_expert_operating_windows() {
+    let data = data();
+
+    let mut cold_isotope = beaker(&data, 50, &[("uranium", 2), ("radium", 2), ("chlorine", 2)]);
+    cold_isotope.temperature = Kelvin(499.0);
+    resolve(&mut cold_isotope, &data.reactions);
+    assert_eq!(
+        cold_isotope.volume_of(data.reagent("polonium")),
+        Units::ZERO
+    );
+
+    let mut isotope = beaker(&data, 50, &[("uranium", 2), ("radium", 2), ("chlorine", 2)]);
+    isotope.temperature = Kelvin(550.0);
+    resolve(&mut isotope, &data.reactions);
+    assert_contents(&data, &isotope, &[("polonium", 6)]);
+
+    let mut cool_opiate = beaker(&data, 50, &[("space_drugs", 6)]);
+    cool_opiate.temperature = Kelvin(673.0);
+    resolve(&mut cool_opiate, &data.reactions);
+    assert_contents(&data, &cool_opiate, &[("space_drugs", 6)]);
+
+    let mut opiate = beaker(&data, 50, &[("space_drugs", 6)]);
+    opiate.temperature = Kelvin(700.0);
+    resolve(&mut opiate, &data.reactions);
+    assert_contents(&data, &opiate, &[("fentanyl", 6)]);
+
+    for (key, minimum, optimum, maximum, purity) in [
+        ("polonium", 5.0, 7.0, 9.0, 0.70),
+        ("fentanyl", 7.0, 9.0, 11.0, 0.50),
+    ] {
+        let reaction = data.reactions.find(key).unwrap();
+        assert_eq!(
+            (reaction.min_ph, reaction.optimal_ph, reaction.max_ph),
+            (Some(minimum), Some(optimum), Some(maximum))
+        );
+        assert_eq!(reaction.min_purity, Some(purity));
+        assert!(reaction.rate.is_some(), "{key} should be a monitored batch");
+    }
+}
+
+#[test]
+fn final_specialist_toxins_form_through_botany_components_and_expert_refinement() {
+    let data = data();
+
+    let mut lead = beaker(&data, 50, &[("lead", 2), ("acetone", 2), ("oxygen", 2)]);
+    lead.temperature = Kelvin(400.0);
+    resolve(&mut lead, &data.reactions);
+    assert_contents(&data, &lead, &[("lead_acetate", 6)]);
+
+    let mut irritant = beaker(
+        &data,
+        50,
+        &[("multiver", 2), ("ammonia", 2), ("welding_fuel", 2)],
+    );
+    irritant.temperature = Kelvin(300.0);
+    resolve(&mut irritant, &data.reactions);
+    assert_contents(&data, &irritant, &[("itching_powder", 6)]);
+
+    let mut cold_teslium = beaker(&data, 50, &[("gunpowder", 2), ("silver", 2), ("plasma", 2)]);
+    cold_teslium.temperature = Kelvin(399.0);
+    resolve(&mut cold_teslium, &data.reactions);
+    assert_eq!(cold_teslium.volume_of(data.reagent("teslium")), Units::ZERO);
+
+    let mut teslium = beaker(&data, 50, &[("gunpowder", 2), ("silver", 2), ("plasma", 2)]);
+    teslium.temperature = Kelvin(420.0);
+    resolve(&mut teslium, &data.reactions);
+    assert_contents(&data, &teslium, &[("teslium", 6)]);
+
+    let mut rotatium = beaker(
+        &data,
+        50,
+        &[("teslium", 2), ("mindbreaker_toxin", 2), ("fentanyl", 2)],
+    );
+    resolve(&mut rotatium, &data.reactions);
+    assert_contents(&data, &rotatium, &[("rotatium", 6)]);
+
+    for (key, purity) in [
+        ("lead_acetate", 0.50),
+        ("itching_powder", 0.30),
+        ("teslium", 0.60),
+        ("rotatium", 0.60),
+    ] {
+        let reaction = data.reactions.find(key).unwrap();
+        assert_eq!(reaction.min_purity, Some(purity), "{key}");
+        assert!(reaction.rate.is_some(), "{key} should be a monitored batch");
+    }
+}
+
+#[test]
+fn pyrosium_cools_on_synthesis_then_heats_by_consuming_oxygen() {
+    let data = data();
+    let mut solution = beaker(
+        &data,
+        100,
+        &[("plasma", 5), ("radium", 5), ("phosphorus", 5)],
+    );
+    solution.temperature = Kelvin(300.0);
+
+    resolve(&mut solution, &data.reactions);
+    assert_contents(&data, &solution, &[("pyrosium", 15)]);
+    assert_eq!(solution.temperature, Kelvin(290.0));
+
+    let overflow = solution.add(data.reagent("oxygen"), Units::whole(5));
+    assert!(overflow.is_zero());
+    resolve(&mut solution, &data.reactions);
+    assert_contents(
+        &data,
+        &solution,
+        &[("pyrosium", 15), ("depleted_oxygen", 5)],
+    );
+    assert_eq!(solution.temperature, Kelvin(310.0));
+}
+
+#[test]
+fn stabilizer_separates_portable_pulse_agents_from_immediate_failures() {
+    let data = data();
+    let cases = [
+        (
+            "sonic_powder",
+            vec![("oxygen", 2), ("sugar", 2), ("phosphorus", 2)],
+            chem_sim::PulseKind::Concuss,
+        ),
+        (
+            "sorium",
+            vec![
+                ("carbon", 2),
+                ("mercury", 2),
+                ("nitrogen", 2),
+                ("oxygen", 2),
+            ],
+            chem_sim::PulseKind::Push,
+        ),
+        (
+            "liquid_dark_matter",
+            vec![("carbon", 2), ("plasma", 2), ("radium", 2)],
+            chem_sim::PulseKind::Pull,
+        ),
+    ];
+
+    for (product, ingredients, kind) in cases {
+        let mut unstable = beaker(&data, 100, &ingredients);
+        let report = resolve(&mut unstable, &data.reactions);
+        assert!(report.effects.iter().any(
+            |effect| matches!(effect, ReactionEffect::Pulse { kind: actual, .. } if *actual == kind)
+        ));
+
+        let mut stable = beaker(&data, 100, &ingredients);
+        assert!(stable
+            .add(data.reagent("stabilizing_agent"), Units::ONE)
+            .is_zero());
+        let report = resolve(&mut stable, &data.reactions);
+        assert!(
+            !report
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, ReactionEffect::Pulse { .. })),
+            "cold stabilized {product} should stay portable"
+        );
+        assert!(stable.volume_of(data.reagent(product)).is_positive());
+        assert_eq!(
+            stable.volume_of(data.reagent("stabilizing_agent")),
+            Units::ONE,
+            "the stabilizer must survive {product} synthesis"
+        );
+    }
+}
+
+#[test]
+fn stabilized_pulse_agents_activate_only_at_their_authored_temperature() {
+    let data = data();
+    for (reagent, threshold, kind) in [
+        ("sonic_powder", 374.0, chem_sim::PulseKind::Concuss),
+        ("sorium", 474.0, chem_sim::PulseKind::Push),
+        ("liquid_dark_matter", 474.0, chem_sim::PulseKind::Pull),
+    ] {
+        let mut cold = beaker(&data, 50, &[(reagent, 6)]);
+        cold.temperature = Kelvin(threshold - 1.0);
+        assert!(!resolve(&mut cold, &data.reactions).reacted());
+
+        let mut hot = beaker(&data, 50, &[(reagent, 6)]);
+        hot.temperature = Kelvin(threshold);
+        let report = resolve(&mut hot, &data.reactions);
+        let power = report.effects.iter().find_map(|effect| match effect {
+            ReactionEffect::Pulse {
+                kind: actual,
+                power,
+            } if *actual == kind => Some(*power),
+            _ => None,
+        });
+        assert!(power.is_some_and(|power| power > 1.0));
+        assert_contents(&data, &hot, &[("ash", 6)]);
     }
 }
 
@@ -925,7 +1372,7 @@ fn order_medicines_have_the_authored_process_and_four_to_eight_second_batches() 
 }
 
 #[test]
-fn exactly_the_nine_advanced_order_recipes_require_agitation() {
+fn every_authored_agitated_recipe_is_accounted_for() {
     let data = data();
     let mut actual: Vec<&str> = data
         .reactions
@@ -934,6 +1381,13 @@ fn exactly_the_nine_advanced_order_recipes_require_agitation() {
         .map(|reaction| reaction.key.as_str())
         .collect();
     let mut expected = ADVANCED_ORDER_RECIPES.to_vec();
+    expected.extend([
+        "acetone_oxide",
+        "epinephrine",
+        "glycerol",
+        "organic_slurry",
+        "pentetic_acid",
+    ]);
     actual.sort_unstable();
     expected.sort_unstable();
     assert_eq!(actual, expected);
@@ -1146,7 +1600,7 @@ fn locked_recipes_stay_within_reach_of_what_the_player_knows() {
                 .product_ids()
         })
         .collect();
-    let base: HashSet<ReagentId> = data.reagents.dispensable().map(|r| r.id).collect();
+    let base: HashSet<ReagentId> = data.reagents.raw().map(|r| r.id).collect();
 
     let mut available: HashSet<ReagentId> = base.union(&known_products).copied().collect();
     let mut depth = 0;
@@ -1160,8 +1614,8 @@ fn locked_recipes_stay_within_reach_of_what_the_player_knows() {
     while !undiscovered.is_empty() {
         depth += 1;
         assert!(
-            depth <= 3,
-            "recipes still unreachable after 3 steps: {undiscovered:?}"
+            depth <= 8,
+            "recipes still unreachable after 8 steps: {undiscovered:?}"
         );
 
         let mut newly_available = Vec::new();
@@ -1276,6 +1730,583 @@ fn solution_colour_blends_by_volume() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn detox_and_neurology_branch_has_working_stoichiometry_and_surviving_catalysts() {
+    let data = data();
+    type RecipeCase<'a> = (&'a str, &'a [(&'a str, i32)], f32, &'a [(&'a str, i32)]);
+    let cases: &[RecipeCase<'_>] = &[
+        (
+            "calomel",
+            &[("mercury", 2), ("chlorine", 2)],
+            400.0,
+            &[("calomel", 4)],
+        ),
+        (
+            "ammoniated_mercury",
+            &[("calomel", 2), ("ammonia", 4)],
+            293.0,
+            &[("ammoniated_mercury", 6)],
+        ),
+        (
+            "granibitaluri",
+            &[
+                ("sodium_chloride", 2),
+                ("carbon", 2),
+                ("sulphuric_acid", 2),
+                ("iron", 5),
+            ],
+            293.0,
+            &[("granibitaluri", 6), ("iron", 5)],
+        ),
+        (
+            "seiver",
+            &[("aluminium", 4), ("nitrogen", 4), ("potassium", 4)],
+            330.0,
+            &[("seiver", 6)],
+        ),
+        (
+            "neurine",
+            &[("acetone", 4), ("mannitol", 4), ("oxygen", 4)],
+            293.0,
+            &[("neurine", 8)],
+        ),
+        (
+            "diphenhydramine",
+            &[
+                ("diethylamine", 2),
+                ("oil", 2),
+                ("bromine", 2),
+                ("carbon", 2),
+                ("ethanol", 2),
+            ],
+            293.0,
+            &[("diphenhydramine", 8)],
+        ),
+        (
+            "oculine",
+            &[("multiver", 3), ("carbon", 3), ("hydrogen", 3)],
+            293.0,
+            &[("oculine", 9)],
+        ),
+    ];
+
+    for (recipe, ingredients, temperature, expected) in cases {
+        let mut solution = beaker(&data, 100, ingredients);
+        solution.temperature = Kelvin(*temperature);
+        let report = resolve(&mut solution, &data.reactions);
+        let reaction = data.reactions.find(recipe).unwrap();
+        assert!(
+            report.fired_reactions().contains(&reaction.id),
+            "{recipe} never fired"
+        );
+        assert_contents(&data, &solution, expected);
+    }
+}
+
+#[test]
+fn koibean_branch_builds_a_toxic_intermediate_into_rezadone() {
+    let data = data();
+
+    let mut intermediate = beaker(&data, 100, &[("oxygen", 3), ("potassium", 3), ("sugar", 3)]);
+    let report = resolve(&mut intermediate, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("cryptobiolin").unwrap().id));
+    assert_contents(&data, &intermediate, &[("cryptobiolin", 9)]);
+
+    let mut medicine = beaker(
+        &data,
+        100,
+        &[("carpotoxin", 4), ("cryptobiolin", 4), ("copper", 4)],
+    );
+    let report = resolve(&mut medicine, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("rezadone").unwrap().id));
+    assert_contents(&data, &medicine, &[("rezadone", 12)]);
+}
+
+#[test]
+fn antihol_refines_multiver_without_leaving_alcohol_behind() {
+    let data = data();
+    let mut solution = beaker(
+        &data,
+        100,
+        &[("multiver", 6), ("copper", 6), ("ethanol", 6)],
+    );
+
+    let report = resolve(&mut solution, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("antihol").unwrap().id));
+    assert_contents(&data, &solution, &[("antihol", 18)]);
+}
+
+#[test]
+fn modafinil_joins_existing_component_branches_over_a_surviving_catalyst() {
+    let data = data();
+    let mut solution = beaker(
+        &data,
+        100,
+        &[
+            ("acetone", 3),
+            ("diethylamine", 3),
+            ("phenol", 3),
+            ("sulphuric_acid", 3),
+            ("bromine", 1),
+        ],
+    );
+
+    let report = resolve(&mut solution, &data.reactions);
+    let reaction = data.reactions.find("modafinil").unwrap();
+    assert!(report.fired_reactions().contains(&reaction.id));
+    assert_contents(&data, &solution, &[("bromine", 1), ("modafinil", 12)]);
+    assert!(
+        reaction.ph_shift > 0.0,
+        "the source recipe consumes acid as it progresses"
+    );
+}
+
+#[test]
+fn naloxone_turns_an_existing_opioid_into_a_purge_medicine() {
+    let data = data();
+    let mut solution = beaker(
+        &data,
+        100,
+        &[
+            ("morphine", 3),
+            ("hydrogen_peroxide", 3),
+            ("bromine", 3),
+            ("ethanol", 3),
+        ],
+    );
+
+    let report = resolve(&mut solution, &data.reactions);
+    let reaction = data.reactions.find("naloxone").unwrap();
+    assert!(report.fired_reactions().contains(&reaction.id));
+    assert_contents(&data, &solution, &[("naloxone", 12)]);
+    assert!(reaction.ph_shift > 0.0);
+}
+
+#[test]
+fn hercuri_requires_an_actively_cooled_cryostylane_batch() {
+    let data = data();
+    let prepare = |temperature| {
+        let mut solution = beaker(
+            &data,
+            100,
+            &[("cryostylane", 3), ("lye", 1), ("bromine", 1)],
+        );
+        solution.temperature = Kelvin(temperature);
+        solution
+    };
+
+    let mut warm = prepare(293.0);
+    assert!(resolve(&mut warm, &data.reactions)
+        .fired_reactions()
+        .is_empty());
+
+    let mut cooled = prepare(240.0);
+    let report = resolve(&mut cooled, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("hercuri").unwrap().id));
+    assert_contents(&data, &cooled, &[("hercuri", 5)]);
+    assert!(cooled.temperature.0 < 240.0, "the synthesis is endothermic");
+}
+
+#[test]
+fn nitrous_oxide_is_a_hot_volatile_intermediate() {
+    let data = data();
+    let prepare = |temperature| {
+        let mut solution = beaker(
+            &data,
+            100,
+            &[("ammonia", 4), ("oxygen", 4), ("nitrogen", 2)],
+        );
+        solution.temperature = Kelvin(temperature);
+        solution
+    };
+
+    let mut controlled = prepare(530.0);
+    let report = resolve(&mut controlled, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("nitrous_oxide").unwrap().id));
+    assert_contents(&data, &controlled, &[("nitrous_oxide", 10)]);
+    assert!(controlled.temperature.0 > 530.0);
+
+    let mut overheated = prepare(576.0);
+    let report = resolve(&mut overheated, &data.reactions);
+    assert!(report.effects.iter().any(
+        |effect| matches!(effect, ReactionEffect::Explosion(power) if (*power - 2.0).abs() < 0.001)
+    ));
+    assert_eq!(
+        overheated.volume_of(data.reagent("nitrous_oxide")),
+        Units::ZERO
+    );
+}
+
+#[test]
+fn syriniver_refines_the_volatile_branch_into_a_dilution_medicine() {
+    let data = data();
+    let mut solution = beaker(
+        &data,
+        100,
+        &[
+            ("nitrous_oxide", 4),
+            ("mindbreaker_toxin", 2),
+            ("fluorine", 2),
+            ("sulfur", 2),
+        ],
+    );
+    solution.temperature = Kelvin(300.0);
+
+    let report = resolve(&mut solution, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("syriniver").unwrap().id));
+    assert_contents(&data, &solution, &[("syriniver", 10)]);
+    assert!(solution.temperature.0 < 300.0);
+}
+
+#[test]
+fn miners_salve_is_a_simple_oil_intermediate_medicine() {
+    let data = data();
+    let mut solution = beaker(&data, 100, &[("oil", 4), ("iron", 4), ("water", 4)]);
+
+    let report = resolve(&mut solution, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("miners_salve").unwrap().id));
+    assert_contents(&data, &solution, &[("miners_salve", 12)]);
+}
+
+#[test]
+fn pyroxadone_joins_cold_and_fire_branches_in_a_narrow_hot_window() {
+    let data = data();
+    let mut solution = beaker(
+        &data,
+        100,
+        &[("cryoxadone", 3), ("plasma", 3), ("phlogiston", 3)],
+    );
+    solution.temperature = Kelvin(390.0);
+
+    let report = resolve(&mut solution, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("pyroxadone").unwrap().id));
+    assert_contents(&data, &solution, &[("pyroxadone", 9)]);
+    assert!(solution.temperature.0 > 390.0);
+}
+
+#[test]
+fn regenerative_jelly_combines_two_purified_botanical_extracts() {
+    let data = data();
+    let mut solution = beaker(&data, 100, &[("omnizine", 6), ("slime_jelly", 6)]);
+
+    let report = resolve(&mut solution, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("regenerative_jelly").unwrap().id));
+    assert_contents(&data, &solution, &[("regenerative_jelly", 12)]);
+}
+
+#[test]
+fn penthrite_chain_builds_two_expert_intermediates_over_a_surviving_stabilizer() {
+    let data = data();
+
+    let mut aldehyde = beaker(
+        &data,
+        100,
+        &[("acetone", 3), ("formaldehyde", 3), ("water", 3)],
+    );
+    aldehyde.temperature = Kelvin(450.0);
+    let report = resolve(&mut aldehyde, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("acetaldehyde").unwrap().id));
+    assert_contents(&data, &aldehyde, &[("acetaldehyde", 9)]);
+
+    let mut scaffold = beaker(
+        &data,
+        100,
+        &[("acetaldehyde", 3), ("formaldehyde", 9), ("lye", 3)],
+    );
+    let report = resolve(&mut scaffold, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("pentaerythritol").unwrap().id));
+    assert_contents(&data, &scaffold, &[("pentaerythritol", 6)]);
+
+    let mut medicine = beaker(
+        &data,
+        100,
+        &[
+            ("pentaerythritol", 3),
+            ("nitric_acid", 3),
+            ("acetone", 3),
+            ("stabilizing_agent", 1),
+        ],
+    );
+    medicine.temperature = Kelvin(300.0);
+    let report = resolve(&mut medicine, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("penthrite").unwrap().id));
+    assert_contents(
+        &data,
+        &medicine,
+        &[("penthrite", 9), ("stabilizing_agent", 1)],
+    );
+}
+
+#[test]
+fn penthrite_and_epinephrine_are_an_immediate_explosive_incompatibility() {
+    let data = data();
+    let mut solution = beaker(&data, 100, &[("penthrite", 4), ("epinephrine", 4)]);
+
+    let report = resolve(&mut solution, &data.reactions);
+
+    assert!(report.effects.iter().any(
+        |effect| matches!(effect, ReactionEffect::Explosion(power) if (*power - 2.3).abs() < 0.001)
+    ));
+    assert_contents(&data, &solution, &[("ash", 4)]);
+}
+
+#[test]
+fn exotic_stabilizer_separates_portable_tatp_from_an_immediate_failure() {
+    let data = data();
+    let ingredients = [
+        ("acetone_oxide", 3),
+        ("nitric_acid", 3),
+        ("pentaerythritol", 3),
+    ];
+
+    let mut stable = Solution::new(Units::whole(100));
+    for (key, amount) in ingredients
+        .iter()
+        .copied()
+        .chain([("exotic_stabilizer", 1)])
+    {
+        let id = data.reagent(key);
+        let definition = data.reagents.get(id);
+        assert!(stable
+            .add_profiled(id, Units::whole(amount), 1.0, definition.ph)
+            .is_zero());
+    }
+    stable.temperature = Kelvin(450.0);
+    let report = resolve(&mut stable, &data.reactions);
+    assert!(
+        report
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, ReactionEffect::Explosion(_))),
+        "stabilized batch unexpectedly failed: {report:?}"
+    );
+    assert_contents(&data, &stable, &[("tatp", 3), ("exotic_stabilizer", 1)]);
+
+    let mut unstable = beaker(&data, 100, &ingredients);
+    unstable.temperature = Kelvin(450.0);
+    let report = resolve(&mut unstable, &data.reactions);
+    assert!(report.effects.iter().any(
+        |effect| matches!(effect, ReactionEffect::Explosion(power) if (*power - 3.9).abs() < 0.001)
+    ));
+    assert_contents(&data, &unstable, &[("ash", 3)]);
+}
+
+#[test]
+fn stabilized_tatp_has_a_clear_550k_activation_threshold() {
+    let data = data();
+    let mut below = beaker(&data, 20, &[("tatp", 2)]);
+    below.temperature = Kelvin(549.0);
+    let report = resolve(&mut below, &data.reactions);
+    assert!(!report.reacted());
+    assert_contents(&data, &below, &[("tatp", 2)]);
+
+    below.temperature = Kelvin(550.0);
+    let report = resolve(&mut below, &data.reactions);
+    assert!(report.effects.iter().any(
+        |effect| matches!(effect, ReactionEffect::Explosion(power) if (*power - 3.6).abs() < 0.001)
+    ));
+    assert_contents(&data, &below, &[("ash", 2)]);
+}
+
+#[test]
+fn emp_and_both_teslium_triggers_scale_their_electrical_pulses() {
+    let data = data();
+    let mut emp = beaker(&data, 50, &[("iron", 3), ("uranium", 3), ("aluminium", 3)]);
+    let report = resolve(&mut emp, &data.reactions);
+    assert!(report.effects.iter().any(
+        |effect| matches!(effect, ReactionEffect::Emp(power) if (*power - 2.16).abs() < 0.001)
+    ));
+    assert_contents(&data, &emp, &[("emp_residue", 3)]);
+
+    let mut wet = beaker(&data, 20, &[("teslium", 4), ("water", 4)]);
+    let report = resolve(&mut wet, &data.reactions);
+    assert!(report.effects.iter().any(
+        |effect| matches!(effect, ReactionEffect::Electric(power) if (*power - 2.5).abs() < 0.001)
+    ));
+
+    let mut hot = beaker(&data, 20, &[("teslium", 4)]);
+    hot.temperature = Kelvin(473.0);
+    assert!(!resolve(&mut hot, &data.reactions).reacted());
+    hot.temperature = Kelvin(474.0);
+    let report = resolve(&mut hot, &data.reactions);
+    assert!(report.effects.iter().any(
+        |effect| matches!(effect, ReactionEffect::Electric(power) if (*power - 2.5).abs() < 0.001)
+    ));
+}
+
+#[test]
+fn carbon_dioxide_and_pax_complete_the_atmosphere_utility_branch() {
+    let data = data();
+    let mut carbon_dioxide = beaker(&data, 50, &[("carbon", 3), ("oxygen", 6)]);
+    carbon_dioxide.temperature = Kelvin(776.0);
+    assert!(!resolve(&mut carbon_dioxide, &data.reactions).reacted());
+    carbon_dioxide.temperature = Kelvin(777.0);
+    let report = resolve(&mut carbon_dioxide, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("carbon_dioxide").unwrap().id));
+    assert_contents(&data, &carbon_dioxide, &[("carbon_dioxide", 9)]);
+
+    let mut pax = beaker(
+        &data,
+        50,
+        &[
+            ("mindbreaker_toxin", 2),
+            ("multiver", 2),
+            ("sodium_chloride", 4),
+            ("sodium", 2),
+        ],
+    );
+    let report = resolve(&mut pax, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("pax").unwrap().id));
+    assert_contents(&data, &pax, &[("pax", 10)]);
+    assert!(data.reagents.get(data.reagent("pax")).controlled);
+}
+
+#[test]
+fn psicodine_refines_an_impairing_narcotic_with_mannitol() {
+    let data = data();
+    let mut precursor = beaker(&data, 100, &[("mercury", 3), ("oxygen", 3), ("sugar", 3)]);
+    let report = resolve(&mut precursor, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("impedrezene").unwrap().id));
+    assert_contents(&data, &precursor, &[("impedrezene", 6)]);
+
+    let mut medicine = beaker(
+        &data,
+        100,
+        &[("mannitol", 4), ("impedrezene", 2), ("water", 4)],
+    );
+    let report = resolve(&mut medicine, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("psicodine").unwrap().id));
+    assert_contents(&data, &medicine, &[("psicodine", 10)]);
+}
+
+#[test]
+fn sulfonal_and_anacea_form_from_their_authored_advanced_branches() {
+    let data = data();
+    let mut sulfonal = beaker(
+        &data,
+        100,
+        &[("acetone", 4), ("diethylamine", 4), ("sulfur", 4)],
+    );
+    let report = resolve(&mut sulfonal, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("sulfonal").unwrap().id));
+    assert_contents(&data, &sulfonal, &[("sulfonal", 12)]);
+
+    let mut anacea = beaker(
+        &data,
+        100,
+        &[("haloperidol", 3), ("impedrezene", 3), ("radium", 3)],
+    );
+    let report = resolve(&mut anacea, &data.reactions);
+    assert!(report
+        .fired_reactions()
+        .contains(&data.reactions.find("anacea").unwrap().id));
+    assert_contents(&data, &anacea, &[("anacea", 9)]);
+}
+
+#[test]
+fn aranesp_quality_selects_the_stimulant_or_its_useful_inverse() {
+    let data = data();
+    let batch = |purity: f32| {
+        let mut solution = Solution::new(Units::whole(100));
+        for key in [
+            "epinephrine",
+            "diethylamine",
+            "phenol",
+            "atropine",
+            "morphine",
+        ] {
+            let reagent = data.reagent(key);
+            let definition = data.reagents.get(reagent);
+            let overflow = solution.add_profiled(reagent, Units::whole(2), purity, definition.ph);
+            assert!(overflow.is_zero());
+        }
+        solution
+    };
+
+    let mut clean = batch(0.80);
+    let clean_report = resolve(&mut clean, &data.reactions);
+    assert!(clean_report
+        .fired_reactions()
+        .contains(&data.reactions.find("aranesp").unwrap().id));
+    assert_contents(&data, &clean, &[("aranesp", 10)]);
+
+    let mut impure = batch(0.40);
+    let impure_report = resolve(&mut impure, &data.reactions);
+    assert!(impure_report
+        .fired_reactions()
+        .contains(&data.reactions.find("epoetin_alfa").unwrap().id));
+    assert_contents(&data, &impure, &[("epoetin_alfa", 10)]);
+}
+
+#[test]
+fn happiness_quality_selects_the_mood_drug_or_sadness_inverse() {
+    let data = data();
+    let batch = |purity: f32| {
+        let mut solution = Solution::new(Units::whole(100));
+        for (key, amount) in [
+            ("nitrous_oxide", 4),
+            ("epinephrine", 2),
+            ("ethanol", 2),
+            ("plasma", 5),
+        ] {
+            let reagent = data.reagent(key);
+            let definition = data.reagents.get(reagent);
+            let overflow =
+                solution.add_profiled(reagent, Units::whole(amount), purity, definition.ph);
+            assert!(overflow.is_zero());
+        }
+        solution
+    };
+
+    let mut clean = batch(0.80);
+    let clean_report = resolve(&mut clean, &data.reactions);
+    assert!(clean_report
+        .fired_reactions()
+        .contains(&data.reactions.find("happiness").unwrap().id));
+    assert_contents(&data, &clean, &[("happiness", 8), ("plasma", 5)]);
+
+    let mut impure = batch(0.30);
+    let impure_report = resolve(&mut impure, &data.reactions);
+    assert!(impure_report
+        .fired_reactions()
+        .contains(&data.reactions.find("sadness").unwrap().id));
+    assert_contents(&data, &impure, &[("sadness", 8), ("plasma", 5)]);
+}
+
+#[test]
 fn producer_of_finds_the_reaction_that_makes_a_reagent() {
     let data = data();
     let bicaridine = data.reagent("bicaridine");
@@ -1293,19 +2324,36 @@ fn producer_of_returns_none_for_a_raw_reagent() {
 }
 
 #[test]
-fn every_reagent_is_produced_by_at_most_one_reaction() {
-    // The recipe tree picks the first match defensively rather than assuming
-    // this, but the data really does hold it today — catch a future edit
-    // that breaks it here rather than have the tree silently pick one
-    // arbitrarily.
+fn a_coproduct_never_overrides_its_primary_synthesis_path() {
+    let data = data();
+    let acid = data.reagent("sulphuric_acid");
+    let primary = data.reactions.producer_of(acid).unwrap();
+
+    assert_eq!(primary.key, "sulphuric_acid");
+    let tar = data.reactions.find("maintenance_tar").unwrap();
+    assert_eq!(tar.products[1], (acid, Units::ONE));
+}
+
+#[test]
+fn every_reagent_has_at_most_one_primary_synthesis() {
+    // Coproducts may overlap a standalone synthesis, but recipe-tree and
+    // batch-sizing callers must always see one unambiguous primary route.
     let data = data();
     let mut seen = HashSet::new();
     for reaction in data.reactions.iter() {
-        for &(reagent, _) in &reaction.products {
+        let Some(&(reagent, _)) = reaction.products.first() else {
+            continue;
+        };
+        if !seen.insert(reagent) {
+            let definition = data.reagents.get(reagent);
+            let consumed_downstream = data
+                .reactions
+                .iter()
+                .any(|candidate| candidate.reactants.iter().any(|(id, _)| *id == reagent));
             assert!(
-                seen.insert(reagent),
-                "'{}' is produced by more than one reaction",
-                data.reagents.get(reagent).key
+                definition.key == "ash" || (definition.intentionally_inert && !consumed_downstream),
+                "only terminal inert waste may share primary event routes; '{}' is ambiguous",
+                definition.key
             );
         }
     }
@@ -1446,7 +2494,7 @@ fn nothing_that_releases_heat_is_rated() {
         let heats = reaction
             .effects
             .iter()
-            .any(|effect| matches!(effect, ReactionEffect::Heat(_)));
+            .any(|effect| matches!(effect, ReactionEffect::Heat(delta) if *delta > 0.0));
         assert!(
             !(heats && reaction.rate.is_some()),
             "'{}' both releases heat and has a rate — retune it first",

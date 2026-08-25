@@ -48,6 +48,12 @@ pub const COLLAPSE: Health = Units::whole(100);
 /// threshold would stand up and fall over on alternating ticks.
 pub const RECOVER: Health = Units::whole(80);
 
+/// Total damage at which critical-care-only medicine activates.
+///
+/// Matching the recovery boundary makes the state easy to read: a patient
+/// who is down, or only just stable enough to stand again, still qualifies.
+pub const CRITICAL_DAMAGE: Health = RECOVER;
+
 /// Extra collapse headroom per point of `Stabilized` intensity.
 pub const STABILIZED_COLLAPSE_BONUS: Health = Units::whole(25);
 
@@ -127,6 +133,10 @@ pub struct Bloodstream {
     /// Kept sorted by kind so iteration — and therefore every tick — is
     /// deterministic, for the same reason `Solution` sorts its contents.
     statuses: Vec<(StatusKind, StatusState)>,
+    /// Consecutive metabolism ticks each reagent has survived in active
+    /// blood. Kept sorted by id for deterministic delayed-effect onset.
+    #[serde(default)]
+    exposure_ticks: Vec<(ReagentId, u32)>,
 }
 
 impl Default for Bloodstream {
@@ -135,6 +145,7 @@ impl Default for Bloodstream {
             blood: Solution::unbounded(),
             stomach: Solution::unbounded(),
             statuses: Vec::new(),
+            exposure_ticks: Vec::new(),
         }
     }
 }
@@ -161,6 +172,34 @@ impl Bloodstream {
 
     pub fn active_statuses(&self) -> impl Iterator<Item = (StatusKind, StatusState)> + '_ {
         self.statuses.iter().copied()
+    }
+
+    fn ticks_present(&self, id: ReagentId) -> u32 {
+        self.exposure_ticks
+            .binary_search_by_key(&id, |(reagent, _)| *reagent)
+            .map(|index| self.exposure_ticks[index].1)
+            .unwrap_or(0)
+    }
+
+    fn retain_present_exposure_ticks(&mut self) {
+        self.exposure_ticks
+            .retain(|(id, _)| self.blood.volume_of(*id).is_positive());
+    }
+
+    fn advance_exposure_ticks(&mut self) {
+        self.retain_present_exposure_ticks();
+        let present: Vec<ReagentId> = self.blood.iter().map(|(id, _)| id).collect();
+        for id in present {
+            match self
+                .exposure_ticks
+                .binary_search_by_key(&id, |(reagent, _)| *reagent)
+            {
+                Ok(index) => {
+                    self.exposure_ticks[index].1 = self.exposure_ticks[index].1.saturating_add(1)
+                }
+                Err(index) => self.exposure_ticks.insert(index, (id, 1)),
+            }
+        }
     }
 
     /// Combined deterministic movement modifier for gameplay and crew AI.
@@ -191,6 +230,27 @@ impl Bloodstream {
             .map(|(kind, state)| kind.motor_instability(state.intensity))
             .sum::<f32>()
             .clamp(0.0, 5.0)
+    }
+
+    /// Fraction of observer detection range hidden by chemistry.
+    ///
+    /// Statuses use the strongest contribution rather than stacking, so two
+    /// concealment drugs cannot accidentally cross the intended 80% cap.
+    pub fn concealment(&self) -> f32 {
+        self.statuses
+            .iter()
+            .map(|(kind, state)| kind.concealment(state.intensity))
+            .fold(0.0, f32::max)
+            .clamp(0.0, 0.80)
+    }
+
+    /// Fraction of ordinary speech/reporting currently suppressed.
+    pub fn communication_suppression(&self) -> f32 {
+        self.statuses
+            .iter()
+            .map(|(kind, state)| kind.communication_suppression(state.intensity))
+            .fold(0.0, f32::max)
+            .clamp(0.0, 1.0)
     }
 
     /// Chemical incapacitation is separate from damage collapse: when the
@@ -323,19 +383,30 @@ impl Bloodstream {
         // offered — a splash that mostly misses mostly does not burn.
         let landing = offered.scaled(route.absorbed(), Units::ONE);
         let mut contact = Damage::default();
+        let mut topical_healing = Damage::default();
         for (id, amount) in dose.iter() {
             let absorbed = amount.scaled(route.absorbed(), Units::ONE);
+            let purity = Units::from_f64(dose.purity_of(id) as f64);
             for effect in &data.reagents.get(id).effects {
                 if let ReagentEffect::Contact(kind, magnitude) = effect {
                     let scaled = magnitude
                         .scaled(absorbed, CONTACT_REFERENCE_DOSE)
-                        .scaled(Units::from_f64(route.contact_scale() as f64), Units::ONE);
+                        .scaled(Units::from_f64(route.contact_scale() as f64), Units::ONE)
+                        .scaled(purity, Units::ONE);
                     contact += Damage::of(*kind, scaled);
+                }
+                if let ReagentEffect::TopicalHeal(kind, magnitude) = effect {
+                    let scaled = magnitude
+                        .scaled(absorbed, CONTACT_REFERENCE_DOSE)
+                        .scaled(Units::from_f64(route.topical_scale() as f64), Units::ONE)
+                        .scaled(purity, Units::ONE);
+                    topical_healing += Damage::of(*kind, scaled);
                 }
             }
         }
         let was_collapsed = vitals.collapsed;
         vitals.apply(contact);
+        vitals.heal(topical_healing);
 
         let destination = if route.digested() {
             &mut self.stomach
@@ -385,26 +456,135 @@ pub struct TickReport {
     pub reactions: ResolveReport,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PurgeRequest {
+    harmful: Units,
+    medicines: Units,
+}
+
+impl std::ops::AddAssign for PurgeRequest {
+    fn add_assign(&mut self, rhs: Self) {
+        self.harmful += rhs.harmful;
+        self.medicines += rhs.medicines;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EffectContext {
+    purity: f32,
+    current_volume: Units,
+    critically_injured: bool,
+    existing_damage: Damage,
+    ticks_present: u32,
+}
+
 /// Applies one data effect and returns any requested per-target purge amount.
-fn apply_effect(effect: ReagentEffect, blood: &mut Bloodstream, report: &mut TickReport) -> Units {
+fn apply_effect(
+    effect: ReagentEffect,
+    context: EffectContext,
+    blood: &mut Bloodstream,
+    report: &mut TickReport,
+) -> PurgeRequest {
+    let EffectContext {
+        purity,
+        current_volume,
+        critically_injured,
+        existing_damage,
+        ticks_present,
+    } = context;
+    let scale = Units::from_f64(purity.clamp(0.0, 1.0) as f64);
     match effect {
-        ReagentEffect::Heal(kind, amount) => report.healed += Damage::of(kind, amount),
-        ReagentEffect::Harm(kind, amount) => report.harmed += Damage::of(kind, amount),
+        ReagentEffect::Heal(kind, amount) => {
+            report.healed += Damage::of(kind, amount.scaled(scale, Units::ONE))
+        }
+        ReagentEffect::Harm(kind, amount) => {
+            report.harmed += Damage::of(kind, amount.scaled(scale, Units::ONE))
+        }
+        ReagentEffect::VolumeScaledHarm(kind, amount) => {
+            report.harmed += Damage::of(
+                kind,
+                amount
+                    .scaled(current_volume, Units::ONE)
+                    .scaled(scale, Units::ONE),
+            )
+        }
         // Charged once on arrival, in `receive`. Nothing to do per tick.
-        ReagentEffect::Contact(..) => {}
+        ReagentEffect::Contact(..) | ReagentEffect::TopicalHeal(..) => {}
+        ReagentEffect::ConditionalHeal {
+            required,
+            kind,
+            amount,
+        } => {
+            if blood.status(required).intensity > 0.0 {
+                report.healed += Damage::of(kind, amount.scaled(scale, Units::ONE));
+            }
+        }
+        ReagentEffect::ConditionalHarm {
+            existing,
+            kind,
+            amount,
+        } => {
+            if existing_damage.get(existing).is_positive() {
+                report.harmed += Damage::of(kind, amount.scaled(scale, Units::ONE));
+            }
+        }
+        ReagentEffect::CriticalHeal(kind, amount) => {
+            if critically_injured {
+                report.healed += Damage::of(kind, amount.scaled(scale, Units::ONE));
+            }
+        }
         ReagentEffect::Status {
             kind,
             seconds,
             intensity,
-        } => blood.add_status(kind, seconds, intensity),
+        } => blood.add_status(kind, seconds * purity, intensity),
+        ReagentEffect::DelayedStatus {
+            after_ticks,
+            kind,
+            seconds,
+            intensity,
+        } => {
+            if ticks_present >= after_ticks {
+                blood.add_status(kind, seconds * purity, intensity);
+            }
+        }
+        ReagentEffect::AccumulatedHarm(kind, amount) => {
+            let exposure = Units::whole(ticks_present.min(i32::MAX as u32) as i32);
+            report.harmed += Damage::of(
+                kind,
+                amount
+                    .scaled(exposure, Units::ONE)
+                    .scaled(scale, Units::ONE),
+            );
+        }
+        ReagentEffect::DelayedHarm {
+            after_ticks,
+            kind,
+            amount,
+        } => {
+            if ticks_present >= after_ticks {
+                report.harmed += Damage::of(kind, amount.scaled(scale, Units::ONE));
+            }
+        }
         ReagentEffect::Counter {
             kind,
             seconds,
             intensity,
-        } => blood.counter_status(kind, seconds, intensity),
-        ReagentEffect::Purge(amount) => return amount,
+        } => blood.counter_status(kind, seconds * purity, intensity),
+        ReagentEffect::Purge(amount) => {
+            return PurgeRequest {
+                harmful: amount.scaled(scale, Units::ONE),
+                ..Default::default()
+            }
+        }
+        ReagentEffect::MedicinePurge(amount) => {
+            return PurgeRequest {
+                medicines: amount.scaled(scale, Units::ONE),
+                ..Default::default()
+            }
+        }
     }
-    Units::ZERO
+    PurgeRequest::default()
 }
 
 fn purge_harmful(
@@ -429,6 +609,54 @@ fn purge_harmful(
     }
 }
 
+fn purge_medicines(
+    blood: &mut Bloodstream,
+    data: &ChemData,
+    amount_per_reagent: Units,
+    report: &mut TickReport,
+) {
+    if !amount_per_reagent.is_positive() {
+        return;
+    }
+    let targets: Vec<ReagentId> = blood
+        .blood
+        .iter()
+        .filter_map(|(id, _)| {
+            data.reagents
+                .get(id)
+                .categories
+                .iter()
+                .any(|category| category.is_legitimately_orderable())
+                .then_some(id)
+        })
+        .collect();
+    for id in targets {
+        let removed = blood.blood.remove(id, amount_per_reagent);
+        if removed.is_positive() {
+            report.purged.push((id, removed));
+        }
+    }
+}
+
+fn purge_targets(
+    blood: &mut Bloodstream,
+    data: &ChemData,
+    targets: &[(String, Units)],
+    purity: f32,
+    report: &mut TickReport,
+) {
+    let scale = Units::from_f64(purity.clamp(0.0, 1.0) as f64);
+    for (target, amount) in targets {
+        let Some(id) = data.reagents.id_of(target) else {
+            continue;
+        };
+        let removed = blood.blood.remove(id, amount.scaled(scale, Units::ONE));
+        if removed.is_positive() {
+            report.purged.push((id, removed));
+        }
+    }
+}
+
 /// Runs one 2-second tick.
 ///
 /// The order is fixed and load-bearing:
@@ -447,6 +675,8 @@ fn purge_harmful(
 /// and what stops a 0.1u remainder being silently worthless.
 pub fn metabolise(vitals: &mut Vitals, blood: &mut Bloodstream, data: &ChemData) -> TickReport {
     let was_collapsed = vitals.collapsed;
+    let critically_injured = vitals.total() >= CRITICAL_DAMAGE;
+    let existing_damage = vitals.damage;
     let mut report = TickReport::default();
 
     // 1. Digestion.
@@ -458,9 +688,12 @@ pub fn metabolise(vitals: &mut Vitals, blood: &mut Bloodstream, data: &ChemData)
     report.reactions = resolve(&mut blood.blood, &data.reactions);
 
     // 3. Per-reagent effects.
+    blood.advance_exposure_ticks();
     let present: Vec<(ReagentId, Units)> = blood.blood.iter().collect();
     for (id, volume) in &present {
         let reagent = data.reagents.get(*id);
+        let purity = blood.blood.purity_of(*id);
+        let ticks_present = blood.ticks_present(*id);
 
         let overdosing = matches!(reagent.overdose, Some(threshold) if *volume > threshold);
         let critical = matches!(reagent.critical_overdose, Some(threshold) if *volume > threshold);
@@ -478,11 +711,24 @@ pub fn metabolise(vitals: &mut Vitals, blood: &mut Bloodstream, data: &ChemData)
             tiers.extend(&reagent.critical_effects);
         }
 
-        let mut purge = Units::ZERO;
+        let mut purge = PurgeRequest::default();
         for effect in tiers {
-            purge += apply_effect(*effect, blood, &mut report);
+            purge += apply_effect(
+                *effect,
+                EffectContext {
+                    purity,
+                    current_volume: *volume,
+                    critically_injured,
+                    existing_damage,
+                    ticks_present,
+                },
+                blood,
+                &mut report,
+            );
         }
-        purge_harmful(blood, data, purge, &mut report);
+        purge_harmful(blood, data, purge.harmful, &mut report);
+        purge_medicines(blood, data, purge.medicines, &mut report);
+        purge_targets(blood, data, &reagent.targeted_purges, purity, &mut report);
     }
 
     // 4. Status damage, then decay. Damage first, so a status that expires this
@@ -499,19 +745,37 @@ pub fn metabolise(vitals: &mut Vitals, blood: &mut Bloodstream, data: &ChemData)
     // neither blood nor stomach contains any of it.
     for (id, _) in present {
         let rate = data.reagents.get(id).rate();
-        let _ = blood.blood.remove(id, rate);
-        if blood.blood.volume_of(id).is_zero() && blood.stomach.volume_of(id).is_zero() {
+        let purity = blood.blood.purity_of(id);
+        let ticks_present = blood.ticks_present(id);
+        let metabolised = blood.blood.remove(id, rate);
+        if metabolised.is_positive()
+            && blood.blood.volume_of(id).is_zero()
+            && blood.stomach.volume_of(id).is_zero()
+        {
             let reagent = data.reagents.get(id);
             if !reagent.after_effects.is_empty() {
                 report.after_effects.push(id);
-                let mut purge = Units::ZERO;
+                let mut purge = PurgeRequest::default();
                 for effect in &reagent.after_effects {
-                    purge += apply_effect(*effect, blood, &mut report);
+                    purge += apply_effect(
+                        *effect,
+                        EffectContext {
+                            purity,
+                            current_volume: metabolised,
+                            critically_injured,
+                            existing_damage,
+                            ticks_present,
+                        },
+                        blood,
+                        &mut report,
+                    );
                 }
-                purge_harmful(blood, data, purge, &mut report);
+                purge_harmful(blood, data, purge.harmful, &mut report);
+                purge_medicines(blood, data, purge.medicines, &mut report);
             }
         }
     }
+    blood.retain_present_exposure_ticks();
 
     // Stabilization softens new oxygen damage without erasing existing debt.
     let oxygen_landing = 1.0 - blood.oxygen_resistance();

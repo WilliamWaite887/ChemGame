@@ -236,7 +236,11 @@ fn run_sweep(
         let mut found = false;
         for mut container in &mut containers {
             let contraband = container.solution.iter().any(|(id, amount)| {
-                amount.is_positive() && db.reagents.get(id).categories.contains(&Category::Illicit)
+                let reagent = db.reagents.get(id);
+                amount.is_positive()
+                    && (reagent.categories.contains(&Category::Illicit)
+                        || reagent.controlled
+                        || reagent.explosive.is_some())
             });
             if contraband {
                 found = true;
