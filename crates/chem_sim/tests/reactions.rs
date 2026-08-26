@@ -5,8 +5,8 @@ use std::collections::HashSet;
 
 use chem_sim::{
     is_reacting, is_reacting_with_activation, resolve, resolve_step, resolve_step_with_activation,
-    resolve_with_activation, Category, ChemData, Kelvin, ReactionEffect, ReactionProcess,
-    ReagentId, Solution, Units,
+    resolve_with_activation, Category, ChemData, ChemFamily, Kelvin, ReactionEffect,
+    ReactionProcess, ReagentId, Solution, Units,
 };
 
 const REAGENTS_RON: &str = include_str!("../../../assets/data/chem.reagents.ron");
@@ -1685,6 +1685,24 @@ fn every_reaction_files_under_a_heading() {
             !reagent.categories.is_empty(),
             "reaction '{}' makes '{}', which names no category",
             reaction.key,
+            reagent.key
+        );
+    }
+}
+
+#[test]
+fn every_dispensable_reagent_names_a_chemical_family() {
+    // The base dispenser grid groups its ~30 chemicals under a family
+    // header instead of one long alphabetised list. A dispensable reagent
+    // left at the `Unclassified` default falls into a leftover "Other"
+    // bucket nobody authored on purpose, so this catches it before the
+    // grid ever renders that way.
+    let data = data();
+    for reagent in data.reagents.dispensable() {
+        assert_ne!(
+            reagent.family,
+            ChemFamily::Unclassified,
+            "'{}' is dispensable but names no chemical family",
             reagent.key
         );
     }

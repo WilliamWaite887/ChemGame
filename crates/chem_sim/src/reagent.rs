@@ -170,6 +170,64 @@ impl Category {
     }
 }
 
+/// What kind of substance a reagent physically is: metal, gas, halogen, and
+/// so on. Separate from [`Category`] on purpose — `Category` answers "what
+/// does this treat" (book-organising, multi-valued: tricordrazine really
+/// does treat four things at once), while `ChemFamily` answers "what *is*
+/// this" (a single fact, true even for raw elements that never get a book
+/// entry at all).
+///
+/// Exists so the base dispenser's ~30 stock chemicals can be grouped under a
+/// heading instead of forced into one long alphabetised list. Only
+/// `dispensable` reagents are expected to name one explicitly — everything
+/// else defaults to `Unclassified` rather than demanding an editor tag all
+/// the crafted/medicinal reagents before this compiles. See
+/// `every_dispensable_reagent_names_a_chemical_family`, which enforces the
+/// boundary that actually matters.
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize,
+)]
+pub enum ChemFamily {
+    Metal,
+    GasNonmetal,
+    Halogen,
+    Organic,
+    AcidBaseBuffer,
+    Radioactive,
+    Industrial,
+    #[default]
+    Unclassified,
+}
+
+impl ChemFamily {
+    /// Declared in the order the base stock grid lists it: chemically
+    /// "simple" groups first, mixed/compound stock after, the rare and the
+    /// unclassified last.
+    pub const ALL: [ChemFamily; 8] = [
+        ChemFamily::Metal,
+        ChemFamily::GasNonmetal,
+        ChemFamily::Halogen,
+        ChemFamily::Organic,
+        ChemFamily::AcidBaseBuffer,
+        ChemFamily::Radioactive,
+        ChemFamily::Industrial,
+        ChemFamily::Unclassified,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ChemFamily::Metal => "METALS",
+            ChemFamily::GasNonmetal => "GASES & NONMETALS",
+            ChemFamily::Halogen => "HALOGENS",
+            ChemFamily::Organic => "COMPOUNDS",
+            ChemFamily::AcidBaseBuffer => "BUFFERS",
+            ChemFamily::Radioactive => "RADIOACTIVE",
+            ChemFamily::Industrial => "INDUSTRIAL",
+            ChemFamily::Unclassified => "OTHER",
+        }
+    }
+}
+
 /// An interned reagent handle. Cheap to copy, compare and sort.
 ///
 /// Serialisable because solutions cross the wire in co-op. The id is a
@@ -244,6 +302,11 @@ pub struct ReagentDef {
     /// which `every_reaction_files_under_a_heading` enforces.
     #[serde(default)]
     pub categories: Vec<Category>,
+    /// What this substance physically is, independent of what it treats —
+    /// see [`ChemFamily`]. Only reagents that need to render grouped (today:
+    /// the dispensable ~30) are expected to set this explicitly.
+    #[serde(default)]
+    pub family: ChemFamily,
     /// How good a treatment this is within its category, `0` for anything
     /// never meant to satisfy an order. Only meaningful for reagents in
     /// `Category::Trauma/Burns/Antitoxins/Airloss/Radiation/Stimulants` — the
@@ -328,6 +391,7 @@ pub struct Reagent {
     pub from_produce: bool,
     pub treats: Option<String>,
     pub categories: Vec<Category>,
+    pub family: ChemFamily,
     pub potency: u32,
     pub metabolism: Option<Units>,
     pub effects: Vec<ReagentEffect>,
@@ -422,6 +486,7 @@ impl ReagentRegistry {
             from_produce: def.from_produce,
             treats: def.treats,
             categories: def.categories,
+            family: def.family,
             potency: def.potency,
             metabolism: def.metabolism,
             effects: def.effects,

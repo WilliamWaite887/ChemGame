@@ -11,6 +11,11 @@
 // types. Raw materials leave it empty because they never get an entry;
 // anything craftable must name at least one, which a test enforces.
 //
+// `family` groups a chemical for the base dispenser's stock grid — see
+// `ChemFamily`. Only reagents marked `dispensable: true` need one; everything
+// else is fine leaving it unset (defaults to `Unclassified`), which a test
+// enforces the other way around: every dispensable reagent must name one.
+//
 // `effects` is what the reagent does per metabolism tick to whoever takes it,
 // and `overdose_effects` stack on top of those past the threshold rather than
 // replacing them: an overdose is the medicine still working while it also
@@ -36,16 +41,17 @@
     //
     // One of the six base reagents the three starting recipes are built
     // from. See `every_starting_ingredient_is_unlocked_free`.
-    (id: "carbon",     name: "Carbon",     color: (0.12, 0.12, 0.13), dispensable: true),
-    (id: "nitrogen",   name: "Nitrogen",   color: (0.62, 0.70, 0.86), dispensable: true),
-    (id: "oxygen",     name: "Oxygen",     color: (0.60, 0.80, 1.00), dispensable: true),
-    (id: "potassium",  name: "Potassium",  color: (0.86, 0.84, 0.72), dispensable: true),
-    (id: "silicon",    name: "Silicon",    color: (0.66, 0.68, 0.72), dispensable: true),
+    (id: "carbon",     name: "Carbon",     color: (0.12, 0.12, 0.13), dispensable: true, family: GasNonmetal),
+    (id: "nitrogen",   name: "Nitrogen",   color: (0.62, 0.70, 0.86), dispensable: true, family: GasNonmetal),
+    (id: "oxygen",     name: "Oxygen",     color: (0.60, 0.80, 1.00), dispensable: true, family: GasNonmetal),
+    (id: "potassium",  name: "Potassium",  color: (0.86, 0.84, 0.72), dispensable: true, family: Metal),
+    (id: "silicon",    name: "Silicon",    color: (0.66, 0.68, 0.72), dispensable: true, family: GasNonmetal),
     (
         id: "sugar",
         name: "Sugar",
         color: (0.98, 0.98, 0.96),
         dispensable: true,
+        family: Organic,
         // Burns off fast and takes an absurd amount to hurt you, which is the
         // joke: the safest thing in the lab still has a threshold.
         metabolism: Some(2.0),
@@ -59,6 +65,7 @@
         name: "Hydrogen",
         color: (0.90, 0.90, 0.95),
         dispensable: true,
+        family: GasNonmetal,
         tier: 1,
     ),
     (
@@ -66,6 +73,7 @@
         name: "Iron",
         color: (0.50, 0.28, 0.24),
         dispensable: true,
+        family: Metal,
         tier: 1,
         // Iron restores blood in SS13, and blood loss is what oxygen damage
         // represents here.
@@ -76,6 +84,7 @@
         name: "Sodium",
         color: (0.90, 0.88, 0.82),
         dispensable: true,
+        family: Metal,
         tier: 1,
     ),
     (
@@ -84,6 +93,7 @@
         color: (0.55, 0.72, 0.90),
         ph: 7.0,
         dispensable: true,
+        family: Organic,
         tier: 1,
         // The only thing in the lab that sobers you up.
         effects: [Counter(kind: Drunk, seconds: 2.0, intensity: 0.25)],
@@ -95,6 +105,7 @@
         name: "Copper",
         color: (0.72, 0.45, 0.20),
         dispensable: true,
+        family: Metal,
         tier: 2,
     ),
     (
@@ -102,6 +113,7 @@
         name: "Phosphorus",
         color: (0.94, 0.90, 0.66),
         dispensable: true,
+        family: GasNonmetal,
         tier: 2,
     ),
     (
@@ -109,6 +121,7 @@
         name: "Sulfur",
         color: (0.95, 0.90, 0.35),
         dispensable: true,
+        family: GasNonmetal,
         tier: 2,
         effects: [Harm(Toxin, 0.5)],
     ),
@@ -119,6 +132,7 @@
         name: "Aluminium",
         color: (0.75, 0.76, 0.78),
         dispensable: true,
+        family: Metal,
         tier: 3,
     ),
     (
@@ -126,6 +140,7 @@
         name: "Chlorine",
         color: (0.82, 0.90, 0.44),
         dispensable: true,
+        family: Halogen,
         tier: 3,
         effects: [Harm(Brute, 1)],
     ),
@@ -134,6 +149,7 @@
         name: "Ethanol",
         color: (0.85, 0.85, 0.80),
         dispensable: true,
+        family: Organic,
         tier: 3,
         // Lingers: half the usual rate, which is what makes one drink a
         // problem for the next twenty minutes of a shift.
@@ -145,6 +161,7 @@
         name: "Iodine",
         color: (0.34, 0.24, 0.42),
         dispensable: true,
+        family: Halogen,
         tier: 3,
         effects: [Harm(Toxin, 0.5)],
     ),
@@ -155,6 +172,7 @@
         name: "Plasma",
         color: (0.72, 0.24, 0.86),
         dispensable: true,
+        family: GasNonmetal,
         tier: 4,
         // The most poisonous thing the dispenser will hand you, and it boils
         // off at 50°C — so heating a beaker to run a hot recipe can quietly
@@ -169,6 +187,7 @@
         name: "Radium",
         color: (0.44, 0.90, 0.42),
         dispensable: true,
+        family: Radioactive,
         tier: 5,
         effects: [Harm(Toxin, 2)],
     ),
@@ -177,6 +196,7 @@
         name: "Lithium",
         color: (0.66, 0.68, 0.74),
         dispensable: true,
+        family: Metal,
         tier: 5,
         effects: [Status(kind: Unsteady, seconds: 4.0, intensity: 1.0)],
     ),
@@ -185,6 +205,7 @@
         name: "Welding Fuel",
         color: (0.58, 0.44, 0.18),
         dispensable: true,
+        family: Industrial,
         tier: 5,
         // Drinkable in the sense that a mouthful will not kill you outright.
         // It is still the worst decision available at the dispenser.
@@ -197,6 +218,7 @@
         name: "Fluorine",
         color: (0.78, 0.92, 0.72),
         dispensable: true,
+        family: Halogen,
         // The priciest halogen: chlorine trifluoride is the one recipe it
         // gates, and chlorine trifluoride is the one recipe that can detonate
         // harder than phlogiston.
@@ -210,6 +232,7 @@
         name: "Mercury",
         color: (0.60, 0.62, 0.66),
         dispensable: true,
+        family: Metal,
         // The most expensive tier in the game — it gates nothing legitimate
         // at all, only mindbreaker_toxin and zombie_powder, both Illicit.
         tier: 7,
@@ -832,12 +855,12 @@
     // ---- Expanded base stock --------------------------------------------
     // The dispenser is complete from a fresh save. Difficulty now lives in
     // synthesis, control, equipment and external ingredient sources.
-    (id: "bromine", name: "Bromine", color: (0.55, 0.18, 0.10), ph: 5.5, dispensable: true, effects: [Harm(Toxin, 0.5)]),
-    (id: "silver", name: "Silver", color: (0.78, 0.80, 0.84), dispensable: true),
-    (id: "gold", name: "Gold", color: (0.94, 0.72, 0.18), dispensable: true),
-    (id: "uranium", name: "Uranium", color: (0.34, 0.72, 0.28), dispensable: true, effects: [Status(kind: Irradiated, seconds: 5.0, intensity: 1.0)]),
-    (id: "acidic_buffer", name: "Acidic Buffer", color: (0.88, 0.42, 0.34), ph: 0.0, dispensable: true),
-    (id: "basic_buffer", name: "Basic Buffer", color: (0.34, 0.50, 0.90), ph: 14.0, dispensable: true),
+    (id: "bromine", name: "Bromine", color: (0.55, 0.18, 0.10), ph: 5.5, dispensable: true, family: Halogen, effects: [Harm(Toxin, 0.5)]),
+    (id: "silver", name: "Silver", color: (0.78, 0.80, 0.84), dispensable: true, family: Metal),
+    (id: "gold", name: "Gold", color: (0.94, 0.72, 0.18), dispensable: true, family: Metal),
+    (id: "uranium", name: "Uranium", color: (0.34, 0.72, 0.28), dispensable: true, family: Radioactive, effects: [Status(kind: Irradiated, seconds: 5.0, intensity: 1.0)]),
+    (id: "acidic_buffer", name: "Acidic Buffer", color: (0.88, 0.42, 0.34), ph: 0.0, dispensable: true, family: AcidBaseBuffer),
+    (id: "basic_buffer", name: "Basic Buffer", color: (0.34, 0.50, 0.90), ph: 14.0, dispensable: true, family: AcidBaseBuffer),
 
     // ---- Dangerous chemistry backbone ----------------------------------
     (id: "corn_oil", name: "Corn Oil", color: (0.86, 0.72, 0.24), from_produce: true, world_effects: [Slippery(seconds: 24.0), Flammable(intensity: 0.8, seconds: 20.0)]),
@@ -1500,6 +1523,7 @@
         // base dispenser roster instead of becoming an arbitrary late lock.
         id: "lead", name: "Lead", color: (0.34, 0.37, 0.42), ph: 7.0,
         dispensable: true,
+        family: Metal,
         treats: Some("A toxic heavy-metal stock used in advanced maintenance chemistry."),
         categories: [Precursors, Poisons], effects: [Harm(Toxin, 0.5)],
     ),

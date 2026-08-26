@@ -11,7 +11,7 @@ use std::collections::{HashSet, VecDeque};
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use chem_sim::{Category, DamageKind, Kelvin, ReactionId, ReagentId, Units};
+use chem_sim::{Category, ChemFamily, DamageKind, Kelvin, ReactionId, ReagentId, Units};
 
 use crate::arc::{ArcScript, Campaign, Reveal};
 use crate::audio::{PlaySfx, Sfx};
@@ -100,6 +100,7 @@ impl Plugin for UiPlugin {
                 // the same ordering `settings::sync_sliders` uses and for the
                 // same reason.
                 sync_thermostat_slider,
+                animate_beaker_previews,
                 update_phase_banner,
                 update_order_queue,
                 update_vitals_panel,
@@ -932,10 +933,27 @@ fn sync_panel(
 
                     match machine.kind {
                         MachineKind::ChemMaster5000 => {
-                            dispenser_body(panel, &db, &knowledge, amount, loaded, reacting);
+                            dispenser_body(
+                                panel,
+                                &db,
+                                &knowledge,
+                                amount,
+                                loaded_entity,
+                                loaded,
+                                reacting,
+                            );
                         }
                         MachineKind::MixingChamber => {
-                            mixing_chamber_body(panel, &db, buffer, loaded, loaded_b, agitation);
+                            mixing_chamber_body(
+                                panel,
+                                &db,
+                                buffer,
+                                loaded_entity,
+                                loaded,
+                                loaded_entity_b,
+                                loaded_b,
+                                agitation,
+                            );
                         }
                         MachineKind::Analyzer => {
                             analyzer_body(
@@ -948,10 +966,18 @@ fn sync_panel(
                             );
                         }
                         MachineKind::Grinder => {
-                            grinder_body(panel, &db, catalog.as_deref(), hopper, loaded, reacting);
+                            grinder_body(
+                                panel,
+                                &db,
+                                catalog.as_deref(),
+                                hopper,
+                                loaded_entity,
+                                loaded,
+                                reacting,
+                            );
                         }
                         MachineKind::DeliveryWindow => {
-                            delivery_window_body(panel, &db, loaded, reacting);
+                            delivery_window_body(panel, &db, loaded_entity, loaded, reacting);
                         }
                         MachineKind::StandingBoard => {
                             let radio_scroll = board.radio_scroll_state();
@@ -966,7 +992,15 @@ fn sync_panel(
                             );
                         }
                         MachineKind::ReactionChamber => {
-                            heater_body(panel, &db, &knowledge, thermostat, loaded, reacting);
+                            heater_body(
+                                panel,
+                                &db,
+                                &knowledge,
+                                thermostat,
+                                loaded_entity,
+                                loaded,
+                                reacting,
+                            );
                         }
                         MachineKind::Locker => {
                             locker_body(panel, &stored);
@@ -1375,60 +1409,95 @@ fn draw_arc_notice(panel: &mut ChildSpawnerCommands, arc: &ArcHeadline) {
     }
 }
 
+/// Fixed cell width for every base-stock chip. One size rather than a size
+/// parameter per panel: this is the only panel that calls [`chip_grid`] so
+/// far, and a shared constant is one fewer thing for a future caller to get
+/// wrong when it does too.
+const BASE_STOCK_CHIP_WIDTH: f32 = 150.0;
+
+/// Every dispensable reagent, grouped by [`ChemFamily`] in display order and
+/// alphabetised within each group — the grid a chemist actually wants to
+/// scan, instead of one alphabetised wall of ~30 names.
+fn base_stock_groups(db: &ChemDb) -> Vec<(&'static str, Vec<GridChip<PanelAction>>)> {
+    ChemFamily::ALL
+        .into_iter()
+        .filter_map(|family| {
+            let mut reagents: Vec<&chem_sim::Reagent> = db
+                .reagents
+                .dispensable()
+                .filter(|r| r.family == family)
+                .collect();
+            if reagents.is_empty() {
+                return None;
+            }
+            reagents.sort_by(|a, b| a.name.cmp(&b.name));
+            let chips = reagents
+                .into_iter()
+                .map(|r| GridChip {
+                    label: r.name.clone(),
+                    swatch: Color::srgb(r.color[0], r.color[1], r.color[2]),
+                    action: PanelAction::Dispense(r.id),
+                    selected: false,
+                })
+                .collect();
+            Some((family.label(), chips))
+        })
+        .collect()
+}
+
 fn dispenser_body(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
     knowledge: &Knowledge,
     amount: Option<&DispenseAmount>,
+    container_entity: Option<Entity>,
     loaded: Option<&Container>,
     reacting: bool,
 ) {
     let selected = amount.map(|a| a.0).unwrap_or(Units::whole(10));
 
-    panel.spawn(label("Dispense amount", 13.0, TEXT_DIM));
-    panel.spawn(row()).with_children(|row| {
-        for step in [1, 5, 10, 25, 50] {
-            let units = Units::whole(step);
-            let mut entity = row.spawn(button(format!("{step}u"), PanelAction::SetAmount(units)));
-            if units == selected {
-                entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
+    card(panel, "Dispense amount", |section| {
+        section.spawn(row()).with_children(|row| {
+            for step in [1, 5, 10, 25, 50] {
+                let units = Units::whole(step);
+                let mut entity =
+                    row.spawn(button(format!("{step}u"), PanelAction::SetAmount(units)));
+                if units == selected {
+                    entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
+                }
             }
-        }
+        });
     });
 
-    panel.spawn(label("Reagents", 13.0, TEXT_DIM));
-
-    // The balance, next to the thing it buys. Research is *spent* here, so
-    // reading it should not mean closing the dispenser and opening the book to
-    // check the header — by which point the tier cost below is off screen.
-    panel.spawn(label(
-        format!("{} research banked", knowledge.research_points),
-        14.0,
-        TEXT,
-    ));
-
-    if knowledge.known_count() < db.reactions.len() {
-        panel.spawn(button(
-            "PLAYTEST: unlock all chemistry",
-            PanelAction::UnlockAll,
+    // Renamed from "Reagents": this card is about the research balance and
+    // unlocking chemistry, not the reagent list — that is what "Base stock"
+    // below actually shows. The old shared heading between two unrelated
+    // things was itself part of what made the panel hard to scan.
+    card(panel, "Research", |section| {
+        // The balance, next to the thing it buys. Research is *spent* here, so
+        // reading it should not mean closing the dispenser and opening the book
+        // to check the header — by which point the tier cost is off screen.
+        section.spawn(label(
+            format!("{} research banked", knowledge.research_points),
+            14.0,
+            TEXT,
         ));
-    }
 
-    // Every standard base reagent is available immediately. Complexity now
-    // comes from recipes, process control and sourced ingredients.
-    let mut reagents: Vec<&chem_sim::Reagent> = db.reagents.dispensable().collect();
-    reagents.sort_by(|a, b| a.name.cmp(&b.name));
-    panel.spawn(label("Base stock", 12.0, TEXT_DIM));
-    panel.spawn(wrap_row()).with_children(|row| {
-        for reagent in reagents {
-            row.spawn(button(
-                reagent.name.clone(),
-                PanelAction::Dispense(reagent.id),
+        if knowledge.known_count() < db.reactions.len() {
+            section.spawn(button(
+                "PLAYTEST: unlock all chemistry",
+                PanelAction::UnlockAll,
             ));
         }
     });
 
-    container_readout(panel, db, loaded, reacting, true);
+    // Every standard base reagent is available immediately. Complexity now
+    // comes from recipes, process control and sourced ingredients.
+    card(panel, "Base stock", |section| {
+        chip_grid(section, BASE_STOCK_CHIP_WIDTH, base_stock_groups(db));
+    });
+
+    container_readout(panel, db, container_entity, loaded, reacting, true);
 }
 
 /// The reaction chamber's target-temperature dial.
@@ -1497,6 +1566,25 @@ fn reaction_is_hazardous(reaction: &chem_sim::Reaction, temperature: Kelvin) -> 
         )
     }) || (reaction.is_overheated(temperature)
         && matches!(reaction.overheat, chem_sim::Overheat::Detonate { .. }))
+}
+
+/// Whether `solution` currently satisfies every gating condition
+/// (`Reaction::max_scale`) of some reaction with a destructive effect — the
+/// same "which reactions can run right now" test `chem_sim::is_reacting`
+/// uses internally, widened past rated reactions so an instantaneous
+/// hazardous reaction is still caught for the one tick before it resolves.
+///
+/// Deliberately not gated on `Knowledge`, unlike the REACTION MONITOR's
+/// forecast (`represented_chamber_reactions`/`chamber_forecast`): this is a
+/// physical read of the beaker, the same category of fact as
+/// `Solution::color` or `chem_sim::is_reacting`, not a spoiler of the recipe
+/// book — it names no product or recipe, only "something in here is
+/// dangerous."
+fn solution_is_hazardous(solution: &chem_sim::Solution, reactions: &chem_sim::ReactionSet) -> bool {
+    reactions.iter().any(|reaction| {
+        reaction.max_scale(solution).is_some()
+            && reaction_is_hazardous(reaction, solution.temperature)
+    })
 }
 
 fn chamber_target(reaction: &chem_sim::Reaction) -> String {
@@ -1800,6 +1888,7 @@ fn heater_body(
     db: &ChemDb,
     knowledge: &Knowledge,
     thermostat: Option<&Thermostat>,
+    container_entity: Option<Entity>,
     loaded: Option<&Container>,
     reacting: bool,
 ) {
@@ -2066,50 +2155,65 @@ fn heater_body(
 
     panel
         .spawn((section(), BackgroundColor(SECTION_BG)))
-        .with_children(|beaker| {
-            beaker
-                .spawn(Node {
-                    width: percent(100),
-                    justify_content: JustifyContent::SpaceBetween,
-                    align_items: AlignItems::Center,
-                    ..default()
-                })
-                .with_children(|header| {
-                    header.spawn(label(
-                        loaded
-                            .map(|container| {
-                                format!(
-                                    "BEAKER   {} / {}",
-                                    container.solution.total_volume(),
-                                    container.kind.capacity()
-                                )
+        .with_children(|section| {
+            section.spawn(row()).with_children(|preview_row| {
+                beaker_preview(preview_row, container_entity);
+                preview_row
+                    .spawn(Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(3),
+                        flex_grow: 1.0,
+                        ..default()
+                    })
+                    .with_children(|beaker| {
+                        beaker
+                            .spawn(Node {
+                                width: percent(100),
+                                justify_content: JustifyContent::SpaceBetween,
+                                align_items: AlignItems::Center,
+                                ..default()
                             })
-                            .unwrap_or_else(|| "BEAKER   — / —".to_string()),
-                        13.0,
-                        TEXT,
-                    ));
-                    header.spawn(button("Eject", PanelAction::Eject(MachineSlot::A)));
-                });
-            if let Some(container) = loaded {
-                if container.solution.is_empty() {
-                    beaker.spawn(label("Empty.", 12.0, TEXT_DIM));
-                } else {
-                    beaker.spawn(wrap_row()).with_children(|contents| {
-                        for (reagent, amount) in container.solution.iter() {
-                            contents.spawn(label(
-                                format!("{amount} {}   ", db.reagents.get(reagent).name),
-                                11.0,
-                                TEXT_DIM,
-                            ));
+                            .with_children(|header| {
+                                header.spawn(label(
+                                    loaded
+                                        .map(|container| {
+                                            format!(
+                                                "BEAKER   {} / {}",
+                                                container.solution.total_volume(),
+                                                container.kind.capacity()
+                                            )
+                                        })
+                                        .unwrap_or_else(|| "BEAKER   — / —".to_string()),
+                                    13.0,
+                                    TEXT,
+                                ));
+                                header.spawn(button("Eject", PanelAction::Eject(MachineSlot::A)));
+                            });
+                        if let Some(container) = loaded {
+                            if container.solution.is_empty() {
+                                beaker.spawn(label("Empty.", 12.0, TEXT_DIM));
+                            } else {
+                                beaker.spawn(wrap_row()).with_children(|contents| {
+                                    for (reagent, amount) in container.solution.iter() {
+                                        contents.spawn(label(
+                                            format!(
+                                                "{amount} {}   ",
+                                                db.reagents.get(reagent).name
+                                            ),
+                                            11.0,
+                                            TEXT_DIM,
+                                        ));
+                                    }
+                                });
+                            }
+                        } else {
+                            beaker.spawn(label("Carry a beaker over and press E.", 12.0, TEXT_DIM));
+                        }
+                        if reacting {
+                            beaker.spawn(label("◌ Reaction in progress", 11.0, GOOD_TEXT));
                         }
                     });
-                }
-            } else {
-                beaker.spawn(label("Carry a beaker over and press E.", 12.0, TEXT_DIM));
-            }
-            if reacting {
-                beaker.spawn(label("◌ Reaction in progress", 11.0, GOOD_TEXT));
-            }
+            });
         });
 }
 
@@ -2215,7 +2319,9 @@ fn mixing_chamber_body(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
     buffer: Option<&Buffer>,
+    container_a: Option<Entity>,
     loaded_a: Option<&Container>,
+    container_b: Option<Entity>,
     loaded_b: Option<&Container>,
     agitation: Option<&AgitationRun>,
 ) {
@@ -2293,8 +2399,24 @@ fn mixing_chamber_body(
         }
     }
 
-    mixing_chamber_beaker(panel, db, "Beaker A", loaded_a, MachineSlot::A, locked);
-    mixing_chamber_beaker(panel, db, "Beaker B", loaded_b, MachineSlot::B, locked);
+    mixing_chamber_beaker(
+        panel,
+        db,
+        "Beaker A",
+        container_a,
+        loaded_a,
+        MachineSlot::A,
+        locked,
+    );
+    mixing_chamber_beaker(
+        panel,
+        db,
+        "Beaker B",
+        container_b,
+        loaded_b,
+        MachineSlot::B,
+        locked,
+    );
 
     panel.spawn(label("Buffer", 13.0, TEXT_DIM));
     panel
@@ -2390,6 +2512,7 @@ fn mixing_chamber_beaker(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
     heading_text: &str,
+    container_entity: Option<Entity>,
     loaded: Option<&Container>,
     slot: MachineSlot,
     locked: bool,
@@ -2398,55 +2521,67 @@ fn mixing_chamber_beaker(
     panel
         .spawn((section(), BackgroundColor(SECTION_BG)))
         .with_children(|section| {
-            if let Some(container) = loaded {
-                section.spawn(label(
-                    format!(
-                        "{} / {}   •   {:.0}K",
-                        container.solution.total_volume(),
-                        container.solution.max_volume(),
-                        container.solution.temperature.0,
-                    ),
-                    12.0,
-                    Color::srgb(0.60, 0.72, 0.82),
-                ));
-            }
-            match loaded {
-                None => {
-                    section.spawn(label(
-                        "No container loaded. Carry a beaker over and press E.",
-                        14.0,
-                        TEXT_DIM,
-                    ));
-                }
-                Some(container) if container.solution.is_empty() => {
-                    section.spawn(label("Empty.", 14.0, TEXT_DIM));
-                }
-                Some(container) => {
-                    for (reagent, quantity) in container.solution.iter() {
-                        section.spawn(row()).with_children(|row| {
-                            row.spawn(reagent_name(db, reagent, quantity));
-                            if !locked {
-                                for step in [5, 10] {
-                                    let units = Units::whole(step);
-                                    row.spawn(button(
-                                        format!("▸{step}"),
-                                        PanelAction::ToBuffer(reagent, units, slot),
-                                    ));
-                                }
-                                row.spawn(button(
-                                    "▸All",
-                                    PanelAction::ToBuffer(reagent, quantity, slot),
+            section.spawn(row()).with_children(|preview_row| {
+                beaker_preview(preview_row, container_entity);
+                preview_row
+                    .spawn(Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(3),
+                        flex_grow: 1.0,
+                        ..default()
+                    })
+                    .with_children(|column| {
+                        if let Some(container) = loaded {
+                            column.spawn(label(
+                                format!(
+                                    "{} / {}   •   {:.0}K",
+                                    container.solution.total_volume(),
+                                    container.solution.max_volume(),
+                                    container.solution.temperature.0,
+                                ),
+                                12.0,
+                                Color::srgb(0.60, 0.72, 0.82),
+                            ));
+                        }
+                        match loaded {
+                            None => {
+                                column.spawn(label(
+                                    "No container loaded. Carry a beaker over and press E.",
+                                    14.0,
+                                    TEXT_DIM,
                                 ));
                             }
-                        });
-                    }
-                }
-            }
-            if !locked {
-                section.spawn(row()).with_children(|row| {
-                    row.spawn(button("Eject", PanelAction::Eject(slot)));
-                });
-            }
+                            Some(container) if container.solution.is_empty() => {
+                                column.spawn(label("Empty.", 14.0, TEXT_DIM));
+                            }
+                            Some(container) => {
+                                for (reagent, quantity) in container.solution.iter() {
+                                    column.spawn(row()).with_children(|row| {
+                                        row.spawn(reagent_name(db, reagent, quantity));
+                                        if !locked {
+                                            for step in [5, 10] {
+                                                let units = Units::whole(step);
+                                                row.spawn(button(
+                                                    format!("▸{step}"),
+                                                    PanelAction::ToBuffer(reagent, units, slot),
+                                                ));
+                                            }
+                                            row.spawn(button(
+                                                "▸All",
+                                                PanelAction::ToBuffer(reagent, quantity, slot),
+                                            ));
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        if !locked {
+                            column.spawn(row()).with_children(|row| {
+                                row.spawn(button("Eject", PanelAction::Eject(slot)));
+                            });
+                        }
+                    });
+            });
         });
 }
 
@@ -2885,6 +3020,7 @@ fn grinder_body(
     db: &ChemDb,
     catalog: Option<&ProduceCatalog>,
     hopper: Option<&Hopper>,
+    container_entity: Option<Entity>,
     loaded: Option<&Container>,
     reacting: bool,
 ) {
@@ -2938,7 +3074,7 @@ fn grinder_body(
         row.spawn(button("Grind all", PanelAction::Grind { all: true }));
     });
 
-    container_readout(panel, db, loaded, reacting, true);
+    container_readout(panel, db, container_entity, loaded, reacting, true);
 }
 
 /// The shelf.
@@ -3001,6 +3137,7 @@ fn locker_body(panel: &mut ChildSpawnerCommands, stored: &[StoredItem]) {
 fn delivery_window_body(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
+    container_entity: Option<Entity>,
     loaded: Option<&Container>,
     reacting: bool,
 ) {
@@ -3011,7 +3148,7 @@ fn delivery_window_body(
         TEXT_DIM,
     ));
 
-    container_readout(panel, db, loaded, reacting, false);
+    container_readout(panel, db, container_entity, loaded, reacting, false);
 
     let Some(container) = loaded else {
         return;
@@ -3054,76 +3191,86 @@ fn delivery_window_body(
 fn container_readout(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
+    container_entity: Option<Entity>,
     loaded: Option<&Container>,
     reacting: bool,
     show_empty_button: bool,
 ) {
-    panel.spawn(label("Loaded container", 13.0, TEXT_DIM));
-    panel
-        .spawn((section(), BackgroundColor(SECTION_BG)))
-        .with_children(|section| {
-            let Some(container) = loaded else {
-                section.spawn(label(
-                    "No container loaded. Carry a beaker over and press E.",
-                    14.0,
-                    TEXT_DIM,
-                ));
-                return;
-            };
+    card(panel, "Loaded container", |section| {
+        section.spawn(row()).with_children(|preview_row| {
+            beaker_preview(preview_row, container_entity);
+            preview_row
+                .spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(3),
+                    flex_grow: 1.0,
+                    ..default()
+                })
+                .with_children(|column| {
+                    let Some(container) = loaded else {
+                        column.spawn(label(
+                            "No container loaded. Carry a beaker over and press E.",
+                            14.0,
+                            TEXT_DIM,
+                        ));
+                        return;
+                    };
 
-            section.spawn(label(
-                format!(
-                    "{}   {} / {}",
-                    container.kind.label(),
-                    container.solution.total_volume(),
-                    container.kind.capacity()
-                ),
-                15.0,
-                TEXT,
-            ));
-
-            if container.solution.is_empty() {
-                section.spawn(label("Empty.", 14.0, TEXT_DIM));
-            } else {
-                section.spawn(label(
-                    format!(
-                        "pH {:.2}   ·   purity {:.0}%   ·   {}",
-                        container.solution.ph(),
-                        container.solution.average_purity() * 100.0,
-                        container.solution.temperature
-                    ),
-                    13.0,
-                    Color::srgb(0.66, 0.78, 0.92),
-                ));
-                for (reagent, quantity) in container.solution.iter() {
-                    section.spawn(label(
+                    column.spawn(label(
                         format!(
-                            "{}  {}   ({:.0}% pure)",
-                            quantity,
-                            db.reagents.get(reagent).name,
-                            container.solution.purity_of(reagent) * 100.0
+                            "{}   {} / {}",
+                            container.kind.label(),
+                            container.solution.total_volume(),
+                            container.kind.capacity()
                         ),
-                        14.0,
+                        15.0,
                         TEXT,
                     ));
-                }
-            }
 
-            // Some recipes take real seconds. The numbers above are already
-            // moving while one runs — that is the actual readout — but a
-            // chemist watching them needs to know the difference between "not
-            // finished yet" and "this is all you are getting".
-            if reacting {
-                section.spawn(label("Still reacting…", 13.0, GOOD_TEXT));
-            }
+                    if container.solution.is_empty() {
+                        column.spawn(label("Empty.", 14.0, TEXT_DIM));
+                    } else {
+                        column.spawn(label(
+                            format!(
+                                "pH {:.2}   ·   purity {:.0}%   ·   {}",
+                                container.solution.ph(),
+                                container.solution.average_purity() * 100.0,
+                                container.solution.temperature
+                            ),
+                            13.0,
+                            Color::srgb(0.66, 0.78, 0.92),
+                        ));
+                        for (reagent, quantity) in container.solution.iter() {
+                            column.spawn(label(
+                                format!(
+                                    "{}  {}   ({:.0}% pure)",
+                                    quantity,
+                                    db.reagents.get(reagent).name,
+                                    container.solution.purity_of(reagent) * 100.0
+                                ),
+                                14.0,
+                                TEXT,
+                            ));
+                        }
+                    }
 
-            section.spawn(row()).with_children(|row| {
-                row.spawn(button("Eject", PanelAction::Eject(MachineSlot::A)));
-                if show_empty_button {
-                    row.spawn(button("Empty", PanelAction::Empty(MachineSlot::A)));
-                }
-            });
+                    // Some recipes take real seconds. The numbers above are already
+                    // moving while one runs — that is the actual readout — but a
+                    // chemist watching them needs to know the difference between
+                    // "not finished yet" and "this is all you are getting".
+                    if reacting {
+                        column.spawn(label("Still reacting…", 13.0, GOOD_TEXT));
+                    }
+
+                    column.spawn(row()).with_children(|row| {
+                        row.spawn(button("Eject", PanelAction::Eject(MachineSlot::A)));
+                        if show_empty_button {
+                            row.spawn(button("Empty", PanelAction::Empty(MachineSlot::A)));
+                        }
+                    });
+                });
         });
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -5448,6 +5595,306 @@ fn radio_channel_color(channel: RadioChannel) -> Color {
 }
 
 // ---------------------------------------------------------------------------
+// Beaker preview
+// ---------------------------------------------------------------------------
+//
+// A live visual of whatever is loaded into a machine's beaker, shared by the
+// ChemMaster 5000, Mixing Chamber and Reaction Chamber panels. Every dynamic
+// piece (fill height, blended colour, heat glow, hazard flash, bubble
+// motion) is repainted every frame by `animate_beaker_previews`, entirely
+// independent of `sync_panel`'s despawn/rebuild-on-signature-diff cycle:
+// `PanelSignature` carries no temperature signal at all outside the
+// Reaction Chamber (`panel_temperature`, tracked only while that panel is
+// open), so nothing here can afford to rely on a rebuild to stay current.
+
+const BEAKER_PREVIEW_WIDTH: f32 = 64.0;
+const BEAKER_PREVIEW_HEIGHT: f32 = 96.0;
+// The glass's own corners, echoed on `BeakerFill` (bottom only — a liquid's
+// top edge is its flat surface, not a rounded lip) so the fill reads as
+// poured into this exact vessel rather than an unrelated rectangle clipped
+// inside it.
+const BEAKER_TOP_RADIUS: f32 = 4.0;
+const BEAKER_BOTTOM_RADIUS: f32 = 16.0;
+const BEAKER_BUBBLE_COUNT: usize = 5;
+const BEAKER_BUBBLE_RISE_SECS: f32 = 2.4;
+const BEAKER_HAZARD_ALPHA_MIN: f32 = 0.12;
+const BEAKER_HAZARD_ALPHA_MAX: f32 = 0.42;
+const BEAKER_HAZARD_HZ: f32 = 2.2;
+
+/// Which loaded container a beaker-preview piece belongs to, carried
+/// directly on every per-frame-mutated part rather than looked up through
+/// the hierarchy — keeps `animate_beaker_previews` a flat query per part,
+/// like `DamageBar`/`TempSliderFill`. Mirrors `LiquidVisual { container }`
+/// (`src/containers/mod.rs`), the 3D-mesh version of this same fill. Unlike
+/// the always-alone `TempSlider`, more than one beaker preview can be alive
+/// at once — the Mixing Chamber's beakers A and B.
+#[derive(Component, Clone, Copy)]
+struct BeakerOf(Entity);
+
+/// The liquid fill: bottom-anchored, height = volume/capacity, colour =
+/// [`chem_sim::Solution::color`]. The `bevy_ui` counterpart to
+/// `update_liquid_visuals`'s mesh scale/tint (`src/containers/mod.rs`).
+#[derive(Component)]
+struct BeakerFill;
+
+/// The outer glass, retinted from live temperature via `BoxShadow`.
+#[derive(Component)]
+struct BeakerGlow;
+
+/// Full-cover translucent overlay, alpha-pulsed while the loaded solution is
+/// primed for a hazardous reaction.
+#[derive(Component)]
+struct BeakerHazardFlash;
+
+/// One rising bubble. `seed` (0..1, evenly spaced across
+/// `BEAKER_BUBBLE_COUNT`) offsets its phase and horizontal column so a
+/// beaker's bubbles never move in lockstep. Deterministic rather than
+/// `rand`-seeded — nothing here needs to differ run to run, and `rand` is
+/// not otherwise a dependency of this module.
+#[derive(Component)]
+struct BeakerBubble {
+    seed: f32,
+}
+
+/// Centrepiece live preview of a loaded container, spawned beside — never
+/// instead of — a panel's own compact text readout. `container` is the
+/// loaded container's entity, already computed by `sync_panel` as
+/// `loaded_entity`/`loaded_entity_b`, or `None` to draw a dim static
+/// placeholder with no marker components at all, so an idle machine costs
+/// `animate_beaker_previews` nothing to skip.
+///
+/// Deliberately takes no solution/reacting/hazard data of its own: every
+/// dynamic pixel is repainted every frame by `animate_beaker_previews`
+/// straight from a fresh container lookup, so nothing here can go stale
+/// between `sync_panel` rebuilds.
+fn beaker_preview(panel: &mut ChildSpawnerCommands, container: Option<Entity>) {
+    let mut glass = panel.spawn((
+        Node {
+            position_type: PositionType::Relative,
+            width: px(BEAKER_PREVIEW_WIDTH),
+            height: px(BEAKER_PREVIEW_HEIGHT),
+            flex_shrink: 0.0,
+            border: UiRect::all(px(2)),
+            border_radius: BorderRadius {
+                top_left: px(BEAKER_TOP_RADIUS),
+                top_right: px(BEAKER_TOP_RADIUS),
+                bottom_left: px(BEAKER_BOTTOM_RADIUS),
+                bottom_right: px(BEAKER_BOTTOM_RADIUS),
+            },
+            overflow: Overflow::clip(),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.09, 0.10, 0.13, 0.65)),
+        BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.16)),
+    ));
+    let Some(entity) = container else {
+        return; // Dim static glass outline; nothing to animate.
+    };
+    glass.insert((BeakerOf(entity), BeakerGlow, BoxShadow::default()));
+    glass.with_children(|glass| {
+        glass.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                right: px(0),
+                bottom: px(0),
+                height: percent(0),
+                // Square top — a liquid's surface is flat, not a lip — but
+                // rounded on the bottom to match the glass it is sitting in,
+                // so it reads as poured into this vessel rather than an
+                // unrelated rectangle merely clipped inside it.
+                border_radius: BorderRadius {
+                    top_left: px(0.0),
+                    top_right: px(0.0),
+                    bottom_left: px(BEAKER_BOTTOM_RADIUS),
+                    bottom_right: px(BEAKER_BOTTOM_RADIUS),
+                },
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            BeakerOf(entity),
+            BeakerFill,
+        ));
+        for i in 0..BEAKER_BUBBLE_COUNT {
+            glass.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: px(6),
+                    height: px(6),
+                    left: percent(50.0),
+                    bottom: px(0),
+                    border_radius: BorderRadius::MAX,
+                    ..default()
+                },
+                BackgroundColor(Color::NONE),
+                BeakerOf(entity),
+                BeakerBubble {
+                    seed: i as f32 / BEAKER_BUBBLE_COUNT as f32,
+                },
+            ));
+        }
+        // Spawned last so it paints on top of the fill and bubbles, matching
+        // the z-order convention `ph_gauge` already relies on for its needle.
+        glass.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                right: px(0),
+                top: px(0),
+                bottom: px(0),
+                ..default()
+            },
+            BackgroundColor(ERROR_TEXT.with_alpha(0.0)),
+            BeakerOf(entity),
+            BeakerHazardFlash,
+        ));
+    });
+}
+
+/// Repaints every live [`beaker_preview`] from its container's current
+/// state. Runs every frame, unconditionally, right after `sync_panel` in the
+/// same `Update` chain — the same ordering `sync_thermostat_slider` already
+/// documents: a widget spawned this frame is corrected before it is ever
+/// drawn. Like `update_vitals_panel`/`sync_thermostat_slider`, this does not
+/// gate on `Changed<Container>` — see the section banner above for why that
+/// would be too coarse for this widget.
+#[allow(clippy::too_many_arguments)]
+fn animate_beaker_previews(
+    time: Res<Time>,
+    db: Res<ChemDb>,
+    containers: Query<&Container>,
+    agitations: Query<&AgitationRun>,
+    mut fills: Query<
+        (&BeakerOf, &mut Node, &mut BackgroundColor),
+        (
+            With<BeakerFill>,
+            Without<BeakerBubble>,
+            Without<BeakerHazardFlash>,
+        ),
+    >,
+    mut glows: Query<(&BeakerOf, &mut BoxShadow)>,
+    mut hazards: Query<
+        (&BeakerOf, &mut BackgroundColor),
+        (With<BeakerHazardFlash>, Without<BeakerFill>),
+    >,
+    mut bubbles: Query<
+        (&BeakerOf, &BeakerBubble, &mut Node, &mut BackgroundColor),
+        (Without<BeakerFill>, Without<BeakerHazardFlash>),
+    >,
+) {
+    let t = time.elapsed_secs();
+
+    for (of, mut node, mut background) in &mut fills {
+        let Ok(container) = containers.get(of.0) else {
+            continue;
+        };
+        let fill = fill_fraction(container);
+        let wanted_height = percent(fill * 100.0);
+        if node.height != wanted_height {
+            node.height = wanted_height;
+        }
+        let wanted_color = if fill > 0.0 {
+            let [r, g, b] = container.solution.color(&db.reagents);
+            Color::srgb(r, g, b)
+        } else {
+            Color::NONE
+        };
+        if background.0 != wanted_color {
+            background.0 = wanted_color;
+        }
+    }
+
+    for (of, mut shadow) in &mut glows {
+        let Ok(container) = containers.get(of.0) else {
+            continue;
+        };
+        let wanted = BoxShadow(vec![heat_glow(container.solution.temperature)]);
+        if *shadow != wanted {
+            *shadow = wanted;
+        }
+    }
+
+    for (of, mut background) in &mut hazards {
+        let Ok(container) = containers.get(of.0) else {
+            continue;
+        };
+        let hazardous = solution_is_hazardous(&container.solution, &db.reactions);
+        let alpha = if hazardous {
+            let phase = (t * BEAKER_HAZARD_HZ * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+            BEAKER_HAZARD_ALPHA_MIN + (BEAKER_HAZARD_ALPHA_MAX - BEAKER_HAZARD_ALPHA_MIN) * phase
+        } else {
+            0.0
+        };
+        let wanted = ERROR_TEXT.with_alpha(alpha);
+        if background.0 != wanted {
+            background.0 = wanted;
+        }
+    }
+
+    for (of, bubble, mut node, mut background) in &mut bubbles {
+        let Ok(container) = containers.get(of.0) else {
+            continue;
+        };
+        let fill = fill_fraction(container);
+        let reacting = chem_sim::is_reacting(&container.solution, &db.reactions);
+        let agitating = agitations.iter().any(|run| run.destination == of.0);
+        let active = (reacting || agitating) && fill > 0.04;
+
+        let phase = (t / BEAKER_BUBBLE_RISE_SECS + bubble.seed).fract();
+        let bottom_pct = (phase * (fill * 100.0 - 6.0).max(0.0)).clamp(0.0, 100.0);
+        let wobble = (t * 3.0 + bubble.seed * std::f32::consts::TAU).sin() * 3.0;
+        let column = 16.0 + bubble.seed * 68.0;
+        let left_pct = (column + wobble).clamp(4.0, 92.0);
+
+        node.bottom = percent(bottom_pct);
+        node.left = percent(left_pct);
+
+        let alpha = if active { 0.5 } else { 0.0 };
+        let [r, g, b] = container.solution.color(&db.reagents);
+        let lighten = |c: f32| c + (1.0 - c) * 0.6;
+        let wanted = Color::srgba(lighten(r), lighten(g), lighten(b), alpha);
+        if background.0 != wanted {
+            background.0 = wanted;
+        }
+    }
+}
+
+fn fill_fraction(container: &Container) -> f32 {
+    let volume = container.solution.total_volume();
+    if !volume.is_positive() {
+        return 0.0;
+    }
+    (volume.as_f32() / container.kind.capacity().as_f32()).clamp(0.0, 1.0)
+}
+
+/// Colour/blur/spread for the beaker's ambient-temperature glow: fully
+/// transparent at `Kelvin::AMBIENT`, warming toward red/orange at
+/// `TEMPERATURE_MAX` or cooling toward blue at `TEMPERATURE_MIN` — the same
+/// domain the Reaction Chamber's thermostat slider already sweeps.
+fn heat_glow(temperature: Kelvin) -> ShadowStyle {
+    let k = temperature.0;
+    let ambient = Kelvin::AMBIENT.0;
+    let (base, deviation) = if k >= ambient {
+        (
+            Color::srgb(0.95, 0.35, 0.15),
+            ((k - ambient) / (TEMPERATURE_MAX - ambient)).clamp(0.0, 1.0),
+        )
+    } else {
+        (
+            Color::srgb(0.30, 0.55, 0.95),
+            ((ambient - k) / (ambient - TEMPERATURE_MIN)).clamp(0.0, 1.0),
+        )
+    };
+    ShadowStyle {
+        color: base.with_alpha(deviation * 0.65),
+        x_offset: px(0),
+        y_offset: px(0),
+        spread_radius: px(2.0 + deviation * 6.0),
+        blur_radius: px(6.0 + deviation * 16.0),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Widgets
 // ---------------------------------------------------------------------------
 
@@ -5541,6 +5988,120 @@ pub(crate) fn button<A: Component>(text: impl Into<String>, action: A) -> impl B
             TextColor(TEXT),
         )],
     )
+}
+
+/// A small colour sample: makes a reagent recognisable by colour before a
+/// player has read its name, using nothing but a coloured `Node` rectangle
+/// since the lab has no icon or image assets. Bordered in `TEXT_DIM` rather
+/// than left bare, because a near-black reagent's true colour (carbon's is
+/// barely lighter than the panel background) would otherwise vanish into
+/// whatever it sits on instead of reading as a discrete swatch.
+fn swatch_chip(color: Color) -> impl Bundle {
+    (
+        Node {
+            width: px(12),
+            height: px(12),
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(2)),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        BackgroundColor(color),
+        BorderColor::all(TEXT_DIM),
+    )
+}
+
+/// One button inside a [`chip_grid`]: a label, the swatch colour that makes
+/// it recognisable at a glance, and the action pressing it fires.
+struct GridChip<A: Component> {
+    label: String,
+    swatch: Color,
+    action: A,
+    /// Painted `BUTTON_ACTIVE` by `button_feedback`, the same marker the
+    /// dispense-amount row and book tabs use — most grids never set this,
+    /// but a picker that remembers "last used" gets it for free.
+    selected: bool,
+}
+
+/// A single grid cell: a swatch-and-label button at a fixed width, so a row
+/// of these lines up like a grid instead of wrapping ragged, name-length
+/// buttons.
+fn chip_button<A: Component>(
+    text: impl Into<String>,
+    swatch: Color,
+    width: f32,
+    action: A,
+) -> impl Bundle {
+    (
+        Button,
+        Node {
+            width: px(width),
+            padding: UiRect::axes(px(10), px(6)),
+            margin: UiRect::all(px(3)),
+            align_items: AlignItems::Center,
+            column_gap: px(6),
+            border_radius: BorderRadius::all(px(4)),
+            ..default()
+        },
+        BackgroundColor(BUTTON_IDLE),
+        action,
+        children![
+            swatch_chip(swatch),
+            (
+                Text::new(text.into()),
+                TextFont::from_font_size(14.0),
+                TextColor(TEXT),
+            ),
+        ],
+    )
+}
+
+/// A same-width grid of swatch-and-label buttons, split into labelled
+/// sub-groups — the shape every "pick one of many named, colour-coded
+/// things" picker in the lab wants. Built for the base dispenser's chemical
+/// list, but kept generic so another panel can group the same way later.
+/// Empty groups are skipped rather than printing a bare heading over
+/// nothing.
+fn chip_grid<A: Component>(
+    panel: &mut ChildSpawnerCommands,
+    cell_width: f32,
+    groups: Vec<(&str, Vec<GridChip<A>>)>,
+) {
+    for (heading, chips) in groups {
+        if chips.is_empty() {
+            continue;
+        }
+        panel.spawn(label(heading, 11.0, TEXT_DIM));
+        panel.spawn(wrap_row()).with_children(|row| {
+            for chip in chips {
+                let mut entity = row.spawn(chip_button(
+                    chip.label,
+                    chip.swatch,
+                    cell_width,
+                    chip.action,
+                ));
+                if chip.selected {
+                    entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
+                }
+            }
+        });
+    }
+}
+
+/// A titled card: a dim heading above a tinted [`section()`] box — the "this
+/// is one coherent group of controls" unit the whole panel now uses.
+/// `container_readout` was the only place this shape already existed; this
+/// pulls it out so every group in a panel (amounts, stock, readouts) is
+/// visibly the same kind of thing instead of four one-off layouts.
+fn card(
+    panel: &mut ChildSpawnerCommands,
+    title: impl Into<String>,
+    build: impl FnOnce(&mut ChildSpawnerCommands),
+) {
+    panel.spawn(label(title.into(), 13.0, TEXT_DIM));
+    panel
+        .spawn((section(), BackgroundColor(SECTION_BG)))
+        .with_children(build);
 }
 
 // ---------------------------------------------------------------------------
@@ -6076,6 +6637,22 @@ mod tests {
             .lines
             .iter()
             .any(|line| line.starts_with("DANGER:")));
+    }
+
+    #[test]
+    fn solution_is_hazardous_flags_the_same_explosive_route_the_forecast_does() {
+        let (db, _knowledge) = book_fixture();
+        let mut sample = chem_sim::Solution::unbounded();
+        for key in ["glycerol", "sulphuric_acid", "nitric_acid"] {
+            let reagent = db.reagent(key);
+            let definition = db.reagents.get(reagent);
+            let _ = sample.add_profiled(reagent, Units::ONE, 1.0, definition.ph);
+        }
+        assert!(solution_is_hazardous(&sample, &db.reactions));
+        assert!(!solution_is_hazardous(
+            &chem_sim::Solution::unbounded(),
+            &db.reactions
+        ));
     }
 
     #[test]

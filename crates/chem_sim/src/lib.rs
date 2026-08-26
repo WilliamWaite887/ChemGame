@@ -46,7 +46,8 @@ pub use reaction::{
     ReactionId, ReactionProcess, ReactionProcessDef, ReactionSet,
 };
 pub use reagent::{
-    Category, ExplosiveProfile, Reagent, ReagentDef, ReagentId, ReagentRegistry, DEFAULT_METABOLISM,
+    Category, ChemFamily, ExplosiveProfile, Reagent, ReagentDef, ReagentId, ReagentRegistry,
+    DEFAULT_METABOLISM,
 };
 pub use resolver::{
     is_reacting, is_reacting_with_activation, resolve, resolve_step, resolve_step_with_activation,
