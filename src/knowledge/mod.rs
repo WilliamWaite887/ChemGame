@@ -68,15 +68,10 @@ pub fn research_for_delivery_at_purity(potency: u32, purity: f32) -> u32 {
     ((clean_value as f32 * purity.clamp(0.0, 1.0)).ceil() as u32).max(1)
 }
 
-/// Research points to upgrade the dispenser from tier `N` to `N+1`, indexed
-/// by `N` (index 0 = tier 0→1, etc.). Each entry is the sum of what the
-/// reagents in that tier used to cost individually under the old
-/// per-reagent unlock economy (M11) — the total to fully upgrade is still
-/// 213, only the unit of purchase moved from one reagent to a whole tier.
-/// See the tier comment block in `assets/data/chem.reagents.ron`.
-/// Base stock is no longer a progression lock. Kept as an empty table so old
-/// saves can still deserialize their historical tier field without it buying
-/// access the new chemistry curve deliberately grants at shift start.
+/// Historical dispenser-upgrade costs, retained only to interpret old saves
+/// and verify that their former tier field remains harmless. Base stock is no
+/// longer a progression lock and [`Knowledge::next_upgrade_cost`] always
+/// returns `None`.
 pub const DISPENSER_TIER_COSTS: [u32; 7] = [24, 27, 48, 15, 54, 21, 24];
 
 /// Distinct reagents a beaker can hold when it reacts and still count as a
@@ -188,8 +183,8 @@ pub struct RecipeDiscovered {
 pub struct Knowledge {
     entries: HashMap<ReactionId, Entry>,
     pub research_points: u32,
-    /// How many dispenser upgrades have been bought. `0` means only tier-0
-    /// (free) reagents are available; see [`Self::dispensable`].
+    /// Historical save field from the retired dispenser upgrade track.
+    /// Retained so old careers deserialize without migration data loss.
     dispenser_tier: u32,
 }
 
@@ -368,8 +363,8 @@ impl Knowledge {
         self.close_known_reactions(data, available)
     }
 
-    /// What this notebook could produce if the dispenser were at `tier`.
-    /// Known recipes still matter; this only changes the equipment input set.
+    /// What this notebook can produce from base and external roots. `tier` is
+    /// the retired save field and deliberately has no effect.
     fn available_reagents_at_tier(&self, data: &ChemData, tier: u32) -> HashSet<ReagentId> {
         let _ = tier;
         // External grinder inputs are roots of the same dependency graph as
@@ -414,8 +409,8 @@ impl Knowledge {
     }
 
     /// Products suitable for a forgiving development request: unavailable
-    /// now, but reachable through at most the next dispenser tier and one
-    /// currently-unknown reaction. Deep chains stay hidden until their own
+    /// now, but reachable through at most one currently-unknown reaction.
+    /// Deep chains stay hidden until their own
     /// prerequisites become real rather than piling several locks into one
     /// supposedly motivating order.
     pub fn development_reagents(&self, data: &ChemData) -> HashSet<ReagentId> {
@@ -982,6 +977,47 @@ mod tests {
             !frontier.contains(&"rdx"),
             "deep products still require learned intermediates"
         );
+    }
+
+    #[test]
+    fn simulated_saves_reach_every_recipe_without_a_progression_stall() {
+        let data = data();
+        let mut knowledge = Knowledge::new(&data);
+        let milestones = [
+            STARTING_RECIPES.len(),
+            12.min(data.reactions.len()),
+            24.min(data.reactions.len()),
+            36.min(data.reactions.len()),
+            data.reactions.len(),
+        ];
+
+        for target in milestones {
+            while knowledge.known_count() < target {
+                let mut frontier = knowledge.frontier(&data);
+                frontier.sort_by_key(|id| reaction_key(&data, *id).to_string());
+                let next = frontier.first().copied().unwrap_or_else(|| {
+                    panic!(
+                        "career stalled at {} of {} recorded methods",
+                        knowledge.known_count(),
+                        data.reactions.len()
+                    )
+                });
+                knowledge.learn(next);
+            }
+
+            let saved = ron::ser::to_string(&knowledge.to_save(&data)).unwrap();
+            knowledge = Knowledge::from_save(&data, ron::from_str(&saved).unwrap());
+            assert_eq!(knowledge.known_count(), target);
+            if target < data.reactions.len() {
+                assert!(
+                    !knowledge.frontier(&data).is_empty(),
+                    "save at {target} methods has no next frontier"
+                );
+            }
+        }
+
+        assert_eq!(knowledge.known_count(), data.reactions.len());
+        assert!(knowledge.frontier(&data).is_empty());
     }
 
     #[test]

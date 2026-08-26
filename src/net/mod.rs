@@ -27,7 +27,9 @@ use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRe
 use crate::body::{Bloodstream, Body};
 use crate::character_lab::{LocomotionPreview, TestSubject};
 use crate::chem_world::ChemicalPuddle;
-use crate::containers::{ArmedCharge, Container, HeldBy, InSlot, InSlotB, Stored};
+use crate::containers::{
+    ArmedCharge, Container, HeldBy, InSlot, InSlotB, InventorySlot, SelectedInventorySlot, Stored,
+};
 use crate::crew::{AtCounter, CrewAppearance, CrewMember, NeedsMedicalEvacuation};
 use crate::cult::{Cultist, RitualAnchor};
 use crate::door::{Corroded, Door};
@@ -48,7 +50,7 @@ pub mod steam;
 /// Explicit revision for replicated Rust types that are not represented by
 /// the authored chemistry catalogs below. Bump it when one of those wire
 /// shapes changes incompatibly.
-const PROTOCOL_REVISION: u64 = 9;
+const PROTOCOL_REVISION: u64 = 10;
 
 /// FNV-1a is deliberately small and `const`: the protocol id is derived at
 /// compile time from every catalog whose list position crosses the wire.
@@ -70,13 +72,15 @@ const fn chemistry_protocol_id(
     reactions: &[u8],
     produce: &[u8],
     statuses: &[u8],
+    containers: &[u8],
     revision: u64,
 ) -> u64 {
     let hash = fingerprint_bytes(0xcbf2_9ce4_8422_2325, &revision.to_le_bytes());
     let hash = fingerprint_bytes(hash, reagents);
     let hash = fingerprint_bytes(hash, reactions);
     let hash = fingerprint_bytes(hash, produce);
-    fingerprint_bytes(hash, statuses)
+    let hash = fingerprint_bytes(hash, statuses);
+    fingerprint_bytes(hash, containers)
 }
 
 pub(super) const PROTOCOL_ID: u64 = chemistry_protocol_id(
@@ -84,6 +88,7 @@ pub(super) const PROTOCOL_ID: u64 = chemistry_protocol_id(
     include_bytes!("../../assets/data/chem.reactions.ron"),
     include_bytes!("../../assets/data/station.produce.ron"),
     chem_sim::StatusKind::NETWORK_SCHEMA.as_bytes(),
+    crate::containers::ContainerKind::NETWORK_SCHEMA.as_bytes(),
     PROTOCOL_REVISION,
 );
 const DEFAULT_PORT: u16 = 5327;
@@ -547,6 +552,8 @@ fn register_replication(app: &mut App) {
         .replicate::<Container>()
         .replicate::<ArmedCharge>()
         .replicate::<HeldBy>()
+        .replicate::<InventorySlot>()
+        .replicate::<SelectedInventorySlot>()
         .replicate::<InSlot>()
         // The Mixing Chamber's second beaker slot. Same reasoning as `InSlot`
         // itself: both chemists have to see which beaker is in which slot.
@@ -940,6 +947,37 @@ mod tests {
     }
 
     #[test]
+    fn inventory_cells_and_selection_replicate_with_mapped_ownership() {
+        let (mut server, mut client) = connected_pair();
+        let owner = server
+            .world_mut()
+            .spawn((Replicated, SelectedInventorySlot(2)))
+            .id();
+        server.world_mut().spawn((
+            Replicated,
+            Container::new(ContainerKind::SmokeProjector),
+            InventorySlot { owner, slot: 2 },
+            HeldBy(owner),
+        ));
+
+        settle(&mut server, &mut client);
+
+        let mut owners = client
+            .world_mut()
+            .query::<(Entity, &SelectedInventorySlot)>();
+        let (mapped_owner, selected) = owners.single(client.world()).unwrap();
+        assert_eq!(selected.0, 2);
+        let mut items = client
+            .world_mut()
+            .query::<(&InventorySlot, &Container, &HeldBy)>();
+        let (entry, container, held) = items.single(client.world()).unwrap();
+        assert_eq!(entry.owner, mapped_owner);
+        assert_eq!(held.0, mapped_owner);
+        assert_eq!(entry.slot, 2);
+        assert_eq!(container.kind, ContainerKind::SmokeProjector);
+    }
+
+    #[test]
     fn remote_clients_receive_order_and_medical_evacuation_prompts() {
         let (mut server, mut client) = connected_pair();
 
@@ -1322,6 +1360,7 @@ mod tests {
                 include_bytes!("../../assets/data/chem.reactions.ron"),
                 include_bytes!("../../assets/data/station.produce.ron"),
                 chem_sim::StatusKind::NETWORK_SCHEMA.as_bytes(),
+                crate::containers::ContainerKind::NETWORK_SCHEMA.as_bytes(),
                 PROTOCOL_REVISION,
             )
         );
@@ -1332,6 +1371,7 @@ mod tests {
                 include_bytes!("../../assets/data/chem.reactions.ron"),
                 include_bytes!("../../assets/data/station.produce.ron"),
                 chem_sim::StatusKind::NETWORK_SCHEMA.as_bytes(),
+                crate::containers::ContainerKind::NETWORK_SCHEMA.as_bytes(),
                 PROTOCOL_REVISION,
             ),
             "catalog changes must invalidate multiplayer compatibility"

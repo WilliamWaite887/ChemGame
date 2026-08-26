@@ -279,6 +279,7 @@ fn spawn_chemist(commands: &mut Commands, client: ClientId, lane: f32) -> Entity
             // how the other is doing without asking.
             Body::default(),
             Bloodstream::default(),
+            crate::containers::SelectedInventorySlot::default(),
             Transform::from_xyz(lab::SPAWN_SPOT.x + lane, EYE_HEIGHT, lab::SPAWN_SPOT.z),
             Visibility::default(),
             Replicated,

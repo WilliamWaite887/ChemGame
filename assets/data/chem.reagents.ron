@@ -26,25 +26,13 @@
     // Most of these do nothing at all in a body, which is canon and also
     // useful: a chemist who drinks the oxygen supply learns something cheap.
     //
-    // `tier` gates the other 17 behind a dispenser upgrade
-    // (`Knowledge::upgrade_dispenser`): the whole tier unlocks at once for a
-    // lump research-point cost, rather than buying one reagent at a time.
-    // Listed here in tier order, tier 0 (free) first. Tier 1 (24 points)
-    // covers reagents that feed early, common recipes (water alone unlocks
-    // hooch, hydrogen_peroxide and the saltwater chain); tiers 2-3 (27/48)
-    // are more specialised or already pyro-adjacent; tiers 4-7 (15/54/21/24)
-    // gate the exotic or outright dangerous end — chlorine trifluoride's
-    // fluorine, and mercury, the priciest tier of all, behind the
-    // illicit-adjacent mindbreaker_toxin/zombie_powder chain. Nothing here
-    // changes what a fully-upgraded dispenser can eventually make — only how
-    // long it takes to get there. Per-reagent costs were tripled from the
-    // original 2-8 scale (M11) once a fresh career was clearing the whole
-    // 71-point tree in under an hour; the tier upgrade costs below are just
-    // those same per-reagent costs summed per tier, so the 213-point total to
-    // fully upgrade is unchanged — only the unit of purchase moved from one
-    // reagent to a whole tier.
+    // Every dispensable base reagent is available from the first shift.
+    // Historical `tier` values remain serialized for old-save compatibility
+    // and data ordering, but they do not gate stock. Progression now comes
+    // from recipe knowledge, intermediates, external sources, equipment,
+    // temperature, pH, purity, agitation, stabilization, and hazards.
     //
-    // ---- Tier 0: free from the start ---------------------------------------
+    // ---- Historical tier 0: all tiers are now free from the start ----------
     //
     // One of the six base reagents the three starting recipes are built
     // from. See `every_starting_ingredient_is_unlocked_free`.

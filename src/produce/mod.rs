@@ -330,7 +330,44 @@ struct ProduceDelivery {
     items: Vec<ProduceId>,
 }
 
+/// Builds one haul from the least-stocked physical specimens.
+fn balanced_delivery_items(
+    catalog: &ProduceCatalog,
+    present: impl IntoIterator<Item = ProduceId>,
+    count: u32,
+    rng: &mut impl Rng,
+) -> Vec<ProduceId> {
+    let mut stock = vec![0_u32; catalog.kinds.len()];
+    for id in present {
+        if let Some(amount) = stock.get_mut(id.index()) {
+            *amount += 1;
+        }
+    }
+
+    let mut delivery = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let Some(lowest) = stock.iter().copied().min() else {
+            break;
+        };
+        let Some(kind) = catalog
+            .iter()
+            .filter(|kind| stock[kind.id.index()] == lowest)
+            .choose(rng)
+        else {
+            break;
+        };
+        stock[kind.id.index()] += 1;
+        delivery.push(kind.id);
+    }
+    delivery
+}
+
 /// Sends the botanist in on a timer.
+///
+/// Hauls favor the least-stocked physical specimens in the lab. This keeps a
+/// large external-source catalog from starving one dependency through bad
+/// luck, while consumed ingredients naturally rise back to the front of the
+/// queue. Ties remain random, so deliveries do not become a fixed script.
 #[allow(clippy::too_many_arguments)]
 fn deliver_produce(
     mut commands: Commands,
@@ -338,7 +375,8 @@ fn deliver_produce(
     catalog: Option<Res<ProduceCatalog>>,
     station: Option<Res<StationData>>,
     mut schedule: Option<ResMut<DeliverySchedule>>,
-    present: Query<&CrewMember, crate::crew::NotResident>,
+    present_crew: Query<&CrewMember, crate::crew::NotResident>,
+    present_produce: Query<&Produce>,
 ) {
     let (Some(catalog), Some(station), Some(schedule)) = (catalog, station, schedule.as_mut())
     else {
@@ -359,7 +397,10 @@ fn deliver_produce(
     // One of her is plenty. She is in the ordinary crew roster too, so without
     // this a delivery landing while she is already at the counter with an
     // order would put two of her in the room.
-    if present.iter().any(|member| member.name == catalog.courier) {
+    if present_crew
+        .iter()
+        .any(|member| member.name == catalog.courier)
+    {
         return;
     }
 
@@ -376,9 +417,12 @@ fn deliver_produce(
     };
 
     let count = rng.random_range(catalog.items_per_delivery.0..=catalog.items_per_delivery.1);
-    let items: Vec<ProduceId> = (0..count)
-        .filter_map(|_| catalog.iter().choose(&mut rng).map(|kind| kind.id))
-        .collect();
+    let items = balanced_delivery_items(
+        &catalog,
+        present_produce.iter().map(|produce| produce.0),
+        count,
+        &mut rng,
+    );
     if items.is_empty() {
         return;
     }
@@ -496,6 +540,37 @@ mod tests {
                 assert!(amount.is_positive(), "{} yields {key} at {amount}", def.id);
             }
         }
+    }
+
+    #[test]
+    fn repeated_hauls_evenly_cover_the_external_source_catalog() {
+        let data = chemistry();
+        let catalog = ProduceCatalog::from_config(&config(), &data.reagents);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let items = balanced_delivery_items(
+            &catalog,
+            std::iter::empty(),
+            (catalog.kinds.len() * 2) as u32,
+            &mut rng,
+        );
+        let mut counts = vec![0_u32; catalog.kinds.len()];
+        for item in items {
+            counts[item.index()] += 1;
+        }
+
+        assert_eq!(counts.iter().copied().min(), counts.iter().copied().max());
+    }
+
+    #[test]
+    fn deliveries_replace_consumed_sources_before_piling_up_more_stock() {
+        let data = chemistry();
+        let catalog = ProduceCatalog::from_config(&config(), &data.reagents);
+        let overstocked = catalog.kinds[0].id;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        let next =
+            balanced_delivery_items(&catalog, std::iter::repeat_n(overstocked, 4), 1, &mut rng);
+
+        assert_ne!(next, vec![overstocked]);
     }
 
     #[test]

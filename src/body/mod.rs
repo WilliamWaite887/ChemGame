@@ -21,7 +21,7 @@ use crate::chem_data::ChemDb;
 use crate::chem_world::{
     assess_exposure, order_authorizes_dose, spawn_puddle, ChemicalExposure, ExposureSource,
 };
-use crate::containers::{ArmedCharge, Container, ContainerKind, HeldBy};
+use crate::containers::{ArmedCharge, Container, ContainerKind, HeldBy, InventorySlot};
 use crate::machines::{chemist_entity, ReactionsFired};
 use crate::net::is_authority;
 use crate::player::Chemist;
@@ -35,6 +35,10 @@ const SIP: Units = Units::whole(5);
 
 /// A hand pour is large enough to matter and small enough to correct.
 const HAND_TRANSFER: Units = Units::whole(10);
+
+/// A sprayer trades volume for control: several aimed applications per bottle
+/// and better absorption than a thrown splash.
+const SPRAY_DOSE: Units = Units::whole(3);
 
 /// Ticks to run at most in one frame.
 ///
@@ -327,7 +331,10 @@ fn handle_apply_held(
         if kind != ContainerKind::Syringe {
             // A pill has no open liquid surface; R remains its only deliberate
             // use. Beakers and bottles share the hand-pour interaction.
-            if matches!(kind, ContainerKind::Pill | ContainerKind::Patch) {
+            if matches!(
+                kind,
+                ContainerKind::Pill | ContainerKind::Patch | ContainerKind::SmokeProjector
+            ) {
                 continue;
             }
 
@@ -337,7 +344,12 @@ fn handle_apply_held(
                         .get(target)
                         .map(|container| container.solution.available_volume())
                         .unwrap_or(Units::ZERO);
-                    let amount = HAND_TRANSFER.min(space);
+                    let amount = if kind == ContainerKind::SprayBottle {
+                        SPRAY_DOSE
+                    } else {
+                        HAND_TRANSFER
+                    }
+                    .min(space);
                     if !amount.is_positive() {
                         continue;
                     }
@@ -373,12 +385,15 @@ fn handle_apply_held(
                 }
 
                 if bodies.contains(target) {
+                    let application = if kind == ContainerKind::SprayBottle {
+                        SPRAY_DOSE
+                    } else {
+                        HAND_TRANSFER
+                    };
                     let mut dose = containers
                         .get_mut(held_entity)
                         .map(|mut source| {
-                            source
-                                .mutate(&db, |solution| solution.split(HAND_TRANSFER))
-                                .0
+                            source.mutate(&db, |solution| solution.split(application)).0
                         })
                         .unwrap_or_else(|_| chem_sim::Solution::unbounded());
                     if dose.is_empty() {
@@ -388,7 +403,12 @@ fn handle_apply_held(
                     let Ok((mut body, mut blood)) = bodies.get_mut(target) else {
                         continue;
                     };
-                    let assessment = assess_exposure(&snapshot, Route::Touched, &body, &blood, &db);
+                    let route = if kind == ContainerKind::SprayBottle {
+                        Route::Sprayed
+                    } else {
+                        Route::Touched
+                    };
+                    let assessment = assess_exposure(&snapshot, route, &body, &blood, &db);
                     let requested =
                         orders
                             .get(target)
@@ -405,11 +425,11 @@ fn handle_apply_held(
                         && assessment.helpful
                         && !assessment.illicit
                         && !assessment.overdose;
-                    blood.0.receive(&mut dose, Route::Touched, &mut body.0, &db);
+                    blood.0.receive(&mut dose, route, &mut body.0, &db);
                     exposures.write(ChemicalExposure {
                         actor: Some(player),
                         target,
-                        route: Route::Touched,
+                        route,
                         source: ExposureSource::Direct,
                         solution: snapshot,
                         authorized: target == player
@@ -433,13 +453,14 @@ fn handle_apply_held(
             }
 
             if let Some(point) = request.point {
+                let application = if kind == ContainerKind::SprayBottle {
+                    SPRAY_DOSE
+                } else {
+                    HAND_TRANSFER
+                };
                 let spilled = containers
                     .get_mut(held_entity)
-                    .map(|mut source| {
-                        source
-                            .mutate(&db, |solution| solution.split(HAND_TRANSFER))
-                            .0
-                    })
+                    .map(|mut source| source.mutate(&db, |solution| solution.split(application)).0)
                     .unwrap_or_else(|_| chem_sim::Solution::unbounded());
                 if spawn_puddle(&mut commands, spilled, point, Some(player)).is_some() {
                     emit_world_sfx(&mut sounds, Sfx::Splash, point);
@@ -583,6 +604,22 @@ fn handle_consume(
                 },
                 Transform::from_translation(position),
             ));
+            commands.entity(entity).remove::<InventorySlot>();
+            continue;
+        }
+        if container.kind == ContainerKind::SmokeProjector {
+            let payload = container
+                .mutate(&db, |solution| solution.split(solution.total_volume()))
+                .0;
+            let position = transforms
+                .get(player)
+                .map(|transform| transform.translation + transform.forward() * 0.8)
+                .unwrap_or(Vec3::ZERO);
+            if crate::hazards::spawn_projected_smoke(&mut commands, payload, player, position)
+                .is_some()
+            {
+                emit_world_sfx(&mut sounds, Sfx::HazardSmoke, position);
+            }
             continue;
         }
         if container.kind == ContainerKind::SprayBottle {
@@ -716,6 +753,7 @@ fn handle_chemical_incapacitation(
             commands
                 .entity(container)
                 .remove::<HeldBy>()
+                .remove::<InventorySlot>()
                 .insert(Transform::from_xyz(ahead.x, 0.08, ahead.z));
         }
         if let Ok(mut mode) = modes.get_mut(player) {
@@ -784,6 +822,7 @@ fn handle_collapse(
                 commands
                     .entity(container)
                     .remove::<HeldBy>()
+                    .remove::<InventorySlot>()
                     .insert(Transform::from_xyz(ahead.x, 0.08, ahead.z));
             }
         }
@@ -1258,6 +1297,54 @@ mod tests {
             dose_in_blood(ContainerKind::Syringe) > dose_in_blood(ContainerKind::Beaker),
             "the needle is the whole reason to make one"
         );
+    }
+
+    #[test]
+    fn a_smoke_projector_releases_its_full_profile_and_stays_refillable() {
+        let mut app = test_app();
+        let (player, projector) =
+            chemist_holding(&mut app, ContainerKind::SmokeProjector, "dylovene", 30);
+
+        consume(&mut app);
+
+        assert!(contents_of(&app, projector).is_empty());
+        assert!(
+            app.world().get_entity(projector).is_ok(),
+            "the projector is a reusable tool, not disposable packaging"
+        );
+        let mut clouds = app
+            .world_mut()
+            .query::<(&crate::hazards::SmokePayload, &crate::hazards::SmokeOwner)>();
+        let (payload, owner) = clouds.single(app.world()).unwrap();
+        assert_eq!(payload.0.total_volume(), Units::whole(30));
+        assert_eq!(owner.0, Some(player));
+    }
+
+    #[test]
+    fn a_spray_uses_a_small_aimed_dose_and_the_sprayed_route() {
+        let mut app = test_app();
+        let (actor, sprayer) =
+            chemist_holding(&mut app, ContainerKind::SprayBottle, "dylovene", 30);
+        let patient = app
+            .world_mut()
+            .spawn((
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_xyz(1.0, crate::player::EYE_HEIGHT, 0.0),
+            ))
+            .id();
+
+        apply(&mut app, Some(patient));
+
+        assert_eq!(contents_of(&app, sprayer).total_volume(), Units::whole(27));
+        let records: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ChemicalExposure>>()
+            .drain()
+            .collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].actor, Some(actor));
+        assert_eq!(records[0].route, Route::Sprayed);
     }
 
     #[test]

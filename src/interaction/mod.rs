@@ -626,6 +626,9 @@ fn update_prompt(
                             (ContainerKind::SprayBottle, false) => {
                                 Some("[F]  spray chemical".to_string())
                             }
+                            (ContainerKind::SmokeProjector, false) => {
+                                Some("[R]  project smoke payload".to_string())
+                            }
                             (kind, false) if kind.charge_fuse().is_some() => {
                                 Some("[R]  arm and place charge".to_string())
                             }

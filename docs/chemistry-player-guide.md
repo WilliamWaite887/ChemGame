@@ -30,6 +30,15 @@ in this file.
 
 ## Your first shift
 
+### Use the four-slot hotbar
+
+Picked-up items go into the four cells at the bottom center of the screen.
+Press `1`–`4` to select a cell. Only the selected item is physically in your
+hand, so `E`, `F`, `R`, machine loading, and dropping always act on that one
+item. Picking up with the selected cell occupied fills the next free cell.
+Dropping or loading an item frees its cell; a full hotbar refuses another
+pickup until a cell is cleared.
+
 ### Make the three foundation medicines
 
 These are deliberately simple and instant. Use equal amounts.
@@ -95,7 +104,8 @@ The Mixing Chamber has two jobs:
 
 - combine separately prepared sides for an agitated reaction;
 - package finished liquid as bottles, pills, syringes, patches, sprays, or
-  sealed chemical charges.
+  sealed chemical charges;
+- package a refillable Smoke Projector carrying up to 30u.
 
 For agitation, divide the ingredients exactly as the method describes. The
 machine records that they were separate before combining them.
@@ -106,6 +116,12 @@ Produce and sourced materials arrive as mixtures. Grinding them gives the
 desired extract plus Plant Fibre or another contaminant. This is intentional:
 the extract is obtainable immediately, but exact orders may require HPLC
 cleanup.
+
+Courier hauls favor the least-stocked physical specimens currently left in the
+lab. Consuming a rare source therefore moves it toward the front of future
+deliveries instead of leaving the career at the mercy of an unbounded random
+roll. Exact timed requests still wait until their required source or extract is
+physically present.
 
 Important sources include:
 
@@ -228,6 +244,12 @@ Extra material on either side can prevent activation. Prepare the exact
 partition first; add buffers only when you understand where they will land.
 
 ## Progression path
+
+The research book names your current stage from successful orders and shows a
+recommended next method. It prefers a recipe whose ingredients are obtainable
+now; when none exists, it points one precursor beyond the current frontier.
+This is guidance rather than a lock—you may inspect any card and pursue another
+branch.
 
 ### Fundamentals: roughly 0–10 successful orders
 
@@ -529,13 +551,20 @@ Unrequested energetic material remains controlled contraband.
 |---|---|
 | Syringe / injected | Full dose lands immediately; contact chemicals are especially dangerous |
 | Ingested | 60% of the dose is absorbed gradually through the stomach |
-| Splash / touched | 15% is absorbed; contact effects and puddles matter |
+| Splash / puddle contact | A 10u hand splash or floor pour; 15% is absorbed and contact/topical effects apply |
 | Patch | Full dose without becoming an injection; activates topical healing |
-| Spray | Directed surface/body application while preserving mixture quality |
-| Smoke | Area delivery carrying the source mixture, purity, and attribution |
+| Spray | Aimed 3u application; 35% is absorbed topically while mixture quality and owner are preserved |
+| Smoke / inhaled | 40% reaches blood directly without skin-contact or topical effects; clouds preserve source mixture, purity, and attribution |
 | Chemical foam | Expands more slowly than smoke and preserves the complete mixed payload, per-reagent purity, and owner; general foam is slippery, Firefighting Foam is not, and Metal Foam is temporarily solid |
 | Bottle or pill | Portable measured delivery; pills are swallowed |
 | Charge | Sealed energetic package with a thermal fuse |
+
+The Smoke Projector is reusable. Package it from a prepared Mixing Chamber
+buffer, carry it to the deployment point, and press `R`; it empties its payload
+into a volume-scaled cloud and remains as an empty tool that can be refilled.
+Because inhalation bypasses skin effects, a topical salve in smoke is not a
+substitute for a patch. Conversely, an inhaled poison is more efficient than a
+thrown splash and affects everyone who remains in the cloud.
 
 Smart Metal Foam is intentionally not implemented. Ordinary Metal Foam
 already provides temporary containment, while the smart version depends on

@@ -541,6 +541,12 @@ pub enum Route {
     /// A sealed patch. The whole dose lands without becoming an injection,
     /// preserving topical effects and route-specific gameplay.
     Patched,
+    /// A fine spray aimed directly at exposed skin. More controlled than a
+    /// thrown splash, but still a topical route rather than an injection.
+    Sprayed,
+    /// Aerosol taken through the lungs. It reaches blood directly without
+    /// applying skin contact or topical-healing effects.
+    Inhaled,
 }
 
 impl Route {
@@ -551,6 +557,8 @@ impl Route {
             Route::Ingested => Units::from_raw(60),
             Route::Touched => Units::from_raw(15),
             Route::Patched => Units::ONE,
+            Route::Sprayed => Units::from_raw(35),
+            Route::Inhaled => Units::from_raw(40),
         }
     }
 
@@ -568,6 +576,8 @@ impl Route {
             Route::Ingested => 1.0,
             Route::Touched => 0.5,
             Route::Patched => 1.0,
+            Route::Sprayed => 0.75,
+            Route::Inhaled => 0.0,
         }
     }
 
@@ -575,8 +585,8 @@ impl Route {
     /// only the small absorbed share lands; patches deliver the full dose.
     pub fn topical_scale(self) -> f32 {
         match self {
-            Route::Touched | Route::Patched => 1.0,
-            Route::Injected | Route::Ingested => 0.0,
+            Route::Touched | Route::Patched | Route::Sprayed => 1.0,
+            Route::Injected | Route::Ingested | Route::Inhaled => 0.0,
         }
     }
 
@@ -586,6 +596,8 @@ impl Route {
             Route::Ingested => "swallowed",
             Route::Touched => "splashed",
             Route::Patched => "patched",
+            Route::Sprayed => "sprayed",
+            Route::Inhaled => "inhaled",
         }
     }
 }

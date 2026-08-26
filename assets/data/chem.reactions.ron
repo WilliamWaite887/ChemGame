@@ -1560,7 +1560,7 @@
         reactants: [("carbon", 1), ("oxygen", 2)], products: [("carbon_dioxide", 3)],
         min_temp: Some((777.0)), max_temp: Some((900.0)),
         min_ph: Some(5.0), optimal_ph: Some(7.0), max_ph: Some(9.0), min_purity: Some(0.30),
-        effects: [Heat(0.2)], priority: 47,
+        effects: [Heat(0.2)], priority: 9,
         hints: [
             "A carbon charge and excess Oxygen form an atmospheric fire suppressant only under extreme heat.",
             "Combine one part Carbon with two parts Oxygen at 777–900K, pH 5–9, and at least 30% input purity.",

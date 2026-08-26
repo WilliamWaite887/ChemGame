@@ -175,10 +175,9 @@ fn default_request_patience_scale() -> f32 {
 /// How the difficulty tightens as the career goes on.
 ///
 /// There is no shift boundary any more — crew arrive continuously — so the
-/// tier that drives every field below comes from total orders resolved
-/// (`shift.succeeded + shift.botched`) divided by `orders_per_tier`, computed
-/// fresh wherever it's needed rather than frozen once per shift. See
-/// [`current_rules`].
+/// tier that drives every field below comes from successful deliveries divided
+/// by `orders_per_tier`, computed fresh wherever it is needed. Failures cost
+/// standing but never accelerate difficulty. See [`current_rules`].
 #[derive(Clone, Debug, Deserialize)]
 pub struct RampDef {
     /// Orders resolved before the difficulty steps up once.

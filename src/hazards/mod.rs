@@ -351,6 +351,38 @@ pub struct SmokePayload(pub Solution);
 #[derive(Component, Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct SmokeOwner(#[entities] pub Option<Entity>);
 
+/// Releases a prepared portable projector payload without pretending another
+/// chemical reaction fired. Composition, purity and owner are carried by the
+/// same replicated cloud components as reaction-generated smoke.
+pub(crate) fn spawn_projected_smoke(
+    commands: &mut Commands,
+    payload: Solution,
+    owner: Entity,
+    origin: Vec3,
+) -> Option<Entity> {
+    if payload.is_empty() {
+        return None;
+    }
+    let volume = payload.total_volume().as_f32();
+    let radius = (2.2 + (volume / 10.0).sqrt() * 0.55).clamp(2.2, 4.0);
+    Some(
+        commands
+            .spawn((
+                SmokeCloud {
+                    radius,
+                    remaining: 16.0,
+                },
+                SmokePayload(payload),
+                SmokeOwner(Some(owner)),
+                Transform::from_translation(origin),
+                Visibility::default(),
+                Replicated,
+                crate::until_we_leave_the_lab(),
+            ))
+            .id(),
+    )
+}
+
 /// Marks the rendered sphere so the interaction raycast can ignore it.
 ///
 /// Without this the whole lab becomes unusable the first time anything smokes:
@@ -899,15 +931,15 @@ fn expose_to_smoke(
             if dose.total_volume().is_zero() {
                 continue;
             }
-            // Touch: 15% absorbed, half contact damage. Standing in a cloud
-            // should be survivable and unpleasant, not instantly fatal.
+            // Inhalation reaches blood more efficiently than a splash, but
+            // cannot trigger skin contact or topical repair.
             let snapshot = dose.clone();
-            let assessment = assess_exposure(&snapshot, Route::Touched, &body, &blood, &db);
-            blood.0.receive(&mut dose, Route::Touched, &mut body.0, &db);
+            let assessment = assess_exposure(&snapshot, Route::Inhaled, &body, &blood, &db);
+            blood.0.receive(&mut dose, Route::Inhaled, &mut body.0, &db);
             exposures.write(ChemicalExposure {
                 actor: owner,
                 target,
-                route: Route::Touched,
+                route: Route::Inhaled,
                 source: ExposureSource::Smoke,
                 solution: snapshot,
                 // A cloud attributable to a chemist is consensual for either
@@ -939,7 +971,7 @@ fn expose_to_smoke(
                 continue;
             }
             let snapshot = dose.clone();
-            let assessment = assess_exposure(&snapshot, Route::Touched, &body, &blood, &db);
+            let assessment = assess_exposure(&snapshot, Route::Inhaled, &body, &blood, &db);
             let requested = orders
                 .get(target)
                 .is_ok_and(|(order, illicit, crisis, counter)| {
@@ -955,11 +987,11 @@ fn expose_to_smoke(
                 && assessment.helpful
                 && !assessment.illicit
                 && !assessment.overdose;
-            blood.0.receive(&mut dose, Route::Touched, &mut body.0, &db);
+            blood.0.receive(&mut dose, Route::Inhaled, &mut body.0, &db);
             exposures.write(ChemicalExposure {
                 actor: owner,
                 target,
-                route: Route::Touched,
+                route: Route::Inhaled,
                 source: ExposureSource::Smoke,
                 solution: snapshot,
                 authorized: owner == Some(target) || requested || crisis_care,
@@ -1238,6 +1270,7 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].actor, Some(operator));
         assert_eq!(records[0].source, ExposureSource::Smoke);
+        assert_eq!(records[0].route, Route::Inhaled);
     }
 
     #[test]

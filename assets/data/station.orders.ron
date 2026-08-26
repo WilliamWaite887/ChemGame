@@ -5,7 +5,7 @@
 // just a guaranteed failure.
 //
 // The numbers below are tier 0 — a brand new career. Everything in `ramp`
-// tightens them as `succeeded + botched` climbs; `ShiftRules::for_tier` is
+// tightens them as successful deliveries climb; `ShiftRules::for_tier` is
 // where that arithmetic lives, and `tier_zero_matches_the_base_config`
 // guarantees the ramp is a no-op here.
 (

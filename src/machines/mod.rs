@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::audio::{EmitWorldSfx, Sfx};
 use crate::chem_data::ChemDb;
 use crate::containers::{
-    set_down_lift, spawn_container, Container, ContainerKind, HeldBy, InSlot, InSlotB, Stored,
+    free_inventory_slot, set_down_lift, spawn_container, Container, ContainerKind, HeldBy, InSlot,
+    InSlotB, InventorySlot, SelectedInventorySlot, Stored,
 };
 use crate::interaction::{
     InteractRequested, InteractionMode, LeaveMachineRequested, MachineOpened,
@@ -609,6 +610,7 @@ fn handle_machine_interact(
                     commands
                         .entity(item)
                         .remove::<HeldBy>()
+                        .remove::<InventorySlot>()
                         .remove::<ChildOf>()
                         .insert(Stored(request.target))
                         // Parked inside the casing. It is hidden while stored,
@@ -654,6 +656,7 @@ fn handle_machine_interact(
             (Some(container), Some((offset, in_b))) => {
                 let mut item = commands.entity(container);
                 item.remove::<HeldBy>()
+                    .remove::<InventorySlot>()
                     .remove::<ChildOf>()
                     .insert(Transform::from_translation(transform.translation + offset));
                 if in_b {
@@ -1543,6 +1546,23 @@ fn handle_package(
         let Ok((mut buffer, transform)) = machines.get_mut(request.machine) else {
             continue;
         };
+        if !matches!(
+            request.kind,
+            ContainerKind::Bottle
+                | ContainerKind::Pill
+                | ContainerKind::Syringe
+                | ContainerKind::Patch
+                | ContainerKind::SprayBottle
+                | ContainerKind::SmokeProjector
+                | ContainerKind::ChemicalCharge5
+                | ContainerKind::ChemicalCharge10
+                | ContainerKind::ChemicalCharge20
+                | ContainerKind::PhPaper
+        ) {
+            // The kind crosses the network. Only authored package forms are
+            // accepted; a forged request cannot mint beakers or used tools.
+            continue;
+        }
         if request.kind == ContainerKind::PhPaper {
             let drop_at = transform.translation + Vec3::new(0.0, 0.95, 0.45);
             spawn_container(&mut commands, ContainerKind::PhPaper, drop_at);
@@ -1620,19 +1640,25 @@ fn give_back(
     commands: &mut Commands,
     item: Entity,
     player: Entity,
-    hands_full: bool,
+    inventory_cell: Option<(u8, u8)>,
     machine: &Transform,
     solid: &Solid,
     facing: Option<&Facing>,
     lift: f32,
 ) {
     let mut item = commands.entity(item);
-    if hands_full {
+    if let Some((slot, selected)) = inventory_cell {
+        item.insert(InventorySlot {
+            owner: player,
+            slot,
+        });
+        if slot == selected {
+            item.insert(HeldBy(player));
+        }
+    } else {
         item.insert(Transform::from_translation(front_of(
             machine, solid, facing, lift,
         )));
-    } else {
-        item.insert(HeldBy(player));
     }
 }
 
@@ -1661,10 +1687,13 @@ fn handle_eject(
     slotted: Query<(Entity, &InSlot)>,
     slotted_b: Query<(Entity, &InSlotB)>,
     held: Query<&HeldBy>,
+    inventory: Query<&InventorySlot>,
+    selected: Query<&SelectedInventorySlot>,
     bodies: Query<&crate::body::Body>,
     bloodstreams: Query<&crate::body::Bloodstream>,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
+    let mut reserved = Vec::new();
     for request in requests.read() {
         if active.contains(request.machine) {
             continue;
@@ -1695,15 +1724,31 @@ fn handle_eject(
         ) else {
             continue;
         };
-        if held.iter().any(|holder| holder.0 == player) {
+        let selected = selected.get(player).map_or(0, |selected| selected.0);
+        let legacy_full_hand = held.iter().any(|held| held.0 == player)
+            && !inventory
+                .iter()
+                .any(|entry| entry.owner == player && entry.slot == selected);
+        if legacy_full_hand {
             continue;
         }
+        let Some(slot) = free_inventory_slot(player, selected, &inventory, &reserved) else {
+            continue;
+        };
+        reserved.push((player, slot));
 
         match request.slot {
             MachineSlot::A => commands.entity(container).remove::<InSlot>(),
             MachineSlot::B => commands.entity(container).remove::<InSlotB>(),
         };
-        commands.entity(container).insert(HeldBy(player));
+        let mut item = commands.entity(container);
+        item.insert(InventorySlot {
+            owner: player,
+            slot,
+        });
+        if slot == selected {
+            item.insert(HeldBy(player));
+        }
         emit_world_sfx(&mut sounds, Sfx::Eject, transform.translation);
     }
 }
@@ -1733,9 +1778,12 @@ fn handle_take(
     stored: Query<&Stored>,
     containers: Query<&Container>,
     held: Query<&HeldBy>,
+    inventory: Query<&InventorySlot>,
+    selected: Query<&SelectedInventorySlot>,
     bodies: Query<&crate::body::Body>,
     bloodstreams: Query<&crate::body::Bloodstream>,
 ) {
+    let mut reserved = Vec::new();
     for request in requests.read() {
         // The item has to be in the locker the message names. Checked rather
         // than trusted: the pair comes off the wire, and without this a client
@@ -1760,12 +1808,24 @@ fn handle_take(
             continue;
         };
 
+        let selected = selected.get(player).map_or(0, |selected| selected.0);
+        let legacy_full_hand = held.iter().any(|held| held.0 == player)
+            && !inventory
+                .iter()
+                .any(|entry| entry.owner == player && entry.slot == selected);
+        let cell = (!legacy_full_hand)
+            .then(|| free_inventory_slot(player, selected, &inventory, &reserved))
+            .flatten()
+            .map(|slot| (slot, selected));
+        if let Some((slot, _)) = cell {
+            reserved.push((player, slot));
+        }
         commands.entity(request.item).remove::<Stored>();
         give_back(
             &mut commands,
             request.item,
             player,
-            held.iter().any(|holder| holder.0 == player),
+            cell,
             transform,
             solid,
             facing,
@@ -2366,6 +2426,36 @@ mod tests {
             .expect("one strip should be dispensed");
         assert_eq!(paper.kind, ContainerKind::PhPaper);
         assert!(paper.solution.is_empty());
+    }
+
+    #[test]
+    fn smoke_projector_packages_a_profiled_payload_and_forged_forms_are_rejected() {
+        let mut app = test_app();
+        let water = reagent(&app, "water");
+        let mut buffer = Solution::unbounded();
+        let _ = buffer.add_profiled(water, Units::whole(40), 0.73, 6.4);
+        let machine = app
+            .world_mut()
+            .spawn((Buffer(buffer), Transform::default()))
+            .id();
+
+        request_package(&mut app, machine, ContainerKind::PhPaperStrongBase);
+        assert_eq!(
+            app.world_mut()
+                .query::<&Container>()
+                .iter(app.world())
+                .count(),
+            0,
+            "clients cannot mint already-used tools"
+        );
+
+        request_package(&mut app, machine, ContainerKind::SmokeProjector);
+        let mut containers = app.world_mut().query::<&Container>();
+        let projector = containers.single(app.world()).unwrap();
+        assert_eq!(projector.kind, ContainerKind::SmokeProjector);
+        assert_eq!(projector.solution.total_volume(), Units::whole(30));
+        assert!((projector.solution.purity_of(water) - 0.73).abs() < 0.001);
+        assert!((projector.solution.ph() - 6.4).abs() < 0.001);
     }
 
     #[test]

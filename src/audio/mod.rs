@@ -909,13 +909,28 @@ fn radio_channel_sfx(channel: RadioChannel) -> Sfx {
     }
 }
 
-/// Door transitions become authority-confirmed positional cues; clients do
-/// not replay the initial replicated closed state as a fresh sound.
+/// Door transitions become authority-confirmed positional cues.
+///
+/// This tracks the `open` field itself instead of relying on `Changed<Door>`:
+/// the replicated EMP timer lives in the same component and legitimately
+/// changes while counting down. Treating any component write as an open/close
+/// edge once produced one audio entity per door per frame, exhausting memory
+/// within seconds. First sight is baselined silently so loading a station does
+/// not play every closed airlock at once.
 fn play_door_sfx(
-    doors: Query<(&Door, &Transform), Changed<Door>>,
+    doors: Query<(Entity, &Door, &Transform)>,
+    mut previous: Local<HashMap<Entity, bool>>,
     mut play: MessageWriter<EmitWorldSfx>,
 ) {
-    for (door, transform) in &doors {
+    let mut live = HashSet::new();
+    for (entity, door, transform) in &doors {
+        live.insert(entity);
+        let Some(was_open) = previous.insert(entity, door.open) else {
+            continue;
+        };
+        if was_open == door.open {
+            continue;
+        }
         play.write(EmitWorldSfx::new(
             if door.open {
                 Sfx::DoorOpen
@@ -925,6 +940,7 @@ fn play_door_sfx(
             transform.translation,
         ));
     }
+    previous.retain(|entity, _| live.contains(entity));
 }
 
 /// Universal click feedback for every plain button — pause/settings/main
@@ -1334,6 +1350,65 @@ mod tests {
         // caught the runtime B0001 where the machine query read `Transform`
         // while the loop-player query could mutate the same component.
         schedule.initialize(&mut world).unwrap();
+    }
+
+    #[test]
+    fn door_audio_fires_only_when_open_state_crosses_an_edge() {
+        let mut app = App::new();
+        app.add_message::<EmitWorldSfx>()
+            .add_systems(Update, play_door_sfx);
+        let door = app
+            .world_mut()
+            .spawn((
+                Door {
+                    open: false,
+                    bridge_id: "test.bridge".to_string(),
+                    along_x: true,
+                    skin: crate::door::DoorSkin::Chemistry,
+                    disabled_for: 0.0,
+                },
+                Transform::from_xyz(2.0, 0.0, 3.0),
+            ))
+            .id();
+
+        // Loading a shut door establishes the baseline without a station-wide
+        // chorus of close sounds.
+        app.update();
+        assert!(app
+            .world_mut()
+            .resource_mut::<Messages<EmitWorldSfx>>()
+            .drain()
+            .next()
+            .is_none());
+
+        // An EMP timer write changes Door but not whether it is open.
+        app.world_mut()
+            .entity_mut(door)
+            .get_mut::<Door>()
+            .unwrap()
+            .disabled_for = 4.0;
+        app.update();
+        assert!(app
+            .world_mut()
+            .resource_mut::<Messages<EmitWorldSfx>>()
+            .drain()
+            .next()
+            .is_none());
+
+        app.world_mut()
+            .entity_mut(door)
+            .get_mut::<Door>()
+            .unwrap()
+            .open = true;
+        app.update();
+        let heard: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<EmitWorldSfx>>()
+            .drain()
+            .collect();
+        assert_eq!(heard.len(), 1);
+        assert_eq!(heard[0].sound, Sfx::DoorOpen);
+        assert_eq!(heard[0].position, Vec3::new(2.0, 0.0, 3.0));
     }
 
     #[test]

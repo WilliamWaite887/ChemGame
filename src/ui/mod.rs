@@ -17,7 +17,10 @@ use crate::arc::{ArcScript, Campaign, Reveal};
 use crate::audio::{PlaySfx, Sfx};
 use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
-use crate::containers::{Container, ContainerKind, InSlot, InSlotB, Stored};
+use crate::containers::{
+    Container, ContainerKind, InSlot, InSlotB, InventorySlot, SelectedInventorySlot, Stored,
+    INVENTORY_SLOTS,
+};
 use crate::crew::{AtCounter, CrewMember};
 use crate::interaction::{leave_machine, Interactable, InteractionMode, LeaveMachineRequested};
 use crate::knowledge::{
@@ -37,7 +40,7 @@ use crate::player::LocalPlayer;
 use crate::produce::{ProduceCatalog, ProduceId};
 use crate::radio::{RadioChannel, RadioEntry, RadioLog, RadioPriority, RadioTone};
 use crate::shift::{
-    can_afford, can_call_it, shift_report, CallItAShift, OpenUpAgain, RequisitionKind,
+    can_afford, can_call_it, shift_report, CallItAShift, CareerStage, OpenUpAgain, RequisitionKind,
     RequisitionRequested, ShiftReport, ToggleAcceptingOrders,
 };
 use crate::AppState;
@@ -80,6 +83,7 @@ impl Plugin for UiPlugin {
                 spawn_order_queue,
                 reset_radio_dispatch,
                 spawn_vitals_panel,
+                spawn_hotbar,
                 spawn_room_label,
             ),
         )
@@ -99,6 +103,7 @@ impl Plugin for UiPlugin {
                 update_phase_banner,
                 update_order_queue,
                 update_vitals_panel,
+                update_hotbar,
                 update_room_label,
                 update_radio_dispatch,
                 animate_radio_dispatch,
@@ -348,6 +353,7 @@ struct PanelSignature {
     /// warning live without rebuilding a complex instrument every frame.
     disabled_seconds: u16,
     known_recipes: usize,
+    career_stage: CareerStage,
     /// The book's open heading. Here rather than tracked separately because
     /// switching tab is exactly the same kind of change as any other: it
     /// alters what the panel shows, so it rebuilds the panel.
@@ -428,6 +434,7 @@ impl Default for PanelSignature {
             amount: None,
             disabled_seconds: u16::MAX,
             known_recipes: usize::MAX,
+            career_stage: CareerStage::Mastery,
             book_category: None,
             book_filter: BookFilter::All,
             book_page: 0,
@@ -757,6 +764,11 @@ fn sync_panel(
     // Same reasoning as `arc` above: built once, read by both the comparison
     // and the panel body, because the signature is moved into `previous`.
     let stage = board.stage(&knowledge);
+    let career_stage = CareerStage::from_progress(
+        board.shift.succeeded,
+        knowledge.known_count(),
+        db.reactions.len(),
+    );
 
     // Only for the locker, and only while its panel is open. Reading every
     // stored item on every frame of every other panel would be a scan of the
@@ -813,6 +825,7 @@ fn sync_panel(
             .map(|(machine, ..)| machine.disabled_for.ceil().max(0.0) as u16)
             .unwrap_or(0),
         known_recipes: knowledge.known_count(),
+        career_stage,
         book_category: views.book.category,
         book_filter: views.book.filter,
         book_page: views.book.page,
@@ -862,6 +875,8 @@ fn sync_panel(
             &knowledge,
             &views.book,
             at_machine.is_some(),
+            career_stage,
+            board.shift.succeeded,
         );
         return;
     }
@@ -2334,6 +2349,38 @@ fn mixing_chamber_body(
             PanelAction::Package(ContainerKind::SprayBottle),
         ));
     });
+    panel.spawn(label("Sealed demolition charges", 12.0, TEXT_DIM));
+    panel.spawn(row()).with_children(|row| {
+        for (kind, fuse) in [
+            (ContainerKind::ChemicalCharge5, 5),
+            (ContainerKind::ChemicalCharge10, 10),
+            (ContainerKind::ChemicalCharge20, 20),
+        ] {
+            row.spawn(button(
+                format!("Charge {fuse}s"),
+                PanelAction::Package(kind),
+            ));
+        }
+    });
+    panel.spawn(label("Laboratory tools", 12.0, TEXT_DIM));
+    panel.spawn(row()).with_children(|row| {
+        row.spawn(button(
+            "pH paper",
+            PanelAction::Package(ContainerKind::PhPaper),
+        ));
+        row.spawn(button(
+            format!(
+                "Smoke projector  ({})",
+                ContainerKind::SmokeProjector.capacity()
+            ),
+            PanelAction::Package(ContainerKind::SmokeProjector),
+        ));
+    });
+    panel.spawn(label(
+        "Routes: spray uses 3u at 35% topical absorption; the projector aerosolizes up to 30u at 40% inhaled absorption. Charges reject non-explosive payloads.",
+        11.0,
+        TEXT_DIM,
+    ));
 }
 
 /// One of the Mixing Chamber's two beaker slots: its contents, a way to pull
@@ -2401,26 +2448,6 @@ fn mixing_chamber_beaker(
                 });
             }
         });
-    panel.spawn(label("Sealed demolition charges", 12.0, TEXT_DIM));
-    panel.spawn(row()).with_children(|row| {
-        for (kind, fuse) in [
-            (ContainerKind::ChemicalCharge5, 5),
-            (ContainerKind::ChemicalCharge10, 10),
-            (ContainerKind::ChemicalCharge20, 20),
-        ] {
-            row.spawn(button(
-                format!("Charge {fuse}s"),
-                PanelAction::Package(kind),
-            ));
-        }
-    });
-    panel.spawn(label("Laboratory tools", 12.0, TEXT_DIM));
-    panel.spawn(row()).with_children(|row| {
-        row.spawn(button(
-            "pH paper",
-            PanelAction::Package(ContainerKind::PhPaper),
-        ));
-    });
 }
 
 const HPLC_CLEAN: Color = Color::srgb(0.24, 0.86, 0.58);
@@ -3120,6 +3147,8 @@ fn spawn_reference_book(
     // the header line differs, but it is the line that tells the player they
     // have not just walked away from the dispenser.
     at_machine: bool,
+    career_stage: CareerStage,
+    successes: u32,
 ) {
     commands
         .spawn((
@@ -3170,8 +3199,10 @@ fn spawn_reference_book(
                     });
                     book.spawn(label(
                         format!(
-                            "{} of {} methods recorded   ·   {} research   ·   \
-                             B or Esc to {}",
+                            "{}  ·  {} successful orders  ·  {} of {} methods recorded  ·  \
+                             {} research  ·  B or Esc to {}",
+                            career_stage.label(),
+                            successes,
                             knowledge.known_count(),
                             db.reactions.len(),
                             knowledge.research_points,
@@ -3183,6 +3214,18 @@ fn spawn_reference_book(
                         ),
                         13.0,
                         TEXT_DIM,
+                    ));
+                    let stage_progress = career_stage
+                        .next_success_threshold()
+                        .map(|next| format!(" Next stage at {next} successful orders."))
+                        .unwrap_or_default();
+                    book.spawn(label(
+                        format!(
+                            "Current focus: {}.{stage_progress}",
+                            career_stage.expectation()
+                        ),
+                        13.0,
+                        Color::srgb(0.70, 0.81, 0.96),
                     ));
 
                     let progress = RecipeProgress::new(db, knowledge);
@@ -3289,6 +3332,30 @@ impl RecipeProgress {
         }
         RecipeState::Locked
     }
+
+    /// The smallest useful step from the current notebook: something ready to
+    /// discover first, otherwise something one precursor beyond it. This is a
+    /// recommendation, not a lock; every card remains browsable.
+    fn recommendation<'a>(
+        &self,
+        db: &'a ChemDb,
+        knowledge: &Knowledge,
+    ) -> Option<(RecipeState, &'a chem_sim::Reaction)> {
+        db.reactions
+            .iter()
+            .filter_map(|reaction| {
+                let state = self.state(knowledge, reaction);
+                matches!(state, RecipeState::Ready | RecipeState::Frontier)
+                    .then_some((state, reaction))
+            })
+            .min_by_key(|(state, reaction)| {
+                (
+                    *state,
+                    reaction.reactants.len() + reaction.catalysts.len(),
+                    product_name(db, reaction.id),
+                )
+            })
+    }
 }
 
 fn reaction_inputs_are_in(reaction: &chem_sim::Reaction, reagents: &HashSet<ReagentId>) -> bool {
@@ -3365,6 +3432,22 @@ fn book_entries(
         .with_children(|pane| {
             pane.spawn(label(title, 20.0, TEXT));
             pane.spawn(label(blurb, 14.0, TEXT_DIM));
+
+            if let Some((state, reaction)) = progress.recommendation(db, knowledge) {
+                let guidance = match state {
+                    RecipeState::Ready => "all inputs are obtainable now",
+                    RecipeState::Frontier => "one precursor discovery away",
+                    _ => unreachable!("recommendations only use actionable states"),
+                };
+                pane.spawn(label(
+                    format!(
+                        "Recommended next method: {} — {guidance}.",
+                        product_name(db, reaction.id)
+                    ),
+                    14.0,
+                    Color::srgb(0.70, 0.81, 0.96),
+                ));
+            }
 
             pane.spawn(wrap_row()).with_children(|filters| {
                 for filter in BookFilter::ALL {
@@ -4018,7 +4101,7 @@ fn reagent_profile_lines(reagent: &chem_sim::Reagent) -> Vec<String> {
         "Application routes: environmental release; no therapeutic body route."
             .to_string()
     } else {
-        "Application routes: inject (full/fast), ingest (slow/60%), patch (full/topical), splash, smoke or puddle contact (15%)."
+        "Application routes: inject (full/fast), ingest (slow/60%), patch (full/topical), aimed spray (35% topical), splash or puddle contact (15%), smoke inhalation (40% direct)."
             .to_string()
     });
     lines.push(format!(
@@ -4616,6 +4699,172 @@ fn expire_toasts(mut commands: Commands, time: Res<Time>, mut toasts: Query<(Ent
     for (entity, mut toast) in &mut toasts {
         if toast.0.tick(time.delta()).just_finished() {
             commands.entity(entity).despawn();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Four-slot inventory hotbar
+// ---------------------------------------------------------------------------
+
+#[derive(Component)]
+struct HotbarCell(u8);
+
+#[derive(Component)]
+enum HotbarText {
+    Key(u8),
+    Name(u8),
+    Amount(u8),
+}
+
+fn hotbar_container_name(kind: ContainerKind) -> &'static str {
+    match kind {
+        ContainerKind::ChemicalCharge5 => "Charge · 5s",
+        ContainerKind::ChemicalCharge10 => "Charge · 10s",
+        ContainerKind::ChemicalCharge20 => "Charge · 20s",
+        ContainerKind::PhPaper
+        | ContainerKind::PhPaperStrongAcid
+        | ContainerKind::PhPaperAcid
+        | ContainerKind::PhPaperNeutral
+        | ContainerKind::PhPaperBase
+        | ContainerKind::PhPaperStrongBase => "pH Paper",
+        ContainerKind::SmokeProjector => "Smoke Projector",
+        _ => kind.label(),
+    }
+}
+
+fn spawn_hotbar(mut commands: Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: px(18),
+                width: percent(100),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            GlobalZIndex(20),
+            crate::until_we_leave_the_lab(),
+        ))
+        .with_children(|root| {
+            root.spawn((
+                Node {
+                    padding: UiRect::all(px(4)),
+                    column_gap: px(4),
+                    border_radius: BorderRadius::all(px(5)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.035, 0.04, 0.05, 0.88)),
+            ))
+            .with_children(|bar| {
+                for slot in 0..INVENTORY_SLOTS {
+                    bar.spawn((
+                        Node {
+                            width: px(96),
+                            height: px(72),
+                            flex_direction: FlexDirection::Column,
+                            justify_content: JustifyContent::SpaceBetween,
+                            padding: UiRect::all(px(6)),
+                            border: UiRect::all(px(3)),
+                            border_radius: BorderRadius::all(px(3)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.10, 0.11, 0.13, 0.94)),
+                        BorderColor::all(Color::srgb(0.28, 0.30, 0.34)),
+                        HotbarCell(slot),
+                    ))
+                    .with_children(|cell| {
+                        cell.spawn((
+                            Text::new(""),
+                            TextFont::from_font_size(11.0),
+                            TextColor(TEXT_DIM),
+                            HotbarText::Key(slot),
+                        ));
+                        cell.spawn((
+                            Text::new(""),
+                            TextFont::from_font_size(13.0),
+                            TextColor(TEXT),
+                            HotbarText::Name(slot),
+                        ));
+                        cell.spawn((
+                            Text::new(""),
+                            TextFont::from_font_size(11.0),
+                            TextColor(TEXT_DIM),
+                            HotbarText::Amount(slot),
+                        ));
+                    });
+                }
+            });
+        });
+}
+
+fn update_hotbar(
+    local: Query<(Entity, &SelectedInventorySlot), With<LocalPlayer>>,
+    items: Query<(&InventorySlot, Option<&Container>, Option<&Interactable>)>,
+    mut cells: Query<(&HotbarCell, &mut BackgroundColor, &mut BorderColor)>,
+    mut texts: Query<(&HotbarText, &mut Text, &mut TextColor)>,
+) {
+    let Ok((owner, selected)) = local.single() else {
+        return;
+    };
+
+    for (cell, mut background, mut border) in &mut cells {
+        let active = cell.0 == selected.0;
+        let wanted_background = if active {
+            Color::srgba(0.18, 0.20, 0.23, 0.98)
+        } else {
+            Color::srgba(0.10, 0.11, 0.13, 0.94)
+        };
+        let wanted_border = if active {
+            Color::srgb(0.92, 0.80, 0.42)
+        } else {
+            Color::srgb(0.28, 0.30, 0.34)
+        };
+        if background.0 != wanted_background {
+            background.0 = wanted_background;
+        }
+        let wanted_border = BorderColor::all(wanted_border);
+        if *border != wanted_border {
+            *border = wanted_border;
+        }
+    }
+
+    for (part, mut text, mut color) in &mut texts {
+        let slot = match part {
+            HotbarText::Key(slot) | HotbarText::Name(slot) | HotbarText::Amount(slot) => *slot,
+        };
+        let item = items
+            .iter()
+            .find(|(entry, _, _)| entry.owner == owner && entry.slot == slot);
+        let (wanted, wanted_color) = match part {
+            HotbarText::Key(_) => (format!("{}", slot + 1), TEXT_DIM),
+            HotbarText::Name(_) => match item {
+                Some((_, Some(container), _)) => {
+                    (hotbar_container_name(container.kind).to_string(), TEXT)
+                }
+                Some((_, None, Some(interactable))) => (interactable.label.clone(), TEXT),
+                Some(_) => ("Item".to_string(), TEXT),
+                None => ("—".to_string(), Color::srgb(0.34, 0.37, 0.42)),
+            },
+            HotbarText::Amount(_) => match item {
+                Some((_, Some(container), _)) if container.kind.capacity().is_zero() => {
+                    ("TOOL".to_string(), TEXT_DIM)
+                }
+                Some((_, Some(container), _)) if container.solution.is_empty() => {
+                    ("EMPTY".to_string(), TEXT_DIM)
+                }
+                Some((_, Some(container), _)) => {
+                    (format!("{}", container.solution.total_volume()), GOOD_TEXT)
+                }
+                Some(_) => ("ITEM".to_string(), TEXT_DIM),
+                None => (String::new(), TEXT_DIM),
+            },
+        };
+        if text.0 != wanted {
+            text.0 = wanted;
+        }
+        if color.0 != wanted_color {
+            color.0 = wanted_color;
         }
     }
 }
@@ -5992,6 +6241,19 @@ mod tests {
         let reachable: HashSet<_> = knowledge.frontier(&db).into_iter().collect();
 
         assert_eq!(badged, reachable);
+    }
+
+    #[test]
+    fn the_book_always_recommends_an_actionable_next_method() {
+        let (db, knowledge) = book_fixture();
+        let progress = RecipeProgress::new(&db, &knowledge);
+        let (state, reaction) = progress
+            .recommendation(&db, &knowledge)
+            .expect("a fresh notebook needs a next method");
+
+        assert_eq!(state, RecipeState::Ready);
+        assert!(!knowledge.is_known(reaction.id));
+        assert!(reaction_inputs_are_in(reaction, &progress.available));
     }
 
     #[test]

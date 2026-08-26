@@ -1,9 +1,9 @@
-//! Beakers, bottles and pills.
+//! Beakers, bottles, pills and the chemist's four-slot hotbar.
 //!
-//! A container is an entity, and who holds it lives in [`HeldBy`] on the
-//! container itself rather than in a player-side inventory. That is what lets
-//! a beaker sit on a bench, be carried by either chemist, or be locked in a
-//! machine slot without any of those being a special case.
+//! A container is an entity. [`InventorySlot`] records which chemist owns it,
+//! while [`HeldBy`] marks only the currently selected hotbar item. Keeping both
+//! relations on the item is what lets it move between a bench, either chemist,
+//! a locker, and a machine without maintaining parallel entity lists.
 
 use bevy::ecs::entity::MapEntities;
 use bevy::prelude::*;
@@ -37,6 +37,7 @@ pub struct ContainerPlugin;
 impl Plugin for ContainerPlugin {
     fn build(&self, app: &mut App) {
         app.add_client_message::<DropRequested>(Channel::Ordered)
+            .add_client_message::<SelectInventorySlotRequested>(Channel::Ordered)
             .add_message::<EmitWorldSfx>()
             .add_systems(
                 OnEnter(AppState::Playing),
@@ -51,14 +52,24 @@ impl Plugin for ContainerPlugin {
             .add_systems(
                 Update,
                 (
-                    (handle_pickup, handle_drop, tick_armed_charges).run_if(is_authority),
                     (
+                        ensure_inventory_selection,
+                        handle_select_inventory_slot,
+                        handle_pickup,
+                        handle_drop,
+                        tick_armed_charges,
+                    )
+                        .chain()
+                        .run_if(is_authority),
+                    (
+                        request_inventory_slot.run_if(crate::settings::not_paused),
                         request_drop.run_if(crate::settings::not_paused),
                         // Runs everywhere: a replicated beaker arrives as
                         // contents and a position, and each end builds the
                         // glass for it.
                         dress_containers,
                         carry_held_containers,
+                        sync_inventory_visibility,
                         hide_stored_items,
                         update_liquid_visuals,
                     )
@@ -94,9 +105,16 @@ pub enum ContainerKind {
     PhPaperNeutral,
     PhPaperBase,
     PhPaperStrongBase,
+    /// A refillable portable smoke projector. Appended so existing serialized
+    /// container discriminants retain their meaning.
+    SmokeProjector,
 }
 
 impl ContainerKind {
+    /// Ordered wire schema. Container variants are append-only because serde's
+    /// binary representation uses their discriminants in multiplayer.
+    pub const NETWORK_SCHEMA: &'static str = "Beaker|LargeBeaker|Bottle|Pill|Syringe|ChemicalCharge5|ChemicalCharge10|ChemicalCharge20|SprayBottle|Patch|PhPaper|PhPaperStrongAcid|PhPaperAcid|PhPaperNeutral|PhPaperBase|PhPaperStrongBase|SmokeProjector";
+
     pub fn capacity(self) -> Units {
         match self {
             ContainerKind::Beaker => Units::whole(50),
@@ -115,6 +133,7 @@ impl ContainerKind {
             | ContainerKind::PhPaperNeutral
             | ContainerKind::PhPaperBase
             | ContainerKind::PhPaperStrongBase => Units::ZERO,
+            ContainerKind::SmokeProjector => Units::whole(30),
         }
     }
 
@@ -136,6 +155,7 @@ impl ContainerKind {
             ContainerKind::PhPaperNeutral => "pH Paper — near neutral (6–8)",
             ContainerKind::PhPaperBase => "pH Paper — basic (9–11)",
             ContainerKind::PhPaperStrongBase => "pH Paper — strong base (12–14)",
+            ContainerKind::SmokeProjector => "Smoke Projector",
         }
     }
 
@@ -158,6 +178,7 @@ impl ContainerKind {
             | ContainerKind::PhPaperNeutral
             | ContainerKind::PhPaperBase
             | ContainerKind::PhPaperStrongBase => (0.018, 0.004),
+            ContainerKind::SmokeProjector => (0.045, 0.15),
         }
     }
 
@@ -282,6 +303,59 @@ impl Container {
 /// the same player.
 #[derive(Component, Serialize, Deserialize)]
 pub struct HeldBy(#[entities] pub Entity);
+
+/// Four inventory cells, numbered left to right like a compact Minecraft
+/// hotbar. The relation lives on the item so despawning an item automatically
+/// frees its cell without maintaining a second entity list.
+pub const INVENTORY_SLOTS: u8 = 4;
+
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, MapEntities)]
+pub struct InventorySlot {
+    #[entities]
+    pub owner: Entity,
+    pub slot: u8,
+}
+
+/// The inventory cell currently represented by [`HeldBy`].
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectedInventorySlot(pub u8);
+
+/// Requests selection of one of the four number-key cells.
+#[derive(Message, Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct SelectInventorySlotRequested {
+    pub slot: u8,
+}
+
+/// Finds a free cell, preferring the selected one so picking something up with
+/// an empty hand immediately puts it in view.
+/// `reserved` is used by handlers that may accept several requests in one frame.
+/// Deferred commands do not appear in a query until the handler returns, so
+/// reservations prevent two valid requests from claiming the same free cell.
+pub fn free_inventory_slot(
+    owner: Entity,
+    preferred: u8,
+    inventory: &Query<&InventorySlot>,
+    reserved: &[(Entity, u8)],
+) -> Option<u8> {
+    let mut occupied = [false; INVENTORY_SLOTS as usize];
+    for entry in inventory.iter().filter(|entry| entry.owner == owner) {
+        if let Some(cell) = occupied.get_mut(entry.slot as usize) {
+            *cell = true;
+        }
+    }
+    for (_, slot) in reserved.iter().filter(|(reserved, _)| *reserved == owner) {
+        if let Some(cell) = occupied.get_mut(*slot as usize) {
+            *cell = true;
+        }
+    }
+    if preferred < INVENTORY_SLOTS && !occupied[preferred as usize] {
+        return Some(preferred);
+    }
+    occupied
+        .iter()
+        .position(|occupied| !occupied)
+        .map(|slot| slot as u8)
+}
 
 /// Sitting in this machine's container slot.
 #[derive(Component, Serialize, Deserialize)]
@@ -483,10 +557,13 @@ fn handle_pickup(
     mut requests: MessageReader<FromClient<InteractRequested>>,
     pickable: Pickable,
     held: Query<&HeldBy>,
+    inventory: Query<&InventorySlot>,
+    selected: Query<&SelectedInventorySlot>,
     stored: Query<&Stored>,
     chemists: Query<(Entity, &Chemist)>,
     bodies: Query<(&Body, &Bloodstream)>,
 ) {
+    let mut reserved = Vec::new();
     for request in requests.read() {
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
@@ -498,7 +575,10 @@ fn handle_pickup(
         {
             continue;
         }
-        if !pickable.contains(request.target) || held.contains(request.target) {
+        if !pickable.contains(request.target)
+            || held.contains(request.target)
+            || inventory.contains(request.target)
+        {
             continue;
         }
         // Belt and braces. A stored item is hidden, so the crosshair cannot
@@ -507,16 +587,97 @@ fn handle_pickup(
         if stored.contains(request.target) {
             continue;
         }
-        // One hand, one beaker. Anything else needs an inventory, which this
-        // game does not want.
-        if held.iter().any(|holder| holder.0 == player) {
+        let preferred = selected.get(player).map_or(0, |selected| selected.0);
+        let Some(slot) = free_inventory_slot(player, preferred, &inventory, &reserved) else {
+            continue;
+        };
+        reserved.push((player, slot));
+
+        let mut item = commands.entity(request.target);
+        item.remove::<InSlot>()
+            .remove::<InSlotB>()
+            .insert(InventorySlot {
+                owner: player,
+                slot,
+            });
+        if slot == preferred {
+            item.insert(HeldBy(player));
+        }
+    }
+}
+
+fn ensure_inventory_selection(
+    mut commands: Commands,
+    chemists: Query<Entity, (Added<Chemist>, Without<SelectedInventorySlot>)>,
+) {
+    for chemist in &chemists {
+        commands
+            .entity(chemist)
+            .insert(SelectedInventorySlot::default());
+    }
+}
+
+fn request_inventory_slot(
+    keys: Res<ButtonInput<KeyCode>>,
+    players: Query<&crate::interaction::InteractionMode, With<LocalPlayer>>,
+    mut requests: MessageWriter<SelectInventorySlotRequested>,
+) {
+    if !players.iter().any(|mode| mode.is_roaming()) {
+        return;
+    }
+    let selected = [
+        (KeyCode::Digit1, 0),
+        (KeyCode::Digit2, 1),
+        (KeyCode::Digit3, 2),
+        (KeyCode::Digit4, 3),
+    ]
+    .into_iter()
+    .find_map(|(key, slot)| keys.just_pressed(key).then_some(slot));
+    if let Some(slot) = selected {
+        requests.write(SelectInventorySlotRequested { slot });
+    }
+}
+
+fn handle_select_inventory_slot(
+    mut commands: Commands,
+    mut requests: MessageReader<FromClient<SelectInventorySlotRequested>>,
+    chemists: Query<(Entity, &Chemist)>,
+    bodies: Query<(&Body, &Bloodstream)>,
+    mut selected: Query<&mut SelectedInventorySlot>,
+    inventory: Query<(Entity, &InventorySlot, Option<&HeldBy>)>,
+) {
+    for request in requests.read() {
+        if request.message.slot >= INVENTORY_SLOTS {
             continue;
         }
-
-        commands
-            .entity(request.target)
-            .remove::<InSlot>()
-            .insert(HeldBy(player));
+        let Some(player) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
+        if bodies
+            .get(player)
+            .is_ok_and(|(body, blood)| body.0.collapsed || blood.0.incapacitated())
+        {
+            continue;
+        }
+        let Ok(mut current) = selected.get_mut(player) else {
+            continue;
+        };
+        if current.0 == request.message.slot {
+            continue;
+        }
+        current.0 = request.message.slot;
+        for (item, entry, held) in &inventory {
+            if entry.owner != player {
+                continue;
+            }
+            if entry.slot == current.0 {
+                if held.is_none() {
+                    commands.entity(item).insert(HeldBy(player));
+                }
+            } else if held.is_some() {
+                commands.entity(item).remove::<HeldBy>();
+            }
+        }
     }
 }
 
@@ -578,6 +739,7 @@ fn handle_drop(
             commands
                 .entity(container)
                 .remove::<HeldBy>()
+                .remove::<InventorySlot>()
                 .insert(Transform::from_translation(position));
             if contents.is_some_and(|contents| {
                 matches!(
@@ -622,6 +784,26 @@ fn carry_held_containers(
     for container in dropped.read() {
         if let Ok(mut entity) = commands.get_entity(container) {
             entity.remove::<ChildOf>();
+        }
+    }
+}
+
+/// Inventory items outside the selected cell exist and replicate, but remain
+/// out of the world raycast until selected. Four cells per chemist is tiny, so
+/// this direct reconciliation is cheaper and safer than coordinating several
+/// added/removed-component edge systems.
+fn sync_inventory_visibility(
+    mut commands: Commands,
+    inventory: Query<(Entity, Has<HeldBy>, Option<&Visibility>), With<InventorySlot>>,
+) {
+    for (item, active, visibility) in &inventory {
+        let wanted = if active {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if visibility.is_none_or(|current| *current != wanted) {
+            commands.entity(item).insert(wanted);
         }
     }
 }
@@ -700,6 +882,75 @@ fn update_liquid_visuals(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::SystemState;
+
+    #[test]
+    fn inventory_prefers_the_selected_cell_then_fills_to_four() {
+        let mut world = World::new();
+        let owner = world.spawn_empty().id();
+        let first = world.spawn(InventorySlot { owner, slot: 2 }).id();
+        let mut state: SystemState<Query<&InventorySlot>> = SystemState::new(&mut world);
+        let inventory = state.get(&world).unwrap();
+        assert_eq!(free_inventory_slot(owner, 0, &inventory, &[]), Some(0));
+        assert_eq!(
+            free_inventory_slot(owner, 0, &inventory, &[(owner, 0)]),
+            Some(1),
+            "two pickup requests in one frame must reserve different cells"
+        );
+        state.apply(&mut world);
+
+        world
+            .entity_mut(first)
+            .insert(InventorySlot { owner, slot: 0 });
+        world.spawn(InventorySlot { owner, slot: 1 });
+        world.spawn(InventorySlot { owner, slot: 2 });
+        let mut state: SystemState<Query<&InventorySlot>> = SystemState::new(&mut world);
+        let inventory = state.get(&world).unwrap();
+        assert_eq!(free_inventory_slot(owner, 0, &inventory, &[]), Some(3));
+        state.apply(&mut world);
+
+        world.spawn(InventorySlot { owner, slot: 3 });
+        let mut state: SystemState<Query<&InventorySlot>> = SystemState::new(&mut world);
+        let inventory = state.get(&world).unwrap();
+        assert_eq!(free_inventory_slot(owner, 0, &inventory, &[]), None);
+    }
+
+    #[test]
+    fn selecting_a_hotbar_cell_moves_the_single_active_hand() {
+        let mut app = App::new();
+        app.add_message::<FromClient<SelectInventorySlotRequested>>()
+            .add_systems(Update, handle_select_inventory_slot);
+        let owner = app
+            .world_mut()
+            .spawn((
+                Chemist {
+                    client: ClientId::Server,
+                },
+                SelectedInventorySlot(0),
+            ))
+            .id();
+        let first = app
+            .world_mut()
+            .spawn((InventorySlot { owner, slot: 0 }, HeldBy(owner)))
+            .id();
+        let second = app.world_mut().spawn(InventorySlot { owner, slot: 1 }).id();
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: SelectInventorySlotRequested { slot: 1 },
+        });
+
+        app.update();
+
+        assert!(app.world().get::<HeldBy>(first).is_none());
+        assert_eq!(
+            app.world().get::<HeldBy>(second).map(|held| held.0),
+            Some(owner)
+        );
+        assert_eq!(
+            app.world().get::<SelectedInventorySlot>(owner).unwrap().0,
+            1
+        );
+    }
 
     #[test]
     fn a_beaker_that_arrives_over_the_wire_gets_its_glass() {

@@ -94,6 +94,72 @@ pub struct ShiftRules {
     pub forecast_boost: f64,
 }
 
+/// The player-facing chemistry curriculum stage.
+///
+/// Order difficulty itself remains continuous through [`ShiftRules`]. These
+/// broad bands make that curve legible in the research book and give data
+/// audits stable save milestones to simulate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CareerStage {
+    Fundamentals,
+    Intermediate,
+    Advanced,
+    Expert,
+    Mastery,
+}
+
+impl CareerStage {
+    pub fn from_progress(successes: u32, known_recipes: usize, total_recipes: usize) -> Self {
+        if total_recipes > 0 && known_recipes >= total_recipes {
+            CareerStage::Mastery
+        } else {
+            match successes {
+                0..=9 => CareerStage::Fundamentals,
+                10..=29 => CareerStage::Intermediate,
+                30..=59 => CareerStage::Advanced,
+                _ => CareerStage::Expert,
+            }
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CareerStage::Fundamentals => "Fundamentals",
+            CareerStage::Intermediate => "Intermediate",
+            CareerStage::Advanced => "Advanced",
+            CareerStage::Expert => "Expert",
+            CareerStage::Mastery => "Mastery",
+        }
+    }
+
+    pub fn expectation(self) -> &'static str {
+        match self {
+            CareerStage::Fundamentals => "direct mixtures, safe handling, and first-line medicine",
+            CareerStage::Intermediate => {
+                "synthesized precursors, temperature control, catalysts, and grinder inputs"
+            }
+            CareerStage::Advanced => {
+                "multi-stage work, pH control, purity targets, and volatile compounds"
+            }
+            CareerStage::Expert => {
+                "tight operating ranges, rare sources, exact emergencies, and payloads"
+            }
+            CareerStage::Mastery => {
+                "efficient production, purification, and complete chemical coverage"
+            }
+        }
+    }
+
+    pub fn next_success_threshold(self) -> Option<u32> {
+        match self {
+            CareerStage::Fundamentals => Some(10),
+            CareerStage::Intermediate => Some(30),
+            CareerStage::Advanced => Some(60),
+            CareerStage::Expert | CareerStage::Mastery => None,
+        }
+    }
+}
+
 impl Default for ShiftRules {
     fn default() -> Self {
         ShiftRules {
@@ -1374,6 +1440,43 @@ mod tests {
     }
 
     #[test]
+    fn curriculum_stages_follow_the_authored_progression_curve() {
+        let total = 100;
+        assert_eq!(
+            CareerStage::from_progress(0, 3, total),
+            CareerStage::Fundamentals
+        );
+        assert_eq!(
+            CareerStage::from_progress(9, 20, total),
+            CareerStage::Fundamentals
+        );
+        assert_eq!(
+            CareerStage::from_progress(10, 20, total),
+            CareerStage::Intermediate
+        );
+        assert_eq!(
+            CareerStage::from_progress(29, 40, total),
+            CareerStage::Intermediate
+        );
+        assert_eq!(
+            CareerStage::from_progress(30, 40, total),
+            CareerStage::Advanced
+        );
+        assert_eq!(
+            CareerStage::from_progress(59, 70, total),
+            CareerStage::Advanced
+        );
+        assert_eq!(
+            CareerStage::from_progress(60, 70, total),
+            CareerStage::Expert
+        );
+        assert_eq!(
+            CareerStage::from_progress(2, total, total),
+            CareerStage::Mastery
+        );
+    }
+
+    #[test]
     fn the_ramp_only_ever_tightens() {
         let base = config();
         let mut previous = ShiftRules::for_tier(&base, &base.ramp, 0);
@@ -1672,6 +1775,72 @@ mod tests {
             demanded, expected,
             "every supported treatment family needs recurring service demand"
         );
+    }
+
+    #[test]
+    fn simulated_career_stages_always_have_reachable_required_work() {
+        let orders = config();
+        let chemistry = chem_sim::ChemData::from_ron(
+            include_str!("../../assets/data/chem.reagents.ron"),
+            include_str!("../../assets/data/chem.reactions.ron"),
+        )
+        .expect("chemistry data should parse");
+        let mut knowledge = Knowledge::new(&chemistry);
+        let saves = [
+            (0, 3, CareerStage::Fundamentals),
+            (10, 12, CareerStage::Intermediate),
+            (30, 24, CareerStage::Advanced),
+            (60, 36, CareerStage::Expert),
+            (80, chemistry.reactions.len(), CareerStage::Mastery),
+        ];
+        let mut previous_pool = 0;
+
+        for (successes, target_known, expected_stage) in saves {
+            while knowledge.known_count() < target_known {
+                let mut frontier = knowledge.frontier(&chemistry);
+                frontier.sort_by_key(|id| chemistry.reactions.get(*id).key.clone());
+                let next = frontier.first().copied().unwrap_or_else(|| {
+                    panic!(
+                        "stage simulation stalled at {} methods",
+                        knowledge.known_count()
+                    )
+                });
+                knowledge.learn(next);
+            }
+
+            assert_eq!(
+                CareerStage::from_progress(
+                    successes,
+                    knowledge.known_count(),
+                    chemistry.reactions.len()
+                ),
+                expected_stage
+            );
+            let makeable = knowledge.available_reagents(&chemistry);
+            let pool = orders
+                .requests
+                .iter()
+                .filter(|request| request.minimum_successes <= successes)
+                .filter(|request| request.minimum_recipes_known <= knowledge.known_count())
+                .filter(|request| {
+                    chemistry
+                        .reagents
+                        .id_of(&request.reagent)
+                        .is_some_and(|id| makeable.contains(&id))
+                })
+                .count();
+            assert!(
+                pool > 0,
+                "{} save has no required work",
+                expected_stage.label()
+            );
+            assert!(
+                pool >= previous_pool,
+                "request pool shrank from {previous_pool} to {pool} at {}",
+                expected_stage.label()
+            );
+            previous_pool = pool;
+        }
     }
 
     #[test]

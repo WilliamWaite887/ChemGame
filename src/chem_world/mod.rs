@@ -511,6 +511,7 @@ fn initialize_puddle_profile(
 /// Area extinguishers act once when released. A `ParamSet` separates reading
 /// the new carrier from mutating every puddle it reaches, preserving the
 /// source mixture for ordinary contact exposure afterward.
+#[allow(clippy::type_complexity)]
 fn extinguish_with_new_puddles(
     db: Res<ChemDb>,
     mut sets: ParamSet<(

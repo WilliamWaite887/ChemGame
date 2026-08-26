@@ -191,6 +191,39 @@ fn splashing_delivers_very_little() {
 }
 
 #[test]
+fn spraying_and_inhaling_are_distinct_controlled_routes() {
+    let data = fixture();
+    let inert = data.reagent("inert");
+    let absorbed = |route: Route| {
+        let mut vitals = Vitals::default();
+        let mut blood = Bloodstream::new();
+        let mut d = dose(&data, "inert", 10);
+        blood.receive(&mut d, route, &mut vitals, &data);
+        blood.blood.volume_of(inert)
+    };
+
+    assert_eq!(absorbed(Route::Touched), Units::from_f64(1.5));
+    assert_eq!(absorbed(Route::Sprayed), Units::from_f64(3.5));
+    assert_eq!(absorbed(Route::Inhaled), Units::whole(4));
+}
+
+#[test]
+fn inhalation_bypasses_skin_contact_effects() {
+    let data = fixture();
+    let mut vitals = Vitals::default();
+    let mut blood = Bloodstream::new();
+    let mut acid = dose(&data, "acid", 10);
+    blood.receive(&mut acid, Route::Inhaled, &mut vitals, &data);
+
+    assert_eq!(vitals.damage.burn, Units::ZERO);
+    assert_eq!(
+        blood.blood.volume_of(data.reagent("acid")),
+        Units::whole(4),
+        "the inhaled fraction still reaches blood"
+    );
+}
+
+#[test]
 fn contact_damage_scales_with_the_route() {
     let data = fixture();
 

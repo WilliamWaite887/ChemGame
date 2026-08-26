@@ -353,7 +353,15 @@ fn decide_door_state(
     crew: Query<&Transform, (With<CrewMember>, Without<Chemist>, Without<Door>)>,
 ) {
     for (door_transform, mut door, corroded) in &mut doors {
-        door.disabled_for = (door.disabled_for - time.delta_secs()).max(0.0);
+        // Taking `&mut Door` is not itself a change, but assigning the already
+        // settled `0.0` is. That used to mark every idle door changed every
+        // frame, which made every change-driven consumer (replication,
+        // collision reconciliation and, historically, door audio) run at the
+        // render frame rate. Only touch the component while the timer is
+        // genuinely counting down.
+        if door.disabled_for > 0.0 {
+            door.disabled_for = (door.disabled_for - time.delta_secs()).max(0.0);
+        }
         let near = |transform: &Transform| {
             transform.translation.distance(door_transform.translation) <= DOOR_PROXIMITY
         };
@@ -523,6 +531,32 @@ mod tests {
 
         app.update();
         assert!(!is_open(&app, door), "a door opened for nobody near it");
+    }
+
+    #[derive(Resource, Default)]
+    struct DoorChanges(usize);
+
+    fn count_door_changes(doors: Query<(), Changed<Door>>, mut changes: ResMut<DoorChanges>) {
+        changes.0 += doors.iter().count();
+    }
+
+    #[test]
+    fn a_settled_idle_door_is_not_marked_changed_every_frame() {
+        let mut app = test_app();
+        app.init_resource::<DoorChanges>()
+            .add_systems(Update, count_door_changes.after(decide_door_state));
+        door_at(&mut app, 0);
+
+        // First sight is legitimately Changed because the component is new.
+        app.update();
+        app.world_mut().resource_mut::<DoorChanges>().0 = 0;
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<DoorChanges>().0,
+            0,
+            "an idle door should not wake replication and presentation systems",
+        );
     }
 
     #[test]
