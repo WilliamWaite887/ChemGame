@@ -132,16 +132,19 @@ fn status_readout_text(blood: &ChemBloodstream) -> String {
     } else if blood.incapacitated() {
         lines.push("CHEMICALLY INCAPACITATED".to_string());
     }
-    lines.extend(blood.active_statuses().filter_map(|(kind, state)| {
-        (state.intensity > 0.0 && state.remaining > 0.0).then(|| {
-            format!(
-                "{}  x{:.1}  {:.0}s",
-                kind.label(),
-                state.intensity,
-                state.remaining.ceil(),
-            )
-        })
-    }));
+    lines.extend(
+        blood
+            .active_statuses()
+            .filter(|(_, state)| state.intensity > 0.0 && state.remaining > 0.0)
+            .map(|(kind, state)| {
+                format!(
+                    "{}  x{:.1}  {:.0}s",
+                    kind.label(),
+                    state.intensity,
+                    state.remaining.ceil(),
+                )
+            }),
+    );
     lines.join("\n")
 }
 

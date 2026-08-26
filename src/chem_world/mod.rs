@@ -1880,7 +1880,7 @@ mod tests {
     fn write_abuse(app: &mut App, actor: Entity, victim: Entity) {
         let dose = {
             let db = app.world().resource::<ChemDb>();
-            solution(&db, "sulphuric_acid", 10)
+            solution(db, "sulphuric_acid", 10)
         };
         app.world_mut().write_message(ChemicalExposure {
             actor: Some(actor),
@@ -2035,7 +2035,7 @@ mod tests {
             let (mut app, actor, victim) = abuse_app(false);
             let dose = {
                 let db = app.world().resource::<ChemDb>();
-                solution(&db, "sulphuric_acid", 10)
+                solution(db, "sulphuric_acid", 10)
             };
             app.world_mut().write_message(ChemicalExposure {
                 actor: Some(actor),
@@ -2094,7 +2094,7 @@ mod tests {
         let (mut app, actor, victim) = abuse_app(true);
         let dose = {
             let db = app.world().resource::<ChemDb>();
-            solution(&db, "dylovene", 5)
+            solution(db, "dylovene", 5)
         };
         app.world_mut().write_message(ChemicalExposure {
             actor: Some(actor),

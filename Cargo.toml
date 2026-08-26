@@ -63,3 +63,11 @@ quake-map = "0.6"
 
 [profile.dev]
 opt-level = 1
+
+# Untuned by default: LTO/codegen-units/strip all trade compile time for a
+# smaller, faster shipped binary — worth paying for a release build, not for
+# dev iteration (which stays on [profile.dev] above).
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

@@ -352,13 +352,13 @@ fn treat_opioid_habits(
     let treated: Vec<String> = crew
         .iter()
         .filter(|(_, blood)| blood.0.blood.volume_of(naloxone) >= Units::ONE)
-        .filter_map(|(member, _)| {
+        .filter(|(member, _)| {
             addictions
                 .0
                 .get(&member.name)
                 .is_some_and(|habit| is_opioid_habit(&habit.reagent))
-                .then(|| member.name.clone())
         })
+        .map(|(member, _)| member.name.clone())
         .collect();
     if treated.is_empty() {
         return;

@@ -1969,18 +1969,24 @@ mod tests {
 
     #[test]
     fn wayfinding_routes_cover_every_public_department() {
-        assert!(
-            ROUTE_WIDTH <= 0.13 && ROUTE_BORDER_WIDTH > ROUTE_WIDTH,
-            "floor paint should read as a narrow recessed inlay, not a UI ribbon",
-        );
-        assert!(
-            HUB_PORT_OUTER_RADIUS <= 1.20 && HUB_BORDER_OUTER_RADIUS <= 1.20,
-            "the public hub should stay subordinate to the corridor floor",
-        );
-        assert!(
-            ROUTE_PANEL_GAP > 0.0 && ROUTE_PANEL_GAP < ROUTE_PANEL_REPEAT * 0.1,
-            "route paint should pause subtly at deck-panel cadence",
-        );
+        const {
+            assert!(
+                ROUTE_WIDTH <= 0.13 && ROUTE_BORDER_WIDTH > ROUTE_WIDTH,
+                "floor paint should read as a narrow recessed inlay, not a UI ribbon",
+            );
+        }
+        const {
+            assert!(
+                HUB_PORT_OUTER_RADIUS <= 1.20 && HUB_BORDER_OUTER_RADIUS <= 1.20,
+                "the public hub should stay subordinate to the corridor floor",
+            );
+        }
+        const {
+            assert!(
+                ROUTE_PANEL_GAP > 0.0 && ROUTE_PANEL_GAP < ROUTE_PANEL_REPEAT * 0.1,
+                "route paint should pause subtly at deck-panel cadence",
+            );
+        }
         let departments: std::collections::HashSet<&str> = WAYFINDING_SPECS
             .iter()
             .map(|spec| spec.department)

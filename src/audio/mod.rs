@@ -285,7 +285,7 @@ struct SfxAssets {
     announce: Handle<AudioSource>,
     red_alert: Handle<AudioSource>,
     shuttle_called: Handle<AudioSource>,
-    /// Looped, not one-shot — see [`sync_radiation_alarm`].
+    /// One-shot alert, not looped — see [`sync_radiation_alarm`].
     radiation_alarm: Handle<AudioSource>,
     requisition_confirm: Handle<AudioSource>,
     ui_click: Handle<AudioSource>,
@@ -755,19 +755,28 @@ fn voice_parcel_drops(
     }
 }
 
-/// Marks the looping rad klaxon, so [`sync_radiation_alarm`] can tell whether
-/// one is already going — the same shape [`MachineLoop`] uses, minus the owner,
-/// because the lab has one alarm however many leaks are open at once.
+/// Marks the rad klaxon alert, so [`sync_radiation_alarm`] can tell whether
+/// one has already sounded for the leak that is currently open — the same
+/// shape [`MachineLoop`] uses, minus the owner, because the lab has one alarm
+/// however many leaks are open at once.
 #[derive(Component)]
 struct RadiationAlarm;
 
-/// Sounds the rad klaxon for exactly as long as something radiological is
-/// leaking into the lab, and cuts it the moment the last one expires.
+/// Sounds the rad klaxon once, the moment something radiological starts
+/// leaking into the lab, and clears the marker the moment the last one
+/// expires so a later, separate leak sounds its own alert.
+///
+/// One-shot rather than looping: a klaxon bed running for the entire length
+/// of a leak (which can run for minutes) reads as broken, not tense. Using
+/// `PlaybackSettings::ONCE` rather than `DESPAWN` is load-bearing — the
+/// finished-but-not-despawned entity keeps satisfying `playing.is_empty()`
+/// as false, which is what stops this system from re-triggering the alert
+/// every tick for as long as the hazard remains active.
 ///
 /// Presentation read straight off replicated state, so it needs no message and
 /// no authority gate: `ActiveHazard` is an entity on every peer (see its own
-/// doc), which means a guest working the same room hears the same alarm start
-/// and stop, and one who joins mid-leak walks into an alarm already running.
+/// doc), which means a guest working the same room hears the same alarm fire
+/// once and a leak already running when they join does not re-announce.
 ///
 /// Distinct from [`Sfx::RadiationPulse`], which is the geiger counter by the
 /// dispenser — positional, per metabolism tick, and about *where* the source
@@ -783,7 +792,7 @@ fn sync_radiation_alarm(
             commands.spawn((
                 RadiationAlarm,
                 AudioPlayer::new(assets.radiation_alarm.clone()),
-                PlaybackSettings::LOOP.with_volume(Volume::Linear(RADIATION_ALARM_VOLUME)),
+                PlaybackSettings::ONCE.with_volume(Volume::Linear(RADIATION_ALARM_VOLUME)),
                 crate::until_we_leave_the_lab(),
             ));
         }
@@ -976,8 +985,10 @@ fn tense_moment(shift: &Shift, active_crises: &Query<(), With<CrisisOrder>>) -> 
 
 /// How long the lab sits in near-silence between one ambience loop ending
 /// and the next starting. Rolled fresh for every gap, so the room does not
-/// settle into an audible rhythm.
-const AMBIENCE_GAP_SECONDS: (f32, f32) = (30.0, 90.0);
+/// settle into an audible rhythm. Widened from the original (30, 90) — that
+/// read as ambience firing back-to-back too often for a room people sit in
+/// for a whole shift.
+const AMBIENCE_GAP_SECONDS: (f32, f32) = (60.0, 180.0);
 
 /// The countdown to the next ambience pick, while nothing is playing.
 /// `None` both before the first gap has been rolled and while a track is
