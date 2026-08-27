@@ -1981,11 +1981,7 @@ mod tests {
             0,
         );
         assert!(app.world().resource::<RadioLog>().entries.is_empty());
-        assert!(app
-            .world()
-            .resource::<Shift>()
-            .department_standing
-            .is_empty());
+        assert!(app.world().resource::<Shift>().npc_standing.is_empty());
         assert_eq!(
             app.world().get::<CrewRoute>(victim).unwrap().phase,
             CrewPhase::Leaving,
@@ -2122,10 +2118,6 @@ mod tests {
             0
         );
         assert!(app.world().resource::<RadioLog>().entries.is_empty());
-        assert!(app
-            .world()
-            .resource::<Shift>()
-            .department_standing
-            .is_empty());
+        assert!(app.world().resource::<Shift>().npc_standing.is_empty());
     }
 }

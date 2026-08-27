@@ -162,7 +162,7 @@ pub struct ApplyHeldRequested {
     pub point: Option<Vec3>,
 }
 
-/// **R** — take a mouthful.
+/// **R** - drink.
 ///
 /// Deliberately its own key rather than sharing `E`. `E` already means "pick up
 /// or use", and a misfire that made you drink the plasma you were reaching for

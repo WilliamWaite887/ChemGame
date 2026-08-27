@@ -11,11 +11,37 @@
 //
 // Poppy is the dirtiest because bicaridine is the most valuable thing here,
 // and the only one the chemist may not yet know how to make.
+//
+// Nothing here arrives on a clock anymore. `items_per_delivery` only sizes
+// an impersonal, Cargo-funded crate (`shift::RequisitionKind::ProduceCrate`);
+// everything Botanist Ivy brings herself is one of the fixed `packs` below,
+// bought against her own personal standing.
 (
     courier: "Botanist Ivy",
-    first_delivery_delay: 70.0,
-    gap_seconds: (150.0, 240.0),
     items_per_delivery: (3, 5),
+    packs: [
+        (
+            id: "medicinal_starter",
+            label: "Medicinal Starter Pack",
+            blurb: "Ambrosia, Aloe, and Poppy — the everyday medical staples.",
+            cost: 3,
+            items: [("ambrosia", 2), ("aloe", 2), ("poppy", 1)],
+        ),
+        (
+            id: "service_favorites",
+            label: "Service Favorites Pack",
+            blurb: "Tobacco, Coffee Cherries, and Psychedelic Mushroom — what Service actually asks for.",
+            cost: 4,
+            items: [("tobacco", 2), ("coffee_cherries", 2), ("psychedelic_mushroom", 1)],
+        ),
+        (
+            id: "toxin_specimen",
+            label: "Toxin Specimen Pack",
+            blurb: "Destroying Angel, Curare Vine, and Death Berries — grown apart from everything else for a reason.",
+            cost: 6,
+            items: [("destroying_angel", 1), ("curare_vine", 1), ("death_berries", 1)],
+        ),
+    ],
     kinds: [
         (
             id: "ambrosia",

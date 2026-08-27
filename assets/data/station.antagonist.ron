@@ -323,4 +323,39 @@
             min_standing: 14, sting_chance: 0.40,
         ),
     ],
+
+    // The illicit shop, fully hidden — no panel, no visible number, ever.
+    // One per department, the same `role`-keyed drawing a request already
+    // uses, so a department with one roster member (Cargo, Engineering)
+    // resolves to that one person for free. No `incident_line`/`chaos_line`/
+    // `sting_chance`: a private purchase has no fictional reason to make
+    // noise the way fulfilling someone else's request does.
+    offer_chance: 0.35,
+    offers: [
+        (
+            reagent: "bath_salts", amounts: [6, 10], role: "Cargo",
+            pretext: "Got a spare batch riding along with the last shipment, if you're interested.",
+            min_standing: 4, cost: 4,
+        ),
+        (
+            reagent: "maintenance_tar", amounts: [8, 12], role: "Engineering",
+            pretext: "There's maintenance tar left over from the last job — yours if you want it.",
+            min_standing: 4, cost: 4,
+        ),
+        (
+            reagent: "fentanyl", amounts: [4, 6], role: "Medical",
+            pretext: "A few diverted units, off the books, if that's useful to you.",
+            min_standing: 6, cost: 5,
+        ),
+        (
+            reagent: "saturn_x", amounts: [8, 12], role: "Security",
+            pretext: "Confiscated stock that never made it into evidence. Yours, quietly.",
+            min_standing: 8, cost: 6,
+        ),
+        (
+            reagent: "blastoff", amounts: [10, 15], role: "Service",
+            pretext: "Someone left a stash behind the bar. Want it before it's noticed?",
+            min_standing: 4, cost: 4,
+        ),
+    ],
 )

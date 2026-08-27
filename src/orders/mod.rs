@@ -298,6 +298,19 @@ pub struct SupplyDef {
     pub large_every: usize,
     /// How far a requisition raises the target for one shift.
     pub requisition_glassware_bonus: usize,
+    /// Fixed-composition bundles the courier sells directly from his own
+    /// personal standing — see `shift::NpcRequisitionKind::SatoPack`. Empty
+    /// is legal, same reasoning as `produce::ProduceConfig.packs`: a
+    /// `station.orders.ron` written before this existed still parses, it
+    /// just has nothing personal to sell yet.
+    #[serde(default)]
+    pub personal_packs: Vec<GlasswarePackDef>,
+}
+
+impl SupplyDef {
+    pub fn pack(&self, id: GlasswarePackId) -> Option<&GlasswarePackDef> {
+        self.personal_packs.get(id.0 as usize)
+    }
 }
 
 impl Default for SupplyDef {
@@ -308,9 +321,28 @@ impl Default for SupplyDef {
             crate_max: 4,
             large_every: 3,
             requisition_glassware_bonus: 2,
+            personal_packs: Vec::new(),
         }
     }
 }
+
+/// One of Miner Sato's own glassware bundles, as authored: a fixed, known
+/// composition — what the shop lists is exactly what shows up at the
+/// counter, same as Botanist Ivy's packs.
+#[derive(Clone, Debug, Deserialize)]
+pub struct GlasswarePackDef {
+    pub id: String,
+    pub label: String,
+    pub blurb: String,
+    /// In Miner Sato's own standing — see `shift::NpcRequisitionKind`.
+    pub cost: i32,
+    pub beakers: usize,
+    pub large: usize,
+}
+
+/// An interned pack handle, the same shape as `produce::ProducePackId`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+pub struct GlasswarePackId(pub u32);
 
 /// A shift the station is expecting, and the requests it makes likelier.
 #[derive(Clone, Debug, Deserialize)]
@@ -747,6 +779,29 @@ impl Department {
             _ => None,
         }
     }
+
+    /// The named individuals on `station.crew.ron` who belong to this
+    /// department — hardcoded here the same way [`Department::from_role`]
+    /// hardcodes the five role strings, and for the same reason: content the
+    /// roster owns, mirrored rather than derived, so a roster edit that
+    /// forgets to update this list fails a test instead of quietly averaging
+    /// over the wrong headcount.
+    ///
+    /// This is what lets [`Shift::standing`] be an *average* of individual
+    /// standing without changing its own signature: every existing call site
+    /// that reads or writes a department's standing keeps working unchanged,
+    /// because the department number was always allowed to be "one number
+    /// covering everyone in it" — it just used to be stored that way instead
+    /// of derived.
+    pub fn members(self) -> &'static [&'static str] {
+        match self {
+            Department::Medical => &["Dr. Vance", "Nurse Okonkwo"],
+            Department::Security => &["Officer Reyes", "Warden Bex"],
+            Department::Engineering => &["Tech Lindqvist"],
+            Department::Cargo => &["Miner Sato"],
+            Department::Service => &["Botanist Ivy", "Chef Dubois"],
+        }
+    }
 }
 
 /// Supplies bought against a department's standing.
@@ -813,7 +868,19 @@ pub struct ShiftSnapshot {
 pub struct Shift {
     pub succeeded: u32,
     pub botched: u32,
-    pub department_standing: HashMap<Department, i32>,
+    /// One hidden standing per named crew member, keyed by
+    /// `station.crew.ron`'s `name` — not per department. [`Shift::standing`]
+    /// derives the department number the board shows as the rounded average
+    /// of whichever names are `Department::members()` for it.
+    ///
+    /// Two things move this, deliberately kept separate: a *broad* action
+    /// (an order delivered well or badly) goes through [`Shift::adjust`],
+    /// which fans the same delta out to every member of the department —
+    /// the whole department hears about a delivery even though it was
+    /// handed to one specific person. An *individual* action (a purchase
+    /// from one NPC's own shop) goes through [`Shift::adjust_npc`] and moves
+    /// only that one person.
+    pub npc_standing: HashMap<String, i32>,
     pub requisition: Requisition,
     /// The "not accepting requests" sign. Either chemist can flip it; while
     /// it's down, nobody new walks in — but whoever is already at the
@@ -846,7 +913,7 @@ impl Default for Shift {
         Shift {
             succeeded: 0,
             botched: 0,
-            department_standing: HashMap::new(),
+            npc_standing: HashMap::new(),
             requisition: Requisition::default(),
             // A brand new career starts closed; a resumed one restores its
             // saved sign state through `ProgressSave`. The player opens up
@@ -876,16 +943,39 @@ impl Default for Shift {
 pub const STANDING_FLOOR: i32 = -25;
 
 impl Shift {
+    /// Broad: a department-wide event (an order's outcome) moves every one
+    /// of its members by the same amount.
     pub fn adjust(&mut self, department: Department, delta: i32) {
-        let entry = self.department_standing.entry(department).or_insert(0);
+        for name in department.members() {
+            self.adjust_npc(name, delta);
+        }
+    }
+
+    /// The department number the standing board shows: the rounded average
+    /// of its members' individual standing. Departments with exactly one
+    /// member (Engineering, Cargo) reproduce that member's own value
+    /// exactly, by construction.
+    pub fn standing(&self, department: Department) -> i32 {
+        let members = department.members();
+        if members.is_empty() {
+            return 0;
+        }
+        let sum: i32 = members.iter().map(|name| self.npc_standing(name)).sum();
+        (sum as f32 / members.len() as f32).round() as i32
+    }
+
+    /// Individual: moves one named crew member's own hidden standing only —
+    /// what a personal shop purchase or other individually-targeted action
+    /// spends. Clamped at the same floor `adjust` respects.
+    pub fn adjust_npc(&mut self, name: &str, delta: i32) {
+        let entry = self.npc_standing.entry(name.to_string()).or_insert(0);
         *entry = (*entry + delta).max(STANDING_FLOOR);
     }
 
-    pub fn standing(&self, department: Department) -> i32 {
-        self.department_standing
-            .get(&department)
-            .copied()
-            .unwrap_or(0)
+    /// One named crew member's own hidden standing. `0` for anyone not yet
+    /// touched, same default `standing`/`adjust` have always used.
+    pub fn npc_standing(&self, name: &str) -> i32 {
+        self.npc_standing.get(name).copied().unwrap_or(0)
     }
 }
 
@@ -2881,6 +2971,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_roster_member_is_exactly_one_departments_own() {
+        // `Department::members()` mirrors `station.crew.ron` by hand, the
+        // same way `Department::from_role` already hardcodes the five role
+        // strings. A roster edit that forgets to update it would otherwise
+        // silently average over the wrong headcount instead of failing loud.
+        let roster: Vec<CrewDef> =
+            ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap();
+        let total_members: usize = Department::ALL.iter().map(|d| d.members().len()).sum();
+        let recognised = roster
+            .iter()
+            .filter(|member| Department::from_role(&member.role).is_some())
+            .count();
+        assert_eq!(
+            total_members, recognised,
+            "Department::members() headcount does not match the roster"
+        );
+        for member in &roster {
+            let Some(department) = Department::from_role(&member.role) else {
+                continue;
+            };
+            assert!(
+                department.members().contains(&member.name.as_str()),
+                "'{}' is on the roster as {:?} but missing from Department::members()",
+                member.name,
+                department
+            );
+        }
+    }
+
+    #[test]
+    fn adjust_moves_every_department_member_by_the_same_delta() {
+        let mut shift = Shift::default();
+        shift.adjust(Department::Medical, 6);
+        for name in Department::Medical.members() {
+            assert_eq!(shift.npc_standing(name), 6);
+        }
+        assert_eq!(shift.standing(Department::Medical), 6);
+    }
+
+    #[test]
+    fn adjust_npc_moves_only_that_one_member_and_the_department_average_follows() {
+        // The one genuinely new behaviour: an individual action (a personal
+        // shop purchase) must not bleed onto a colleague in the same
+        // department, but the displayed department number still reflects it.
+        let mut shift = Shift::default();
+        let [ivy, dubois] = Department::Service.members() else {
+            panic!("Service should have exactly two members");
+        };
+        shift.adjust_npc(ivy, -10);
+
+        assert_eq!(shift.npc_standing(ivy), -10);
+        assert_eq!(shift.npc_standing(dubois), 0, "Dubois must be untouched");
+        assert_eq!(
+            shift.standing(Department::Service),
+            -5,
+            "the shown average moves by half the individual delta"
+        );
+    }
+
     // -- where a sample vial lands ----------------------------------------
 
     #[test]
@@ -3105,6 +3255,32 @@ mod tests {
     fn station_orders() -> OrderConfig {
         ron::from_str(include_str!("../../assets/data/station.orders.ron"))
             .expect("station.orders.ron should parse")
+    }
+
+    #[test]
+    fn personal_glassware_packs_have_positive_cost_and_composition() {
+        // A typo here would sell a free pack, or one that arrives empty —
+        // mirrors `produce::every_pack_item_names_a_real_produce`'s guard.
+        let config = station_orders();
+        let mut ids = std::collections::HashSet::new();
+        assert!(
+            !config.supply.personal_packs.is_empty(),
+            "station.orders.ron sells no personal glassware packs"
+        );
+        for pack in &config.supply.personal_packs {
+            assert!(!pack.id.is_empty(), "a personal pack has no id");
+            assert!(
+                ids.insert(pack.id.clone()),
+                "duplicate personal pack id '{}'",
+                pack.id
+            );
+            assert!(pack.cost > 0, "pack '{}' costs nothing", pack.id);
+            assert!(
+                pack.beakers + pack.large > 0,
+                "pack '{}' contains nothing",
+                pack.id
+            );
+        }
     }
 
     #[test]

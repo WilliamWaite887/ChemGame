@@ -14,6 +14,7 @@ mod crisis;
 mod cult;
 mod door;
 mod ending;
+mod estrangement;
 /// Cargo's conveyor line. Map-driven, so it has nothing to build without one.
 #[cfg(feature = "trenchbroom")]
 mod freight;
@@ -141,6 +142,10 @@ fn main() {
             // antagonist thread, arming off `Department::Security`
             // standing rather than anything hidden.
             rogue_security::RogueSecurityPlugin,
+            // A burned personal relationship, gone bad the same way. After
+            // `antagonist`, whose `SecuritySuspicion` it feeds a bump into
+            // on estrangement.
+            estrangement::EstrangementPlugin,
             // The department minors: one per department, running in
             // every save regardless of which main antagonist was drawn.
             // `obsessed` is Service's, `rogue_security` above is

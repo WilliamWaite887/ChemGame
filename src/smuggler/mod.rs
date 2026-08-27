@@ -23,7 +23,8 @@ use serde::Deserialize;
 
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, HeldBy, InSlot, Stored};
-use crate::crew::CrewDef;
+use crate::crew::{spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewPosts, CrewRoute, NotResident};
+use crate::interaction::Interactable;
 use crate::net::is_authority;
 use crate::orders::{OrderResolved, Outcome, Shift, StationData};
 use crate::player::Chemist;
@@ -33,6 +34,15 @@ use crate::AppState;
 
 const INITIAL_GAP_SECONDS: (f32, f32) = (240.0, 420.0);
 
+/// How often, independent of the scripted-visit cadence, a chance is rolled
+/// to send the smuggler's identity visibly loitering between visits — pure
+/// atmosphere, no mechanical effect, matching `obsessed`'s own established
+/// "costs nothing mechanically" precedent for a minor's ambient beat. See
+/// [`loiter_smuggler`].
+const LOITER_CHECK_SECONDS: (f32, f32) = (90.0, 180.0);
+/// How long they stand there before wandering off.
+const LOITER_DWELL_SECONDS: f32 = 20.0;
+
 pub struct SmugglerPlugin;
 
 impl Plugin for SmugglerPlugin {
@@ -40,13 +50,18 @@ impl Plugin for SmugglerPlugin {
         app.add_plugins(RonAssetPlugin::<SmugglerScript>::new(&["smuggler.ron"]))
             .init_resource::<SmugglerProgress>()
             .add_systems(Startup, start_loading)
-            .add_systems(OnEnter(AppState::Playing), arm_spawner)
+            .add_systems(
+                OnEnter(AppState::Playing),
+                (arm_spawner, arm_loiter_spawner),
+            )
             .add_systems(
                 Update,
                 (
                     promote_script,
                     generate_smuggler_visit,
                     handle_smuggler_resolution,
+                    loiter_smuggler,
+                    expire_smuggler_loitering,
                 )
                     .chain()
                     .run_if(is_authority)
@@ -122,6 +137,102 @@ fn arm_spawner(mut commands: Commands) {
     shift::arm_first_visit(&mut commands, INITIAL_GAP_SECONDS, |timer| {
         SmugglerSpawner { timer }
     });
+}
+
+/// The clock between loitering appearances — its own, independent of
+/// [`SmugglerSpawner`]'s scripted-visit cadence.
+#[derive(Resource)]
+struct SmugglerLoiterSpawner {
+    timer: Timer,
+}
+
+fn arm_loiter_spawner(mut commands: Commands) {
+    shift::arm_first_visit(&mut commands, LOITER_CHECK_SECONDS, |timer| {
+        SmugglerLoiterSpawner { timer }
+    });
+}
+
+/// Marks the smuggler's identity while it is standing around doing nothing
+/// in particular. Ticked down by [`expire_smuggler_loitering`], which sends
+/// them on their way once it runs out — the same "walk_route despawns a
+/// Leaving crew member once their route finishes" cleanup every other
+/// visitor already gets for free, see `crew::walk_route`.
+#[derive(Component)]
+struct Loitering {
+    dwell: f32,
+}
+
+/// Sends the smuggler's identity to visibly loiter at an authored
+/// `"loiter"`-kind `crew_post` between scripted visits — a real behavioural
+/// tell an attentive player can learn to notice, entirely outside the
+/// antagonist/offer economy's own hidden invariant, since department minors
+/// were never bound by "no visible tell" in the first place: their whole
+/// fiction is already "you find out by looking," not "indistinguishable
+/// from legitimate."
+fn loiter_smuggler(
+    mut commands: Commands,
+    time: Res<Time>,
+    script: Option<Res<Script>>,
+    mut spawner: Option<ResMut<SmugglerLoiterSpawner>>,
+    crew_posts: Res<CrewPosts>,
+    shift: Res<Shift>,
+    present: Query<&CrewMember, NotResident>,
+) {
+    let (Some(script), Some(spawner)) = (script, spawner.as_mut()) else {
+        return;
+    };
+    if !shift.accepting_orders {
+        return;
+    }
+    if !spawner.timer.tick(time.delta()).just_finished() {
+        return;
+    }
+
+    let mut rng = rand::rng();
+    spawner.timer = Timer::from_seconds(
+        rng.random_range(LOITER_CHECK_SECONDS.0..=LOITER_CHECK_SECONDS.1),
+        TimerMode::Once,
+    );
+
+    // One of them is plenty — if a scripted visit already has them at the
+    // counter, skip this round rather than putting two of them in the room.
+    if present.iter().any(|member| member.name == script.name) {
+        return;
+    }
+    let Some(spot) = crew_posts.random_loiter() else {
+        return;
+    };
+
+    let def = CrewDef {
+        name: script.name.clone(),
+        role: script.role.clone(),
+        color: script.color,
+    };
+    let entity = spawn_crew_member(&mut commands, &def, 0.0);
+    commands.entity(entity).insert((
+        Loitering {
+            dwell: LOITER_DWELL_SECONDS,
+        },
+        Interactable::new("Cargo tech, killing time off the manifest."),
+    ));
+    // Overwrite the default counter-bound arrival route: they are here to be
+    // seen, not to be served.
+    commands.entity(entity).insert(CrewRoute::to(spot));
+}
+
+/// Ticks the loiter dwell down once they've actually arrived, and sends them
+/// off once it runs out.
+fn expire_smuggler_loitering(time: Res<Time>, mut loitering: Query<(&mut Loitering, &mut CrewRoute)>) {
+    let dt = time.delta_secs();
+    for (mut loiter, mut route) in &mut loitering {
+        if route.phase != CrewPhase::Waiting {
+            continue;
+        }
+        loiter.dwell -= dt;
+        if loiter.dwell <= 0.0 {
+            route.leave();
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -288,6 +399,60 @@ mod tests {
             .add_message::<OrderResolved>()
             .add_systems(Update, handle_smuggler_resolution);
         app
+    }
+
+    fn loiter_app() -> App {
+        let mut app = App::new();
+        let mut posts = CrewPosts::default();
+        posts.add_loiter(Vec3::new(3.0, 0.0, 4.0));
+        app.insert_resource(Script(script()))
+            .insert_resource(Shift {
+                accepting_orders: true,
+                ..Default::default()
+            })
+            .insert_resource(posts)
+            .insert_resource(SmugglerLoiterSpawner {
+                // Effectively due on the first real tick.
+                timer: Timer::from_seconds(0.01, TimerMode::Once),
+            })
+            .init_resource::<Time>()
+            .add_systems(Update, (loiter_smuggler, expire_smuggler_loitering).chain());
+        app
+    }
+
+    #[test]
+    fn a_loitering_visit_never_carries_an_order_or_wanders_off_before_its_dwell() {
+        let mut app = loiter_app();
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.1));
+        app.update();
+
+        let mut spawned = app
+            .world_mut()
+            .query::<(&Loitering, &CrewMember, Option<&crate::orders::Order>)>();
+        let (_, member, order) = spawned
+            .iter(app.world())
+            .next()
+            .expect("a loiterer should have spawned once the spot exists and the timer is due");
+        assert_eq!(member.name, app.world().resource::<Script>().0.name);
+        assert!(
+            order.is_none(),
+            "a loitering visit must never carry an Order — no mechanical hook at all"
+        );
+    }
+
+    #[test]
+    fn nothing_loiters_without_an_authored_spot() {
+        let mut app = loiter_app();
+        app.insert_resource(CrewPosts::default()); // no loiter spots authored
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.1));
+        app.update();
+
+        let mut spawned = app.world_mut().query::<&Loitering>();
+        assert_eq!(spawned.iter(app.world()).count(), 0);
     }
 
     /// A beaker sitting out on the counter with nobody holding it.

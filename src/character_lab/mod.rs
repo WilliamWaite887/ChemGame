@@ -117,7 +117,7 @@ struct TestDose(ReagentId);
 struct CharacterLabAssets {
     subject: Handle<WorldAsset>,
     animation_graph: Handle<AnimationGraph>,
-    animation_nodes: [AnimationNodeIndex; 7],
+    animation_nodes: [AnimationNodeIndex; 9],
 }
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,6 +135,15 @@ pub(crate) enum CharacterAnimation {
     Collapsed = 4,
     Walk = 5,
     WalkDrunk = 6,
+    /// A looping upper-body gesture for a resident standing at their own
+    /// work post. Never selected by [`desired_character_animation`] itself —
+    /// it has no bloodstream signal to key off — `crew::drive_crew_animation`
+    /// layers it on top of an otherwise-idle resident by comparing their own
+    /// position against `crew::CrewPosts`.
+    Working = 7,
+    /// A held pose for a resident at a communal relax spot's seat. Selected
+    /// the same way `Working` is — see its doc comment.
+    Sitting = 8,
 }
 
 fn load_character_lab_assets(
@@ -145,23 +154,28 @@ fn load_character_lab_assets(
     mut animation_graphs: ResMut<Assets<AnimationGraph>>,
 ) {
     // Blender exports Actions alphabetically: Collapsed, Idle, Sedated,
-    // Stimulated, Unsteady, Walk, WalkDrunk. Keep gameplay-facing node order
-    // explicit even though Blender stores the clips alphabetically.
+    // Sitting, Stimulated, Unsteady, Walk, WalkDrunk, Working. Keep
+    // gameplay-facing node order explicit even though Blender stores the
+    // clips alphabetically. Verified against the exported GLB's own
+    // `animations` array, not guessed — see the station-kit/Bevy-postdates-
+    // cutoff memory's rule for this exact pipeline.
     let (animation_graph, animation_nodes) = AnimationGraph::from_clips([
-        asset_server.load(GltfAssetLabel::Animation(1).from_asset(SUBJECT_MODEL)),
-        asset_server.load(GltfAssetLabel::Animation(3).from_asset(SUBJECT_MODEL)),
-        asset_server.load(GltfAssetLabel::Animation(2).from_asset(SUBJECT_MODEL)),
-        asset_server.load(GltfAssetLabel::Animation(4).from_asset(SUBJECT_MODEL)),
-        asset_server.load(GltfAssetLabel::Animation(0).from_asset(SUBJECT_MODEL)),
-        asset_server.load(GltfAssetLabel::Animation(5).from_asset(SUBJECT_MODEL)),
-        asset_server.load(GltfAssetLabel::Animation(6).from_asset(SUBJECT_MODEL)),
+        asset_server.load(GltfAssetLabel::Animation(1).from_asset(SUBJECT_MODEL)), // Idle
+        asset_server.load(GltfAssetLabel::Animation(4).from_asset(SUBJECT_MODEL)), // Stimulated
+        asset_server.load(GltfAssetLabel::Animation(2).from_asset(SUBJECT_MODEL)), // Sedated
+        asset_server.load(GltfAssetLabel::Animation(5).from_asset(SUBJECT_MODEL)), // Unsteady
+        asset_server.load(GltfAssetLabel::Animation(0).from_asset(SUBJECT_MODEL)), // Collapsed
+        asset_server.load(GltfAssetLabel::Animation(6).from_asset(SUBJECT_MODEL)), // Walk
+        asset_server.load(GltfAssetLabel::Animation(7).from_asset(SUBJECT_MODEL)), // WalkDrunk
+        asset_server.load(GltfAssetLabel::Animation(8).from_asset(SUBJECT_MODEL)), // Working
+        asset_server.load(GltfAssetLabel::Animation(3).from_asset(SUBJECT_MODEL)), // Sitting
     ]);
     commands.insert_resource(CharacterLabAssets {
         subject: asset_server.load(GltfAssetLabel::Scene(0).from_asset(SUBJECT_MODEL)),
         animation_graph: animation_graphs.add(animation_graph),
         animation_nodes: animation_nodes
             .try_into()
-            .expect("the character animation graph has exactly seven clips"),
+            .expect("the character animation graph has exactly nine clips"),
     });
 
     // A deliberately plain local-only plinth for the sample row. The bottles
@@ -444,6 +458,12 @@ pub(crate) fn character_animation_speed(
         CharacterAnimation::WalkDrunk => {
             (0.88 - blood.status(StatusKind::Drunk).intensity.min(3.0) * 0.06).max(0.58)
         }
+        // Neither is ever selected while a chemical status would otherwise
+        // apply — `drive_crew_animation` only reaches for them once
+        // `desired_character_animation` has already settled on `Idle` — so
+        // there is no bloodstream signal to scale either by.
+        CharacterAnimation::Working => 1.0,
+        CharacterAnimation::Sitting => 1.0,
     }
 }
 
@@ -517,9 +537,9 @@ fn pace_locomotion_previews(
     }
 }
 
-fn locomotion_facing(direction: f32) -> Quat {
     // Blender's -Y front becomes +Z in the exported glTF. Rotate that axis
     // toward the lane velocity instead of assuming Bevy's conventional -Z.
+fn locomotion_facing(direction: f32) -> Quat {
     Quat::from_rotation_y(if direction > 0.0 {
         std::f32::consts::FRAC_PI_2
     } else {
@@ -593,10 +613,12 @@ mod tests {
                 "Collapsed",
                 "Idle",
                 "Sedated",
+                "Sitting",
                 "Stimulated",
                 "Unsteady",
                 "Walk",
                 "WalkDrunk",
+                "Working",
             ]
         );
         assert_eq!(gltf.skins().count(), 1, "the runtime mesh must stay rigged");
@@ -706,7 +728,7 @@ mod tests {
             assert_eq!(gltf.skins().count(), 1, "{department} lost the shared rig");
             assert_eq!(
                 gltf.animations().count(),
-                7,
+                9,
                 "{department} lost authored actions"
             );
             let nodes: Vec<_> = gltf.nodes().filter_map(|node| node.name()).collect();

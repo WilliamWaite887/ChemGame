@@ -35,13 +35,16 @@ use crate::machines::{
     SetHeaterPower, SetTargetTemperature, TakeRequested, Thermostat, HPLC_RECIPE_REQUIREMENT,
     LOCKER_CAPACITY, TEMPERATURE_MARKS, TEMPERATURE_MAX, TEMPERATURE_MIN,
 };
-use crate::orders::{reference_category, Department, DevelopmentOrder, Order, Shift};
+use crate::orders::{
+    reference_category, Department, DevelopmentOrder, GlasswarePackId, Order, Shift, StationData,
+};
 use crate::player::LocalPlayer;
 use crate::produce::{ProduceCatalog, ProduceId};
 use crate::radio::{RadioChannel, RadioEntry, RadioLog, RadioPriority, RadioTone};
 use crate::shift::{
-    can_afford, can_call_it, shift_report, CallItAShift, CareerStage, OpenUpAgain, RequisitionKind,
-    RequisitionRequested, ShiftReport, ToggleAcceptingOrders,
+    can_afford, can_call_it, npc_can_afford, shift_report, CallItAShift, CareerStage,
+    NpcRequisitionKind, NpcRequisitionRequested, OpenUpAgain, RequisitionKind,
+    RequisitionRequested, ShiftReport, ToggleAcceptingOrders, OVERCLOCK_COST,
 };
 use crate::AppState;
 
@@ -177,14 +180,16 @@ enum PanelAction {
     CallItAShift,
     OpenUpAgain,
     Requisition(RequisitionKind),
+    NpcPack(NpcRequisitionKind),
     ShowBoardTab(BoardTab),
     Close,
 }
 
-/// Drawn on a [`PanelAction::Requisition`] button dimmed for insufficient
-/// standing — see `draw_department_shop`. Read back at click time so a click
-/// on a dead button plays [`Sfx::UiRefused`] and sends nothing, instead of
-/// silently mailing a request the server was always going to reject.
+/// Drawn on a [`PanelAction::Requisition`] or [`PanelAction::NpcPack`] button
+/// dimmed for insufficient standing — see `draw_department_shop`/
+/// `draw_npc_shop`. Read back at click time so a click on a dead button
+/// plays [`Sfx::UiRefused`] and sends nothing, instead of silently mailing a
+/// request the server was always going to reject.
 #[derive(Component)]
 struct Refused;
 
@@ -367,6 +372,13 @@ struct PanelSignature {
     /// The standing board draws entirely from these, so without them its
     /// panel would freeze on whatever it happened to show first.
     department_standing: Vec<(Department, i32)>,
+    /// Botanist Ivy's own individual standing — what her personal shop's
+    /// affordability dimming reads. Almost always moves in step with
+    /// `department_standing`'s Service entry (an individual delta moves that
+    /// department's shown average too), but tracked explicitly rather than
+    /// relying on that correlation, the same way `arc` is tracked separately
+    /// from the plot number it is derived from.
+    ivy_standing: i32,
     accepting_orders: bool,
     /// Which of the board's two tabs is open — same rationale as
     /// `book_category`: switching tab changes what the panel shows, so it
@@ -441,6 +453,7 @@ impl Default for PanelSignature {
             book_page: 0,
             book_recipe: None,
             department_standing: Vec::new(),
+            ivy_standing: i32::MIN,
             // Neither `true` nor `false` alone is guaranteed to differ from
             // the first real frame's value, so the vector above carries the
             // "never compared yet" signal on its own — this field just needs
@@ -603,6 +616,11 @@ struct StorageView<'w, 's> {
 #[derive(SystemParam)]
 struct BoardView<'w, 's> {
     shift: Res<'w, Shift>,
+    /// Sato's/Lindqvist's own personal-pack catalogs live off `StationData.
+    /// config.supply`, not a promoted resource of their own the way produce
+    /// packs are — folded in here for the same "one off the ceiling" reason
+    /// `radio`/`tab` already are.
+    station: Option<Res<'w, StationData>>,
     /// Crew who walked in and are still holding an order. Residents are
     /// filtered out because they live here: they are never what a shift is
     /// waiting on, and counting them would mean the sign could never come
@@ -835,6 +853,7 @@ fn sync_panel(
             .into_iter()
             .map(|dept| (dept, shift.standing(dept)))
             .collect(),
+        ivy_standing: shift.npc_standing("Botanist Ivy"),
         accepting_orders: shift.accepting_orders,
         board_tab: *board.tab,
         radio_sequence: board.radio.entries.back().map(|entry| entry.sequence),
@@ -989,6 +1008,8 @@ fn sync_panel(
                                 &board.radio,
                                 *board.tab,
                                 radio_scroll,
+                                catalog.as_deref(),
+                                board.station.as_deref(),
                             );
                         }
                         MachineKind::ReactionChamber => {
@@ -1020,6 +1041,7 @@ fn sync_panel(
 /// One panel rather than a modal, exactly like the old shift board: this is
 /// per-player `InteractionMode`, and a modal would trap one chemist on a
 /// summary screen while the other was still working the counter.
+#[allow(clippy::too_many_arguments)]
 fn standing_board_body(
     panel: &mut ChildSpawnerCommands,
     shift: &Shift,
@@ -1028,6 +1050,8 @@ fn standing_board_body(
     radio: &RadioLog,
     tab: BoardTab,
     radio_scroll: RadioScrollState,
+    catalog: Option<&ProduceCatalog>,
+    station: Option<&StationData>,
 ) {
     // The campaign notice goes above everything else, on both tabs, because
     // once there is one it is the most important thing on the board — and
@@ -1079,6 +1103,65 @@ fn standing_board_body(
                 ))
                 .with_children(|scroll| {
                     draw_department_shop(scroll, shift);
+                    if let Some(catalog) = catalog {
+                        let items: Vec<_> = catalog
+                            .packs()
+                            .iter()
+                            .map(|pack| {
+                                (
+                                    pack.label.clone(),
+                                    pack.blurb.clone(),
+                                    pack.cost,
+                                    PanelAction::NpcPack(NpcRequisitionKind::IvyPack(pack.id)),
+                                )
+                            })
+                            .collect();
+                        draw_seller_section(
+                            scroll,
+                            "Botanist Ivy",
+                            shift.npc_standing("Botanist Ivy"),
+                            "Sells themed packs off her own trust, not the department's.",
+                            &items,
+                        );
+                    }
+                    if let Some(station) = station {
+                        let items: Vec<_> = station
+                            .config
+                            .supply
+                            .personal_packs
+                            .iter()
+                            .enumerate()
+                            .map(|(index, pack)| {
+                                (
+                                    pack.label.clone(),
+                                    pack.blurb.clone(),
+                                    pack.cost,
+                                    PanelAction::NpcPack(NpcRequisitionKind::SatoPack(
+                                        GlasswarePackId(index as u32),
+                                    )),
+                                )
+                            })
+                            .collect();
+                        draw_seller_section(
+                            scroll,
+                            "Miner Sato",
+                            shift.npc_standing("Miner Sato"),
+                            "Sells glassware directly, off his own trust — faster than waiting on the deficit check.",
+                            &items,
+                        );
+                    }
+                    draw_seller_section(
+                        scroll,
+                        "Tech Lindqvist",
+                        shift.npc_standing("Tech Lindqvist"),
+                        "Sells a coil that overclocks the Reaction Chamber — faster, not safer.",
+                        &[(
+                            "Overclock Coil".to_string(),
+                            "Temporarily doubles the chamber's heating rate. Repurchasing tops up charges.".to_string(),
+                            OVERCLOCK_COST,
+                            PanelAction::NpcPack(NpcRequisitionKind::LindqvistOverclock),
+                        )],
+                    );
                 });
         }
         BoardTab::Radio => {
@@ -1233,6 +1316,51 @@ fn draw_department_shop(panel: &mut ChildSpawnerCommands, shift: &Shift) {
                 TEXT_DIM,
             ));
         }
+    }
+}
+
+/// One NPC's own personal shop — the individual-standing sibling of
+/// [`draw_department_shop`], spending [`Shift::npc_standing`] rather than a
+/// department average. Phase 1 has exactly one seller; a second one
+/// generalizes this into a loop the same way `draw_department_shop` loops
+/// `Department::ALL`, rather than hardcoding Ivy by name here.
+/// One NPC's own personal shop — the individual-standing sibling of
+/// [`draw_department_shop`], spending [`Shift::npc_standing`] rather than a
+/// department average. Generic over the seller: `items` is already resolved
+/// to `(label, blurb, cost, action)` tuples by the caller, since each
+/// seller's own catalog (Ivy's produce packs, Sato's glassware packs,
+/// Lindqvist's single tool) has a genuinely different payload shape with no
+/// shared cross-seller RON schema.
+fn draw_seller_section(
+    panel: &mut ChildSpawnerCommands,
+    seller_name: &str,
+    seller_standing: i32,
+    seller_blurb: &str,
+    items: &[(String, String, i32, PanelAction)],
+) {
+    if items.is_empty() {
+        return;
+    }
+
+    panel.spawn(label(
+        format!("{seller_name}  ·  {seller_standing:+} standing"),
+        15.0,
+        TEXT,
+    ));
+    panel.spawn(label(seller_blurb, 12.0, TEXT_DIM));
+    panel.spawn(wrap_row()).with_children(|row| {
+        for (item_label, _, cost, action) in items {
+            let available = npc_can_afford(seller_standing, *cost);
+            let caption = format!("{item_label} ({cost})");
+            let mut entity = row.spawn(button(caption, action.clone()));
+            // Same dead-button convention `draw_department_shop` uses.
+            if !available {
+                entity.insert((BackgroundColor(Color::srgb(0.11, 0.12, 0.14)), Refused));
+            }
+        }
+    });
+    for (item_label, blurb, _, _) in items {
+        panel.spawn(label(format!("  {item_label} — {blurb}"), 12.0, TEXT_DIM));
     }
 }
 
@@ -6156,6 +6284,7 @@ struct PanelMessages<'w> {
     call_it: MessageWriter<'w, CallItAShift>,
     open_up: MessageWriter<'w, OpenUpAgain>,
     requisition: MessageWriter<'w, RequisitionRequested>,
+    npc_requisition: MessageWriter<'w, NpcRequisitionRequested>,
     leave_machine: MessageWriter<'w, LeaveMachineRequested>,
     unlock_all: MessageWriter<'w, UnlockAllRequested>,
     buy_hint: MessageWriter<'w, BuyHintRequested>,
@@ -6364,6 +6493,19 @@ fn handle_panel_clicks(
                     out.play.write(PlaySfx(Sfx::UiRefused));
                 } else {
                     out.requisition.write(RequisitionRequested {
+                        board: machine,
+                        kind: *kind,
+                    });
+                    out.play.write(PlaySfx(Sfx::RequisitionConfirm));
+                }
+            }
+            // The individual-NPC sibling of `Requisition`, same dead-button
+            // convention (`draw_npc_shop` is what dims it).
+            PanelAction::NpcPack(kind) => {
+                if refused.contains(entity) {
+                    out.play.write(PlaySfx(Sfx::UiRefused));
+                } else {
+                    out.npc_requisition.write(NpcRequisitionRequested {
                         board: machine,
                         kind: *kind,
                     });

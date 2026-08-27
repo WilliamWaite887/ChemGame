@@ -42,7 +42,7 @@ use bevy_trenchbroom::prelude::*;
 
 use crate::AppState;
 
-use crate::crew::Departments;
+use crate::crew::{CrewPosts, Departments};
 
 use super::{
     machine_kind_named, Bounds, CrisisSpots, DoorSpots, FloorProfile, LabLight, MachineSpots,
@@ -250,6 +250,7 @@ fn collect_loaded_map(
     walkables: Query<(&Walkable, &WalkableFootprints)>,
     machine_spots: Query<(&MachineSpot, &Transform)>,
     department_spots: Query<(&DepartmentSpot, &Transform)>,
+    crew_post_spots: Query<(&CrewPost, &Transform)>,
     crisis_spots: Query<(&CrisisSpot, &Transform)>,
     door_spots: Query<(&DoorSpot, &Transform)>,
     point_lights: Query<&PointLight>,
@@ -263,6 +264,7 @@ fn collect_loaded_map(
     let mut areas = WalkableAreas::default();
     let mut machines = MachineSpots::default();
     let mut departments = Departments::default();
+    let mut crew_posts = CrewPosts::default();
     let mut crises = CrisisSpots::default();
     let mut doors = DoorSpots::default();
 
@@ -317,6 +319,22 @@ fn collect_loaded_map(
             }
         }
 
+        if let Ok((spot, transform)) = crew_post_spots.get(entity) {
+            let occupant = spot.occupant.trim();
+            match spot.kind.trim() {
+                "work" => {
+                    if occupant.is_empty() {
+                        warn!("crew_post kind=work has no occupant");
+                    } else {
+                        crew_posts.set_work(occupant.to_string(), transform.translation);
+                    }
+                }
+                "relax" => crew_posts.add_relax(transform.translation),
+                "loiter" => crew_posts.add_loiter(transform.translation),
+                other => warn!("crew_post has unknown kind '{other}'"),
+            }
+        }
+
         if let Ok((spot, transform)) = crisis_spots.get(entity) {
             let id = spot.id.trim();
             if id.is_empty() {
@@ -354,6 +372,7 @@ fn collect_loaded_map(
     commands.insert_resource(areas);
     commands.insert_resource(machines);
     commands.insert_resource(departments);
+    commands.insert_resource(crew_posts);
     commands.insert_resource(crises);
     commands.insert_resource(doors);
 }
@@ -381,6 +400,32 @@ pub struct DoorSpot {
 pub struct CrisisSpot {
     /// Stable semantic key consumed by gameplay data, not display text.
     pub id: String,
+}
+
+/// A personal or communal spot an ambient resident can be sent to, replacing
+/// the one-shared-point-per-department model [`DepartmentSpot`] alone gives.
+///
+/// `kind` is `"work"`, `"relax"` or `"loiter"`, the same single-marker/
+/// kind-tag convention [`DecorationSpot`] already uses rather than several
+/// marker types. A `"work"` post names its `occupant` — a `station.crew.ron`
+/// *name*, not a role, since the whole point is to give each individual
+/// their own place instead of everyone in a department stacking on one
+/// point. A `"relax"` spot is communal and leaves `occupant` empty: any idle
+/// resident may be sent to one, not just its author's intended owner. A
+/// `"loiter"` spot is kept as its own pool rather than folded into
+/// `"relax"` — see `crew::CrewPosts` for why — and is where a department
+/// minor's off-roster identity (`smuggler::loiter_smuggler`) visibly hangs
+/// around between scripted visits.
+#[point_class(
+    classname("crew_post"),
+    base(Transform),
+    color(64 200 160),
+    size(-16 -16 0, 16 16 48),
+)]
+#[derive(Debug, Clone, Default)]
+pub struct CrewPost {
+    pub occupant: String,
+    pub kind: String,
 }
 
 /// A fixed world-space station plaque.
@@ -1852,6 +1897,7 @@ impl Plugin for LabTrenchBroomPlugin {
             .register_type::<ChemistStart>()
             .register_type::<Walkable>()
             .register_type::<DepartmentSpot>()
+            .register_type::<CrewPost>()
             .register_type::<DepartmentDressing>()
             .register_type::<DecorationSpot>()
             .register_type::<ConveyorSpot>()

@@ -12,16 +12,17 @@ use chem_sim::{Kelvin, ReactionActivation, ReagentId, Solution, Units};
 use serde::{Deserialize, Serialize};
 
 use crate::audio::{EmitWorldSfx, Sfx};
+use crate::body::ApplyHeldRequested;
 use crate::chem_data::ChemDb;
 use crate::containers::{
     free_inventory_slot, set_down_lift, spawn_container, Container, ContainerKind, HeldBy, InSlot,
     InSlotB, InventorySlot, SelectedInventorySlot, Stored,
 };
 use crate::interaction::{
-    InteractRequested, InteractionMode, LeaveMachineRequested, MachineOpened,
+    InteractRequested, Interactable, InteractionMode, LeaveMachineRequested, MachineOpened,
 };
 use crate::knowledge::Knowledge;
-use crate::lab::Solid;
+use crate::lab::{DeliveryStation, Solid};
 use crate::net::is_authority;
 use crate::player::Chemist;
 use crate::produce::{Produce, ProduceCatalog, ProduceId};
@@ -61,32 +62,41 @@ impl Plugin for MachinePlugin {
             .add_systems(
                 Update,
                 (
-                    recover_from_emp,
-                    handle_machine_interact,
-                    handle_leave_machine,
-                    handle_dispense,
-                    handle_agitate,
-                    handle_buffer_transfer,
-                    handle_package,
-                    handle_analyze,
-                    handle_purify,
-                    handle_grind,
-                    handle_eject,
-                    handle_take,
-                    handle_empty,
-                    handle_thermostat_controls,
-                    apply_thermostats,
-                    cool_to_ambient,
-                    // Last: everything above is a change to a beaker, and this
-                    // is what carries whatever that change *started* forward
-                    // in time. Running it first would step a batch before the
-                    // frame's pours had gone in.
-                    tick_reactions,
+                    (
+                        recover_from_emp,
+                        handle_machine_interact,
+                        handle_leave_machine,
+                        handle_dispense,
+                        handle_agitate,
+                        handle_buffer_transfer,
+                        handle_package,
+                        handle_analyze,
+                        handle_purify,
+                        handle_grind,
+                        handle_eject,
+                        handle_take,
+                        handle_empty,
+                        handle_thermostat_controls,
+                        handle_overclock_use,
+                        tick_overclock,
+                        apply_thermostats,
+                        cool_to_ambient,
+                        // Last: everything above is a change to a beaker, and this
+                        // is what carries whatever that change *started* forward
+                        // in time. Running it first would step a batch before the
+                        // frame's pours had gone in.
+                        tick_reactions,
+                    )
+                        .chain()
+                        // Authority: server, listen server, or singleplayer.
+                        .run_if(is_authority),
+                    // Presentation, everywhere: `Overclock` is a pickable prop
+                    // that spawns mid-game, not a map-fixture machine, so it
+                    // needs the same spawn(authority)/dress(everywhere) split
+                    // every other pickable thing in the lab already uses.
+                    dress_overclock,
                 )
-                    .chain()
-                    .run_if(in_state(AppState::Playing))
-                    // Authority: server, listen server, or singleplayer.
-                    .run_if(is_authority),
+                    .run_if(in_state(AppState::Playing)),
             );
     }
 }
@@ -200,6 +210,43 @@ const CHAMBER_RATE: f32 = 0.18;
 /// Mixing Chamber — but not forever. This is the clock a chemist is racing.
 const AMBIENT_RATE: f32 = 0.06;
 
+/// A held, rechargeable tool bought from Tech Lindqvist that temporarily
+/// pushes a Reaction Chamber's heating rate. Composes with [`HeldBy`]
+/// without being a [`Container`] — it holds no `Solution` and wants none of
+/// `ContainerKind`'s dose semantics — mirroring `rogue_security::Deterrent`
+/// exactly. Replicated: nothing about who holds a tool is secret, unlike an
+/// illicit visit.
+#[derive(Component, Clone, Copy, Serialize, Deserialize)]
+pub struct Overclock {
+    pub charges: u32,
+}
+
+/// How many charges one purchase is worth — matches `rogue_security::
+/// DETERRENT_CHARGES`. Repurchasing tops an existing tool up by this amount
+/// rather than spawning a second one; see `shift::apply_npc_requisition`'s
+/// `LindqvistOverclock` arm, the only caller of [`spawn_overclock`].
+pub const OVERCLOCK_CHARGES: u32 = 2;
+
+/// Marks a Reaction Chamber currently running hot off a spent [`Overclock`]
+/// charge. Replicated for the same reason [`Thermostat`] is: both chemists
+/// need to see a chamber is currently boosted, not just whoever applied it.
+#[derive(Component, Clone, Copy, Serialize, Deserialize)]
+pub struct Overclocked {
+    pub multiplier: f32,
+    pub remaining: f32,
+}
+
+/// How much [`CHAMBER_RATE`] is multiplied by while [`Overclocked`] is
+/// active. `CHAMBER_RATE`'s own doc comment notes that at 0.55 "the whole
+/// thing was over in under two seconds and the machine may as well have
+/// been a button" — deliberately pushed toward that danger zone, not away
+/// from it: faster throughput, less warning before a self-heating batch
+/// crosses its own detonation threshold.
+const OVERCLOCK_MULTIPLIER: f32 = 2.5;
+/// How long one activation lasts before the chamber falls back to its
+/// normal rate.
+const OVERCLOCK_DURATION_SECONDS: f32 = 20.0;
+
 /// Timed chemistry advances in deterministic tenths of a second.
 ///
 /// [`Units`] stores hundredths. Feeding a rated reaction arbitrary render-frame
@@ -246,6 +293,106 @@ fn recover_from_emp(time: Res<Time>, mut machines: Query<&mut Machine>) {
         }
         machine.disabled_for = (machine.disabled_for - time.delta_secs()).max(0.0);
         machine.in_use_by = None;
+    }
+}
+
+/// Counts an active [`Overclocked`] boost down and removes it once spent.
+fn tick_overclock(mut commands: Commands, time: Res<Time>, mut chambers: Query<(Entity, &mut Overclocked)>) {
+    for (entity, mut overclocked) in &mut chambers {
+        overclocked.remaining -= time.delta_secs();
+        if overclocked.remaining <= 0.0 {
+            commands.entity(entity).remove::<Overclocked>();
+        }
+    }
+}
+
+/// Checks the kind, not just that the entity exists — mirrors `shift::
+/// is_board`'s "don't just trust the entity id" idiom.
+fn is_reaction_chamber(entity: Entity, chambers: &Query<&Machine>) -> bool {
+    chambers
+        .get(entity)
+        .is_ok_and(|machine| machine.kind == MachineKind::ReactionChamber)
+}
+
+/// Applies a held [`Overclock`] to a Reaction Chamber. An independent reader
+/// of `ApplyHeldRequested`, the same message the syringe's own F-key
+/// dispatch reads — mirrors `rogue_security::handle_deterrent_use` exactly,
+/// needing no change to `body::handle_apply_held` at all.
+fn handle_overclock_use(
+    mut commands: Commands,
+    mut requests: MessageReader<FromClient<ApplyHeldRequested>>,
+    chemists: Query<(Entity, &Chemist)>,
+    chambers: Query<&Machine>,
+    held: Query<(Entity, &HeldBy)>,
+    mut tools: Query<&mut Overclock>,
+) {
+    for request in requests.read() {
+        let Some(player) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
+        let Some(target) = request.target else {
+            continue;
+        };
+        if !is_reaction_chamber(target, &chambers) {
+            continue;
+        }
+        let Some((tool_entity, _)) = held.iter().find(|(_, holder)| holder.0 == player) else {
+            continue;
+        };
+        let Ok(mut tool) = tools.get_mut(tool_entity) else {
+            continue;
+        };
+        if tool.charges == 0 {
+            continue;
+        }
+        tool.charges -= 1;
+        // Re-applying while already active just refreshes the timer — a flat
+        // multiplier needs no stacking math.
+        commands.entity(target).insert(Overclocked {
+            multiplier: OVERCLOCK_MULTIPLIER,
+            remaining: OVERCLOCK_DURATION_SECONDS,
+        });
+    }
+}
+
+/// Spawns a fresh [`Overclock`] tool at the counter, full charges. Only
+/// called when none exists anywhere yet — see `shift::
+/// apply_npc_requisition`'s `LindqvistOverclock` arm, which tops an existing
+/// one up instead of calling this a second time.
+pub fn spawn_overclock(commands: &mut Commands, station: DeliveryStation) {
+    commands.spawn((
+        Overclock {
+            charges: OVERCLOCK_CHARGES,
+        },
+        Transform::from_translation(
+            station.drop_position(crate::lab::COUNTER_TOP)
+                - (station.transform.rotation * Vec3::X) * 0.4,
+        ),
+        Replicated,
+        crate::until_we_leave_the_lab(),
+    ));
+}
+
+/// Builds the tool's mesh wherever it appears — the same
+/// spawn(authority)/dress(everywhere) split every pickable prop in the lab
+/// uses.
+fn dress_overclock(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    added: Query<Entity, Added<Overclock>>,
+) {
+    for entity in &added {
+        commands.entity(entity).insert((
+            Mesh3d(meshes.add(Cuboid::new(0.09, 0.06, 0.16))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.85, 0.55, 0.10),
+                perceptual_roughness: 0.3,
+                metallic: 0.7,
+                ..default()
+            })),
+            Interactable::new("Thermal overclock coil"),
+        ));
     }
 }
 
@@ -781,11 +928,20 @@ fn temperature_bucket(kelvin: Kelvin) -> i32 {
 /// [`Container::mutate`], which resolves — and `Reaction::max_scale` has always
 /// checked `min_temp`/`max_temp`. So crossing a threshold *is* the trigger, and
 /// temperature-gating a recipe costs no gating code at all.
+/// Picks a chamber's current heating rate — boosted while [`Overclocked`] is
+/// active, [`CHAMBER_RATE`] otherwise. A small pure function rather than
+/// inlined, so the boost math is directly testable without spinning up a
+/// chamber.
+fn effective_chamber_rate(overclocked: Option<&Overclocked>) -> f32 {
+    overclocked.map_or(CHAMBER_RATE, |boost| CHAMBER_RATE * boost.multiplier)
+}
+
 fn apply_thermostats(
     time: Res<Time>,
     db: Res<ChemDb>,
     mut fired: MessageWriter<ReactionsFired>,
     chambers: Query<(Entity, &Thermostat, &Machine)>,
+    overclocked: Query<&Overclocked>,
     slotted: Query<(Entity, &InSlot)>,
     mut containers: Query<&mut Container>,
 ) {
@@ -802,7 +958,8 @@ fn apply_thermostats(
         };
 
         let current = container.solution.temperature;
-        let next = approach(current, thermostat.target, CHAMBER_RATE, dt);
+        let rate = effective_chamber_rate(overclocked.get(machine).ok());
+        let next = approach(current, thermostat.target, rate, dt);
         // Settled. Going through `mutate` anyway would re-resolve and mark the
         // component changed every frame, which wakes the panel and replication
         // for nothing.
@@ -2235,6 +2392,7 @@ mod tests {
             .add_message::<FromClient<EjectRequested>>()
             .add_message::<FromClient<EmptyRequested>>()
             .add_message::<FromClient<TakeRequested>>()
+            .add_message::<FromClient<ApplyHeldRequested>>()
             // What the server tells a client when it grants them a machine.
             // Headless there is nobody to tell, but the writer still has to
             // exist for the system to run.
@@ -2256,6 +2414,8 @@ mod tests {
                     handle_take,
                     handle_empty,
                     handle_thermostat_controls,
+                    handle_overclock_use,
+                    tick_overclock,
                     apply_thermostats,
                     cool_to_ambient,
                     tick_reactions,
@@ -4612,6 +4772,115 @@ mod tests {
             Kelvin::AMBIENT,
             "the dial is set but the switch is off"
         );
+    }
+
+    #[test]
+    fn overclock_raises_the_effective_chamber_rate_while_active() {
+        assert_eq!(effective_chamber_rate(None), CHAMBER_RATE);
+        let boosted = Overclocked {
+            multiplier: OVERCLOCK_MULTIPLIER,
+            remaining: 5.0,
+        };
+        assert_eq!(
+            effective_chamber_rate(Some(&boosted)),
+            CHAMBER_RATE * OVERCLOCK_MULTIPLIER
+        );
+    }
+
+    #[test]
+    fn an_overclocked_chamber_reaches_its_target_faster() {
+        let mut plain = test_app();
+        let plain_machine = chamber(&mut plain, 400.0, true, &[("water", 20)]);
+        run_for(&mut plain, 2.0);
+        let plain_temp = slot_temperature(&mut plain, plain_machine);
+
+        let mut boosted = test_app();
+        let boosted_machine = chamber(&mut boosted, 400.0, true, &[("water", 20)]);
+        boosted
+            .world_mut()
+            .entity_mut(boosted_machine)
+            .insert(Overclocked {
+                multiplier: OVERCLOCK_MULTIPLIER,
+                remaining: 60.0,
+            });
+        run_for(&mut boosted, 2.0);
+        let boosted_temp = slot_temperature(&mut boosted, boosted_machine);
+
+        assert!(
+            boosted_temp.0 > plain_temp.0,
+            "an overclocked chamber ({boosted_temp}) should heat faster than \
+             a plain one ({plain_temp}) over the same real time"
+        );
+    }
+
+    #[test]
+    fn tick_overclock_expires_and_falls_back_to_base_rate() {
+        let mut app = test_app();
+        let machine = chamber(&mut app, 400.0, true, &[("water", 20)]);
+        app.world_mut().entity_mut(machine).insert(Overclocked {
+            multiplier: OVERCLOCK_MULTIPLIER,
+            remaining: 1.0,
+        });
+
+        run_for(&mut app, 2.0);
+
+        assert!(
+            app.world().get::<Overclocked>(machine).is_none(),
+            "the boost should have expired and been removed"
+        );
+    }
+
+    #[test]
+    fn overclock_use_is_refused_against_anything_that_is_not_a_reaction_chamber() {
+        let mut app = test_app();
+        let (client, player) = chemist(&mut app);
+        let mixer = app
+            .world_mut()
+            .spawn(Machine::new(MachineKind::MixingChamber))
+            .id();
+        let tool = app
+            .world_mut()
+            .spawn((Overclock { charges: 2 }, HeldBy(player)))
+            .id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: ApplyHeldRequested {
+                target: Some(mixer),
+                point: None,
+            },
+        });
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Overclock>(tool).unwrap().charges,
+            2,
+            "no charge should be spent against a non-chamber target"
+        );
+        assert!(app.world().get::<Overclocked>(mixer).is_none());
+    }
+
+    #[test]
+    fn overclock_use_consumes_exactly_one_charge() {
+        let mut app = test_app();
+        let (client, player) = chemist(&mut app);
+        let machine = chamber(&mut app, 400.0, false, &[]);
+        let tool = app
+            .world_mut()
+            .spawn((Overclock { charges: 2 }, HeldBy(player)))
+            .id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: ApplyHeldRequested {
+                target: Some(machine),
+                point: None,
+            },
+        });
+        app.update();
+
+        assert_eq!(app.world().get::<Overclock>(tool).unwrap().charges, 1);
+        assert!(app.world().get::<Overclocked>(machine).is_some());
     }
 
     #[test]

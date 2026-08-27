@@ -7,8 +7,14 @@
 //! else about carrying — the one-hand rule, dropping, the held-item visual —
 //! keys off `HeldBy` and works on produce unchanged.
 //!
-//! Supply comes through the door like everything else in this lab: a botanist
-//! walks in on a timer, leaves an armful on the counter, and goes.
+//! Supply comes through the door like everything else in this lab, but not on
+//! a clock anymore: a botanist walks in only when sent — bought as one of her
+//! own curated packs (`shift::NpcRequisitionKind::IvyPack`, spent against her
+//! own personal standing) or as an impersonal balanced crate
+//! (`shift::RequisitionKind::ProduceCrate`, spent against Cargo's). Both
+//! routes end here, at [`spawn_named_delivery`], which is everything a
+//! scheduled haul used to do on its own timer, now driven by a purchase
+//! instead.
 
 use bevy::prelude::*;
 use bevy_common_assets::ron::RonAssetPlugin;
@@ -37,17 +43,17 @@ impl Plugin for ProducePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(RonAssetPlugin::<ProduceConfig>::new(&["produce.ron"]))
             .add_systems(Startup, start_loading)
-            .add_systems(OnEnter(AppState::Playing), rearm_delivery_clock)
             .add_systems(
                 Update,
                 (
                     // The catalog is not server state: both ends need it to
                     // name what is in the hopper, so it is not authority-gated.
                     promote_produce_data,
-                    // Who turns up and when is the server's business.
-                    (deliver_produce, unload_produce)
-                        .chain()
-                        .run_if(is_authority),
+                    // Couriers are spawned by a purchase, elsewhere
+                    // (`shift::handle_requisition`/`handle_npc_requisition`);
+                    // walking them in and unloading them is still the
+                    // server's business.
+                    unload_produce.run_if(is_authority),
                     // Drawing what turned up is everyone's.
                     dress_produce,
                 )
@@ -66,10 +72,17 @@ impl Plugin for ProducePlugin {
 pub struct ProduceConfig {
     /// Crew member who brings it, looked up in the roster by name.
     pub courier: String,
-    pub first_delivery_delay: f32,
-    pub gap_seconds: (f32, f32),
+    /// How many items an impersonal, Cargo-funded crate contains — see
+    /// `shift::RequisitionKind::ProduceCrate`. One of Botanist Ivy's own
+    /// packs is a fixed composition instead (`ProducePackDef.items`), so
+    /// this range is only ever consulted for the untargeted crate.
     pub items_per_delivery: (u32, u32),
     pub kinds: Vec<ProduceDef>,
+    /// Themed bundles Botanist Ivy sells from her own standing. Empty is
+    /// legal — a `station.produce.ron` written before packs existed still
+    /// parses, it just has nothing to sell yet.
+    #[serde(default)]
+    pub packs: Vec<ProducePackDef>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -80,6 +93,23 @@ pub struct ProduceDef {
     /// Reagents released per item, in absolute units. Grinding is extraction,
     /// not a reaction, so these are quantities rather than ratios.
     pub yields: Vec<(String, Units)>,
+}
+
+/// One themed pack, as authored: a fixed, known composition rather than a
+/// random draw, so what the shop lists is exactly what shows up at the
+/// counter.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ProducePackDef {
+    pub id: String,
+    pub label: String,
+    pub blurb: String,
+    /// In the seller's own standing — see `shift::NpcRequisitionKind`.
+    pub cost: i32,
+    /// `(produce id, count)` pairs. A produce id that does not resolve to a
+    /// real [`ProduceDef`] warns and drops, the same leniency `yields`
+    /// already gets — a content typo costs that one line of the pack, not
+    /// the whole purchase.
+    pub items: Vec<(String, u32)>,
 }
 
 /// An interned produce handle, the same shape as `ReagentId`.
@@ -112,28 +142,49 @@ impl ProduceKind {
     }
 }
 
-/// Every produce kind in the game, plus the delivery schedule.
+/// An interned pack handle, the same shape as [`ProduceId`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+pub struct ProducePackId(pub u32);
+
+/// A loaded pack, with its items resolved to produce ids.
+pub struct ProducePack {
+    pub id: ProducePackId,
+    pub label: String,
+    pub blurb: String,
+    pub cost: i32,
+    pub items: Vec<(ProduceId, u32)>,
+}
+
+impl ProducePack {
+    /// Expands the `(kind, count)` composition into one entry per physical
+    /// item — the flat shape [`spawn_named_delivery`] wants.
+    pub fn expand_items(&self) -> Vec<ProduceId> {
+        self.items
+            .iter()
+            .flat_map(|(id, count)| std::iter::repeat_n(*id, *count as usize))
+            .collect()
+    }
+}
+
+/// Every produce kind and pack in the game.
 #[derive(Resource)]
 pub struct ProduceCatalog {
     kinds: Vec<ProduceKind>,
+    packs: Vec<ProducePack>,
     courier: String,
-    gap_seconds: (f32, f32),
     items_per_delivery: (u32, u32),
-    /// Carried so [`rearm_delivery_clock`] can arm a second session's clock
-    /// exactly as the first one was armed. Without it the catalog knows the
-    /// gap between hauls but not how long the lab waits for the first.
-    first_delivery_delay: f32,
 }
 
 impl ProduceCatalog {
-    /// Resolves yield keys to reagent ids.
+    /// Resolves yield keys to reagent ids, and pack item keys to produce ids.
     ///
-    /// A key naming a reagent that does not exist is a content bug, but it
-    /// should cost that one yield rather than the whole shift — so it warns
-    /// and drops. `every_produce_yield_names_a_real_reagent` is what actually
-    /// stops it reaching a player.
+    /// A key naming something that does not exist is a content bug, but it
+    /// should cost that one yield or pack line rather than the whole shift —
+    /// so it warns and drops. `every_produce_yield_names_a_real_reagent`/
+    /// `every_pack_item_names_a_real_produce` are what actually stop it
+    /// reaching a player.
     pub fn from_config(config: &ProduceConfig, reagents: &ReagentRegistry) -> Self {
-        let kinds = config
+        let kinds: Vec<ProduceKind> = config
             .kinds
             .iter()
             .enumerate()
@@ -155,12 +206,36 @@ impl ProduceCatalog {
             })
             .collect();
 
+        let packs = config
+            .packs
+            .iter()
+            .enumerate()
+            .map(|(index, def)| ProducePack {
+                id: ProducePackId(index as u32),
+                label: def.label.clone(),
+                blurb: def.blurb.clone(),
+                cost: def.cost,
+                items: def
+                    .items
+                    .iter()
+                    .filter_map(|(key, count)| {
+                        match config.kinds.iter().position(|kind| &kind.id == key) {
+                            Some(position) => Some((ProduceId(position as u32), *count)),
+                            None => {
+                                warn!("produce pack '{}' names unknown produce '{key}'", def.id);
+                                None
+                            }
+                        }
+                    })
+                    .collect(),
+            })
+            .collect();
+
         ProduceCatalog {
             kinds,
+            packs,
             courier: config.courier.clone(),
-            gap_seconds: config.gap_seconds,
             items_per_delivery: config.items_per_delivery,
-            first_delivery_delay: config.first_delivery_delay,
         }
     }
 
@@ -168,12 +243,22 @@ impl ProduceCatalog {
         &self.kinds[id.index()]
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.kinds.is_empty()
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = &ProduceKind> {
         self.kinds.iter()
+    }
+
+    pub fn packs(&self) -> &[ProducePack] {
+        &self.packs
+    }
+
+    pub fn pack(&self, id: ProducePackId) -> Option<&ProducePack> {
+        self.packs.get(id.0 as usize)
+    }
+
+    /// Who sells the packs, and who an impersonal crate is delivered by —
+    /// looked up in the roster by this name.
+    pub fn courier_name(&self) -> &str {
+        &self.courier
     }
 }
 
@@ -188,45 +273,8 @@ pub struct ProduceAssets {
 #[derive(Resource)]
 struct PendingProduceData(Handle<ProduceConfig>);
 
-#[derive(Resource)]
-pub struct DeliverySchedule {
-    timer: Timer,
-}
-
-impl DeliverySchedule {
-    /// Brings the next haul forward.
-    ///
-    /// What a requisitioned produce crate buys: cargo lean on botany, and the
-    /// grinder has something to work with at the start of the shift rather than
-    /// somewhere in the middle of it.
-    pub fn expedite(&mut self, seconds: f32) {
-        if self.timer.remaining_secs() > seconds {
-            self.timer = Timer::from_seconds(seconds, TimerMode::Once);
-        }
-    }
-}
-
 fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(PendingProduceData(assets.load("data/station.produce.ron")));
-}
-
-fn arm_delivery_clock(commands: &mut Commands, first_delivery_delay: f32) {
-    commands.insert_resource(DeliverySchedule {
-        timer: Timer::from_seconds(first_delivery_delay, TimerMode::Once),
-    });
-}
-
-/// Re-arms botany's delivery clock on the way into the lab.
-///
-/// Same reasoning as `orders::rearm_arrival_clocks`: `promote_produce_data`
-/// runs once per process and this is a `TimerMode::Once`, so without this the
-/// second save opened in a session would never see a single plant arrive.
-/// No-ops on the first pass, before the catalog has loaded.
-fn rearm_delivery_clock(mut commands: Commands, catalog: Option<Res<ProduceCatalog>>) {
-    let Some(catalog) = catalog else {
-        return;
-    };
-    arm_delivery_clock(&mut commands, catalog.first_delivery_delay);
 }
 
 /// Turns the loaded RON into a catalog once the chemistry data is available.
@@ -264,7 +312,6 @@ fn promote_produce_data(
 
     info!("produce loaded: {} kinds", config.kinds.len());
 
-    arm_delivery_clock(&mut commands, config.first_delivery_delay);
     commands.insert_resource(ProduceAssets {
         mesh: meshes.add(Sphere::new(ITEM_RADIUS)),
         materials: handles,
@@ -362,74 +409,54 @@ fn balanced_delivery_items(
     delivery
 }
 
-/// Sends the botanist in on a timer.
+/// True while `name` is already in the room — queuing for an order,
+/// mid-delivery, or otherwise present. She is in the ordinary crew roster
+/// too, so without this check a second purchase landing while she is
+/// already at the counter would put two of her in the room at once.
+pub fn courier_present(name: &str, present_crew: &Query<&CrewMember, crate::crew::NotResident>) -> bool {
+    present_crew.iter().any(|member| member.name == name)
+}
+
+/// Spawns `name` (looked up in the roster) carrying `items`, in her own lane
+/// at the counter, clear of whoever is queuing for an order — the same
+/// mechanics a scheduled haul used to drive off its own timer, now driven by
+/// a purchase instead.
 ///
-/// Hauls favor the least-stocked physical specimens in the lab. This keeps a
-/// large external-source catalog from starving one dependency through bad
-/// luck, while consumed ingredients naturally rise back to the front of the
-/// queue. Ties remain random, so deliveries do not become a fixed script.
-#[allow(clippy::too_many_arguments)]
-fn deliver_produce(
-    mut commands: Commands,
-    time: Res<Time>,
-    catalog: Option<Res<ProduceCatalog>>,
-    station: Option<Res<StationData>>,
-    mut schedule: Option<ResMut<DeliverySchedule>>,
-    present_crew: Query<&CrewMember, crate::crew::NotResident>,
-    present_produce: Query<&Produce>,
-) {
-    let (Some(catalog), Some(station), Some(schedule)) = (catalog, station, schedule.as_mut())
-    else {
-        return;
-    };
-    if catalog.is_empty() {
-        return;
-    }
-
-    if !schedule.timer.tick(time.delta()).just_finished() {
-        return;
-    }
-
-    let mut rng = rand::rng();
-    let gap = rng.random_range(catalog.gap_seconds.0..=catalog.gap_seconds.1);
-    schedule.timer = Timer::from_seconds(gap, TimerMode::Once);
-
-    // One of her is plenty. She is in the ordinary crew roster too, so without
-    // this a delivery landing while she is already at the counter with an
-    // order would put two of her in the room.
-    if present_crew
-        .iter()
-        .any(|member| member.name == catalog.courier)
-    {
-        return;
-    }
-
-    let Some(def) = station
-        .crew
-        .iter()
-        .find(|member| member.name == catalog.courier)
-    else {
-        warn!(
-            "no crew member named '{}' to deliver produce",
-            catalog.courier
-        );
-        return;
-    };
-
-    let count = rng.random_range(catalog.items_per_delivery.0..=catalog.items_per_delivery.1);
-    let items = balanced_delivery_items(
-        &catalog,
-        present_produce.iter().map(|produce| produce.0),
-        count,
-        &mut rng,
-    );
+/// Returns whether it actually spawned: a name not found on the roster is a
+/// content bug, but the caller must still be able to tell, since standing
+/// has typically already been spent by the time this runs and a silent
+/// failure would eat it for nothing delivered.
+pub fn spawn_named_delivery(
+    commands: &mut Commands,
+    station: &StationData,
+    name: &str,
+    items: Vec<ProduceId>,
+) -> bool {
     if items.is_empty() {
-        return;
+        return false;
     }
-
-    // Her own lane at the counter, clear of whoever is queuing for an order.
-    let courier = spawn_crew_member(&mut commands, def, -1.1);
+    let Some(def) = station.crew.iter().find(|member| member.name == name) else {
+        warn!("no crew member named '{name}' to deliver produce");
+        return false;
+    };
+    let courier = spawn_crew_member(commands, def, -1.1);
     commands.entity(courier).insert(ProduceDelivery { items });
+    true
+}
+
+/// Builds a balanced, unthemed haul across the whole catalog — what an
+/// impersonal Cargo-funded crate buys, as opposed to one of Botanist Ivy's
+/// own fixed-composition packs. Favors the least-stocked physical specimens
+/// in the lab, so a large catalog cannot be starved of one dependency
+/// through bad luck, while consumed ingredients naturally rise back to the
+/// front of the queue. Ties remain random.
+pub fn balanced_crate(
+    catalog: &ProduceCatalog,
+    present: impl IntoIterator<Item = ProduceId>,
+    rng: &mut impl Rng,
+) -> Vec<ProduceId> {
+    let count = rng.random_range(catalog.items_per_delivery.0..=catalog.items_per_delivery.1);
+    balanced_delivery_items(catalog, present, count, rng)
 }
 
 /// Puts the delivery down once she reaches the counter, then sends her out.
@@ -540,6 +567,40 @@ mod tests {
                 assert!(amount.is_positive(), "{} yields {key} at {amount}", def.id);
             }
         }
+    }
+
+    #[test]
+    fn every_pack_item_names_a_real_produce() {
+        // A typo here would silently shrink a pack's contents at load — the
+        // shop would list one thing and deliver less, with no error anywhere.
+        let config = config();
+        let known: std::collections::HashSet<&str> =
+            config.kinds.iter().map(|def| def.id.as_str()).collect();
+        assert!(!config.packs.is_empty(), "station.produce.ron sells no packs");
+        for pack in &config.packs {
+            assert!(!pack.items.is_empty(), "pack '{}' is empty", pack.id);
+            assert!(pack.cost > 0, "pack '{}' costs nothing", pack.id);
+            for (key, count) in &pack.items {
+                assert!(
+                    known.contains(key.as_str()),
+                    "pack '{}' names unknown produce '{key}'",
+                    pack.id
+                );
+                assert!(*count > 0, "pack '{}' names {key} at 0 count", pack.id);
+            }
+        }
+    }
+
+    #[test]
+    fn a_resolved_pack_expands_to_the_declared_item_counts() {
+        let data = chemistry();
+        let catalog = ProduceCatalog::from_config(&config(), &data.reagents);
+        let pack = catalog
+            .pack(ProducePackId(0))
+            .expect("the first authored pack should resolve");
+        let expanded = pack.expand_items();
+        let declared_total: u32 = pack.items.iter().map(|(_, count)| count).sum();
+        assert_eq!(expanded.len(), declared_total as usize);
     }
 
     #[test]

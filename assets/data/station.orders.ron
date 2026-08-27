@@ -66,6 +66,24 @@
         crate_max: 4,
         large_every: 3,
         requisition_glassware_bonus: 2,
+        personal_packs: [
+            (
+                id: "spare_beakers",
+                label: "Spare Beakers",
+                blurb: "A quick top-up, off the books.",
+                cost: 3,
+                beakers: 4,
+                large: 0,
+            ),
+            (
+                id: "bulk_crate",
+                label: "Bulk Crate",
+                blurb: "A full crate, right now, no waiting on the deficit check.",
+                cost: 5,
+                beakers: 6,
+                large: 2,
+            ),
+        ],
     ),
 
     // What the station expects, briefed periodically over the radio. A

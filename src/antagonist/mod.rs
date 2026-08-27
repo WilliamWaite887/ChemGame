@@ -15,14 +15,16 @@
 
 use bevy::prelude::*;
 use bevy_common_assets::ron::RonAssetPlugin;
-use chem_sim::Units;
+use bevy_replicon::prelude::*;
+use chem_sim::{ReagentId, Units};
 use rand::prelude::*;
 use serde::Deserialize;
 
 use crate::chem_data::ChemDb;
-use crate::containers::Container;
-use crate::crew::{spawn_crew_member, CrewMember};
-use crate::interaction::Interactable;
+use crate::containers::{Container, HeldBy};
+use crate::crew::{spawn_crew_member, CrewMember, CrewPhase, CrewRoute};
+use crate::interaction::{InteractRequested, Interactable};
+use crate::machines::{chemist_entity, ReactionsFired};
 use crate::net::is_authority;
 use crate::orders::{
     deliverable_amount, physical_reagent_inventory, IllicitOrder, Order, OrderResolved, Shift,
@@ -86,6 +88,8 @@ impl Plugin for AntagonistPlugin {
                     promote_script,
                     generate_antagonist_orders,
                     handle_illicit_resolutions,
+                    handle_illicit_offer_pickup,
+                    expire_illicit_offers,
                 )
                     .chain()
                     .run_if(is_authority)
@@ -135,6 +139,18 @@ pub struct AntagonistScript {
     /// does not care what shaped the climb toward its own threshold).
     pub standing_tighten_at: i32,
     pub requests: Vec<AntagonistRequestDef>,
+    /// Chance a fired visit is an offer instead of a request — the illicit
+    /// shop, fully hidden: no panel, no visible number, ever (see
+    /// `IllicitOffer`). Defaulted so a `station.antagonist.ron` written
+    /// before offers existed still parses with none authored yet.
+    #[serde(default = "default_offer_chance")]
+    pub offer_chance: f64,
+    #[serde(default)]
+    pub offers: Vec<AntagonistOfferDef>,
+}
+
+fn default_offer_chance() -> f64 {
+    0.35
 }
 
 /// The antagonist gap multiplier's effective range at a given underworld
@@ -193,6 +209,49 @@ pub struct AntagonistRequestDef {
 
 fn min_standing_default() -> i32 {
     i32::MIN
+}
+
+/// A visit that sells to the player instead of asking for something — the
+/// illicit shop, authored per department the same way [`AntagonistRequestDef`]
+/// already is. Since an illicit visit already draws a real, random, named
+/// crew member of the matching `role` from the actual roster, a department
+/// with one member (Cargo, Engineering) resolves to that one person for
+/// free — no special-casing needed.
+///
+/// Deliberately carries no `incident_line`/`chaos_line`/`sting_chance`: those
+/// exist because *fulfilling someone else's request* causes station-wide
+/// fallout worth reporting. A private purchase has no fictional reason to
+/// make noise — see [`IllicitOffer`].
+#[derive(Clone, Debug, Deserialize)]
+pub struct AntagonistOfferDef {
+    pub reagent: String,
+    pub amounts: Vec<u32>,
+    pub role: String,
+    /// The ordinary-sounding line, same "no visible tell" convention as
+    /// [`AntagonistRequestDef::pretext`] — never anything that reads as
+    /// "this NPC has a shop."
+    pub pretext: String,
+    /// Floor on `UnderworldStanding` before this offer can ever be drawn.
+    #[serde(default = "min_standing_default")]
+    pub min_standing: i32,
+    /// What it drains from `UnderworldStanding` on a successful pickup.
+    pub cost: i32,
+}
+
+/// A visitor offering to sell something, rather than asking for it — the
+/// mirror image of [`IllicitOrder`]. Deliberately **not** an [`Order`] and
+/// deliberately never replicated: this is the actual mechanical enforcement
+/// of "no visible tell," the same rule `IllicitOrder` itself lives by.
+/// Modeled on `rogue_security::RogueOfficer` — a non-`Order`, server-only
+/// "visitor with a demand" shape already proven to work cleanly through the
+/// ordinary crew/route/interact machinery.
+#[derive(Component)]
+struct IllicitOffer {
+    reagent: ReagentId,
+    amount: Units,
+    cost: i32,
+    patience: f32,
+    waited: f32,
 }
 
 #[derive(Resource)]
@@ -285,6 +344,35 @@ fn generate_antagonist_orders(
     let multiplier = rng.random_range(lo..=hi);
     spawner.timer = Timer::from_seconds(legit_gap * multiplier, TimerMode::Once);
 
+    // Same lane-offset trick `generate_orders` uses, so a visit spawned here
+    // never overlaps a legitimate one queuing at the same counter. Shared by
+    // both branches below, computed once.
+    let lane = active.iter().count() as f32 * 0.95;
+    // Reuses the ordinary difficulty's patience range rather than a range of
+    // its own — a visit that waited noticeably longer or shorter than normal
+    // would itself be a statistical tell, which the whole point of this
+    // system is to never give the player. Shared by both branches for the
+    // same reason `lane` is.
+    let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
+
+    // An offer sells to the player instead of asking for something — rolled
+    // first, so a roll that lands on "offer" with nothing eligible yet falls
+    // straight through to the ordinary request path below rather than
+    // wasting the visit. No reachability filter, unlike a request: the
+    // player never has to synthesize what's being handed to them.
+    let in_standing_offers: Vec<&AntagonistOfferDef> = script
+        .offers
+        .iter()
+        .filter(|offer| offer.min_standing <= underworld.0)
+        .collect();
+    if !in_standing_offers.is_empty() && rng.random_bool(script.offer_chance) {
+        let offer = *in_standing_offers
+            .choose(&mut rng)
+            .expect("checked non-empty above");
+        spawn_illicit_offer(&mut commands, &db, &mut rng, &station, offer, lane, patience);
+        return;
+    }
+
     // Only requests whose `min_standing` floor the current underworld
     // standing already clears — a reliable dealer sees bolder pretexts as
     // their standing grows, without any UI ever naming the mechanism.
@@ -326,16 +414,6 @@ fn generate_antagonist_orders(
         return;
     };
 
-    // Reuses the ordinary difficulty's patience range rather than a range of
-    // its own — a visit that waited noticeably longer or shorter than normal
-    // would itself be a statistical tell, which the whole point of this
-    // system is to never give the player. `rules` was already computed above
-    // for the gap; reused here rather than recomputed.
-    let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
-
-    // Same lane-offset trick `generate_orders` uses, so a visit spawned here
-    // never overlaps a legitimate one queuing at the same counter.
-    let lane = active.iter().count() as f32 * 0.95;
     let crew = spawn_crew_member(&mut commands, crew_def, lane);
 
     let reagent_name = db.reagents.get(reagent).name.clone();
@@ -372,6 +450,60 @@ fn generate_antagonist_orders(
     info!(
         "antagonist: {} ({}) wants {}u {}",
         crew_def.name, crew_def.role, amount, reagent_name
+    );
+}
+
+/// Spawns a visitor who sells, rather than asks — see [`IllicitOffer`]. A
+/// plain function rather than inlined into [`generate_antagonist_orders`],
+/// mirroring the separation `spawn_scripted_visit` already draws between
+/// picking a visit and building one.
+fn spawn_illicit_offer(
+    commands: &mut Commands,
+    db: &ChemDb,
+    rng: &mut impl Rng,
+    station: &StationData,
+    offer: &AntagonistOfferDef,
+    lane: f32,
+    patience: f32,
+) {
+    let Some(reagent) = db.reagents.id_of(&offer.reagent) else {
+        warn!("antagonist offer names unknown reagent '{}'", offer.reagent);
+        return;
+    };
+    let Some(&amount) = offer.amounts.choose(rng) else {
+        return;
+    };
+    let candidates: Vec<_> = station
+        .crew
+        .iter()
+        .filter(|def| def.role == offer.role)
+        .collect();
+    let Some(crew_def) = candidates.choose(rng).copied() else {
+        warn!(
+            "no crew member with role '{}' to voice an antagonist offer",
+            offer.role
+        );
+        return;
+    };
+
+    let crew = spawn_crew_member(commands, crew_def, lane);
+    commands.entity(crew).insert((
+        IllicitOffer {
+            reagent,
+            amount: Units::whole(amount as i32),
+            cost: offer.cost,
+            patience,
+            waited: 0.0,
+        },
+        // Styled like `rogue_security::RogueOfficer`'s label, not `Order`'s
+        // "hand over N X" template — this is the one client-visible
+        // artifact, and it must read like an ordinary line, never a shop.
+        Interactable::new(format!("{} — {}", crew_def.name, offer.pretext)),
+    ));
+
+    info!(
+        "antagonist: {} ({}) is offering {}u {} for {}",
+        crew_def.name, crew_def.role, amount, offer.reagent, offer.cost
     );
 }
 
@@ -466,6 +598,104 @@ fn handle_illicit_resolutions(
             )
             .negative(),
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Offers — the illicit shop, fully hidden
+// ---------------------------------------------------------------------------
+
+/// The mirror image of `orders::handle_delivery`: the NPC gives, instead of
+/// receiving. An independent reader of `InteractRequested`, the same
+/// message `handle_delivery` reads — Bevy gives every system its own
+/// cursor, the same pattern `rogue_security::handle_deterrent_use` already
+/// proves for a second independent reader of a different message.
+///
+/// What an unaffordable interaction feels like: mechanically identical to
+/// fumbling any other delivery already is in this game — wrong container,
+/// empty hand, nothing happens, try again or walk away. There is no code
+/// path here that can distinguish "you can't afford this" from "that wasn't
+/// the right thing," because they are literally the same shape of no-op.
+#[allow(clippy::too_many_arguments)]
+fn handle_illicit_offer_pickup(
+    mut commands: Commands,
+    db: Res<ChemDb>,
+    mut requests: MessageReader<FromClient<InteractRequested>>,
+    chemists: Query<(Entity, &Chemist)>,
+    mut offers: Query<(&IllicitOffer, &mut CrewRoute)>,
+    mut containers: Query<(Entity, &mut Container, &HeldBy)>,
+    mut underworld: ResMut<UnderworldStanding>,
+    mut fired: MessageWriter<ReactionsFired>,
+) {
+    for request in requests.read() {
+        let Some(player) = chemist_entity(&chemists, request.client_id) else {
+            continue;
+        };
+        let Ok((offer, mut route)) = offers.get_mut(request.target) else {
+            continue;
+        };
+        // Rechecked here, not just at spawn time: `handle_crisis_resolutions`
+        // can zero `UnderworldStanding` outright while an offer visitor is
+        // still standing there waiting.
+        if underworld.0 < offer.cost {
+            continue;
+        }
+        let Some((container_entity, mut container, _)) = containers
+            .iter_mut()
+            .find(|(_, _, holder)| holder.0 == player)
+        else {
+            continue;
+        };
+        let reagent = offer.reagent;
+        let amount = offer.amount;
+        let cost = offer.cost;
+        let ph = db.reagents.get(reagent).ph;
+        let (overflow, report) =
+            container.mutate(&db, |solution| solution.add_profiled(reagent, amount, 1.0, ph));
+        if overflow >= amount {
+            // A full container accepted nothing — the same silent no-op
+            // fumbling any other delivery already produces.
+            continue;
+        }
+        if let Some(message) = ReactionsFired::from_report(container_entity, &report) {
+            fired.write(message);
+        }
+        underworld.0 = (underworld.0 - cost).max(0);
+        commands
+            .entity(request.target)
+            .remove::<IllicitOffer>()
+            .remove::<Interactable>();
+        route.leave();
+    }
+}
+
+/// Ticks an offer's patience down and lets it walk away, ignored — true
+/// silence in both directions: no radio line, no standing consequence,
+/// either way. Deliberately asymmetric with `IllicitOrder`'s own expiry
+/// (`orders::expire_orders`, which *does* cost department standing, because
+/// that visit has to imitate an ordinary order's consequences to stay
+/// statistically invisible among them) — an offer was never wired into that
+/// bookkeeping in the first place, so ignoring one has nothing to fall
+/// through to.
+fn expire_illicit_offers(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut offers: Query<(Entity, &mut IllicitOffer, &mut CrewRoute)>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut offer, mut route) in &mut offers {
+        if route.phase != CrewPhase::Waiting {
+            continue;
+        }
+        offer.waited += dt;
+        if offer.waited < offer.patience {
+            continue;
+        }
+        commands
+            .entity(entity)
+            .remove::<IllicitOffer>()
+            .remove::<Interactable>();
+        route.leave();
     }
 }
 
@@ -809,6 +1039,252 @@ mod tests {
                 .warning_in
                 .is_some(),
             "a sting should eventually arm the raid schedule directly"
+        );
+    }
+
+    // -- offers: the illicit shop, fully hidden ------------------------------
+
+    fn forced_offer_app(underworld: i32) -> App {
+        let mut app = antagonist_app();
+        app.world_mut().resource_mut::<UnderworldStanding>().0 = underworld;
+        // Deterministic: guarantees the offer branch is taken whenever at
+        // least one offer clears its own `min_standing`, rather than
+        // depending on a probabilistic roll.
+        app.world_mut().resource_mut::<Script>().0.offer_chance = 1.0;
+        app
+    }
+
+    #[test]
+    fn an_offer_visit_never_carries_an_order_component() {
+        let mut app = forced_offer_app(10);
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.1));
+        app.update();
+
+        let mut offers = app.world_mut().query::<&IllicitOffer>();
+        assert_eq!(
+            offers.iter(app.world()).count(),
+            1,
+            "one offer visit should have spawned"
+        );
+        let mut orders = app.world_mut().query::<&Order>();
+        assert_eq!(
+            orders.iter(app.world()).count(),
+            0,
+            "an offer must never carry an Order — that is the whole \
+             'no visible tell' guarantee"
+        );
+    }
+
+    #[test]
+    fn a_high_min_standing_offer_is_unreachable_below_it() {
+        let script = script();
+        let underworld = 0;
+        let reachable: Vec<&AntagonistOfferDef> = script
+            .offers
+            .iter()
+            .filter(|offer| offer.min_standing <= underworld)
+            .collect();
+        assert!(
+            reachable.len() < script.offers.len(),
+            "at least one offer should be gated behind standing this data authors"
+        );
+    }
+
+    #[test]
+    fn every_offer_names_a_real_illicit_reagent_and_recognised_department() {
+        let script = script();
+        let data = chem_sim::ChemData::from_ron(
+            include_str!("../../assets/data/chem.reagents.ron"),
+            include_str!("../../assets/data/chem.reactions.ron"),
+        )
+        .unwrap();
+        assert!(!script.offers.is_empty(), "no offers authored");
+        for offer in &script.offers {
+            let reagent = data
+                .reagents
+                .id_of(&offer.reagent)
+                .unwrap_or_else(|| panic!("'{}' names no real reagent", offer.reagent));
+            let reagent = data.reagents.get(reagent);
+            assert!(
+                reagent.categories.contains(&chem_sim::Category::Illicit) || reagent.controlled,
+                "'{}' is offered but is neither illicit nor controlled",
+                offer.reagent
+            );
+            assert!(
+                crate::orders::Department::from_role(&offer.role).is_some(),
+                "'{}' names a role no department recognises",
+                offer.role
+            );
+            assert!(offer.cost > 0, "offer '{}' costs nothing", offer.reagent);
+            assert!(!offer.pretext.trim().is_empty());
+        }
+    }
+
+    use crate::containers::ContainerKind;
+
+    fn offer_pickup_app() -> App {
+        let data = chem_sim::ChemData::from_ron(
+            include_str!("../../assets/data/chem.reagents.ron"),
+            include_str!("../../assets/data/chem.reactions.ron"),
+        )
+        .unwrap();
+        let mut app = App::new();
+        app.insert_resource(ChemDb(data))
+            .init_resource::<UnderworldStanding>()
+            .add_message::<FromClient<InteractRequested>>()
+            .add_message::<ReactionsFired>()
+            .add_systems(Update, handle_illicit_offer_pickup);
+        app
+    }
+
+    fn waiting_offer(app: &mut App, reagent: &str, amount: u32, cost: i32) -> Entity {
+        let reagent = app.world().resource::<ChemDb>().reagent(reagent);
+        let mut route = CrewRoute::arrival(0.0);
+        route.phase = CrewPhase::Waiting;
+        app.world_mut()
+            .spawn((
+                IllicitOffer {
+                    reagent,
+                    amount: Units::whole(amount as i32),
+                    cost,
+                    patience: 60.0,
+                    waited: 0.0,
+                },
+                route,
+            ))
+            .id()
+    }
+
+    fn player_holding(app: &mut App, kind: ContainerKind) -> Entity {
+        let player = app
+            .world_mut()
+            .spawn(crate::player::Chemist {
+                client: ClientId::Server,
+            })
+            .id();
+        app.world_mut().spawn((Container::new(kind), HeldBy(player)));
+        player
+    }
+
+    fn pick_up(app: &mut App, target: Entity) {
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: InteractRequested { target },
+        });
+        app.update();
+    }
+
+    #[test]
+    fn a_successful_pickup_drains_underworld_standing_by_the_offers_cost() {
+        let mut app = offer_pickup_app();
+        app.world_mut().resource_mut::<UnderworldStanding>().0 = 10;
+        let offer = waiting_offer(&mut app, "space_drugs", 5, 4);
+        player_holding(&mut app, ContainerKind::Beaker);
+
+        pick_up(&mut app, offer);
+
+        assert_eq!(app.world().resource::<UnderworldStanding>().0, 6);
+        assert!(
+            app.world().get::<IllicitOffer>(offer).is_none(),
+            "a successful pickup should remove the offer"
+        );
+    }
+
+    #[test]
+    fn an_unaffordable_pickup_is_a_true_no_op() {
+        let mut app = offer_pickup_app();
+        app.world_mut().resource_mut::<UnderworldStanding>().0 = 2;
+        let offer = waiting_offer(&mut app, "space_drugs", 5, 4);
+        player_holding(&mut app, ContainerKind::Beaker);
+
+        pick_up(&mut app, offer);
+
+        assert_eq!(
+            app.world().resource::<UnderworldStanding>().0,
+            2,
+            "an unaffordable pickup must not spend anything"
+        );
+        assert!(
+            app.world().get::<IllicitOffer>(offer).is_some(),
+            "an unaffordable pickup must leave the offer standing"
+        );
+    }
+
+    #[test]
+    fn a_full_container_accepts_nothing_and_spends_nothing() {
+        let mut app = offer_pickup_app();
+        app.world_mut().resource_mut::<UnderworldStanding>().0 = 10;
+        let offer = waiting_offer(&mut app, "space_drugs", 5, 4);
+        let player = player_holding(&mut app, ContainerKind::Beaker);
+        let filler = app
+            .world()
+            .resource::<ChemDb>()
+            .reagents
+            .id_of("water")
+            .expect("water should exist");
+        {
+            let mut containers = app.world_mut().query::<(&mut Container, &HeldBy)>();
+            for (mut container, holder) in containers.iter_mut(app.world_mut()) {
+                if holder.0 == player {
+                    let capacity = container.solution.max_volume();
+                    let _ = container
+                        .solution
+                        .add_profiled(filler, capacity, 1.0, 7.0);
+                }
+            }
+        }
+
+        pick_up(&mut app, offer);
+
+        assert_eq!(
+            app.world().resource::<UnderworldStanding>().0,
+            10,
+            "a full container should accept nothing and spend nothing"
+        );
+        assert!(app.world().get::<IllicitOffer>(offer).is_some());
+    }
+
+    fn expire_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .add_systems(Update, expire_illicit_offers);
+        app
+    }
+
+    #[test]
+    fn an_ignored_offer_costs_nothing() {
+        let mut app = expire_app();
+        let mut route = CrewRoute::arrival(0.0);
+        route.phase = CrewPhase::Waiting;
+        let entity = app
+            .world_mut()
+            .spawn((
+                IllicitOffer {
+                    reagent: chem_sim::ChemData::from_ron(
+                        include_str!("../../assets/data/chem.reagents.ron"),
+                        include_str!("../../assets/data/chem.reactions.ron"),
+                    )
+                    .unwrap()
+                    .reagent("space_drugs"),
+                    amount: Units::whole(5),
+                    cost: 4,
+                    patience: 1.0,
+                    waited: 0.0,
+                },
+                route,
+            ))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(2.0));
+        app.update();
+
+        assert!(
+            app.world().get::<IllicitOffer>(entity).is_none(),
+            "expiry should remove the offer"
         );
     }
 }

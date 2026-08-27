@@ -28,13 +28,14 @@ use crate::chem_data::ChemDb;
 use crate::containers::{spawn_container, Container, ContainerKind};
 use crate::knowledge::Knowledge;
 use crate::lab::{DeliveryLane, DeliveryStation, DeliveryStations, COUNTER_DROP_Z, COUNTER_TOP};
-use crate::machines::{Machine, MachineKind};
+use crate::machines::{self, Machine, MachineKind, Overclock};
 use crate::net::is_authority;
 use crate::orders::{
-    Department, ForecastDef, OrderConfig, RampDef, RequestDef, Requisition, Shift, ShiftSnapshot,
-    StationData, SupplyDef,
+    Department, ForecastDef, GlasswarePackId, OrderConfig, RampDef, RequestDef, Requisition, Shift,
+    ShiftSnapshot, StationData,
 };
-use crate::produce::DeliverySchedule;
+use crate::crew::{CrewMember, NotResident};
+use crate::produce::{self, Produce, ProduceCatalog};
 use crate::radio::channel_for;
 use crate::radio::RadioEntry;
 use crate::radio::RadioLog;
@@ -57,6 +58,7 @@ impl Plugin for ShiftPlugin {
         app.init_resource::<CurrentForecast>()
             .init_resource::<ForecastClock>()
             .add_mapped_client_message::<RequisitionRequested>(Channel::Ordered)
+            .add_mapped_client_message::<NpcRequisitionRequested>(Channel::Ordered)
             .add_mapped_client_message::<ToggleAcceptingOrders>(Channel::Ordered)
             .add_mapped_client_message::<CallItAShift>(Channel::Ordered)
             .add_mapped_client_message::<OpenUpAgain>(Channel::Ordered)
@@ -66,6 +68,7 @@ impl Plugin for ShiftPlugin {
                     open_the_shift,
                     redraw_forecast,
                     handle_requisition,
+                    handle_npc_requisition,
                     handle_toggle_accepting,
                     handle_call_it_a_shift,
                     handle_open_up_again,
@@ -644,17 +647,11 @@ impl RequisitionKind {
     }
 }
 
-/// How long a requisitioned produce crate is brought forward by.
-///
-/// Early enough to be worth grinding right away, late enough that the player
-/// is not handed it the instant they buy it.
-const EXPEDITED_PRODUCE_SECONDS: f32 = 25.0;
-
 /// How much extra patience a `CompedRound` buys the next generated order.
 ///
-/// Comparable to [`EXPEDITED_PRODUCE_SECONDS`]; roughly 15-20% of the base
-/// `patience_seconds` range in `station.orders.ron` (135-230s) — meaningful
-/// without trivializing the timer.
+/// Roughly 15-20% of the base `patience_seconds` range in
+/// `station.orders.ron` (135-230s) — meaningful without trivializing the
+/// timer.
 pub(crate) const COMPED_PATIENCE_BONUS_SECONDS: f32 = 30.0;
 
 /// Standing is what you cash in for supplies.
@@ -685,8 +682,11 @@ pub fn apply_requisition(
     commands: &mut Commands,
     shift: &mut Shift,
     knowledge: &mut Knowledge,
-    produce: Option<&mut DeliverySchedule>,
-    supply: &SupplyDef,
+    station: &StationData,
+    catalog: Option<&ProduceCatalog>,
+    already_present: bool,
+    present_produce: impl IntoIterator<Item = produce::ProduceId>,
+    rng: &mut impl Rng,
     db: &ChemDb,
     suspicion: Option<&mut SecuritySuspicion>,
     carried: Option<&mut CarriedSuspicion>,
@@ -701,11 +701,20 @@ pub fn apply_requisition(
 
     match kind {
         RequisitionKind::Glassware => {
-            shift.requisition.glassware += supply.requisition_glassware_bonus;
+            shift.requisition.glassware += station.config.supply.requisition_glassware_bonus;
         }
         RequisitionKind::ProduceCrate => {
-            if let Some(schedule) = produce {
-                schedule.expedite(EXPEDITED_PRODUCE_SECONDS);
+            // Cargo's institutional pull buys an impersonal, unthemed crate —
+            // whatever's running low, balanced across the whole catalog —
+            // unlike one of Botanist Ivy's own curated packs, which spends
+            // her personal standing instead of Cargo's. Silently a no-op if
+            // she's already in the room; the standing was already spent on
+            // resolving affordability above, matching every other kind here.
+            if let Some(catalog) = catalog {
+                if !already_present {
+                    let items = produce::balanced_crate(catalog, present_produce, rng);
+                    produce::spawn_named_delivery(commands, station, catalog.courier_name(), items);
+                }
             }
         }
         RequisitionKind::ResearchGrant => {
@@ -781,12 +790,135 @@ fn gift_container(
     });
 }
 
+/// Something bought from one specific crew member's own trust, rather than
+/// their whole department's — the individual-standing sibling of
+/// [`RequisitionKind`]. Where a department requisition is fixed, compiled
+/// content, an NPC's own wares are mostly authored data (Ivy's packs live in
+/// `station.produce.ron`, Sato's in `station.orders.ron`), so a payload
+/// variant wraps an interned handle instead of being matched on directly for
+/// cost/label/blurb — those need a catalog to resolve. `LindqvistOverclock`
+/// is a unit variant instead: exactly one purchasable item today, same
+/// reasoning `RequisitionKind::ResearchGrant` stays a unit variant for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum NpcRequisitionKind {
+    IvyPack(produce::ProducePackId),
+    SatoPack(GlasswarePackId),
+    LindqvistOverclock,
+}
+
+impl NpcRequisitionKind {
+    /// Whose standing this spends — the `station.crew.ron` name
+    /// [`Shift::npc_standing`]/[`Shift::adjust_npc`] key on.
+    pub fn owner(self) -> &'static str {
+        match self {
+            NpcRequisitionKind::IvyPack(_) => "Botanist Ivy",
+            NpcRequisitionKind::SatoPack(_) => "Miner Sato",
+            NpcRequisitionKind::LindqvistOverclock => "Tech Lindqvist",
+        }
+    }
+}
+
+/// In Tech Lindqvist's own standing. A plain constant, not authored data,
+/// same reasoning `RequisitionKind::cost()` hardcodes its own — there is
+/// exactly one item to price. `pub(crate)` so `ui::standing_board_body` can
+/// show the same number on the button it draws.
+pub(crate) const OVERCLOCK_COST: i32 = 5;
+
+/// The same affordability rule [`can_afford`] applies, against one person's
+/// own standing instead of a department's average.
+pub fn npc_can_afford(standing: i32, cost: i32) -> bool {
+    standing >= cost
+}
+
+/// Books a purchase from one NPC's own shop, or does nothing at all — the
+/// individual-standing sibling of [`apply_requisition`], with the same
+/// "never half-apply" contract.
+///
+/// Refuses (spending nothing) if the owner is estranged, across every kind —
+/// a locked shop is a coherent secondary effect of estrangement, not a
+/// substitute for the suspicion consequence `estrangement::watch_estrangement`
+/// already applies. `already_present` is checked only inside the two arms
+/// that actually walk a courier in (`IvyPack`/`SatoPack`); `LindqvistOverclock`
+/// materializes instantly with no crew visit at all, so it has nothing to
+/// collide with.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_npc_requisition(
+    commands: &mut Commands,
+    shift: &mut Shift,
+    station: &StationData,
+    catalog: Option<&ProduceCatalog>,
+    pending: &mut PendingRestock,
+    overclocks: &mut Query<&mut Overclock>,
+    delivery_station: DeliveryStation,
+    estranged: &crate::estrangement::Estranged,
+    already_present: bool,
+    kind: NpcRequisitionKind,
+) -> bool {
+    let owner = kind.owner();
+    if estranged.0.contains(owner) {
+        return false;
+    }
+    match kind {
+        NpcRequisitionKind::IvyPack(pack_id) => {
+            if already_present {
+                return false;
+            }
+            let Some(catalog) = catalog else {
+                return false;
+            };
+            let Some(pack) = catalog.pack(pack_id) else {
+                return false;
+            };
+            if !npc_can_afford(shift.npc_standing(owner), pack.cost) {
+                return false;
+            }
+            shift.adjust_npc(owner, -pack.cost);
+            produce::spawn_named_delivery(commands, station, owner, pack.expand_items());
+            true
+        }
+        NpcRequisitionKind::SatoPack(pack_id) => {
+            if already_present {
+                return false;
+            }
+            let Some(pack) = station.config.supply.pack(pack_id) else {
+                return false;
+            };
+            if !npc_can_afford(shift.npc_standing(owner), pack.cost) {
+                return false;
+            }
+            shift.adjust_npc(owner, -pack.cost);
+            restock::queue_glassware_purchase(pending, pack.beakers, pack.large);
+            true
+        }
+        NpcRequisitionKind::LindqvistOverclock => {
+            if !npc_can_afford(shift.npc_standing(owner), OVERCLOCK_COST) {
+                return false;
+            }
+            shift.adjust_npc(owner, -OVERCLOCK_COST);
+            if let Some(mut existing) = overclocks.iter_mut().next() {
+                existing.charges += machines::OVERCLOCK_CHARGES;
+            } else {
+                machines::spawn_overclock(commands, delivery_station);
+            }
+            true
+        }
+    }
+}
+
 /// Spend standing on a department's supplies, any time affordability holds.
 #[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
 pub struct RequisitionRequested {
     #[entities]
     pub board: Entity,
     pub kind: RequisitionKind,
+}
+
+/// Spend one NPC's own standing on something only they sell.
+#[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
+pub struct NpcRequisitionRequested {
+    #[entities]
+    pub board: Entity,
+    pub kind: NpcRequisitionKind,
 }
 
 /// Flips the "not accepting requests" sign. Either chemist can use it.
@@ -804,7 +936,9 @@ fn handle_requisition(
     station: Option<Res<StationData>>,
     mut shift: ResMut<Shift>,
     mut knowledge: ResMut<Knowledge>,
-    mut produce: Option<ResMut<DeliverySchedule>>,
+    catalog: Option<Res<ProduceCatalog>>,
+    present_crew: Query<&CrewMember, NotResident>,
+    present_produce: Query<&Produce>,
     db: Res<ChemDb>,
     mut suspicion: Option<ResMut<SecuritySuspicion>>,
     mut carried: Option<ResMut<CarriedSuspicion>>,
@@ -814,6 +948,7 @@ fn handle_requisition(
     let Some(station) = station else {
         return;
     };
+    let mut rng = rand::rng();
     for request in requests.read() {
         if !is_board(request.board, &boards) {
             continue;
@@ -823,12 +958,18 @@ fn handle_requisition(
             .cloned()
             .unwrap_or_default()
             .station(DeliveryLane::Public);
+        let already_present = catalog
+            .as_deref()
+            .is_some_and(|catalog| produce::courier_present(catalog.courier_name(), &present_crew));
         if !apply_requisition(
             &mut commands,
             &mut shift,
             &mut knowledge,
-            produce.as_deref_mut(),
-            &station.config.supply,
+            &station,
+            catalog.as_deref(),
+            already_present,
+            present_produce.iter().map(|produce| produce.0),
+            &mut rng,
             &db,
             suspicion.as_deref_mut(),
             carried.as_deref_mut(),
@@ -847,6 +988,79 @@ fn handle_requisition(
             .positive(),
         );
     }
+}
+
+/// The individual-standing sibling of [`handle_requisition`] — same shape,
+/// keyed to one NPC instead of a department.
+#[allow(clippy::too_many_arguments)]
+fn handle_npc_requisition(
+    mut commands: Commands,
+    mut requests: MessageReader<FromClient<NpcRequisitionRequested>>,
+    boards: Query<&Machine>,
+    station: Option<Res<StationData>>,
+    catalog: Option<Res<ProduceCatalog>>,
+    mut shift: ResMut<Shift>,
+    mut pending: ResMut<PendingRestock>,
+    mut overclocks: Query<&mut Overclock>,
+    delivery_stations: Option<Res<DeliveryStations>>,
+    estranged: Option<Res<crate::estrangement::Estranged>>,
+    present_crew: Query<&CrewMember, NotResident>,
+    mut radio: ResMut<RadioLog>,
+) {
+    // Only `StationData` is unconditionally required — `catalog` is Ivy-only
+    // and is threaded through as an `Option`, so Sato's/Lindqvist's own
+    // purchases still work before (or without) the produce catalog ever
+    // loading.
+    let Some(station) = station else {
+        return;
+    };
+    let empty = crate::estrangement::Estranged::default();
+    let estranged = estranged.as_deref().unwrap_or(&empty);
+    for request in requests.read() {
+        if !is_board(request.board, &boards) {
+            continue;
+        }
+        let delivery_station = delivery_stations
+            .as_deref()
+            .cloned()
+            .unwrap_or_default()
+            .station(DeliveryLane::Public);
+        let already_present = produce::courier_present(request.kind.owner(), &present_crew);
+        if !apply_npc_requisition(
+            &mut commands,
+            &mut shift,
+            &station,
+            catalog.as_deref(),
+            &mut pending,
+            &mut overclocks,
+            delivery_station,
+            estranged,
+            already_present,
+            request.kind,
+        ) {
+            continue;
+        }
+        radio.push(
+            RadioEntry::new(
+                channel_for(&find_role(&station, request.kind.owner())),
+                format!("{} logged a personal order.", request.kind.owner()),
+            )
+            .speaker(request.kind.owner())
+            .positive(),
+        );
+    }
+}
+
+/// The role a named crew member holds, for the radio channel their own
+/// purchase should log against. Falls back to `Service` — every current
+/// seller is Service's own — rather than guessing wrong silently.
+fn find_role(station: &StationData, name: &str) -> String {
+    station
+        .crew
+        .iter()
+        .find(|member| member.name == name)
+        .map(|member| member.role.clone())
+        .unwrap_or_else(|| "Service".to_string())
 }
 
 fn handle_toggle_accepting(
@@ -960,7 +1174,10 @@ fn snapshot(shift: &Shift, knowledge: &Knowledge) -> ShiftSnapshot {
     ShiftSnapshot {
         succeeded: shift.succeeded,
         botched: shift.botched,
-        department_standing: shift.department_standing.clone(),
+        department_standing: Department::ALL
+            .into_iter()
+            .map(|department| (department, shift.standing(department)))
+            .collect(),
         research_points: knowledge.research_points,
         recipes_known: knowledge.known_count(),
     }
@@ -1125,6 +1342,17 @@ struct ProgressSave {
     succeeded: u32,
     #[serde(default)]
     botched: u32,
+    /// One hidden standing per named crew member. See `orders::Shift::
+    /// npc_standing`. Empty on a save written before per-NPC standing
+    /// existed — `load_progress` backward-fills it from `department_standing`
+    /// below in that case, so a returning career's crew do not silently
+    /// reset to neutral.
+    #[serde(default)]
+    npc_standing: HashMap<String, i32>,
+    /// Legacy, department-level standing from before per-NPC standing
+    /// existed. Read-only from here on: `load_progress` only ever reads this
+    /// to backward-fill `npc_standing` when a save has no `npc_standing` of
+    /// its own, and `persist_progress` never writes anything into it again.
     #[serde(default)]
     department_standing: HashMap<Department, i32>,
     /// Which shift the career is on, and what it looked like when that shift
@@ -1196,6 +1424,12 @@ struct ProgressSave {
     /// See `addiction::Addictions`.
     #[serde(default)]
     addictions: crate::addiction::Addictions,
+    /// Which named crew members are currently estranged — a career fact
+    /// like `rogue_redeemed`, not a shift-scoped one: burning a relationship
+    /// should not un-burn itself just because the shift was called. See
+    /// `estrangement::Estranged`.
+    #[serde(default)]
+    estranged: std::collections::HashSet<String>,
 }
 
 /// Restores the career on launch.
@@ -1212,6 +1446,7 @@ fn load_progress(
     quack_progress: Option<ResMut<crate::quack::QuackProgress>>,
     mut thwarted: ResMut<crate::arc::ThwartedAntags>,
     mut addictions: ResMut<crate::addiction::Addictions>,
+    estranged: Option<ResMut<crate::estrangement::Estranged>>,
     slot: Option<Res<SaveSlot>>,
 ) {
     // Cross-save, so it is read whether or not this session has a slot at all
@@ -1228,7 +1463,18 @@ fn load_progress(
 
     shift.succeeded = save.succeeded;
     shift.botched = save.botched;
-    shift.department_standing = save.department_standing;
+    if !save.npc_standing.is_empty() {
+        shift.npc_standing = save.npc_standing;
+    } else if !save.department_standing.is_empty() {
+        // Backward-fill: a save from before per-NPC standing existed only
+        // knows one scalar per department. Seed every member from it so a
+        // returning career's crew do not silently reset to neutral.
+        for (department, value) in &save.department_standing {
+            for name in department.members() {
+                shift.npc_standing.insert((*name).to_string(), *value);
+            }
+        }
+    }
     // Shifts are 1-based; `0` is what a save written before they were numbered
     // deserialises to, and reading it as "shift 1" is exactly right for one.
     shift.shift_number = save.shift_number.max(1);
@@ -1265,6 +1511,9 @@ fn load_progress(
         commands.insert_resource(campaign);
     }
     *addictions = save.addictions;
+    if let Some(mut estranged) = estranged {
+        estranged.0 = save.estranged;
+    }
     info!(
         "resuming with {} delivered, {} botched",
         shift.succeeded, shift.botched
@@ -1318,6 +1567,7 @@ fn persist_progress(
     quack_progress: Option<Res<crate::quack::QuackProgress>>,
     campaign: Option<Res<crate::arc::Campaign>>,
     addictions: Res<crate::addiction::Addictions>,
+    estranged: Option<Res<crate::estrangement::Estranged>>,
     slot: Option<Res<SaveSlot>>,
     mut written: ResMut<PersistedProgress>,
 ) {
@@ -1327,7 +1577,10 @@ fn persist_progress(
     let save = ProgressSave {
         succeeded: shift.succeeded,
         botched: shift.botched,
-        department_standing: shift.department_standing.clone(),
+        npc_standing: shift.npc_standing.clone(),
+        // Never written again once a save has moved to `npc_standing` above
+        // — kept as a field only so an older save file still parses.
+        department_standing: HashMap::new(),
         shift_number: shift.shift_number,
         opened_at: shift.opened_at.clone(),
         requisition: shift.requisition,
@@ -1342,6 +1595,7 @@ fn persist_progress(
         quack_progress: quack_progress.map(|p| p.0).unwrap_or(0),
         campaign: campaign.map(|c| c.clone()),
         addictions: addictions.clone(),
+        estranged: estranged.map(|e| e.0.clone()).unwrap_or_default(),
     };
     if written.0.as_ref() == Some(&save) {
         return;
@@ -1980,6 +2234,7 @@ mod tests {
         .add_plugins(ShiftPlugin)
         .init_resource::<Shift>()
         .init_resource::<RadioLog>()
+        .init_resource::<PendingRestock>()
         .insert_resource(Knowledge::new(&chemistry()))
         .insert_resource(ChemDb(chemistry()))
         .insert_resource(station());
@@ -2426,7 +2681,15 @@ mod tests {
             Some(ShiftSnapshot {
                 succeeded: 6,
                 botched: 0,
-                department_standing: HashMap::new(),
+                // Dense now, not sparse: `snapshot()` derives every
+                // department's average fresh rather than cloning whichever
+                // ones had ever been directly touched — untouched members
+                // read as 0 either way, so `shift_report`'s own comparison
+                // is unaffected.
+                department_standing: Department::ALL
+                    .into_iter()
+                    .map(|department| (department, 0))
+                    .collect(),
                 research_points: 0,
                 recipes_known: knowledge,
             }),

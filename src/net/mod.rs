@@ -36,7 +36,8 @@ use crate::door::{Corroded, Door};
 use crate::hazards::{ActiveHazard, SmokeCloud, SmokeOwner, SmokePayload};
 use crate::interaction::Interactable;
 use crate::machines::{
-    AgitationRun, Buffer, DispenseAmount, Hopper, HplcReport, Machine, Thermostat,
+    AgitationRun, Buffer, DispenseAmount, Hopper, HplcReport, Machine, Overclock, Overclocked,
+    Thermostat,
 };
 use crate::orders::{CounterOrder, CrisisOrder, DevelopmentOrder, Order};
 use crate::player::Player;
@@ -608,6 +609,9 @@ fn register_replication(app: &mut App) {
         // What the chamber is set to. Without this the second chemist to walk
         // up cannot see it is running and cooks the batch.
         .replicate::<Thermostat>()
+        // Whether the chamber is currently running hot off a spent Overclock
+        // charge — both chemists need to see this, not just whoever applied it.
+        .replicate::<Overclocked>()
         // Whether a door is open. `door::decide_door_state` is the only
         // writer; every peer's leaves, `Solid` and `WalkableAreas` bridge
         // follow this one bool.
@@ -635,6 +639,8 @@ fn register_replication(app: &mut App) {
         // Rogue Security's reward — a pickable prop, shared lab state like
         // any other, so both peers see it appear on the counter.
         .replicate::<Deterrent>()
+        // Tech Lindqvist's overclock tool — same reasoning as `Deterrent`.
+        .replicate::<Overclock>()
         // The showdown, both forms. A breach needs its own marker because it
         // is not crew and `dress_crew` cannot draw it; the assailant needs one
         // so a guest is not watching an ordinary-looking crew member walk

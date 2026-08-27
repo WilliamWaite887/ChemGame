@@ -79,8 +79,39 @@ impl GlasswareDelivery {
 /// takes. Collapsed into one system, a courier who happened to be in the room
 /// would cancel the lab's entire resupply, and any requisition paid for it
 /// with it.
+///
+/// `deficit` (from the periodic check) and `purchased_*` (from
+/// `shift::NpcRequisitionKind::SatoPack`, his own personal shop) are kept as
+/// separate fields rather than one running total, deliberately: they are
+/// still one delivery in the end, but a purchased pack's exact composition
+/// has to survive to `dispatch_glassware` unchanged — "what the shop lists is
+/// exactly what shows up," the same property Botanist Ivy's packs already
+/// guarantee — while the deficit half still gets rounded through
+/// `crate_contents`'s `large_every` split same as always. `order_glassware`
+/// *adds to* `deficit` rather than overwriting it for the same reason: a
+/// purchase queued the same tick a periodic check lands must never be
+/// clobbered.
 #[derive(Resource, Default)]
-pub struct PendingRestock(Option<usize>);
+pub struct PendingRestock {
+    deficit: usize,
+    purchased_beakers: usize,
+    purchased_large: usize,
+}
+
+impl PendingRestock {
+    fn is_empty(&self) -> bool {
+        self.deficit == 0 && self.purchased_beakers == 0 && self.purchased_large == 0
+    }
+}
+
+/// Banks a personal purchase from Miner Sato's own shop onto the one pending
+/// delivery — see [`PendingRestock`]'s own doc comment for why this merges
+/// rather than spawning him a second time. `pub(super)`: only `shift::
+/// apply_npc_requisition`'s `SatoPack` arm calls this.
+pub(super) fn queue_glassware_purchase(pending: &mut PendingRestock, beakers: usize, large: usize) {
+    pending.purchased_beakers += beakers;
+    pending.purchased_large += large;
+}
 
 /// Works out how short the lab is, on a periodic check rather than once per
 /// prep — there is no prep to hang it off any more.
@@ -145,7 +176,9 @@ fn order_glassware(
     // Only spent once it has bought something. Zeroed above the early return it
     // could be consumed by a check that delivered nothing at all.
     shift.requisition.glassware = 0;
-    pending.0 = Some(needed);
+    // Adds rather than overwrites — a personal purchase already queued this
+    // same tick must not be clobbered. See `PendingRestock`'s doc comment.
+    pending.deficit += needed;
 }
 
 /// Sends cargo in as soon as there is a courier free to come.
@@ -155,9 +188,9 @@ fn dispatch_glassware(
     station: Option<Res<StationData>>,
     present: Query<&CrewMember, crate::crew::NotResident>,
 ) {
-    let Some(needed) = pending.0 else {
+    if pending.is_empty() {
         return;
-    };
+    }
     let Some(station) = station else {
         return;
     };
@@ -179,17 +212,19 @@ fn dispatch_glassware(
             "no crew member named '{}' to bring glassware",
             supply.courier
         );
-        pending.0 = None;
+        *pending = PendingRestock::default();
         return;
     };
 
-    let (beakers, large) = crate_contents(needed, supply.large_every);
+    let (deficit_beakers, deficit_large) = crate_contents(pending.deficit, supply.large_every);
+    let beakers = deficit_beakers + pending.purchased_beakers;
+    let large = deficit_large + pending.purchased_large;
     // His own lane at the counter, clear of whoever is queuing for an order.
     let courier = spawn_crew_member(&mut commands, def, -1.1);
     commands
         .entity(courier)
         .insert(GlasswareDelivery { beakers, large });
-    pending.0 = None;
+    *pending = PendingRestock::default();
 }
 
 /// Puts the crate down once he reaches the counter, then sends him out.
@@ -268,9 +303,105 @@ fn describe(delivery: &GlasswareDelivery) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orders::OrderConfig;
 
     fn delivery(beakers: usize, large: usize) -> GlasswareDelivery {
         GlasswareDelivery { beakers, large }
+    }
+
+    fn config() -> OrderConfig {
+        ron::from_str(include_str!("../../assets/data/station.orders.ron"))
+            .expect("order data should parse")
+    }
+
+    fn station() -> StationData {
+        StationData {
+            crew: ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap(),
+            config: config(),
+        }
+    }
+
+    fn restock_app() -> App {
+        let mut app = App::new();
+        app.insert_resource(station())
+            .init_resource::<Shift>()
+            .init_resource::<RadioLog>()
+            .init_resource::<PendingRestock>()
+            .init_resource::<Time>()
+            .add_systems(
+                Update,
+                (order_glassware, dispatch_glassware, unload_glassware).chain(),
+            );
+        app
+    }
+
+    #[test]
+    fn a_purchase_merges_with_a_pending_deficit_instead_of_clobbering_it() {
+        // Every real beaker is missing, so the periodic check will find a
+        // deficit on its very first tick (armed as "due now"). Queue a
+        // personal purchase in the same frame the check lands.
+        let mut app = restock_app();
+        queue_glassware_purchase(&mut app.world_mut().resource_mut::<PendingRestock>(), 2, 1);
+        app.update();
+
+        let mut couriers = app.world_mut().query::<&GlasswareDelivery>();
+        let delivered = couriers
+            .iter(app.world())
+            .next()
+            .expect("a courier should have been dispatched carrying both halves");
+        let supply = &station().config.supply;
+        let (deficit_beakers, deficit_large) =
+            crate_contents(restock_order(0, supply.glassware_target, supply.crate_max), supply.large_every);
+        assert_eq!(delivered.beakers, deficit_beakers + 2);
+        assert_eq!(delivered.large, deficit_large + 1);
+    }
+
+    #[test]
+    fn a_purchased_composition_survives_unchanged_when_there_is_no_deficit() {
+        // Enough live beakers already in the lab that the very first periodic
+        // check finds no deficit at all — isolates the purchase from any
+        // deficit rounding, in one single update so there's no already-
+        // present courier from an earlier delivery to confuse the picture.
+        let mut app = restock_app();
+        let target = station().config.supply.glassware_target;
+        for _ in 0..target {
+            app.world_mut().spawn(Container::new(ContainerKind::Beaker));
+        }
+        queue_glassware_purchase(&mut app.world_mut().resource_mut::<PendingRestock>(), 3, 2);
+        app.update();
+
+        let mut couriers = app.world_mut().query::<&GlasswareDelivery>();
+        let delivered = couriers
+            .iter(app.world())
+            .next()
+            .expect("the purchase alone should still dispatch a courier");
+        assert_eq!((delivered.beakers, delivered.large), (3, 2));
+    }
+
+    #[test]
+    fn sato_is_refused_while_he_is_already_present() {
+        let mut app = restock_app();
+        let supply = station().config.supply;
+        app.world_mut().spawn(CrewMember {
+            name: supply.courier.clone(),
+            role: "Cargo".to_string(),
+        });
+        queue_glassware_purchase(&mut app.world_mut().resource_mut::<PendingRestock>(), 4, 0);
+        app.update();
+
+        assert!(
+            app.world_mut()
+                .query::<&GlasswareDelivery>()
+                .iter(app.world())
+                .next()
+                .is_none(),
+            "no delivery should dispatch while he's already at the counter"
+        );
+        let pending = app.world().resource::<PendingRestock>();
+        assert!(
+            !pending.is_empty(),
+            "the purchase must stay queued, not be lost"
+        );
     }
 
     #[test]

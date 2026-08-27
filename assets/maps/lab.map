@@ -3325,6 +3325,92 @@
 "origin" "-660 1400 0"
 "department" "Service"
 }
+// crew_post: Medical work posts, either side of the shared department_spot.
+// Verified against the "Medical" func_walkable box (X -400..120, Y 660..1448)
+// so neither lands closer than ~35 units (the nav radius inset) to a wall.
+{
+"classname" "crew_post"
+"origin" "-260 1080 0"
+"occupant" "Dr. Vance"
+"kind" "work"
+}
+{
+"classname" "crew_post"
+"origin" "-300 1220 0"
+"occupant" "Nurse Okonkwo"
+"kind" "work"
+}
+// crew_post: Security work posts. Verified against "Security"
+// (X -400..80, Y 3340..4380).
+{
+"classname" "crew_post"
+"origin" "-260 3840 0"
+"occupant" "Officer Reyes"
+"kind" "work"
+}
+{
+"classname" "crew_post"
+"origin" "-300 3960 0"
+"occupant" "Warden Bex"
+"kind" "work"
+}
+// crew_post: Engineering's one work post. Verified against "Engineering"
+// brush 1 (X -1144..-600, Y 2640..4080), the sub-room the department_spot
+// itself falls inside.
+{
+"classname" "crew_post"
+"origin" "-1040 3120 0"
+"occupant" "Tech Lindqvist"
+"kind" "work"
+}
+// crew_post: Cargo's one work post. Verified against "Cargo" brush 0
+// (X -1904..-1380, Y 2100..3760) — the department_spot itself sits only 60
+// units off the south wall, so this is offset north instead of south.
+{
+"classname" "crew_post"
+"origin" "-1600 2200 0"
+"occupant" "Miner Sato"
+"kind" "work"
+}
+// crew_post: Service work posts. Verified against "Service" brush 1
+// (X -1560..-600, Y 945..1548) — the department_spot itself sits only 60
+// units off the east wall, so Ivy's post is offset south instead of east.
+{
+"classname" "crew_post"
+"origin" "-700 1300 0"
+"occupant" "Botanist Ivy"
+"kind" "work"
+}
+{
+"classname" "crew_post"
+"origin" "-740 1400 0"
+"occupant" "Chef Dubois"
+"kind" "work"
+}
+// crew_post: relax spots in the Service hall, between the department_spot
+// and the SERVICE / CHAPEL room sign — both inside the same brush 1 box.
+{
+"classname" "crew_post"
+"origin" "-800 1400 0"
+"occupant" ""
+"kind" "relax"
+}
+{
+"classname" "crew_post"
+"origin" "-900 1350 0"
+"occupant" ""
+"kind" "relax"
+}
+// crew_post: illicit-flavoured loitering spot, Cargo-adjacent — where
+// smuggler::loiter_smuggler visibly hangs around between scripted visits.
+// Inside the same "Cargo" brush 0 box as Miner Sato's post above, offset
+// further north so the two don't overlap.
+{
+"classname" "crew_post"
+"origin" "-1750 2300 0"
+"occupant" ""
+"kind" "loiter"
+}
 // entity 71
 {
 "classname" "escape_pod"

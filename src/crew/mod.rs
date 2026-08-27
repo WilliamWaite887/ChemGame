@@ -31,12 +31,20 @@ use crate::AppState;
 const WALK_SPEED: f32 = 2.1;
 /// Close enough to count as arrived.
 const ARRIVE_EPSILON: f32 = 0.12;
+/// Close enough to a post to count as *standing at* it rather than merely
+/// having walked nearby — used only for presentation (which animation to
+/// play), so it stays generous relative to [`ARRIVE_EPSILON`]'s tight
+/// walk-arrival tolerance. Shared by [`CrewPosts::is_near_relax`] and
+/// `drive_crew_animation`'s own work-post check, and by
+/// `ambient_behaviour`'s "already standing there" crisis check.
+const POST_PROXIMITY: f32 = 1.5;
 
 pub struct CrewPlugin;
 
 impl Plugin for CrewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Departments>()
+            .init_resource::<CrewPosts>()
             .add_systems(OnEnter(AppState::Playing), load_crew_assets)
             .add_systems(
                 Update,
@@ -48,8 +56,6 @@ impl Plugin for CrewPlugin {
                     // the same side.
                     (
                         start_crew_at_their_department,
-                        // Ambient crew decide where to be, then everyone walks.
-                        populate_departments.run_if(resource_exists_and_changed::<Departments>),
                         react_to_chemical_statuses,
                         sync_medical_evacuation_prompt,
                         handle_medical_evacuation,
@@ -60,6 +66,28 @@ impl Plugin for CrewPlugin {
                         .chain()
                         .run_if(is_authority)
                         .run_if(resource_exists::<MapReady>),
+                    // Deliberately outside the `MapReady`-gated chain above:
+                    // `collect_loaded_map` removes `MapReady` in the very same
+                    // command batch that makes `Departments` newly changed,
+                    // and nav only restores `MapReady` a frame later once it
+                    // has rebuilt from the fresh `WalkableAreas`. A system
+                    // gated on both at once — as this one used to be — can
+                    // have that one real transition land on the exact frame
+                    // `MapReady` is momentarily absent: Bevy still evaluates
+                    // every run condition on the system regardless of
+                    // whether an earlier one already failed, so the
+                    // change-detection condition here "sees" and consumes
+                    // the change on that frame even though the system's body
+                    // never runs, and by the time `MapReady` returns
+                    // `Departments` no longer looks newly changed to it.
+                    // Silently, permanently, no ambient crew ever spawn.
+                    // This system does not actually need nav to have
+                    // finished — it only queues a destination on a fresh
+                    // `CrewRoute`; `walk_route` (still gated on `MapReady`
+                    // above) resolves the real path once nav is ready.
+                    populate_departments
+                        .run_if(resource_exists_and_changed::<Departments>)
+                        .run_if(is_authority),
                     // Runs everywhere: a crew member who arrived by
                     // replication needs a body drawing just as much as one
                     // spawned locally.
@@ -126,6 +154,88 @@ impl Departments {
         elsewhere
             .get(rand::random_range(0..elsewhere.len()))
             .map(|at| **at)
+    }
+}
+
+/// Personal and communal spots an ambient resident can be sent to, layered
+/// on top of [`Departments`]' one-point-per-department model rather than
+/// replacing it: a named individual with no authored post here simply falls
+/// back to their department's shared point exactly as before, which is what
+/// lets posts be authored incrementally, one person at a time, without ever
+/// leaving the station in a broken state.
+///
+/// Empty in a build without the map, same reasoning as [`Departments`].
+/// Populated from the `crew_post` map marker — see `lab::tb::CrewPost`.
+#[derive(Resource, Default)]
+pub struct CrewPosts {
+    /// Keyed by `station.crew.ron` *name*, not role — this is what actually
+    /// fixes the stacking bug: giving each of the individuals in a
+    /// multi-person department (Medical, Security, Service) their own
+    /// destination instead of all pathing to the department's single shared
+    /// point.
+    work: std::collections::HashMap<String, Vec3>,
+    /// Communal, not owned by any one person: any idle resident may be sent
+    /// to one when they decide to relax, not just an author's intended
+    /// occupant.
+    relax: Vec<Vec3>,
+    /// Kept as its own pool, distinct from `relax`, so the signal stays
+    /// clean: a department minor's off-roster identity (see
+    /// `smuggler::loiter_smuggler`) only ever appears here, never at an
+    /// ordinary resident's relax spot — mixing the two would blur the exact
+    /// behavioural tell this exists to give an attentive player.
+    loiter: Vec<Vec3>,
+}
+
+impl CrewPosts {
+    #[cfg_attr(not(feature = "trenchbroom"), allow(dead_code))]
+    pub fn set_work(&mut self, occupant: String, at: Vec3) {
+        self.work.insert(occupant, at);
+    }
+
+    #[cfg_attr(not(feature = "trenchbroom"), allow(dead_code))]
+    pub fn add_relax(&mut self, at: Vec3) {
+        self.relax.push(at);
+    }
+
+    #[cfg_attr(not(feature = "trenchbroom"), allow(dead_code))]
+    pub fn add_loiter(&mut self, at: Vec3) {
+        self.loiter.push(at);
+    }
+
+    /// Where this named individual's own post is, if the station has
+    /// authored one for them yet.
+    pub fn work(&self, occupant: &str) -> Option<Vec3> {
+        self.work.get(occupant).copied()
+    }
+
+    /// A random communal relax spot, if the station has authored any.
+    pub fn random_relax(&self) -> Option<Vec3> {
+        Self::random_of(&self.relax)
+    }
+
+    /// Whether `at` is close enough to some relax spot to count as sitting
+    /// there. Presentation-only — `Sitting` is chosen for a resident who has
+    /// already arrived and is otherwise idle, this only decides whether
+    /// their current position happens to be one of the seats rather than
+    /// somewhere ordinary to stand.
+    pub fn is_near_relax(&self, at: Vec3) -> bool {
+        self.relax.iter().any(|spot| {
+            let flat = Vec3::new(spot.x, at.y, spot.z);
+            at.distance(flat) < POST_PROXIMITY
+        })
+    }
+
+    /// A random illicit-flavoured loitering spot, if the station has
+    /// authored any.
+    pub fn random_loiter(&self) -> Option<Vec3> {
+        Self::random_of(&self.loiter)
+    }
+
+    fn random_of(spots: &[Vec3]) -> Option<Vec3> {
+        if spots.is_empty() {
+            return None;
+        }
+        spots.get(rand::random_range(0..spots.len())).copied()
     }
 }
 
@@ -200,6 +310,23 @@ impl CrewRoute {
             counter_bound: true,
             delivery_lane,
             lane_offset,
+        }
+    }
+
+    /// A plain walk to an arbitrary destination, not bound for the counter —
+    /// for ambient/loitering spawns that aren't fulfilling an order. Fields
+    /// stay private to this module, so callers elsewhere (`smuggler::
+    /// loiter_smuggler`, for one) go through this rather than a struct
+    /// literal.
+    pub fn to(destination: Vec3) -> Self {
+        CrewRoute {
+            waypoints: Vec::new(),
+            index: 0,
+            phase: CrewPhase::Arriving,
+            pending: Some(destination),
+            counter_bound: false,
+            delivery_lane: DeliveryLane::Public,
+            lane_offset: 0.0,
         }
     }
 
@@ -289,7 +416,7 @@ impl CrewAssets {
 struct CrewModelAsset {
     scene: Handle<WorldAsset>,
     animation_graph: Handle<AnimationGraph>,
-    animation_nodes: [AnimationNodeIndex; 7],
+    animation_nodes: [AnimationNodeIndex; 9],
 }
 
 fn load_crew_model(
@@ -297,21 +424,28 @@ fn load_crew_model(
     asset_server: &AssetServer,
     animation_graphs: &mut Assets<AnimationGraph>,
 ) -> CrewModelAsset {
+    // Blender exports Actions alphabetically: Collapsed, Idle, Sedated,
+    // Sitting, Stimulated, Unsteady, Walk, WalkDrunk, Working. Mirrors
+    // `character_lab::load_character_lab_assets`'s own mapping — the two
+    // load the same rig's clips, just per-department GLBs instead of one
+    // shared test-subject GLB.
     let (graph, nodes) = AnimationGraph::from_clips([
-        asset_server.load(GltfAssetLabel::Animation(1).from_asset(path)),
-        asset_server.load(GltfAssetLabel::Animation(3).from_asset(path)),
-        asset_server.load(GltfAssetLabel::Animation(2).from_asset(path)),
-        asset_server.load(GltfAssetLabel::Animation(4).from_asset(path)),
-        asset_server.load(GltfAssetLabel::Animation(0).from_asset(path)),
-        asset_server.load(GltfAssetLabel::Animation(5).from_asset(path)),
-        asset_server.load(GltfAssetLabel::Animation(6).from_asset(path)),
+        asset_server.load(GltfAssetLabel::Animation(1).from_asset(path)), // Idle
+        asset_server.load(GltfAssetLabel::Animation(4).from_asset(path)), // Stimulated
+        asset_server.load(GltfAssetLabel::Animation(2).from_asset(path)), // Sedated
+        asset_server.load(GltfAssetLabel::Animation(5).from_asset(path)), // Unsteady
+        asset_server.load(GltfAssetLabel::Animation(0).from_asset(path)), // Collapsed
+        asset_server.load(GltfAssetLabel::Animation(6).from_asset(path)), // Walk
+        asset_server.load(GltfAssetLabel::Animation(7).from_asset(path)), // WalkDrunk
+        asset_server.load(GltfAssetLabel::Animation(8).from_asset(path)), // Working
+        asset_server.load(GltfAssetLabel::Animation(3).from_asset(path)), // Sitting
     ]);
     CrewModelAsset {
         scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset(path)),
         animation_graph: animation_graphs.add(graph),
         animation_nodes: nodes
             .try_into()
-            .expect("the shared crew rig has exactly seven clips"),
+            .expect("the shared crew rig has exactly nine clips"),
     }
 }
 
@@ -521,10 +655,33 @@ fn attach_crew_animation(
     }
 }
 
+/// What an otherwise-idle resident's position says about what they should be
+/// shown doing — a relax spot beats a work post so a resident who has wandered
+/// to sit down is never shown standing at attention over an empty post
+/// nearby. `None` means: keep whatever `desired_character_animation` already
+/// picked, ordinarily `Idle`. Pure and Bevy-free on purpose, so it is testable
+/// without an `App`, `AssetServer`, or `AnimationGraph` — see
+/// `machines::effective_chamber_rate` for the same pattern.
+fn post_presentation_animation(
+    crew_posts: &CrewPosts,
+    member: &CrewMember,
+    at: Vec3,
+) -> Option<CharacterAnimation> {
+    if crew_posts.is_near_relax(at) {
+        return Some(CharacterAnimation::Sitting);
+    }
+    let post = crew_posts.work(&member.name)?;
+    let flat = Vec3::new(post.x, at.y, post.z);
+    (at.distance(flat) < POST_PROXIMITY).then_some(CharacterAnimation::Working)
+}
+
 fn drive_crew_animation(
     assets: Option<Res<CrewAssets>>,
+    crew_posts: Res<CrewPosts>,
     bloods: Query<&Bloodstream>,
     routes: Query<&CrewRoute>,
+    members: Query<&CrewMember>,
+    transforms: Query<&Transform>,
     mut players: Query<(
         &mut AnimationPlayer,
         &mut AnimationTransitions,
@@ -539,7 +696,24 @@ fn drive_crew_animation(
             continue;
         };
         let moving = routes.get(controller.crew).is_ok_and(CrewRoute::is_moving);
-        let desired = desired_character_animation(&blood.0, moving);
+        let mut desired = desired_character_animation(&blood.0, moving);
+        // Neither `Working` nor `Sitting` has a bloodstream signal of its
+        // own — both are a presentation choice layered on top of an
+        // otherwise-plain `Idle`, derived from comparing the resident's own
+        // (replicated) `Transform` against the (locally-known) `CrewPosts`
+        // marker positions. No new network state: both peers already have
+        // everything this needs.
+        if desired == CharacterAnimation::Idle {
+            if let (Ok(member), Ok(transform)) =
+                (members.get(controller.crew), transforms.get(controller.crew))
+            {
+                if let Some(post_animation) =
+                    post_presentation_animation(&crew_posts, member, transform.translation)
+                {
+                    desired = post_animation;
+                }
+            }
+        }
         let model = &assets.models[controller.theme];
         let node = model.animation_nodes[desired as usize];
         let speed = character_animation_speed(&blood.0, desired);
@@ -719,6 +893,7 @@ const DWELL_SECONDS: (f32, f32) = (4.0, 11.0);
 fn populate_departments(
     mut commands: Commands,
     departments: Res<Departments>,
+    crew_posts: Res<CrewPosts>,
     station: Option<Res<crate::orders::StationData>>,
     resident: Query<&CrewMember, With<Ambient>>,
 ) {
@@ -727,7 +902,10 @@ fn populate_departments(
     };
 
     for def in &station.crew {
-        let Some(home) = departments.home(&def.role) else {
+        // Their own post if the station has authored one, otherwise the
+        // shared department point exactly as before posts existed.
+        let Some(home) = crew_posts.work(&def.name).or_else(|| departments.home(&def.role))
+        else {
             continue;
         };
         // One resident per person on the roster, not per department: the roster
@@ -742,15 +920,15 @@ fn populate_departments(
             dwell: rand::random_range(DWELL_SECONDS.0..=DWELL_SECONDS.1),
         });
         // Overwrite the arrival route: they are not coming to the counter.
-        commands.entity(crew).insert(CrewRoute {
-            waypoints: Vec::new(),
-            index: 0,
-            phase: CrewPhase::Arriving,
-            pending: Some(home),
-            counter_bound: false,
-            delivery_lane: DeliveryLane::Public,
-            lane_offset: 0.0,
-        });
+        commands.entity(crew).insert(CrewRoute::to(home));
+        // A resident's "ordinary interaction" `sync_medical_evacuation_prompt`
+        // already talks about displacing — without this they have no
+        // `Interactable` at all, so `Focus` never locks onto them and no
+        // verb reaches them, apply-held (inject/splash) included, since it
+        // reads the same focused target every other interaction does.
+        commands
+            .entity(crew)
+            .insert(Interactable::new(format!("{} — {}", def.name, def.role)));
     }
 }
 
@@ -764,6 +942,7 @@ fn populate_departments(
 fn ambient_behaviour(
     time: Res<Time>,
     departments: Res<Departments>,
+    crew_posts: Res<CrewPosts>,
     crisis: Query<(&Transform, &crate::crisis::CrisisResponse)>,
     mut residents: Query<(&CrewMember, &mut Ambient, &mut CrewRoute, &Transform)>,
 ) {
@@ -780,14 +959,16 @@ fn ambient_behaviour(
             let post = if wanted {
                 Some(casualty.translation)
             } else {
-                departments.home(&member.role)
+                crew_posts
+                    .work(&member.name)
+                    .or_else(|| departments.home(&member.role))
             };
 
             if let Some(post) = post {
                 // Only walk if they are not already standing there, or they
                 // shuffle on the spot for the whole crisis.
                 let flat = Vec3::new(post.x, transform.translation.y, post.z);
-                if transform.translation.distance(flat) > 1.5 {
+                if transform.translation.distance(flat) > POST_PROXIMITY {
                     route.pending = Some(post);
                     route.counter_bound = false;
                     route.phase = CrewPhase::Arriving;
@@ -802,9 +983,28 @@ fn ambient_behaviour(
         }
         ambient.dwell = rand::random_range(DWELL_SECONDS.0..=DWELL_SECONDS.1);
 
-        // Somewhere else on the station: another department, or their own.
-        if let Some(next) = departments.somewhere_else(&member.role) {
-            route.pending = Some(next);
+        // A chance to relax at a communal spot first — independent of the
+        // ordinary elsewhere/home choice below, so relax spots
+        // (concentrated in the Service hall to start) draw residents
+        // station-wide, not just Service's own.
+        let relaxing = (rand::random_range(0..4) == 0)
+            .then(|| crew_posts.random_relax())
+            .flatten();
+
+        // Somewhere else on the station: another department, or their own —
+        // preferring their own post over the shared department point when
+        // they stay home, the same fix `populate_departments` already gets.
+        let destination = relaxing.or_else(|| {
+            let next = departments.somewhere_else(&member.role)?;
+            Some(if Some(next) == departments.home(&member.role) {
+                crew_posts.work(&member.name).unwrap_or(next)
+            } else {
+                next
+            })
+        });
+
+        if let Some(destination) = destination {
+            route.pending = Some(destination);
             route.counter_bound = false;
             route.phase = CrewPhase::Arriving;
         }
@@ -820,10 +1020,14 @@ fn ambient_behaviour(
 /// so moving them the same frame is invisible.
 fn start_crew_at_their_department(
     departments: Res<Departments>,
+    crew_posts: Res<CrewPosts>,
     mut arriving: Query<(&CrewMember, &mut Transform), Added<CrewRoute>>,
 ) {
     for (member, mut transform) in &mut arriving {
-        if let Some(home) = departments.home(&member.role) {
+        let home = crew_posts
+            .work(&member.name)
+            .or_else(|| departments.home(&member.role));
+        if let Some(home) = home {
             transform.translation.x = home.x;
             transform.translation.z = home.z;
         }
@@ -1138,6 +1342,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<Departments>()
+            .init_resource::<CrewPosts>()
             .init_resource::<DeliveryStations>()
             .insert_resource(crate::nav::NavGraph::build(
                 &crate::lab::WalkableAreas::from_floor_plan(),
@@ -1174,6 +1379,278 @@ mod tests {
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_secs_f32(seconds));
         app.update();
+    }
+
+    fn named_at(app: &mut App, name: &str, role: &str, at: Vec3) -> Entity {
+        app.world_mut()
+            .spawn((
+                CrewMember {
+                    name: name.to_string(),
+                    role: role.to_string(),
+                },
+                Transform::from_translation(at),
+                CrewRoute::arrival(0.0),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn standing_at_a_work_post_selects_working() {
+        let mut posts = CrewPosts::default();
+        posts.set_work("Tech Lindqvist".to_string(), Vec3::new(-1040.0, 0.0, 3120.0));
+        let member = CrewMember {
+            name: "Tech Lindqvist".to_string(),
+            role: "Engineering".to_string(),
+        };
+        assert_eq!(
+            post_presentation_animation(&posts, &member, Vec3::new(-1040.0, 0.93, 3120.0)),
+            Some(CharacterAnimation::Working),
+            "close enough to their own post, ignoring the Y difference",
+        );
+    }
+
+    #[test]
+    fn standing_near_someone_elses_work_post_stays_idle() {
+        let mut posts = CrewPosts::default();
+        posts.set_work("Tech Lindqvist".to_string(), Vec3::new(-1040.0, 0.0, 3120.0));
+        let visitor = CrewMember {
+            name: "Miner Sato".to_string(),
+            role: "Cargo".to_string(),
+        };
+        assert_eq!(
+            post_presentation_animation(&posts, &visitor, Vec3::new(-1040.0, 0.93, 3120.0)),
+            None,
+            "Lindqvist's post is not Sato's — only your own post reads as work",
+        );
+    }
+
+    #[test]
+    fn walking_toward_a_work_post_stays_idle_until_close() {
+        let mut posts = CrewPosts::default();
+        posts.set_work("Tech Lindqvist".to_string(), Vec3::new(-1040.0, 0.0, 3120.0));
+        let member = CrewMember {
+            name: "Tech Lindqvist".to_string(),
+            role: "Engineering".to_string(),
+        };
+        assert_eq!(
+            post_presentation_animation(&posts, &member, Vec3::new(-1040.0, 0.93, 3116.0)),
+            None,
+            "still 4 units short of the post — must not switch early",
+        );
+    }
+
+    #[test]
+    fn sitting_at_a_relax_spot_beats_a_nearby_work_post() {
+        // A resident's relax spot and their own work post can end up close
+        // together in a small room; relax must win, or someone who has
+        // actually sat down would be shown standing at attention instead.
+        let mut posts = CrewPosts::default();
+        posts.set_work("Chef Dubois".to_string(), Vec3::new(-740.0, 0.0, 1400.0));
+        posts.add_relax(Vec3::new(-800.0, 0.0, 1400.0));
+        let member = CrewMember {
+            name: "Chef Dubois".to_string(),
+            role: "Service".to_string(),
+        };
+        assert_eq!(
+            post_presentation_animation(&posts, &member, Vec3::new(-800.0, 0.93, 1400.0)),
+            Some(CharacterAnimation::Sitting),
+        );
+    }
+
+    #[test]
+    fn an_authored_post_that_falls_back_to_nothing_stays_idle() {
+        let posts = CrewPosts::default();
+        let member = CrewMember {
+            name: "Dr. Vance".to_string(),
+            role: "Medical".to_string(),
+        };
+        assert_eq!(
+            post_presentation_animation(&posts, &member, Vec3::new(-260.0, 0.93, 1080.0)),
+            None,
+            "no posts authored at all — nothing to select",
+        );
+    }
+
+    #[test]
+    fn a_resident_with_no_authored_post_falls_back_to_the_department_home() {
+        // CrewPosts is empty; start_crew_at_their_department must behave
+        // exactly as it did before individual posts existed.
+        let mut app = walking_app();
+        app.world_mut()
+            .resource_mut::<Departments>()
+            .set("Medical".into(), Vec3::new(-21.0, 0.0, 18.0));
+        let crew = named_at(&mut app, "Dr. Vance", "Medical", Vec3::ZERO);
+
+        app.update();
+
+        let at = app.world().get::<Transform>(crew).unwrap().translation;
+        assert_eq!((at.x, at.z), (-21.0, 18.0));
+    }
+
+    #[test]
+    fn two_department_mates_with_distinct_posts_end_up_in_different_places() {
+        // The direct regression guard for the bug this phase fixes: before
+        // per-person posts, both of Medical's two residents landed on the
+        // exact same department point.
+        let mut app = walking_app();
+        app.world_mut()
+            .resource_mut::<Departments>()
+            .set("Medical".into(), Vec3::new(-21.0, 0.0, 18.0));
+        {
+            let mut posts = app.world_mut().resource_mut::<CrewPosts>();
+            posts.set_work("Dr. Vance".to_string(), Vec3::new(-20.0, 0.0, 15.0));
+            posts.set_work("Nurse Okonkwo".to_string(), Vec3::new(-22.0, 0.0, 19.0));
+        }
+        let vance = named_at(&mut app, "Dr. Vance", "Medical", Vec3::ZERO);
+        let okonkwo = named_at(&mut app, "Nurse Okonkwo", "Medical", Vec3::ZERO);
+
+        app.update();
+
+        let vance_at = app.world().get::<Transform>(vance).unwrap().translation;
+        let okonkwo_at = app.world().get::<Transform>(okonkwo).unwrap().translation;
+        assert_eq!((vance_at.x, vance_at.z), (-20.0, 15.0));
+        assert_eq!((okonkwo_at.x, okonkwo_at.z), (-22.0, 19.0));
+        assert_ne!(
+            (vance_at.x, vance_at.z),
+            (okonkwo_at.x, okonkwo_at.z),
+            "two department mates must not stack on one shared point"
+        );
+    }
+
+    fn crew_roster() -> Vec<CrewDef> {
+        ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap()
+    }
+
+    fn order_config() -> crate::orders::OrderConfig {
+        ron::from_str(include_str!("../../assets/data/station.orders.ron")).unwrap()
+    }
+
+    #[test]
+    fn ambient_residents_still_populate_when_map_ready_is_not_yet_back() {
+        // Regression guard for a real, silent, permanent bug: `lab::tb::
+        // collect_loaded_map` removes `MapReady` in the very same command
+        // batch that gives `Departments` its real, non-default data, and
+        // `nav::rebuild_graph` only reinserts `MapReady` a frame later. Bevy
+        // evaluates every run condition attached to a system regardless of
+        // whether an earlier one already failed, so a system gated on both
+        // `resource_exists::<MapReady>` *and*
+        // `resource_exists_and_changed::<Departments>` — as
+        // `populate_departments` briefly was, in `CrewPlugin::build` — can
+        // have that one real transition land on exactly the frame
+        // `MapReady` is absent: the change-detection condition "sees" and
+        // consumes it that frame even though the system's body never runs,
+        // and by the time `MapReady` comes back `Departments` no longer
+        // looks newly changed to it. No ambient crew ever spawned, silently,
+        // forever, until a hot map reload — never actually witnessed in play
+        // until someone stood in a department and watched nobody arrive.
+        // This mirrors `CrewPlugin::build`'s real registration for
+        // `populate_departments`; keep the two in sync.
+        let roster = crew_roster();
+        let mut app = App::new();
+        app.insert_resource(crate::orders::StationData {
+            crew: roster.clone(),
+            config: order_config(),
+        })
+        .init_resource::<Departments>()
+        .init_resource::<CrewPosts>()
+        .add_systems(
+            Update,
+            populate_departments
+                .run_if(resource_exists_and_changed::<Departments>)
+                .run_if(is_authority),
+        );
+
+        // Frame 1: nothing authored yet — spends the trivial "changed" that
+        // `init_resource` itself counts as, matching the instant before any
+        // map has loaded. Deliberately no `MapReady` resource exists
+        // anywhere in this app: the fixed system must not need one.
+        app.update();
+        assert!(
+            app.world_mut()
+                .query::<&CrewMember>()
+                .iter(app.world())
+                .next()
+                .is_none(),
+            "nobody to spawn before the map has said where anyone lives",
+        );
+
+        // The map "loads": exactly what `collect_loaded_map` does to
+        // `Departments` — every role on the roster gets somewhere real.
+        {
+            let mut departments = app.world_mut().resource_mut::<Departments>();
+            let roles: std::collections::HashSet<String> =
+                roster.iter().map(|def| def.role.clone()).collect();
+            for role in roles {
+                departments.set(role, Vec3::new(-1.0, 0.0, -1.0));
+            }
+        }
+
+        app.update();
+
+        let spawned: std::collections::HashSet<String> = app
+            .world_mut()
+            .query::<&CrewMember>()
+            .iter(app.world())
+            .map(|member| member.name.clone())
+            .collect();
+        assert_eq!(
+            spawned,
+            roster.iter().map(|def| def.name.clone()).collect(),
+            "populate_departments must spawn everyone on the same real \
+             change that gave Departments its data — not some later update \
+             that never actually comes",
+        );
+    }
+
+    #[test]
+    fn an_ambient_resident_can_be_focused_and_injected_or_splashed() {
+        // `Focus` (interaction/mod.rs) only ever locks onto an entity with
+        // `Interactable`, and every apply-held route — pour, spray, syringe —
+        // reads that same focused target. A resident with no `Interactable`
+        // is standing in the room but is not actually *there* as far as the
+        // player's crosshair or held container is concerned: nothing to
+        // click, nothing to inject, nothing to splash. This guards
+        // `populate_departments` giving every ambient resident their
+        // "ordinary interaction", the counterpart
+        // `sync_medical_evacuation_prompt`'s own doc comment already
+        // describes displacing.
+        let roster = crew_roster();
+        let mut app = App::new();
+        app.insert_resource(crate::orders::StationData {
+            crew: roster.clone(),
+            config: order_config(),
+        })
+        .init_resource::<Departments>()
+        .init_resource::<CrewPosts>()
+        .add_systems(
+            Update,
+            populate_departments
+                .run_if(resource_exists_and_changed::<Departments>)
+                .run_if(is_authority),
+        );
+        app.update();
+        {
+            let mut departments = app.world_mut().resource_mut::<Departments>();
+            let roles: std::collections::HashSet<String> =
+                roster.iter().map(|def| def.role.clone()).collect();
+            for role in roles {
+                departments.set(role, Vec3::new(-1.0, 0.0, -1.0));
+            }
+        }
+        app.update();
+
+        let mut query = app.world_mut().query::<(&CrewMember, &Interactable)>();
+        let by_name: std::collections::HashMap<String, String> = query
+            .iter(app.world())
+            .map(|(member, tag)| (member.name.clone(), tag.label.clone()))
+            .collect();
+
+        for def in &roster {
+            let label = by_name
+                .get(&def.name)
+                .unwrap_or_else(|| panic!("{} has no Interactable — cannot be focused at all", def.name));
+            assert_eq!(label, &format!("{} — {}", def.name, def.role));
+        }
     }
 
     #[test]
@@ -1261,6 +1738,7 @@ mod tests {
         .init_resource::<Assets<Mesh>>()
         .init_resource::<Assets<StandardMaterial>>()
         .init_resource::<Departments>()
+        .init_resource::<CrewPosts>()
         .init_resource::<DeliveryStations>()
         .init_resource::<crate::lab::DoorSpots>()
         .insert_resource(authored)
@@ -1809,6 +2287,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<Departments>()
+            .init_resource::<CrewPosts>()
             .init_resource::<DeliveryStations>()
             .insert_resource(crate::nav::NavGraph::build(
                 &crate::lab::WalkableAreas::from_floor_plan(),

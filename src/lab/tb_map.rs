@@ -1403,6 +1403,38 @@ fn every_department_on_the_crew_roster_has_somewhere_to_live() {
 }
 
 #[test]
+fn every_named_crew_member_has_a_work_post() {
+    // A missing post is optional by design — `crew::CrewPosts::work` falls
+    // back to the shared department point exactly as before Phase 3
+    // existed — but once authoring is meant to be complete, a silently
+    // missing one is worth catching here rather than only noticing someone
+    // still stacked on their department-mate in play.
+    let map = parse();
+    let work_posts: Vec<String> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("crew_post"))
+        .filter(|entity| property(entity, "kind").as_deref() == Some("work"))
+        .filter_map(|entity| property(entity, "occupant"))
+        .collect();
+
+    for name in [
+        "Dr. Vance",
+        "Nurse Okonkwo",
+        "Officer Reyes",
+        "Warden Bex",
+        "Tech Lindqvist",
+        "Miner Sato",
+        "Botanist Ivy",
+        "Chef Dubois",
+    ] {
+        assert!(
+            work_posts.iter().any(|occupant| occupant == name),
+            "{name} has no work-kind crew_post in {MAP}",
+        );
+    }
+}
+
+#[test]
 fn department_dressing_markers_fit_their_authored_rooms() {
     // Each shell-free set keeps the starter bay's 4.6 x 3.6 m authoring
     // envelope. These origins put the five public departments against their
@@ -3829,6 +3861,7 @@ fn every_entity_in_the_map_is_a_class_the_game_registers() {
         "door_spot",
         "chemist_start",
         "department_spot",
+        "crew_post",
         "department_dressing",
         "decoration_spot",
         "conveyor_spot",
