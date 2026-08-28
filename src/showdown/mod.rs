@@ -127,6 +127,9 @@ pub struct Pursuit {
     /// Shared with `crate::crew::Errand`, which wants exactly this and none of
     /// the hitting — see [`Trail`].
     trail: Trail,
+    /// Whether the last tick actually closed any distance. See
+    /// [`Pursuit::is_moving`].
+    moving: bool,
 }
 
 impl Pursuit {
@@ -142,7 +145,19 @@ impl Pursuit {
             // is the "no route until the first tick" state this used to spell
             // out with an explicit `repath_in: 0.0`.
             trail: Trail::default(),
+            moving: false,
         }
+    }
+
+    /// Whether they are actually closing on someone right now.
+    ///
+    /// `crew::drive_crew_animation` needs this because a `Pursuit` *replaces*
+    /// `CrewRoute`, and the walk cycle used to be chosen from `CrewRoute`
+    /// alone — so every assailant and every cultist has been sliding across
+    /// the floor in a standing pose. Nothing else about pursuit changed here;
+    /// it simply now says out loud what it was already doing.
+    pub fn is_moving(&self) -> bool {
+        self.moving
     }
 }
 
@@ -524,9 +539,13 @@ fn run_pursuers(
     for (mut transform, mut pursuit, blood) in &mut pursuers {
         if blood.is_some_and(|blood| blood.0.status(chem_sim::StatusKind::Pacified).intensity > 0.0)
         {
+            pursuit.moving = false;
             continue;
         }
         pursuit.cooldown -= dt;
+        // Cleared up front, so nobody to chase, no route, or standing in reach
+        // hitting all leave them still rather than holding last tick's stride.
+        pursuit.moving = false;
 
         // Nearest by squared distance — the square root would only be needed
         // to compare against `ASSAILANT_REACH`, which is cheaper to square.
@@ -562,9 +581,10 @@ fn run_pursuers(
             // department walls. No route deliberately means no motion: a
             // disconnected graph must not revive the old wall-phasing path.
             let step = pursuit.speed * dt;
-            pursuit
+            pursuit.moving = pursuit
                 .trail
-                .walk(&mut transform, areas.as_deref(), step, BODY_OFFSET);
+                .walk(&mut transform, areas.as_deref(), step, BODY_OFFSET)
+                .is_some();
             continue;
         }
         if pursuit.cooldown > 0.0 {

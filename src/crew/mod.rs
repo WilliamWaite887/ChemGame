@@ -696,11 +696,14 @@ fn post_presentation_animation(
     (at.distance(flat) < POST_PROXIMITY).then_some(CharacterAnimation::Working)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn drive_crew_animation(
     assets: Option<Res<CrewAssets>>,
     crew_posts: Res<CrewPosts>,
     bloods: Query<&Bloodstream>,
     routes: Query<&CrewRoute>,
+    errands: Query<&Errand>,
+    pursuits: Query<&crate::showdown::Pursuit>,
     members: Query<&CrewMember>,
     transforms: Query<&Transform>,
     mut players: Query<(
@@ -716,7 +719,18 @@ fn drive_crew_animation(
         let Ok(blood) = bloods.get(controller.crew) else {
             continue;
         };
-        let moving = routes.get(controller.crew).is_ok_and(CrewRoute::is_moving);
+        // All three ways a body can be walking, not just the ordinary one.
+        // `Errand` and `showdown::Pursuit` both *replace* `CrewRoute` — that
+        // is deliberate, since two systems writing one `Transform` fight — so
+        // reading the route alone meant anyone on an errand or a pursuit was
+        // animated as standing still while gliding across the floor. That had
+        // been true of every assailant and cultist in the game since `Pursuit`
+        // was written; errands would have made it a daylight problem.
+        let moving = routes.get(controller.crew).is_ok_and(CrewRoute::is_moving)
+            || errands.get(controller.crew).is_ok_and(Errand::is_moving)
+            || pursuits
+                .get(controller.crew)
+                .is_ok_and(crate::showdown::Pursuit::is_moving);
         let mut desired = desired_character_animation(&blood.0, moving);
         // Neither `Working` nor `Sitting` has a bloodstream signal of its
         // own — both are a presentation choice layered on top of an
@@ -1438,6 +1452,10 @@ pub struct Errand {
     /// Seconds before the errand is written off. See
     /// [`ERRAND_DEADLINE_SECONDS`].
     expires_in: f32,
+    /// Whether the last tick actually moved them. Read by
+    /// [`drive_crew_animation`] to pick the walk cycle — see
+    /// [`Errand::is_moving`].
+    moving: bool,
     trail: crate::nav::Trail,
 }
 
@@ -1451,8 +1469,20 @@ impl Errand {
             speed: WALK_SPEED,
             arrive_within: ERRAND_REACH,
             expires_in: ERRAND_DEADLINE_SECONDS,
+            moving: false,
             trail: crate::nav::Trail::default(),
         }
+    }
+
+    /// Whether they are actually walking right now.
+    ///
+    /// Recorded per tick rather than inferred from the component existing,
+    /// which would be the easy version and wrong in both directions that
+    /// matter: a body sedated mid-errand, or held at a wall by containment
+    /// chasing a goal it cannot reach, still *has* an errand — and would walk
+    /// briskly on the spot for as long as it lasted.
+    pub fn is_moving(&self) -> bool {
+        self.moving
     }
 }
 
@@ -1525,8 +1555,13 @@ pub(crate) fn run_errands(
         if blood.is_some_and(|blood| {
             blood.0.status(StatusKind::Sedated).intensity > 0.0 || blood.0.incapacitated()
         }) {
+            errand.moving = false;
             continue;
         }
+        // Cleared up front so every path out of this loop that does not reach
+        // the walk below — no goal, no route, arrived — leaves them standing
+        // still rather than holding last tick's stride.
+        errand.moving = false;
 
         // Where the goal is *now*, not where it was when the errand was set.
         let at = match errand.goal {
@@ -1586,6 +1621,7 @@ pub(crate) fn run_errands(
             // errand-runner is a person crossing the room, and the whole point
             // of the primitive is that the player can watch them do it.
             transform.rotation = Quat::from_rotation_y(heading.x.atan2(heading.z));
+            errand.moving = true;
         }
     }
 }
@@ -3242,6 +3278,61 @@ mod tests {
             "the errand should have been left entirely alone, not half-run",
         );
         assert!(errands(&app).is_empty());
+    }
+
+    #[test]
+    fn an_errand_runner_reports_moving_so_the_walk_cycle_plays() {
+        // `drive_crew_animation` picks the walk animation from this, and an
+        // `Errand` *replaces* `CrewRoute` — so without it the saboteur crosses
+        // the lab in a standing pose. The animation itself needs `CrewAssets`,
+        // an `AnimationPlayer` and a live `AnimationGraph`, none of which exist
+        // headless; this asserts the signal those read, which is the half that
+        // was actually missing.
+        let mut app = errand_app();
+        let start = in_reaction_bay();
+        let walker = errand_runner(&mut app, start);
+        let lobby = crate::lab::ROOMS[crate::lab::LOBBY].center();
+        send(
+            &mut app,
+            walker,
+            ErrandGoal::Point(Vec3::new(lobby.x, BODY_OFFSET, lobby.z)),
+        );
+
+        tick(&mut app, 0.05);
+        tick(&mut app, 0.05);
+
+        assert!(
+            app.world().get::<Errand>(walker).unwrap().is_moving(),
+            "walking across the station has to read as walking",
+        );
+    }
+
+    #[test]
+    fn an_errand_runner_who_is_not_actually_walking_reports_still() {
+        // The other direction, and the reason this is recorded per tick rather
+        // than inferred from the component existing: a sedated body still
+        // *has* an errand, and would otherwise march briskly on the spot.
+        let mut app = errand_app();
+        let start = in_reaction_bay();
+        let walker = errand_runner(&mut app, start);
+        let lobby = crate::lab::ROOMS[crate::lab::LOBBY].center();
+        send(
+            &mut app,
+            walker,
+            ErrandGoal::Point(Vec3::new(lobby.x, BODY_OFFSET, lobby.z)),
+        );
+        tick(&mut app, 0.05);
+        tick(&mut app, 0.05);
+
+        let mut blood = Bloodstream(chem_sim::Bloodstream::default());
+        blood.0.add_status(StatusKind::Sedated, 20.0, 2.0);
+        app.world_mut().entity_mut(walker).insert(blood);
+        tick(&mut app, 0.05);
+
+        assert!(
+            !app.world().get::<Errand>(walker).unwrap().is_moving(),
+            "a body that has been put down must not animate as walking",
+        );
     }
 
     #[test]
