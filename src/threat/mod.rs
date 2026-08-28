@@ -140,6 +140,32 @@ pub const ADDICT_FIRST_RETURN: (f32, f32) = (90.0, 90.0);
 // Spawner clocks
 // ---------------------------------------------------------------------------
 
+/// Divides every threat-thread wait, for testing a thread by hand.
+///
+/// A threat thread is deliberately slow: a department minor's first visit is
+/// four to seven minutes away, and the visit then has to sit unfilled for
+/// another two to four before it expires. That is right for play and useless
+/// for looking at a change — nobody re-checks a walk animation on an eleven
+/// minute loop, and the alternative people actually reach for is editing the
+/// constants and forgetting to put them back.
+///
+/// `THREAT_RUSH=20 cargo run` puts a saboteur at the counter in seconds.
+/// Unset — every shipping build, and every test that does not set it — this
+/// returns `1.0` and nothing about the pacing moves.
+///
+/// Read per call rather than cached in a resource: it is touched a handful of
+/// times a minute across all eleven threads, and a `OnceLock` here would be a
+/// process-global that tests then have to work around.
+pub fn rush_divisor() -> f32 {
+    std::env::var("THREAT_RUSH")
+        .ok()
+        .and_then(|set| set.parse::<f32>().ok())
+        // A zero or negative divisor is a typo, not a request for an infinite
+        // or backwards wait.
+        .filter(|divisor| *divisor >= 1.0)
+        .unwrap_or(1.0)
+}
+
 /// Arms a fresh save's first visit-thread spawn timer.
 ///
 /// Every threat-thread module (`obsessed`, `smuggler`, `saboteur`, `quack`,
@@ -155,7 +181,7 @@ pub fn arm_first_visit<S: Resource>(
     gap_range: (f32, f32),
     make: impl FnOnce(Timer) -> S,
 ) {
-    let gap = rand::rng().random_range(gap_range.0..=gap_range.1);
+    let gap = rand::rng().random_range(gap_range.0..=gap_range.1) / rush_divisor();
     commands.insert_resource(make(Timer::from_seconds(gap, TimerMode::Once)));
 }
 
@@ -174,7 +200,7 @@ pub fn roll_next_gap(
 ) -> Timer {
     let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
     let multiplier = rng.random_range(multiplier_range.0..=multiplier_range.1);
-    Timer::from_seconds(legit_gap * multiplier, TimerMode::Once)
+    Timer::from_seconds(legit_gap * multiplier / rush_divisor(), TimerMode::Once)
 }
 
 // ---------------------------------------------------------------------------
@@ -513,5 +539,63 @@ impl Countdown {
         }
         self.remaining = None;
         Ticked::Fires(self.variant)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The property that matters about the testing lever: it is not on.
+    ///
+    /// `THREAT_RUSH` divides every threat wait in the game, so the one thing
+    /// that must never happen is it quietly applying to a shipping build or to
+    /// the rest of the suite. `rush_divisor` is read live from the process
+    /// environment, which the test harness does not set.
+    #[test]
+    fn threat_pacing_is_untouched_unless_the_rush_lever_is_set() {
+        assert!(
+            std::env::var_os("THREAT_RUSH").is_none(),
+            "the suite must not run with the rush lever set, or every pacing \
+             assertion below is measuring something else",
+        );
+        assert_eq!(rush_divisor(), 1.0);
+    }
+
+    /// A first visit is armed straight off the authored range, undivided.
+    #[test]
+    fn an_unrushed_first_visit_lands_inside_its_authored_range() {
+        let mut app = App::new();
+        #[derive(Resource)]
+        struct Spawner(Timer);
+
+        let mut commands = app.world_mut().commands();
+        arm_first_visit(&mut commands, MINOR_FIRST_VISIT, Spawner);
+        app.world_mut().flush();
+
+        let armed = app.world().resource::<Spawner>().0.duration().as_secs_f32();
+        assert!(
+            (MINOR_FIRST_VISIT.0..=MINOR_FIRST_VISIT.1).contains(&armed),
+            "armed {armed}s, outside the authored {MINOR_FIRST_VISIT:?}",
+        );
+    }
+
+    /// And so is a repeat gap: the thread's own multiplier against the live
+    /// legitimate-order gap, and nothing else.
+    #[test]
+    fn an_unrushed_repeat_gap_is_the_multiplier_against_the_legitimate_gap() {
+        let rules = ShiftRules {
+            gap_seconds: (40.0, 40.0),
+            patience_seconds: (100.0, 100.0),
+            max_active: 3,
+            stretch_chance: 0.0,
+            forecast_boost: 1.0,
+        };
+        let rolled = roll_next_gap(&mut rand::rng(), &rules, (2.0, 2.0));
+        assert!(
+            (rolled.duration().as_secs_f32() - 80.0).abs() < 0.001,
+            "40s gap at a 2x multiplier should be 80s, got {}s",
+            rolled.duration().as_secs_f32(),
+        );
     }
 }

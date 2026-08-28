@@ -226,7 +226,33 @@ pub fn current_rules(config: &OrderConfig, shift: &Shift, chemist_count: usize) 
     let tier = shift.succeeded / config.ramp.orders_per_tier.max(1);
     let base = ShiftRules::for_tier(config, &config.ramp, tier);
     let scaled = scale_for_chemists(base, chemist_count, &config.ramp);
-    scale_for_defeated(scaled, shift.defeated_count, chemist_count, &config.ramp)
+    let rules = scale_for_defeated(scaled, shift.defeated_count, chemist_count, &config.ramp);
+    rush_patience(rules)
+}
+
+/// Shortens how long a visitor waits, under `THREAT_RUSH` only.
+///
+/// The companion to the gap divisor `threat::rush_divisor` already applies to
+/// arrivals: a saboteur who turns up in seconds is still no use for testing if
+/// their visit then takes three minutes to *expire*, and expiry is what the
+/// interesting half of a shenanigan thread hangs off. Deliberately applied
+/// here rather than inside [`ShiftRules::for_tier`], which owns the difficulty
+/// ramp and has an invariant (`tier_zero_matches_the_base_config`) that a
+/// testing lever has no business appearing in.
+///
+/// Unset, this is the identity — see `threat::rush_divisor`.
+fn rush_patience(rules: ShiftRules) -> ShiftRules {
+    let divisor = crate::threat::rush_divisor();
+    if divisor <= 1.0 {
+        return rules;
+    }
+    ShiftRules {
+        patience_seconds: (
+            rules.patience_seconds.0 / divisor,
+            rules.patience_seconds.1 / divisor,
+        ),
+        ..rules
+    }
 }
 
 /// Tightens arrival gaps once per antagonist this career has already

@@ -252,6 +252,171 @@ impl NavGraph {
         }
         Some(waypoints)
     }
+
+    /// The candidate reachable on foot by the shortest *route*, and how far a
+    /// body would actually walk to reach it.
+    ///
+    /// Deliberately not "the nearest by straight line". The two disagree
+    /// exactly where it matters: a beaker a metre away through a wall is a
+    /// twenty-metre walk around, and picking it by proximity sends a body
+    /// pressing hopelessly against the partition. Candidates with no route at
+    /// all are skipped rather than returned with an infinite cost, so an empty
+    /// return means "nowhere to go" and never "somewhere unreachable".
+    pub fn nearest_reachable<T>(
+        &self,
+        from: Vec3,
+        candidates: impl IntoIterator<Item = (T, Vec3)>,
+    ) -> Option<(T, f32)> {
+        candidates
+            .into_iter()
+            .filter_map(|(item, at)| {
+                let path = self.path(from, at)?;
+                Some((item, floor_length(from, &path)))
+            })
+            .min_by(|(_, a), (_, b)| a.total_cmp(b))
+    }
+}
+
+/// Length of a route, measured on the floor plane.
+///
+/// Height is dropped on purpose: a stair's rise is not distance a body has to
+/// spend, and counting it would bias every comparison against routes that
+/// happen to change deck.
+fn floor_length(from: Vec3, path: &[Vec3]) -> f32 {
+    let mut previous = from;
+    let mut total = 0.0;
+    for waypoint in path {
+        let mut leg = *waypoint - previous;
+        leg.y = 0.0;
+        total += leg.length();
+        previous = *waypoint;
+    }
+    total
+}
+
+// ---------------------------------------------------------------------------
+// Walking a route
+// ---------------------------------------------------------------------------
+
+/// A cached portal route and the walking of it.
+///
+/// Extracted from `showdown::Pursuit`, which had the only copy: a path, an
+/// index into it, and a repath clock, plus the loop that follows waypoints
+/// while staying on the walkable floor. `crate::crew::Errand` needs all four
+/// and none of the hitting, so the four move here.
+///
+/// [`crate::crew::CrewRoute`] deliberately does **not** ride on this. It walks
+/// to a destination fixed the moment it is set, through `walk_route`'s phases,
+/// lanes and department fallbacks; a `Trail` re-plans toward something that can
+/// move or vanish. Merging the two would mean one struct with two disjoint
+/// halves and a flag saying which is live.
+#[derive(Default)]
+pub struct Trail {
+    path: Vec<Vec3>,
+    waypoint: usize,
+    /// Seconds until the goal is sampled again and the route rebuilt.
+    replan_in: f32,
+}
+
+impl Trail {
+    /// Whether the replan cadence has come round, ticking its clock.
+    ///
+    /// A fresh `Trail` starts at zero, so the first call always says yes and
+    /// nothing has to plan an opening route by hand.
+    pub fn due_for_replan(&mut self, dt: f32, every: f32) -> bool {
+        self.replan_in -= dt;
+        if self.replan_in > 0.0 {
+            return false;
+        }
+        self.replan_in = every;
+        true
+    }
+
+    /// Replaces the cached route.
+    ///
+    /// An unreachable goal — or a graph that has not finished building —
+    /// leaves the route *empty*, which [`Trail::walk`] then treats as "do not
+    /// move". Never a straight line: that fallback is precisely how bodies
+    /// used to walk through station walls.
+    pub fn plan(&mut self, nav: Option<&NavGraph>, from: Vec3, to: Vec3) {
+        self.waypoint = 0;
+        self.path = nav
+            .and_then(|graph| graph.path(from, to))
+            .unwrap_or_default();
+    }
+
+    /// No route: nowhere to go, and nothing should move.
+    pub fn is_empty(&self) -> bool {
+        self.path.is_empty()
+    }
+
+    /// Where the cached route finishes, if there is one.
+    pub fn end(&self) -> Option<Vec3> {
+        self.path.last().copied()
+    }
+
+    /// Whether the cached route actually ends on `point`, on the floor plane.
+    ///
+    /// The guard against acting on a stale route: a goal that has moved since
+    /// the last replan leaves a path ending somewhere it no longer is, and a
+    /// body that treats "I reached the end of my route" as "I reached my
+    /// target" acts on thin air.
+    pub fn ends_at(&self, point: Vec3) -> bool {
+        self.end().is_some_and(|end| {
+            Vec2::new(end.x - point.x, end.z - point.z).length_squared() <= 0.0001
+        })
+    }
+
+    /// Length of the unwalked part, on the floor plane.
+    pub fn remaining(&self, from: Vec3) -> Option<f32> {
+        if self.path.is_empty() {
+            return None;
+        }
+        Some(floor_length(from, &self.path[self.waypoint.min(self.path.len())..]))
+    }
+
+    /// Walks up to `distance` along the route, kept on the walkable floor.
+    ///
+    /// Returns the direction of the last step taken, for a caller that wants
+    /// to face its body that way — `None` when nothing moved. Containment is
+    /// applied per step rather than per frame for the same reason
+    /// `crew::walk_route` does it: a long step across a doorway can pass
+    /// through geometry the endpoints are both clear of.
+    pub fn walk(
+        &mut self,
+        transform: &mut Transform,
+        areas: Option<&WalkableAreas>,
+        distance: f32,
+        body_offset: f32,
+    ) -> Option<Vec3> {
+        let mut remaining = distance;
+        let mut heading = None;
+        while remaining > 0.0 {
+            let Some(waypoint) = self.path.get(self.waypoint).copied() else {
+                break;
+            };
+            let step = waypoint - transform.translation;
+            let waypoint_distance = step.length();
+            if waypoint_distance <= 0.02 {
+                self.waypoint += 1;
+                continue;
+            }
+            let walked = remaining.min(waypoint_distance);
+            let direction = step / waypoint_distance;
+            let candidate = transform.translation + direction * walked;
+            transform.translation = areas.map_or(candidate, |areas| {
+                areas.contain_on_surface(candidate, NAV_RADIUS, body_offset)
+            });
+            heading = Some(direction);
+            remaining -= walked;
+            if walked >= waypoint_distance {
+                self.waypoint += 1;
+            } else {
+                break;
+            }
+        }
+        heading
+    }
 }
 
 /// A node waiting to be expanded, cheapest first.
