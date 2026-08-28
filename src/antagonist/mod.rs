@@ -14,7 +14,6 @@
 //! stretch-chanced — the requester already knows exactly what they want.
 
 use bevy::prelude::*;
-use bevy_common_assets::ron::RonAssetPlugin;
 use bevy_replicon::prelude::*;
 use chem_sim::{ReagentId, Units};
 use rand::prelude::*;
@@ -33,7 +32,8 @@ use crate::orders::{
 use crate::player::Chemist;
 use crate::produce::{Produce, ProduceCatalog};
 use crate::radio::{PendingBroadcasts, RadioEntry, RadioLog};
-use crate::shift::{self, current_rules};
+use crate::shift::current_rules;
+use crate::threat;
 use crate::AppState;
 
 /// How long a stung delivery's raid warning runs before the officer walks
@@ -77,15 +77,16 @@ pub struct AntagonistPlugin;
 
 impl Plugin for AntagonistPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(RonAssetPlugin::<AntagonistScript>::new(&["antagonist.ron"]))
+        app.add_plugins(threat::ScriptPlugin::<AntagonistScript>::new(
+            "data/station.antagonist.ron",
+            "antagonist.ron",
+        ))
             .init_resource::<UnderworldStanding>()
             .init_resource::<SecuritySuspicion>()
-            .add_systems(Startup, start_loading)
             .add_systems(OnEnter(AppState::Playing), arm_spawner)
             .add_systems(
                 Update,
                 (
-                    promote_script,
                     generate_antagonist_orders,
                     handle_illicit_resolutions,
                     handle_illicit_offer_pickup,
@@ -110,13 +111,81 @@ impl Plugin for AntagonistPlugin {
 /// player willing to open a save file in a text editor, the same as every
 /// other career fact.
 #[derive(Resource, Default, Clone, Copy)]
-pub struct UnderworldStanding(pub i32);
+pub struct UnderworldStanding(i32);
+
+/// The ceiling underworld standing saturates at.
+///
+/// Above it more dealing buys nothing: `crisis::schedule_crisis` already
+/// zeroes the meter on a cure, and an unbounded one turns a single bad shift
+/// into a permanent crisis treadmill nothing can drain. Guarded by
+/// `every_authored_threshold_sits_under_the_ceiling_of_the_meter_that_feeds_it`.
+pub const UNDERWORLD_MAX: i32 = 45;
+
+impl UnderworldStanding {
+    pub fn level(self) -> i32 {
+        self.0
+    }
+
+    /// The one write that is not a nudge: restoring a career off disk.
+    ///
+    /// Also how a test sets up a starting state — clamped either way, so
+    /// neither route can install a value the invariants forbid.
+    pub fn restore(&mut self, level: i32) {
+        self.0 = level.clamp(0, UNDERWORLD_MAX);
+    }
+}
+
+/// Moves underworld standing, clamped to `0..=UNDERWORLD_MAX`.
+///
+/// The tuple field is private for the reason this function exists: four
+/// modules used to reach in and `+=`/`=` it directly, and the only invariant
+/// it had — never negative — was honoured at one of eleven sites. Matches the
+/// `arc::nudge_plot` / `instability::nudge_instability` precedent already set
+/// elsewhere in this codebase.
+pub fn nudge_underworld(standing: &mut UnderworldStanding, delta: i32) {
+    standing.0 = (standing.0 + delta).clamp(0, UNDERWORLD_MAX);
+}
+
+/// Drains it outright — `crisis` on a cure, `shift`'s `QuietWord` requisition.
+pub fn clear_underworld(standing: &mut UnderworldStanding) {
+    standing.0 = 0;
+}
 
 /// How close Security is to raiding the lab. Never replicated, never shown,
 /// and never persisted — a reloaded save should not silently arm a raid the
 /// instant the file opens. Read and reset by `crate::security` (M10c).
 #[derive(Resource, Default, Clone, Copy)]
-pub struct SecuritySuspicion(pub i32);
+pub struct SecuritySuspicion(i32);
+
+/// The ceiling suspicion saturates at. Same reasoning as [`UNDERWORLD_MAX`].
+pub const SUSPICION_MAX: i32 = 60;
+
+impl SecuritySuspicion {
+    pub fn level(self) -> i32 {
+        self.0
+    }
+
+    /// Sets it outright. Not used by the save — suspicion is deliberately
+    /// never persisted, so a reloaded career cannot arm a raid the instant
+    /// the file opens. This exists for tests staging a starting state, hence
+    /// the same test-only annotation `lab::set_bridge_blocked` carries.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn restore(&mut self, level: i32) {
+        self.0 = level.clamp(0, SUSPICION_MAX);
+    }
+}
+
+/// Moves suspicion, clamped to `0..=SUSPICION_MAX`.
+pub fn nudge_suspicion(suspicion: &mut SecuritySuspicion, delta: i32) {
+    suspicion.0 = (suspicion.0 + delta).clamp(0, SUSPICION_MAX);
+}
+
+/// Clears it. Three callers, all meaning "this episode is resolved":
+/// `security::schedule_raid` when a warning arms and again when a ward
+/// absorbs one, and `shift::apply_requisition`'s `QuietWord`.
+pub fn clear_suspicion(suspicion: &mut SecuritySuspicion) {
+    suspicion.0 = 0;
+}
 
 // ---------------------------------------------------------------------------
 // Data
@@ -171,7 +240,6 @@ pub fn effective_gap_multiplier(script: &AntagonistScript, underworld: i32) -> (
 /// this — every re-arm after that reads `gap_multiplier` against the current
 /// legitimate order gap, so only the steady-state cadence needs to track the
 /// ramp.
-const INITIAL_GAP_SECONDS: (f32, f32) = (240.0, 420.0);
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AntagonistRequestDef {
@@ -254,11 +322,9 @@ struct IllicitOffer {
     waited: f32,
 }
 
-#[derive(Resource)]
-struct PendingAntagonistScript(Handle<AntagonistScript>);
 
-#[derive(Resource, Deref)]
-struct Script(AntagonistScript);
+/// This thread's authored script, once loaded.
+type Script = threat::Authored<AntagonistScript>;
 
 /// The clock between antagonist visits — its own, much rarer than the
 /// legitimate `OrderSpawner`'s.
@@ -267,32 +333,12 @@ struct AntagonistSpawner {
     timer: Timer,
 }
 
-fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(PendingAntagonistScript(
-        assets.load("data/station.antagonist.ron"),
-    ));
-}
 
-fn promote_script(
-    mut commands: Commands,
-    pending: Option<Res<PendingAntagonistScript>>,
-    mut scripts: ResMut<Assets<AntagonistScript>>,
-) {
-    let Some(pending) = pending else {
-        return;
-    };
-    let Some(script) = scripts.remove(&pending.0) else {
-        return;
-    };
-    commands.insert_resource(Script(script));
-    commands.remove_resource::<PendingAntagonistScript>();
-}
-
-/// See `shift::arm_first_visit` for why this has to re-run on
+/// See `threat::arm_first_visit` for why this has to re-run on
 /// `OnEnter(AppState::Playing)` every session rather than only once at
 /// process start.
 fn arm_spawner(mut commands: Commands) {
-    shift::arm_first_visit(&mut commands, INITIAL_GAP_SECONDS, |timer| {
+    threat::arm_first_visit(&mut commands, threat::MINOR_FIRST_VISIT, |timer| {
         AntagonistSpawner { timer }
     });
 }
@@ -340,7 +386,7 @@ fn generate_antagonist_orders(
     // in the lab, exactly like the legitimate stream it tracks.
     let rules = current_rules(&station.config, &shift, chemists.iter().count());
     let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
-    let (lo, hi) = effective_gap_multiplier(&script, underworld.0);
+    let (lo, hi) = effective_gap_multiplier(&script, underworld.level());
     let multiplier = rng.random_range(lo..=hi);
     spawner.timer = Timer::from_seconds(legit_gap * multiplier, TimerMode::Once);
 
@@ -363,7 +409,7 @@ fn generate_antagonist_orders(
     let in_standing_offers: Vec<&AntagonistOfferDef> = script
         .offers
         .iter()
-        .filter(|offer| offer.min_standing <= underworld.0)
+        .filter(|offer| offer.min_standing <= underworld.level())
         .collect();
     if !in_standing_offers.is_empty() && rng.random_bool(script.offer_chance) {
         let offer = *in_standing_offers
@@ -381,7 +427,7 @@ fn generate_antagonist_orders(
     let in_standing: Vec<&AntagonistRequestDef> = script
         .requests
         .iter()
-        .filter(|request| request.min_standing <= underworld.0)
+        .filter(|request| request.min_standing <= underworld.level())
         .filter(|request| {
             db.reagents
                 .id_of(&request.reagent)
@@ -553,8 +599,8 @@ fn handle_illicit_resolutions(
         // `crate::addiction`, it is not: a returning addict asks for whatever
         // they are hooked on, which may have no `station.antagonist.ron` entry
         // at all — and every sale to them would silently have cost nothing.
-        underworld.0 += UNDERWORLD_PER_DELIVERY;
-        suspicion.0 += SUSPICION_PER_DELIVERY;
+        nudge_underworld(&mut underworld, UNDERWORLD_PER_DELIVERY);
+        nudge_suspicion(&mut suspicion, SUSPICION_PER_DELIVERY);
 
         // Only the *flavour* needs an authored request. No entry simply means
         // no chaos line and no sting for this one, which is exactly right for
@@ -573,9 +619,7 @@ fn handle_illicit_resolutions(
         // a redundant second one.
         if request.sting_chance > 0.0 && rng.random_bool(request.sting_chance) {
             if let Some(schedule) = raid_schedule.as_mut() {
-                if schedule.warning_in.is_none() {
-                    schedule.warning_in = Some(STING_WARNING_SECONDS);
-                }
+                schedule.arm_sting(STING_WARNING_SECONDS);
             }
             radio.push(
                 RadioEntry::new(
@@ -637,7 +681,7 @@ fn handle_illicit_offer_pickup(
         // Rechecked here, not just at spawn time: `handle_crisis_resolutions`
         // can zero `UnderworldStanding` outright while an offer visitor is
         // still standing there waiting.
-        if underworld.0 < offer.cost {
+        if underworld.level() < offer.cost {
             continue;
         }
         let Some((container_entity, mut container, _)) = containers
@@ -660,7 +704,7 @@ fn handle_illicit_offer_pickup(
         if let Some(message) = ReactionsFired::from_report(container_entity, &report) {
             fired.write(message);
         }
-        underworld.0 = (underworld.0 - cost).max(0);
+        nudge_underworld(&mut underworld, -cost);
         commands
             .entity(request.target)
             .remove::<IllicitOffer>()
@@ -702,6 +746,59 @@ fn expire_illicit_offers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- meter invariants ----------------------------------------------------
+
+    #[test]
+    fn nudging_a_meter_below_zero_floors_it_rather_than_going_negative() {
+        let mut standing = UnderworldStanding::default();
+        nudge_underworld(&mut standing, 3);
+        nudge_underworld(&mut standing, -10);
+        assert_eq!(standing.level(), 0, "standing must never go negative");
+
+        let mut suspicion = SecuritySuspicion::default();
+        nudge_suspicion(&mut suspicion, -5);
+        assert_eq!(suspicion.level(), 0);
+    }
+
+    #[test]
+    fn no_amount_of_dealing_pushes_a_meter_past_its_ceiling() {
+        let mut standing = UnderworldStanding::default();
+        for _ in 0..500 {
+            nudge_underworld(&mut standing, UNDERWORLD_PER_DELIVERY);
+        }
+        assert_eq!(standing.level(), UNDERWORLD_MAX);
+
+        let mut suspicion = SecuritySuspicion::default();
+        for _ in 0..500 {
+            nudge_suspicion(&mut suspicion, SUSPICION_PER_DELIVERY);
+        }
+        assert_eq!(suspicion.level(), SUSPICION_MAX);
+    }
+
+    #[test]
+    fn every_authored_threshold_sits_under_the_ceiling_of_the_meter_that_feeds_it() {
+        // The ceilings added with the mutator API are a real behaviour change,
+        // not a no-op. This is what stops content ever authoring a threshold
+        // the meter it watches can no longer reach — which would silently
+        // disable a whole thread rather than failing loudly.
+        let crisis: crate::crisis::CrisisScript =
+            ron::from_str(include_str!("../../assets/data/station.crisis.ron")).unwrap();
+        assert!(
+            crisis.underworld_threshold < UNDERWORLD_MAX,
+            "station.crisis.ron asks for {} underworld standing, but the meter              saturates at {UNDERWORLD_MAX} — the crisis could never fire",
+            crisis.underworld_threshold,
+        );
+
+        let security: crate::security::SecurityScript =
+            ron::from_str(include_str!("../../assets/data/station.security.ron")).unwrap();
+        assert!(
+            security.threshold < SUSPICION_MAX,
+            "station.security.ron asks for {} suspicion, but the meter saturates              at {SUSPICION_MAX} — the raid could never fire",
+            security.threshold,
+        );
+    }
+
     use crate::orders::OrderConfig;
 
     fn antagonist_app() -> App {
@@ -720,7 +817,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(ChemDb(data))
             .insert_resource(StationData { crew, config })
-            .insert_resource(Script(script))
+            .insert_resource(threat::Authored(script))
             .insert_resource(AntagonistSpawner {
                 // Effectively due on the first real tick, without depending
                 // on a zero-duration timer's edge-case semantics.
@@ -940,7 +1037,7 @@ mod tests {
         .unwrap();
         let mut app = App::new();
         app.insert_resource(ChemDb(data))
-            .insert_resource(Script(script()))
+            .insert_resource(threat::Authored(script()))
             .init_resource::<UnderworldStanding>()
             .init_resource::<SecuritySuspicion>()
             .init_resource::<PendingBroadcasts>()
@@ -998,12 +1095,12 @@ mod tests {
         resolve_illicit(&mut app, unauthored);
 
         assert_eq!(
-            app.world().resource::<UnderworldStanding>().0,
+            app.world().resource::<UnderworldStanding>().level(),
             UNDERWORLD_PER_DELIVERY,
             "the underworld notices a sale whether or not this file scripted it"
         );
         assert_eq!(
-            app.world().resource::<SecuritySuspicion>().0,
+            app.world().resource::<SecuritySuspicion>().level(),
             SUSPICION_PER_DELIVERY,
             "and so does Security"
         );
@@ -1026,8 +1123,8 @@ mod tests {
             if app
                 .world()
                 .resource::<crate::security::RaidSchedule>()
-                .warning_in
-                .is_some()
+                .clock
+                .is_armed()
             {
                 break;
             }
@@ -1036,8 +1133,8 @@ mod tests {
         assert!(
             app.world()
                 .resource::<crate::security::RaidSchedule>()
-                .warning_in
-                .is_some(),
+                .clock
+                .is_armed(),
             "a sting should eventually arm the raid schedule directly"
         );
     }
@@ -1046,7 +1143,7 @@ mod tests {
 
     fn forced_offer_app(underworld: i32) -> App {
         let mut app = antagonist_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().0 = underworld;
+        app.world_mut().resource_mut::<UnderworldStanding>().restore(underworld);
         // Deterministic: guarantees the offer branch is taken whenever at
         // least one offer clears its own `min_standing`, rather than
         // depending on a probabilistic roll.
@@ -1179,13 +1276,13 @@ mod tests {
     #[test]
     fn a_successful_pickup_drains_underworld_standing_by_the_offers_cost() {
         let mut app = offer_pickup_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().0 = 10;
+        app.world_mut().resource_mut::<UnderworldStanding>().restore(10);
         let offer = waiting_offer(&mut app, "space_drugs", 5, 4);
         player_holding(&mut app, ContainerKind::Beaker);
 
         pick_up(&mut app, offer);
 
-        assert_eq!(app.world().resource::<UnderworldStanding>().0, 6);
+        assert_eq!(app.world().resource::<UnderworldStanding>().level(), 6);
         assert!(
             app.world().get::<IllicitOffer>(offer).is_none(),
             "a successful pickup should remove the offer"
@@ -1195,14 +1292,14 @@ mod tests {
     #[test]
     fn an_unaffordable_pickup_is_a_true_no_op() {
         let mut app = offer_pickup_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().0 = 2;
+        app.world_mut().resource_mut::<UnderworldStanding>().restore(2);
         let offer = waiting_offer(&mut app, "space_drugs", 5, 4);
         player_holding(&mut app, ContainerKind::Beaker);
 
         pick_up(&mut app, offer);
 
         assert_eq!(
-            app.world().resource::<UnderworldStanding>().0,
+            app.world().resource::<UnderworldStanding>().level(),
             2,
             "an unaffordable pickup must not spend anything"
         );
@@ -1215,7 +1312,7 @@ mod tests {
     #[test]
     fn a_full_container_accepts_nothing_and_spends_nothing() {
         let mut app = offer_pickup_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().0 = 10;
+        app.world_mut().resource_mut::<UnderworldStanding>().restore(10);
         let offer = waiting_offer(&mut app, "space_drugs", 5, 4);
         let player = player_holding(&mut app, ContainerKind::Beaker);
         let filler = app
@@ -1239,7 +1336,7 @@ mod tests {
         pick_up(&mut app, offer);
 
         assert_eq!(
-            app.world().resource::<UnderworldStanding>().0,
+            app.world().resource::<UnderworldStanding>().level(),
             10,
             "a full container should accept nothing and spend nothing"
         );

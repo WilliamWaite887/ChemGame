@@ -32,7 +32,6 @@
 //!   `antagonist::handle_illicit_resolutions` reacts to a normal one.
 
 use bevy::prelude::*;
-use bevy_common_assets::ron::RonAssetPlugin;
 use chem_sim::{Route, Solution, Units};
 use rand::prelude::*;
 use serde::Deserialize;
@@ -48,6 +47,7 @@ use crate::orders::{
     deliverable_amount, CrisisOrder, Department, Order, OrderResolved, Shift, StationData,
 };
 use crate::radio::{PendingBroadcasts, RadioEntry, RadioLog};
+use crate::threat;
 use crate::AppState;
 
 /// How fast the alert lighting lerps toward red and back, per second. Fast
@@ -58,13 +58,16 @@ pub struct CrisisPlugin;
 
 impl Plugin for CrisisPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(RonAssetPlugin::<CrisisScript>::new(&["crisis.ron"]))
+        app.add_plugins(threat::ScriptPlugin::<CrisisScript>::new(
+            "data/station.crisis.ron",
+            "crisis.ron",
+        ))
             .init_resource::<CrisisSchedule>()
-            .add_systems(Startup, start_loading)
             .add_systems(
                 Update,
-                (promote_script, schedule_crisis, handle_crisis_resolutions)
+                (schedule_crisis, handle_crisis_resolutions)
                     .chain()
+                    .after(threat::PromoteScripts)
                     .run_if(is_authority)
                     .run_if(in_state(AppState::Playing)),
             )
@@ -132,30 +135,9 @@ pub struct CrisisResponse {
     pub responders: Vec<String>,
 }
 
-#[derive(Resource)]
-struct PendingCrisisScript(Handle<CrisisScript>);
+/// This thread's authored script, once loaded.
+type Script = threat::Authored<CrisisScript>;
 
-#[derive(Resource, Deref)]
-struct Script(CrisisScript);
-
-fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(PendingCrisisScript(assets.load("data/station.crisis.ron")));
-}
-
-fn promote_script(
-    mut commands: Commands,
-    pending: Option<Res<PendingCrisisScript>>,
-    mut scripts: ResMut<Assets<CrisisScript>>,
-) {
-    let Some(pending) = pending else {
-        return;
-    };
-    let Some(script) = scripts.remove(&pending.0) else {
-        return;
-    };
-    commands.insert_resource(Script(script));
-    commands.remove_resource::<PendingCrisisScript>();
-}
 
 // ---------------------------------------------------------------------------
 // The warning, and the affliction
@@ -167,8 +149,10 @@ fn promote_script(
 /// has not crossed the threshold since the last crisis cleared.
 #[derive(Resource, Default)]
 pub struct CrisisSchedule {
-    warning_in: Option<f32>,
-    case: usize,
+    /// The case index rides along as the countdown's `variant`, which is what
+    /// keeps "which case was announced" and "which case actually arrives"
+    /// from ever being two separate pieces of state that could disagree.
+    clock: threat::Countdown,
 }
 
 /// Watches `UnderworldStanding`, warns, then afflicts a crew member.
@@ -197,33 +181,33 @@ fn schedule_crisis(
         return;
     }
 
-    if let Some(warning) = schedule.warning_in.as_mut() {
-        *warning -= time.delta_secs();
-        if *warning > 0.0 {
+    match schedule.clock.tick(time.delta_secs()) {
+        threat::Ticked::Waiting => return,
+        threat::Ticked::Fires(case_index) => {
+            let Some(case) = script.cases.get(case_index) else {
+                return;
+            };
+            afflict_victim(
+                &mut commands,
+                &db,
+                &station,
+                case,
+                script.deadline_seconds,
+                &mut radio,
+            );
             return;
         }
-        schedule.warning_in = None;
-
-        let Some(case) = script.cases.get(schedule.case) else {
-            return;
-        };
-        afflict_victim(
-            &mut commands,
-            &db,
-            &station,
-            case,
-            script.deadline_seconds,
-            &mut radio,
-        );
-        return;
+        threat::Ticked::Idle => {}
     }
 
-    if underworld.0 >= script.underworld_threshold {
+    if underworld.level() >= script.underworld_threshold {
         let mut rng = rand::rng();
-        schedule.case = rng.random_range(0..script.cases.len().max(1));
-        schedule.warning_in =
-            Some(rng.random_range(script.warning_seconds.0..=script.warning_seconds.1));
-        let Some(case) = script.cases.get(schedule.case) else {
+        let case_index = rng.random_range(0..script.cases.len().max(1));
+        schedule.clock.arm(
+            rng.random_range(script.warning_seconds.0..=script.warning_seconds.1),
+            case_index,
+        );
+        let Some(case) = script.cases.get(case_index) else {
             return;
         };
         radio.push(
@@ -378,7 +362,7 @@ fn handle_crisis_resolutions(
             continue;
         };
         if report.outcome.is_good() {
-            underworld.0 = 0;
+            crate::antagonist::clear_underworld(&mut underworld);
             if let Some(line) = script
                 .cases
                 .iter()
@@ -543,8 +527,8 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(ChemDb(data()))
             .insert_resource(StationData { crew, config })
-            .insert_resource(Script(script()))
-            .insert_resource(UnderworldStanding(0))
+            .insert_resource(threat::Authored(script()))
+            .insert_resource({ let mut m = UnderworldStanding::default(); m.restore(0); m })
             .init_resource::<CrisisSchedule>()
             .insert_resource(Shift {
                 accepting_orders: true,
@@ -565,8 +549,8 @@ mod tests {
     fn resolution_app() -> App {
         let mut app = App::new();
         app.insert_resource(ChemDb(data()))
-            .insert_resource(Script(script()))
-            .insert_resource(UnderworldStanding(0))
+            .insert_resource(threat::Authored(script()))
+            .insert_resource({ let mut m = UnderworldStanding::default(); m.restore(0); m })
             .init_resource::<Shift>()
             .init_resource::<RadioLog>()
             .add_message::<OrderResolved>()
@@ -584,15 +568,11 @@ mod tests {
     #[test]
     fn nothing_happens_below_the_threshold() {
         let mut app = crisis_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().0 = 4;
+        app.world_mut().resource_mut::<UnderworldStanding>().restore(4);
 
         advance(&mut app, 1.0);
 
-        assert!(app
-            .world()
-            .resource::<CrisisSchedule>()
-            .warning_in
-            .is_none());
+        assert!(!app.world().resource::<CrisisSchedule>().clock.is_armed());
         let mut victims = app.world_mut().query::<&CrisisOrder>();
         assert!(victims.iter(app.world()).next().is_none());
     }
@@ -602,24 +582,29 @@ mod tests {
         // Unlike ordinary chatter, the alarm is not delayed — it should be on
         // the log the same frame the threshold is crossed.
         let mut app = crisis_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().0 = 8;
+        app.world_mut().resource_mut::<UnderworldStanding>().restore(8);
 
         advance(&mut app, 0.1);
 
         assert!(app
             .world()
             .resource::<CrisisSchedule>()
-            .warning_in
-            .is_some());
+            .clock
+            .is_armed());
         assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
     }
 
     #[test]
     fn the_warning_elapsing_afflicts_a_real_victim() {
         let mut app = crisis_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().0 = 8;
+        app.world_mut().resource_mut::<UnderworldStanding>().restore(8);
         advance(&mut app, 0.1);
-        let warning = app.world().resource::<CrisisSchedule>().warning_in.unwrap();
+        let warning = app
+            .world()
+            .resource::<CrisisSchedule>()
+            .clock
+            .remaining()
+            .unwrap();
 
         advance(&mut app, warning + 0.5);
 
@@ -650,7 +635,7 @@ mod tests {
     #[test]
     fn a_cured_crisis_drains_underworld_standing() {
         let mut app = resolution_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().0 = 12;
+        app.world_mut().resource_mut::<UnderworldStanding>().restore(12);
         let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
 
         app.world_mut().write_message(OrderResolved {
@@ -664,7 +649,7 @@ mod tests {
         app.update();
 
         assert_eq!(
-            app.world().resource::<UnderworldStanding>().0,
+            app.world().resource::<UnderworldStanding>().level(),
             0,
             "a successful cure should mean you got ahead of it"
         );
@@ -681,7 +666,7 @@ mod tests {
     #[test]
     fn an_unresolved_crisis_leaves_the_standing_where_it_was() {
         let mut app = resolution_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().0 = 12;
+        app.world_mut().resource_mut::<UnderworldStanding>().restore(12);
 
         app.world_mut().write_message(OrderResolved {
             name: "Dr. Vance".to_string(),
@@ -694,7 +679,7 @@ mod tests {
         app.update();
 
         assert_eq!(
-            app.world().resource::<UnderworldStanding>().0,
+            app.world().resource::<UnderworldStanding>().level(),
             12,
             "failing to keep up should not reset the meter — the fallout is still live"
         );
@@ -710,7 +695,7 @@ mod tests {
     #[test]
     fn a_non_crisis_resolution_is_ignored() {
         let mut app = resolution_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().0 = 12;
+        app.world_mut().resource_mut::<UnderworldStanding>().restore(12);
         let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
 
         app.world_mut().write_message(OrderResolved {
@@ -724,7 +709,7 @@ mod tests {
         app.update();
 
         assert_eq!(
-            app.world().resource::<UnderworldStanding>().0,
+            app.world().resource::<UnderworldStanding>().level(),
             12,
             "an ordinary delivery must never touch the crisis meter"
         );

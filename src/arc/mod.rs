@@ -28,7 +28,6 @@
 //! on. That is why an antagonist run needs almost no mechanics of its own.
 
 use bevy::prelude::*;
-use bevy_common_assets::ron::RonAssetPlugin;
 use bevy_replicon::prelude::*;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -46,6 +45,7 @@ use crate::orders::{
 use crate::player::Chemist;
 use crate::radio::{announce_request, RadioEntry, RadioLog};
 use crate::shift::current_rules;
+use crate::threat;
 use crate::AppState;
 
 /// The top of the plot meter: the antagonist has what they wanted.
@@ -58,17 +58,18 @@ pub struct ArcPlugin;
 
 impl Plugin for ArcPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(RonAssetPlugin::<ArcScript>::new(&["arc.ron"]))
+        app.add_plugins(threat::ScriptPlugin::<ArcScript>::new(
+            "data/station.arc.ron",
+            "arc.ron",
+        ))
             .init_resource::<ThwartedAntags>()
             .init_resource::<DriftClock>()
             .add_server_message::<CampaignSync>(Channel::Ordered)
-            .add_systems(Startup, start_loading)
             .add_systems(
                 Update,
                 (
                     (
-                        promote_script,
-                        assign_campaign,
+                            assign_campaign,
                         advance_plot,
                         update_reveal,
                         // After the reveal, so the frame the track opens is
@@ -447,30 +448,10 @@ pub struct CounterStepDef {
     pub delivered_line: String,
 }
 
-#[derive(Resource)]
-struct PendingArcScript(Handle<ArcScript>);
 
-#[derive(Resource, Deref)]
-pub struct Script(pub ArcScript);
+/// This thread's authored script, once loaded.
+pub type Script = threat::Authored<ArcScript>;
 
-fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(PendingArcScript(assets.load("data/station.arc.ron")));
-}
-
-fn promote_script(
-    mut commands: Commands,
-    pending: Option<Res<PendingArcScript>>,
-    mut scripts: ResMut<Assets<ArcScript>>,
-) {
-    let Some(pending) = pending else {
-        return;
-    };
-    let Some(script) = scripts.remove(&pending.0) else {
-        return;
-    };
-    commands.insert_resource(Script(script));
-    commands.remove_resource::<PendingArcScript>();
-}
 
 // ---------------------------------------------------------------------------
 // Assignment
@@ -792,10 +773,7 @@ fn generate_counter_orders(
 
     let mut rng = rand::rng();
     let rules = current_rules(&station.config, &shift, chemists.iter().count());
-    let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
-    let multiplier =
-        rng.random_range(script.counter_gap_multiplier.0..=script.counter_gap_multiplier.1);
-    spawner.timer = Timer::from_seconds(legit_gap * multiplier, TimerMode::Once);
+    spawner.timer = threat::roll_next_gap(&mut rng, &rules, script.counter_gap_multiplier);
 
     let Some(def) = script.antagonist(campaign.antag) else {
         return;
@@ -1117,7 +1095,7 @@ mod tests {
             .map(|def| def.counter_steps.len())
             .unwrap_or(0);
         let mut app = App::new();
-        app.insert_resource(Script(script()))
+        app.insert_resource(threat::Authored(script()))
             .insert_resource(Campaign::new(antag, Mode::Chemist, steps))
             .init_resource::<DriftClock>()
             .init_resource::<RadioLog>()
@@ -1242,7 +1220,7 @@ mod tests {
         // A script with the roster emptied out — the shape a content bug takes.
         let mut stripped = script();
         stripped.antagonists.clear();
-        app.insert_resource(Script(stripped));
+        app.insert_resource(threat::Authored(stripped));
 
         advance(&mut app, 60.0);
 

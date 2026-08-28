@@ -388,7 +388,8 @@ impl FinishedArc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arc::{AntagId, Reveal, Script};
+    use crate::threat;
+    use crate::arc::{AntagId, Reveal};
     use bevy::state::app::StatesPlugin;
 
     fn chemistry() -> chem_sim::ChemData {
@@ -412,7 +413,7 @@ mod tests {
             .init_resource::<ThwartedAntags>()
             .insert_resource(Knowledge::new(&chemistry()))
             .insert_resource(ChemDb(chemistry()))
-            .insert_resource(Script(
+            .insert_resource(threat::Authored::<crate::arc::ArcScript>(
                 ron::from_str(include_str!("../../assets/data/station.arc.ron")).unwrap(),
             ))
             .insert_resource(campaign);

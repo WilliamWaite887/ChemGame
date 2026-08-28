@@ -142,7 +142,11 @@ mod tests {
         world.resource_mut::<RadioLog>().push(
             RadioEntry::new(crate::radio::RadioChannel::Common, "from the last career").positive(),
         );
-        world.insert_resource(crate::antagonist::UnderworldStanding(9));
+        world.insert_resource({
+            let mut standing = crate::antagonist::UnderworldStanding::default();
+            standing.restore(9);
+            standing
+        });
         world.insert_resource(crate::arc::ThwartedAntags(vec![AntagId::Cult]));
         world.insert_resource(Campaign::new(AntagId::Blob, Mode::Chemist, 3));
         world.insert_resource(crate::saves::SaveSlot::new("Somebody Else"));
@@ -216,7 +220,7 @@ mod tests {
         clear(&mut world);
 
         assert_eq!(
-            world.resource::<crate::antagonist::UnderworldStanding>().0,
+            world.resource::<crate::antagonist::UnderworldStanding>().level(),
             0
         );
         assert_eq!(world.resource::<crate::obsessed::ObsessedProgress>().0, 0);

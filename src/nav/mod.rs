@@ -105,14 +105,9 @@ impl NavGraph {
         Self { nodes }
     }
 
-    /// The region a point is in, or failing that the nearest one.
-    ///
-    /// The fallback matters: crew spawn outside the station and walk in, and a
-    /// body nudged a few centimetres into a wall by a collision still has to be
-    /// able to ask for a route home.
-    fn locate(&self, point: Vec3) -> Option<usize> {
-        if let Some((index, _)) = self
-            .nodes
+    /// The region a point genuinely stands in, if any.
+    fn held_by(&self, point: Vec3) -> Option<usize> {
+        self.nodes
             .iter()
             .enumerate()
             .filter(|(_, node)| node.bounds.holds(point))
@@ -121,10 +116,11 @@ impl NavGraph {
                     .abs()
                     .total_cmp(&(b.floor_at(point) - point.y).abs())
             })
-        {
-            return Some(index);
-        }
+            .map(|(index, _)| index)
+    }
 
+    /// The region nearest a point that is not in one.
+    fn nearest_to(&self, point: Vec3) -> Option<usize> {
         self.nodes
             .iter()
             .enumerate()
@@ -138,17 +134,48 @@ impl NavGraph {
             .map(|(index, _)| index)
     }
 
+    /// The region a point is in, or failing that the nearest one — and which
+    /// of the two it was.
+    ///
+    /// The fallback matters: crew spawn outside the station and walk in, and a
+    /// body nudged a few centimetres into a wall by a collision still has to be
+    /// able to ask for a route home. But it used to be *silent*, and a caller
+    /// that cannot tell "standing here" from "nearest to here" will happily
+    /// emit a waypoint outside the walkable floor and walk a body through a
+    /// wall to reach it. Every caller now has to look at the `bool`.
+    fn locate_or_nearest(&self, point: Vec3) -> Option<(usize, bool)> {
+        if let Some(index) = self.held_by(point) {
+            return Some((index, true));
+        }
+        self.nearest_to(point).map(|index| (index, false))
+    }
+
+    /// A point pulled onto floor the given region can actually stand on.
+    fn standable_in(&self, node: usize, point: Vec3) -> Vec3 {
+        self.nodes[node].bounds.nearest(point)
+    }
+
     /// Waypoints from `from` to `to`, ending on `to`.
     ///
     /// `None` when the two are in parts of the station with no route between
     /// them, or when the graph has not been built yet. Callers should wait or
     /// stop; walking straight to the destination can cross station walls.
     pub fn path(&self, from: Vec3, to: Vec3) -> Option<Vec<Vec3>> {
-        let start = self.locate(from)?;
-        let goal = self.locate(to)?;
+        let (start, start_held) = self.locate_or_nearest(from)?;
+        let (goal, goal_held) = self.locate_or_nearest(to)?;
         let body_offset = from.y - self.nodes[start].floor_at(from);
+        // The goal is deliberately *not* pulled onto walkable floor. Leaving
+        // the station is a real destination outside it — that final leg out
+        // through the door is what despawns a crew member — so clamping here
+        // would strand every leaver at the threshold. Keeping a body on the
+        // floor is `crew::walk_route`'s job, which knows which leg it is on;
+        // this function only says where to walk.
         let normalized_goal = Vec3::new(to.x, self.nodes[goal].floor_at(to) + body_offset, to.z);
-        if start == goal {
+        // Only a short-circuit when both ends are genuinely inside the same
+        // region: a rectangle is convex, so a straight line between two points
+        // it holds stays inside it. Two points that merely *fall back* to the
+        // same region prove nothing about the floor between them.
+        if start == goal && start_held && goal_held {
             return Some(vec![normalized_goal]);
         }
 
@@ -206,6 +233,22 @@ impl NavGraph {
         let portals = waypoints.len().saturating_sub(1);
         for waypoint in &mut waypoints[..portals] {
             waypoint.y += body_offset;
+        }
+        // A body that is not standing anywhere yet — crew spawn outside the
+        // station, by the door — gets an explicit leg onto the floor before
+        // the route proper. Without it the first waypoint is a portal deep
+        // inside the building and the walk there is a straight line through
+        // the outside wall.
+        if !start_held {
+            let entry = self.standable_in(start, from);
+            let entry = Vec3::new(
+                entry.x,
+                self.nodes[start].floor_at(entry) + body_offset,
+                entry.z,
+            );
+            if waypoints.first().is_none_or(|first| first.distance(entry) > 0.01) {
+                waypoints.insert(0, entry);
+            }
         }
         Some(waypoints)
     }

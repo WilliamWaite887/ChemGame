@@ -38,6 +38,10 @@ const ARRIVE_EPSILON: f32 = 0.12;
 /// `drive_crew_animation`'s own work-post check, and by
 /// `ambient_behaviour`'s "already standing there" crisis check.
 const POST_PROXIMITY: f32 = 1.5;
+/// Distance from the floor a crew member is standing on to their entity
+/// origin — the `body_offset` [`crate::lab::WalkableAreas::contain_on_surface`]
+/// wants, and the height [`spawn_crew_member`] starts them at.
+pub(crate) const BODY_OFFSET: f32 = 0.93;
 
 pub struct CrewPlugin;
 
@@ -534,7 +538,7 @@ struct CrewAnimationController {
 /// meant for, instead of a crew member being immune to their own chemistry by
 /// construction.
 pub fn spawn_crew_member(commands: &mut Commands, def: &CrewDef, lane: f32) -> Entity {
-    let position = Vec3::new(door_x(), 0.93, spawn_z());
+    let position = Vec3::new(door_x(), BODY_OFFSET, spawn_z());
     commands
         .spawn((
             CrewMember {
@@ -1243,6 +1247,7 @@ fn walk_route(
     mut commands: Commands,
     time: Res<Time>,
     nav: Res<crate::nav::NavGraph>,
+    areas: Option<Res<crate::lab::WalkableAreas>>,
     departments: Res<Departments>,
     delivery_stations: Res<DeliveryStations>,
     mut crew: Query<(
@@ -1316,7 +1321,33 @@ fn walk_route(
         let chemistry = blood.map_or(1.0, |blood| blood.0.movement_multiplier());
         let stumble = crew_stride_multiplier(entity, time.elapsed_secs(), blood);
         let step = to_target.normalize() * WALK_SPEED * chemistry * stumble * time.delta_secs();
-        transform.translation += step;
+        // Confined to the walkable floor, exactly like the chemist
+        // (`player::apply_movement`) and a hostile pursuer
+        // (`showdown::run_pursuers`). Following waypoints is not on its own
+        // enough to stay inside the station: `NavGraph::locate` falls back to
+        // the *nearest* region when a point is in none, so the first leg of a
+        // route out of the spawn point and the last leg onto a destination
+        // marker authored inside a wall both leave the floor. Every other body
+        // in the game was already clamped; crew were the ones that were not,
+        // and they are the ones the player watches all shift.
+        //
+        // The one exemption is the last leg of a route out: leaving the
+        // station means walking off the walkable floor on purpose, and that
+        // arrival is what despawns them. Clamping it would pin every leaver
+        // at the threshold, never reaching the waypoint, never despawning —
+        // a leak of exactly the kind
+        // `showdown::a_finished_showdown_never_leaves_anything_behind`
+        // exists to catch. They are still confined for the whole walk
+        // *through* the building; only the step out of the door is free.
+        let candidate = transform.translation + step;
+        let leaving_the_station =
+            route.phase == CrewPhase::Leaving && route.index + 1 == route.waypoints.len();
+        transform.translation = match (leaving_the_station, areas.as_deref()) {
+            (false, Some(areas)) => {
+                areas.contain_on_surface(candidate, crate::nav::NAV_RADIUS, BODY_OFFSET)
+            }
+            _ => candidate,
+        };
         // Face the direction of travel so they read as people rather than
         // sliding props.
         transform.rotation = Quat::from_rotation_y(to_target.x.atan2(to_target.z));
@@ -2204,6 +2235,147 @@ mod tests {
             route.pending.is_none(),
             "the destination should have been resolved on the first update",
         );
+    }
+
+    /// [`walking_app`] plus the floor itself.
+    ///
+    /// `walking_app` builds a `NavGraph` *from* a floor plan but never inserts
+    /// the `WalkableAreas` resource, so `walk_route`'s containment is inert
+    /// there — which is exactly why every routing test in this module passed
+    /// throughout the years crew were walking through walls. A test that means
+    /// to exercise containment has to hand it the floor.
+    fn contained_walking_app() -> App {
+        let mut app = walking_app();
+        app.insert_resource(crate::lab::WalkableAreas::from_floor_plan());
+        app
+    }
+
+    /// How far off the walkable floor a body is standing, in metres.
+    ///
+    /// Zero means containment is a no-op on them — they are already somewhere
+    /// they could legitimately stand.
+    fn off_the_floor(app: &App, at: Vec3) -> f32 {
+        let areas = app.world().resource::<crate::lab::WalkableAreas>();
+        at.distance(areas.contain_on_surface(at, crate::nav::NAV_RADIUS, BODY_OFFSET))
+    }
+
+    #[test]
+    fn a_crew_member_walking_across_the_station_is_never_outside_the_walkable_floor() {
+        // The test `a_walk_across_the_suite_is_routed_rather_than_straight_
+        // through_walls` above should have been this one. It asserts a route
+        // with intermediate waypoints was *produced* and then never walks
+        // anybody, so it passed the whole time crew were phasing through
+        // walls between those waypoints. This walks the route.
+        let mut app = contained_walking_app();
+        let from = crate::lab::ROOMS[crate::lab::REACTION_BAY].center();
+        let crew = walker(
+            &mut app,
+            Vec3::new(from.x, BODY_OFFSET, from.z),
+            CrewRoute::arrival(0.0),
+        );
+
+        for step in 0..600 {
+            tick(&mut app, 0.05);
+            let Some(at) = app.world().get::<Transform>(crew) else {
+                break;
+            };
+            let strayed = off_the_floor(&app, at.translation);
+            assert!(
+                strayed < 0.01,
+                "step {step}: stood {strayed:.3}m off the walkable floor at {:?}",
+                at.translation,
+            );
+        }
+    }
+
+    #[test]
+    fn a_crew_member_sent_to_a_spot_off_the_walkable_floor_stops_at_the_edge() {
+        // The failure mode with teeth, and the one a cross-station stroll does
+        // not reach: the destination itself is not standable. A `crew_post` or
+        // `department_spot` authored a little into a wall does this, and
+        // `NavGraph::path` faithfully returns the unstandable point as the
+        // final waypoint — it has to, because walking off the floor is also
+        // how a crew member legitimately *leaves*. Containment is what tells
+        // the two apart, so this is the test that fails without it.
+        let void = Vec3::new(-10.0, BODY_OFFSET, 0.0);
+        let mut app = contained_walking_app();
+        assert!(
+            off_the_floor(&app, void) > 1.0,
+            "the fixture point must really be off the floor, or this proves nothing",
+        );
+
+        let from = crate::lab::ROOMS[crate::lab::REACTION_BAY].center();
+        let crew = walker(
+            &mut app,
+            Vec3::new(from.x, BODY_OFFSET, from.z),
+            CrewRoute::to(void),
+        );
+
+        for _ in 0..400 {
+            tick(&mut app, 0.05);
+            let at = app.world().get::<Transform>(crew).unwrap().translation;
+            let strayed = off_the_floor(&app, at);
+            assert!(
+                strayed < 0.01,
+                "walked {strayed:.3}m off the floor at {at:?}, chasing a goal in the void",
+            );
+        }
+    }
+
+    #[test]
+    fn a_crew_member_spawned_outside_the_station_walks_in_rather_than_through_the_wall() {
+        // Crew spawn at the door, outside the floor: `spawn_crew_member` puts
+        // them there and `NavGraph::locate` used to silently resolve that to
+        // the nearest region, so the first leg ran from outside the building
+        // straight to a portal deep inside it.
+        let mut app = contained_walking_app();
+        let start = Vec3::new(door_x(), BODY_OFFSET, spawn_z());
+        let crew = walker(&mut app, start, CrewRoute::arrival(0.0));
+
+        tick(&mut app, 0.01);
+
+        // One step in they are still outside — that is legitimate, it is where
+        // they spawn — but from the moment they are on the floor they stay on
+        // it.
+        let mut ever_arrived = false;
+        for _ in 0..600 {
+            tick(&mut app, 0.05);
+            let Some(at) = app.world().get::<Transform>(crew) else {
+                break;
+            };
+            if off_the_floor(&app, at.translation) < 0.01 {
+                ever_arrived = true;
+            } else if ever_arrived {
+                panic!("stepped back off the floor at {:?}", at.translation);
+            }
+        }
+        assert!(ever_arrived, "never made it onto the station floor at all");
+    }
+
+    #[test]
+    fn a_leaving_crew_member_still_walks_out_of_the_door_and_despawns() {
+        // The counterweight to containment, and the reason it is not applied
+        // to a leaver's final leg. Walking off the walkable floor is how a
+        // crew member exits; clamping that step would pin them at the
+        // threshold, never reaching the waypoint and never despawning.
+        let mut app = contained_walking_app();
+        let from = crate::lab::ROOMS[crate::lab::REACTION_BAY].center();
+        let crew = walker(
+            &mut app,
+            Vec3::new(from.x, BODY_OFFSET, from.z),
+            CrewRoute::arrival(0.0),
+        );
+        tick(&mut app, 0.01);
+        app.world_mut().get_mut::<CrewRoute>(crew).unwrap().leave();
+
+        for _ in 0..600 {
+            tick(&mut app, 0.05);
+            if app.world().get::<Transform>(crew).is_none() {
+                return;
+            }
+        }
+        let at = app.world().get::<Transform>(crew).unwrap().translation;
+        panic!("still on the station at {at:?} instead of having left");
     }
 
     #[test]

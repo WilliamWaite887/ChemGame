@@ -17,7 +17,6 @@
 //! beaker, or put it in the window. It is a nudge toward tidiness, not a tax.
 
 use bevy::prelude::*;
-use bevy_common_assets::ron::RonAssetPlugin;
 use rand::prelude::*;
 use serde::Deserialize;
 
@@ -26,13 +25,12 @@ use crate::containers::{Container, HeldBy, InSlot, Stored};
 use crate::crew::{spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewPosts, CrewRoute, NotResident};
 use crate::interaction::Interactable;
 use crate::net::is_authority;
-use crate::orders::{OrderResolved, Outcome, Shift, StationData};
+use crate::orders::{OrderResolved, Shift, StationData};
 use crate::player::Chemist;
 use crate::radio::{channel_for, RadioEntry, RadioLog};
-use crate::shift::{self, current_rules};
+use crate::shift::current_rules;
+use crate::threat;
 use crate::AppState;
-
-const INITIAL_GAP_SECONDS: (f32, f32) = (240.0, 420.0);
 
 /// How often, independent of the scripted-visit cadence, a chance is rolled
 /// to send the smuggler's identity visibly loitering between visits — pure
@@ -47,9 +45,11 @@ pub struct SmugglerPlugin;
 
 impl Plugin for SmugglerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(RonAssetPlugin::<SmugglerScript>::new(&["smuggler.ron"]))
+        app.add_plugins(threat::ScriptPlugin::<SmugglerScript>::new(
+            "data/station.smuggler.ron",
+            "smuggler.ron",
+        ))
             .init_resource::<SmugglerProgress>()
-            .add_systems(Startup, start_loading)
             .add_systems(
                 OnEnter(AppState::Playing),
                 (arm_spawner, arm_loiter_spawner),
@@ -57,13 +57,13 @@ impl Plugin for SmugglerPlugin {
             .add_systems(
                 Update,
                 (
-                    promote_script,
                     generate_smuggler_visit,
                     handle_smuggler_resolution,
                     loiter_smuggler,
                     expire_smuggler_loitering,
                 )
                     .chain()
+                    .after(threat::PromoteScripts)
                     .run_if(is_authority)
                     // No `arc::is_active` gate, unlike a main antagonist —
                     // see the module doc.
@@ -98,43 +98,19 @@ pub struct SmugglerVisitDef {
     pub plea: String,
 }
 
-#[derive(Resource)]
-struct PendingSmugglerScript(Handle<SmugglerScript>);
-
-#[derive(Resource, Deref)]
-struct Script(SmugglerScript);
+/// This thread's authored script, once loaded.
+type Script = threat::Authored<SmugglerScript>;
 
 #[derive(Resource)]
 struct SmugglerSpawner {
     timer: Timer,
 }
 
-fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(PendingSmugglerScript(
-        assets.load("data/station.smuggler.ron"),
-    ));
-}
-
-fn promote_script(
-    mut commands: Commands,
-    pending: Option<Res<PendingSmugglerScript>>,
-    mut scripts: ResMut<Assets<SmugglerScript>>,
-) {
-    let Some(pending) = pending else {
-        return;
-    };
-    let Some(script) = scripts.remove(&pending.0) else {
-        return;
-    };
-    commands.insert_resource(Script(script));
-    commands.remove_resource::<PendingSmugglerScript>();
-}
-
-/// See `shift::arm_first_visit` for why this has to re-run on
+/// See `threat::arm_first_visit` for why this has to re-run on
 /// `OnEnter(AppState::Playing)` every session rather than only once at
 /// process start.
 fn arm_spawner(mut commands: Commands) {
-    shift::arm_first_visit(&mut commands, INITIAL_GAP_SECONDS, |timer| {
+    threat::arm_first_visit(&mut commands, threat::MINOR_FIRST_VISIT, |timer| {
         SmugglerSpawner { timer }
     });
 }
@@ -147,7 +123,7 @@ struct SmugglerLoiterSpawner {
 }
 
 fn arm_loiter_spawner(mut commands: Commands) {
-    shift::arm_first_visit(&mut commands, LOITER_CHECK_SECONDS, |timer| {
+    threat::arm_first_visit(&mut commands, LOITER_CHECK_SECONDS, |timer| {
         SmugglerLoiterSpawner { timer }
     });
 }
@@ -251,21 +227,18 @@ fn generate_smuggler_visit(
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
     };
-    if !shift.accepting_orders {
-        return;
-    }
-    if !spawner.timer.tick(time.delta()).just_finished() {
-        return;
-    }
-
     let mut rng = rand::rng();
     let rules = current_rules(&station.config, &shift, chemists.iter().count());
-    spawner.timer = shift::roll_next_gap(&mut rng, &rules, script.gap_multiplier);
-
-    let Some(visit) = script
-        .visits
-        .get(progress.0.min(script.visits.len().saturating_sub(1)))
-    else {
+    let Some(visit) = threat::due_visit(
+        &time,
+        &shift,
+        &mut spawner.timer,
+        &rules,
+        &mut rng,
+        script.gap_multiplier,
+        threat::ChainProgress(progress.0),
+        &script.visits,
+    ) else {
         return;
     };
     let Some(reagent) = db.reagents.id_of(&visit.reagent) else {
@@ -273,12 +246,12 @@ fn generate_smuggler_visit(
         return;
     };
 
-    shift::spawn_scripted_visit(
+    threat::spawn_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
         &rules,
-        shift::ScriptedVisit {
+        threat::ScriptedVisit {
             name: &script.name,
             role: &script.role,
             color: script.color,
@@ -338,25 +311,34 @@ fn handle_smuggler_resolution(
     let mut campaign = campaign;
     let mut instability = instability;
 
-    for report in resolved.read() {
-        if report.name != script.name {
-            continue;
-        }
-        progress.0 = (progress.0 + 1).min(script.visits.len().saturating_sub(1));
-        if report.outcome != Outcome::Expired {
+    // Ignored fires it, and a spent visit is spent however it graded.
+    let mut chain = threat::ChainProgress(progress.0);
+    let steps = threat::step_chain(
+        &mut resolved,
+        &mut chain,
+        &script.name,
+        script.visits.len(),
+        threat::Trigger::Ignored,
+        threat::Advance::EveryVisit,
+    );
+    progress.0 = chain.0;
+
+    for step in steps {
+        if !step.fires {
             continue;
         }
 
         // A `ChainOfCustody` requisition absorbs one theft before it happens.
-        if shift.requisition.smuggler_wards > 0 {
-            shift.requisition.smuggler_wards -= 1;
-            radio.push(
-                RadioEntry::new(
-                    channel_for(&script.role),
-                    "Cargo's paperwork actually matched, for once.",
-                )
-                .positive(),
-            );
+        if threat::ward_absorbed(
+            &mut shift,
+            &mut radio,
+            threat::Ward::Smuggler,
+            RadioEntry::new(
+                channel_for(&script.role),
+                "Cargo's paperwork actually matched, for once.",
+            )
+            .positive(),
+        ) {
             continue;
         }
 
@@ -390,6 +372,7 @@ fn handle_smuggler_resolution(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orders::Outcome;
     use crate::containers::ContainerKind;
     use crate::orders::{Department, OrderKind};
 
@@ -400,7 +383,7 @@ mod tests {
 
     fn resolution_app() -> App {
         let mut app = App::new();
-        app.insert_resource(Script(script()))
+        app.insert_resource(threat::Authored(script()))
             .init_resource::<SmugglerProgress>()
             .init_resource::<Shift>()
             .init_resource::<RadioLog>()
@@ -414,7 +397,7 @@ mod tests {
         let mut app = App::new();
         let mut posts = CrewPosts::default();
         posts.add_loiter(Vec3::new(3.0, 0.0, 4.0));
-        app.insert_resource(Script(script()))
+        app.insert_resource(threat::Authored(script()))
             .insert_resource(Shift {
                 accepting_orders: true,
                 ..Default::default()

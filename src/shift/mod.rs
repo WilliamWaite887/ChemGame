@@ -292,102 +292,6 @@ fn scale_for_chemists(rules: ShiftRules, chemist_count: usize, ramp: &RampDef) -
 }
 
 // ---------------------------------------------------------------------------
-// Threat-thread spawners
-// ---------------------------------------------------------------------------
-
-/// Arms a fresh save's first visit-thread spawn timer.
-///
-/// Every threat-thread module (`obsessed`, `smuggler`, `saboteur`, `quack`,
-/// `cult`, `rogue_security`, `antagonist`, `addiction`) used to hand-copy an
-/// identical three-line body under its own `arm_spawner` system, each
-/// registered on `OnEnter(AppState::Playing)` rather than only once at
-/// process start: quitting to the menu and opening another save would
-/// otherwise leave a spent `TimerMode::Once` behind, and a spent `Once`
-/// timer never reports `just_finished` again — the whole thread would be
-/// silently dead for the rest of the session with nothing to show for it.
-pub fn arm_first_visit<S: Resource>(
-    commands: &mut Commands,
-    gap_range: (f32, f32),
-    make: impl FnOnce(Timer) -> S,
-) {
-    let gap = rand::rng().random_range(gap_range.0..=gap_range.1);
-    commands.insert_resource(make(Timer::from_seconds(gap, TimerMode::Once)));
-}
-
-/// Rolls the next arrival gap for a scripted visit thread and returns the
-/// timer to re-arm its spawner with.
-///
-/// Every "recurring identity" thread (`obsessed`, `smuggler`, `saboteur`,
-/// `quack`, `cult`) and `rogue_security` rolled this identically: the shared
-/// legitimate-order gap from [`current_rules`], scaled by the thread's own
-/// `gap_multiplier` so each keeps its own separate pacing personality.
-pub fn roll_next_gap(
-    rng: &mut impl Rng,
-    rules: &ShiftRules,
-    multiplier_range: (f32, f32),
-) -> Timer {
-    let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
-    let multiplier = rng.random_range(multiplier_range.0..=multiplier_range.1);
-    Timer::from_seconds(legit_gap * multiplier, TimerMode::Once)
-}
-
-/// The fields a scripted visit needs from its own thread's authored data —
-/// see [`spawn_scripted_visit`].
-pub struct ScriptedVisit<'a> {
-    pub name: &'a str,
-    pub role: &'a str,
-    pub color: [f32; 3],
-    pub reagent: chem_sim::ReagentId,
-    pub amount_units: u32,
-    pub plea: String,
-}
-
-/// Spawns one crew member for a scripted "recurring identity" visit — the
-/// common tail every such thread (`obsessed`, `smuggler`, `saboteur`,
-/// `quack`, `cult`) reaches once its own script and gap logic have already
-/// decided a visit is happening. Reuses the ordinary `Order`/`Interactable`
-/// pipeline unmodified — see `obsessed`'s own module doc for why that
-/// matters.
-pub fn spawn_scripted_visit(
-    commands: &mut Commands,
-    db: &ChemDb,
-    rng: &mut impl Rng,
-    rules: &ShiftRules,
-    visit: ScriptedVisit,
-) -> Entity {
-    let identity = crate::crew::CrewDef {
-        name: visit.name.to_string(),
-        role: visit.role.to_string(),
-        color: visit.color,
-    };
-    let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
-    let crew = crate::crew::spawn_crew_member(commands, &identity, 0.0);
-
-    let reagent_name = db.reagents.get(visit.reagent).name.clone();
-    let amount = crate::orders::deliverable_amount(
-        db,
-        visit.reagent,
-        chem_sim::Units::whole(visit.amount_units as i32),
-    );
-    commands.entity(crew).insert((
-        crate::orders::Order {
-            reagent: visit.reagent,
-            specific: true,
-            minimum_purity: 0.0,
-            amount,
-            plea: visit.plea.clone(),
-            patience,
-            waited: 0.0,
-        },
-        crate::interaction::Interactable::new(format!(
-            "{} — hand over {} {}",
-            visit.name, amount, reagent_name
-        )),
-    ));
-    crew
-}
-
-// ---------------------------------------------------------------------------
 // Forecast
 // ---------------------------------------------------------------------------
 
@@ -774,7 +678,7 @@ pub fn apply_requisition(
         }
         RequisitionKind::QuietWord => {
             if let Some(suspicion) = suspicion {
-                suspicion.0 = 0;
+                crate::antagonist::clear_suspicion(suspicion);
             }
             if let Some(carried) = carried {
                 carried.0 = 0.0;
@@ -1603,7 +1507,7 @@ fn load_progress(
     shift.accepting_orders = save.accepting_orders;
     shift.called = save.called;
     if let Some(mut underworld) = underworld {
-        underworld.0 = save.underworld_standing;
+        underworld.restore(save.underworld_standing);
     }
     if let Some(mut redeemed) = rogue_redeemed {
         redeemed.0 = save.rogue_redeemed;
@@ -1707,7 +1611,7 @@ fn persist_progress(
         requisition: shift.requisition,
         accepting_orders: shift.accepting_orders,
         called: shift.called,
-        underworld_standing: underworld.map(|u| u.0).unwrap_or(0),
+        underworld_standing: underworld.map(|u| u.level()).unwrap_or(0),
         rogue_redeemed: rogue_redeemed.map(|r| r.0).unwrap_or(false),
         obsessed_progress: obsessed_progress.map(|p| p.0).unwrap_or(0),
         cult_progress: cult_progress.map(|p| p.0).unwrap_or(0),
@@ -2754,12 +2658,12 @@ mod tests {
     #[test]
     fn quiet_word_zeroes_both_suspicion_meters() {
         let (mut app, board) = with_standing(Department::Security, 10);
-        app.insert_resource(SecuritySuspicion(7));
+        app.insert_resource({ let mut m = SecuritySuspicion::default(); m.restore(7); m });
         app.insert_resource(CarriedSuspicion(0.5));
 
         requisition(&mut app, board, RequisitionKind::QuietWord);
 
-        assert_eq!(app.world().resource::<SecuritySuspicion>().0, 0);
+        assert_eq!(app.world().resource::<SecuritySuspicion>().level(), 0);
         assert_eq!(app.world().resource::<CarriedSuspicion>().0, 0.0);
     }
 

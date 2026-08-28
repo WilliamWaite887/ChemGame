@@ -744,6 +744,7 @@ fn dress_breach(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::threat;
     use crate::arc::{AntagId, ArcScript, Mode};
     use crate::lab::Bounds;
     use std::time::Duration;
@@ -776,7 +777,7 @@ mod tests {
 
         let mut app = App::new();
         app.insert_resource(ChemDb(data()))
-            .insert_resource(Script(script))
+            .insert_resource(threat::Authored(script))
             .insert_resource(campaign)
             .insert_resource(spots)
             .init_resource::<RadioLog>()
@@ -1179,7 +1180,7 @@ mod tests {
     fn pursuit_app(areas: WalkableAreas) -> App {
         let graph = NavGraph::build(&areas, 0.0);
         let mut app = App::new();
-        app.insert_resource(Script(script()))
+        app.insert_resource(threat::Authored(script()))
             .insert_resource(graph)
             .insert_resource(areas)
             .init_resource::<Time>()

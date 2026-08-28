@@ -1015,7 +1015,7 @@ fn respond_to_unwanted_exposure(
             }
         }
         if let Some(suspicion) = suspicion.as_deref_mut() {
-            suspicion.0 += severity;
+            crate::antagonist::nudge_suspicion(suspicion, severity);
         }
         if let Some(radio) = radio.as_deref_mut() {
             let composition = db
@@ -1905,7 +1905,7 @@ mod tests {
         assert_eq!(
             app.world()
                 .resource::<crate::antagonist::SecuritySuspicion>()
-                .0,
+                .level(),
             2
         );
         assert_eq!(
@@ -1934,7 +1934,7 @@ mod tests {
         assert_eq!(
             app.world()
                 .resource::<crate::antagonist::SecuritySuspicion>()
-                .0,
+                .level(),
             2
         );
         assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
@@ -1949,7 +1949,7 @@ mod tests {
         assert_eq!(
             app.world()
                 .resource::<crate::antagonist::SecuritySuspicion>()
-                .0,
+                .level(),
             3
         );
         assert!(app
@@ -1977,7 +1977,7 @@ mod tests {
         assert_eq!(
             app.world()
                 .resource::<crate::antagonist::SecuritySuspicion>()
-                .0,
+                .level(),
             0,
         );
         assert!(app.world().resource::<RadioLog>().entries.is_empty());
@@ -2008,7 +2008,7 @@ mod tests {
         assert_eq!(
             app.world()
                 .resource::<crate::antagonist::SecuritySuspicion>()
-                .0,
+                .level(),
             3,
         );
         let report = &app
@@ -2051,7 +2051,7 @@ mod tests {
             assert_eq!(
                 app.world()
                     .resource::<crate::antagonist::SecuritySuspicion>()
-                    .0,
+                    .level(),
                 2,
             );
             assert!(app
@@ -2079,7 +2079,7 @@ mod tests {
         assert_eq!(
             app.world()
                 .resource::<crate::antagonist::SecuritySuspicion>()
-                .0,
+                .level(),
             2,
         );
         assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
@@ -2114,7 +2114,7 @@ mod tests {
         assert_eq!(
             app.world()
                 .resource::<crate::antagonist::SecuritySuspicion>()
-                .0,
+                .level(),
             0
         );
         assert!(app.world().resource::<RadioLog>().entries.is_empty());

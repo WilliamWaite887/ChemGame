@@ -45,7 +45,6 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use bevy_common_assets::ron::RonAssetPlugin;
 use chem_sim::Units;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -63,22 +62,24 @@ use crate::orders::{
 };
 use crate::player::Chemist;
 use crate::radio::{RadioEntry, RadioLog};
-use crate::shift::{self, current_rules};
+use crate::shift::current_rules;
+use crate::threat;
 use crate::AppState;
 
 pub struct AddictionPlugin;
 
 impl Plugin for AddictionPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(RonAssetPlugin::<AddictionScript>::new(&["addiction.ron"]))
+        app.add_plugins(threat::ScriptPlugin::<AddictionScript>::new(
+            "data/station.addiction.ron",
+            "addiction.ron",
+        ))
             .init_resource::<Addictions>()
             .init_resource::<CarriedSuspicion>()
-            .add_systems(Startup, start_loading)
             .add_systems(OnEnter(AppState::Playing), arm_spawner)
             .add_systems(
                 Update,
                 (
-                    promote_script,
                     note_doses,
                     treat_opioid_habits,
                     notice_the_high,
@@ -179,11 +180,9 @@ pub struct AddictionScript {
     pub withdrawal_lines: Vec<String>,
 }
 
-#[derive(Resource)]
-struct PendingAddictionScript(Handle<AddictionScript>);
 
-#[derive(Resource, Deref)]
-pub struct Script(pub AddictionScript);
+/// This thread's authored script, once loaded.
+pub type Script = threat::Authored<AddictionScript>;
 
 #[derive(Resource)]
 struct AddictSpawner {
@@ -194,55 +193,19 @@ struct AddictSpawner {
 #[derive(Resource)]
 struct DoseClock(Timer);
 
-fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(PendingAddictionScript(
-        assets.load("data/station.addiction.ron"),
-    ));
-}
 
-fn promote_script(
-    mut commands: Commands,
-    pending: Option<Res<PendingAddictionScript>>,
-    mut scripts: ResMut<Assets<AddictionScript>>,
-    clock: Option<Res<DoseClock>>,
-) {
-    let Some(pending) = pending else {
-        return;
-    };
-    let Some(script) = scripts.remove(&pending.0) else {
-        return;
-    };
-    // The dose clock needs a number out of the script, so unlike
-    // [`arm_spawner`] it cannot be set up before the asset has loaded. It is
-    // `TimerMode::Repeating` and carries no session state, so leaving it alone
-    // across a quit to the menu is correct — only the `Once` timer below has
-    // to be re-armed per session.
-    if clock.is_none() {
-        commands.insert_resource(DoseClock(Timer::from_seconds(
-            script.dose_interval_seconds,
-            TimerMode::Repeating,
-        )));
-    }
-    commands.insert_resource(Script(script));
-    commands.remove_resource::<PendingAddictionScript>();
-}
-
-/// See `shift::arm_first_visit` for why this has to re-run on
+/// See `threat::arm_first_visit` for why this has to re-run on
 /// `OnEnter(AppState::Playing)` every session rather than only once at
 /// process start. Not actually a range — every save's first return visit
-/// lands at exactly `FIRST_VISIT_SECONDS`, unlike every other thread's
+/// lands at exactly `threat::ADDICT_FIRST_RETURN`, unlike every other thread's
 /// randomised initial gap.
 fn arm_spawner(mut commands: Commands) {
-    shift::arm_first_visit(
+    threat::arm_first_visit(
         &mut commands,
-        (FIRST_VISIT_SECONDS, FIRST_VISIT_SECONDS),
+        threat::ADDICT_FIRST_RETURN,
         |timer| AddictSpawner { timer },
     );
 }
-
-/// How long after the first habit forms before anyone comes back. Their own
-/// clock re-arms off the ramp from there.
-const FIRST_VISIT_SECONDS: f32 = 90.0;
 
 // ---------------------------------------------------------------------------
 // Getting hooked
@@ -443,7 +406,7 @@ fn notice_the_high(
     carried.0 += script.suspicion_per_second * time.delta_secs();
     while carried.0 >= 1.0 {
         carried.0 -= 1.0;
-        suspicion.0 += 1;
+        crate::antagonist::nudge_suspicion(&mut suspicion, 1);
     }
 }
 
@@ -491,9 +454,7 @@ fn generate_addict_visits(
 
     let mut rng = rand::rng();
     let rules = current_rules(&station.config, &shift, chemists.iter().count());
-    let legit_gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
-    let multiplier = rng.random_range(script.gap_multiplier.0..=script.gap_multiplier.1);
-    spawner.timer = Timer::from_seconds(legit_gap * multiplier, TimerMode::Once);
+    spawner.timer = threat::roll_next_gap(&mut rng, &rules, script.gap_multiplier);
 
     // Nobody already at the counter — an addict who is standing in front of
     // you cannot also be walking back in.
@@ -704,7 +665,7 @@ mod tests {
                 crew: crew_roster(),
                 config,
             })
-            .insert_resource(Script(script))
+            .insert_resource(threat::Authored(script))
             .insert_resource(DoseClock(Timer::from_seconds(
                 interval,
                 TimerMode::Repeating,
@@ -936,7 +897,7 @@ mod tests {
         advance(&mut app, 30.0);
 
         assert_eq!(
-            app.world().resource::<SecuritySuspicion>().0,
+            app.world().resource::<SecuritySuspicion>().level(),
             0,
             "nobody saw anything"
         );
@@ -951,7 +912,7 @@ mod tests {
         advance(&mut app, 30.0);
 
         assert!(
-            app.world().resource::<SecuritySuspicion>().0 > 0,
+            app.world().resource::<SecuritySuspicion>().level() > 0,
             "an addict swaying in front of an officer is the whole risk of dealing"
         );
     }
@@ -963,7 +924,7 @@ mod tests {
 
         advance(&mut app, 30.0);
 
-        assert_eq!(app.world().resource::<SecuritySuspicion>().0, 0);
+        assert_eq!(app.world().resource::<SecuritySuspicion>().level(), 0);
     }
 
     #[test]
@@ -972,7 +933,7 @@ mod tests {
         let addict = plant_addict(&mut app, "Chef Dubois", "Service");
         dosed_crew(&mut app, "Officer Reyes", "Security", "kelotane", 5);
         advance(&mut app, 20.0);
-        let while_watched = app.world().resource::<SecuritySuspicion>().0;
+        let while_watched = app.world().resource::<SecuritySuspicion>().level();
         assert!(while_watched > 0);
 
         app.world_mut()
@@ -982,7 +943,7 @@ mod tests {
         advance(&mut app, 60.0);
 
         assert_eq!(
-            app.world().resource::<SecuritySuspicion>().0,
+            app.world().resource::<SecuritySuspicion>().level(),
             while_watched,
             "walking out is the play, and it has to actually work"
         );
@@ -1129,7 +1090,7 @@ mod tests {
         let db = data();
         let mut app = App::new();
         app.insert_resource(ChemDb(db.clone()))
-            .insert_resource(Script(script()))
+            .insert_resource(threat::Authored(script()))
             .insert_resource(Knowledge::new(&db))
             .init_resource::<Addictions>()
             .add_message::<OrderResolved>()
@@ -1173,7 +1134,7 @@ mod tests {
         let db = data();
         let mut app = App::new();
         app.insert_resource(ChemDb(db.clone()))
-            .insert_resource(Script(script()))
+            .insert_resource(threat::Authored(script()))
             .insert_resource(Knowledge::new(&db))
             .init_resource::<Addictions>()
             .add_message::<OrderResolved>()

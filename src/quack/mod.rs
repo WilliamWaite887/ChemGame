@@ -18,39 +18,36 @@
 //! `crate::addiction` for free too.
 
 use bevy::prelude::*;
-use bevy_common_assets::ron::RonAssetPlugin;
 use chem_sim::{Route, Solution, Units};
 use rand::prelude::*;
 use serde::Deserialize;
 
 use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
-use crate::crew::{CrewDef, CrewMember, CrewPhase, CrewRoute};
+use crate::crew::{CrewMember, CrewPhase, CrewRoute};
 use crate::net::is_authority;
-use crate::orders::{Department, OrderResolved, Outcome, Shift, StationData};
+use crate::orders::{Department, OrderResolved, Shift, StationData};
 use crate::player::Chemist;
 use crate::radio::{channel_for, RadioEntry, RadioLog};
-use crate::shift::{self, current_rules};
+use crate::shift::current_rules;
+use crate::threat;
 use crate::AppState;
-
-const INITIAL_GAP_SECONDS: (f32, f32) = (240.0, 420.0);
 
 pub struct QuackPlugin;
 
 impl Plugin for QuackPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(RonAssetPlugin::<QuackScript>::new(&["quack.ron"]))
+        app.add_plugins(threat::ScriptPlugin::<QuackScript>::new(
+            "data/station.quack.ron",
+            "quack.ron",
+        ))
             .init_resource::<QuackProgress>()
-            .add_systems(Startup, start_loading)
             .add_systems(OnEnter(AppState::Playing), arm_spawner)
             .add_systems(
                 Update,
-                (
-                    promote_script,
-                    generate_quack_visit,
-                    handle_quack_resolution,
-                )
+                (generate_quack_visit, handle_quack_resolution)
                     .chain()
+                    .after(threat::PromoteScripts)
                     .run_if(is_authority)
                     // No `arc::is_active` gate, unlike a main antagonist.
                     .run_if(in_state(AppState::Playing)),
@@ -90,41 +87,19 @@ pub struct QuackVisitDef {
     pub plea: String,
 }
 
-#[derive(Resource)]
-struct PendingQuackScript(Handle<QuackScript>);
-
-#[derive(Resource, Deref)]
-struct Script(QuackScript);
+/// This thread's authored script, once loaded.
+type Script = threat::Authored<QuackScript>;
 
 #[derive(Resource)]
 struct QuackSpawner {
     timer: Timer,
 }
 
-fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(PendingQuackScript(assets.load("data/station.quack.ron")));
-}
-
-fn promote_script(
-    mut commands: Commands,
-    pending: Option<Res<PendingQuackScript>>,
-    mut scripts: ResMut<Assets<QuackScript>>,
-) {
-    let Some(pending) = pending else {
-        return;
-    };
-    let Some(script) = scripts.remove(&pending.0) else {
-        return;
-    };
-    commands.insert_resource(Script(script));
-    commands.remove_resource::<PendingQuackScript>();
-}
-
-/// See `shift::arm_first_visit` for why this has to re-run on
+/// See `threat::arm_first_visit` for why this has to re-run on
 /// `OnEnter(AppState::Playing)` every session rather than only once at
 /// process start.
 fn arm_spawner(mut commands: Commands) {
-    shift::arm_first_visit(&mut commands, INITIAL_GAP_SECONDS, |timer| QuackSpawner {
+    threat::arm_first_visit(&mut commands, threat::MINOR_FIRST_VISIT, |timer| QuackSpawner {
         timer,
     });
 }
@@ -145,21 +120,18 @@ fn generate_quack_visit(
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
     };
-    if !shift.accepting_orders {
-        return;
-    }
-    if !spawner.timer.tick(time.delta()).just_finished() {
-        return;
-    }
-
     let mut rng = rand::rng();
     let rules = current_rules(&station.config, &shift, chemists.iter().count());
-    spawner.timer = shift::roll_next_gap(&mut rng, &rules, script.gap_multiplier);
-
-    let Some(visit) = script
-        .visits
-        .get(progress.0.min(script.visits.len().saturating_sub(1)))
-    else {
+    let Some(visit) = threat::due_visit(
+        &time,
+        &shift,
+        &mut spawner.timer,
+        &rules,
+        &mut rng,
+        script.gap_multiplier,
+        threat::ChainProgress(progress.0),
+        &script.visits,
+    ) else {
         return;
     };
     let Some(reagent) = db.reagents.id_of(&visit.reagent) else {
@@ -167,12 +139,12 @@ fn generate_quack_visit(
         return;
     };
 
-    shift::spawn_scripted_visit(
+    threat::spawn_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
         &rules,
-        shift::ScriptedVisit {
+        threat::ScriptedVisit {
             name: &script.name,
             role: &script.role,
             color: script.color,
@@ -221,27 +193,36 @@ fn handle_quack_resolution(
     let mut campaign = campaign;
     let mut instability = instability;
 
-    for report in resolved.read() {
-        if report.name != script.name {
-            continue;
-        }
-        progress.0 = (progress.0 + 1).min(script.visits.len().saturating_sub(1));
-        if report.outcome != Outcome::Expired {
+    // Ignored fires it, and a spent visit is spent however it graded.
+    let mut chain = threat::ChainProgress(progress.0);
+    let steps = threat::step_chain(
+        &mut resolved,
+        &mut chain,
+        &script.name,
+        script.visits.len(),
+        threat::Trigger::Ignored,
+        threat::Advance::EveryVisit,
+    );
+    progress.0 = chain.0;
+
+    for step in steps {
+        if !step.fires {
             continue;
         }
 
         // A `SecondOpinion` requisition absorbs one malpractice dose before
         // it happens — caught in time, not ignored, so the campaign is never
         // told this one went unanswered.
-        if shift.requisition.quack_wards > 0 {
-            shift.requisition.quack_wards -= 1;
-            radio.push(
-                RadioEntry::new(
-                    channel_for(&script.role),
-                    format!("{}'s last patient turned out fine after all.", script.name),
-                )
-                .positive(),
-            );
+        if threat::ward_absorbed(
+            &mut shift,
+            &mut radio,
+            threat::Ward::Quack,
+            RadioEntry::new(
+                channel_for(&script.role),
+                format!("{}'s last patient turned out fine after all.", script.name),
+            )
+            .positive(),
+        ) {
             continue;
         }
 
@@ -304,6 +285,8 @@ fn handle_quack_resolution(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crew::CrewDef;
+    use crate::orders::Outcome;
     use crate::orders::OrderKind;
 
     fn data() -> chem_sim::ChemData {
@@ -322,7 +305,7 @@ mod tests {
     fn resolution_app() -> App {
         let mut app = App::new();
         app.insert_resource(ChemDb(data()))
-            .insert_resource(Script(script()))
+            .insert_resource(threat::Authored(script()))
             .init_resource::<QuackProgress>()
             .init_resource::<RadioLog>()
             .init_resource::<Shift>()

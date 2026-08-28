@@ -88,7 +88,7 @@ fn watch_estrangement(
 
         if !already && standing < ESTRANGED_BELOW {
             estranged.0.insert(member.name.clone());
-            suspicion.0 += ESTRANGEMENT_SUSPICION;
+            crate::antagonist::nudge_suspicion(&mut suspicion, ESTRANGEMENT_SUSPICION);
             // A relationship burning this badly is itself evidence the crew
             // is fraying — a separate, station-wide signal from the personal
             // one `SecuritySuspicion` above already captures.
@@ -163,7 +163,7 @@ mod tests {
             .0
             .contains("Botanist Ivy"));
         assert_eq!(
-            app.world().resource::<SecuritySuspicion>().0,
+            app.world().resource::<SecuritySuspicion>().level(),
             ESTRANGEMENT_SUSPICION,
             "several frames below the floor must not stack the bump"
         );
@@ -180,7 +180,7 @@ mod tests {
         let mut app = app();
         ivy(&mut app, ESTRANGED_BELOW - 1);
         app.update();
-        assert_eq!(app.world().resource::<SecuritySuspicion>().0, ESTRANGEMENT_SUSPICION);
+        assert_eq!(app.world().resource::<SecuritySuspicion>().level(), ESTRANGEMENT_SUSPICION);
 
         // Climbs back above `ESTRANGED_BELOW` but not past `RECONCILED_AT` —
         // must stay estranged, and must not fire a second bump.
@@ -192,7 +192,7 @@ mod tests {
             .resource::<Estranged>()
             .0
             .contains("Botanist Ivy"));
-        assert_eq!(app.world().resource::<SecuritySuspicion>().0, ESTRANGEMENT_SUSPICION);
+        assert_eq!(app.world().resource::<SecuritySuspicion>().level(), ESTRANGEMENT_SUSPICION);
     }
 
     #[test]
@@ -210,7 +210,7 @@ mod tests {
             .0
             .contains("Botanist Ivy"));
         assert_eq!(
-            app.world().resource::<SecuritySuspicion>().0,
+            app.world().resource::<SecuritySuspicion>().level(),
             ESTRANGEMENT_SUSPICION,
             "reconciling must not add or remove suspicion"
         );

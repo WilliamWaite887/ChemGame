@@ -24,7 +24,6 @@
 //! is exactly one new call site, in [`expire_rogue_encounters`].
 
 use bevy::prelude::*;
-use bevy_common_assets::ron::RonAssetPlugin;
 use bevy_replicon::prelude::*;
 use chem_sim::{Damage, DamageKind, ReagentId, Units};
 use rand::prelude::*;
@@ -43,12 +42,9 @@ use crate::net::is_authority;
 use crate::orders::{Department, Shift, StationData};
 use crate::player::Chemist;
 use crate::radio::{RadioEntry, RadioLog};
-use crate::shift::{self, current_rules};
+use crate::shift::current_rules;
+use crate::threat;
 use crate::AppState;
-
-/// Seconds before the very first check, before `Shift` has moved at all.
-/// Harmless to make short — nothing spawns until standing is already bad.
-const INITIAL_GAP_SECONDS: (f32, f32) = (30.0, 60.0);
 
 /// How long a visit waits at the counter before a non-answer counts as a
 /// refusal. Its own range rather than reusing the ordinary difficulty's —
@@ -76,18 +72,17 @@ pub struct RogueSecurityPlugin;
 
 impl Plugin for RogueSecurityPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(RonAssetPlugin::<RogueSecurityScript>::new(&[
+        app.add_plugins(threat::ScriptPlugin::<RogueSecurityScript>::new(
+            "data/station.rogue_security.ron",
             "rogue_security.ron",
-        ]))
+        ))
         .init_resource::<RogueRedeemed>()
         .add_message::<EmitWorldSfx>()
-        .add_systems(Startup, start_loading)
         .add_systems(OnEnter(AppState::Playing), arm_spawner)
         .add_systems(
             Update,
             (
                 (
-                    promote_script,
                     schedule_rogue_encounter,
                     handle_rogue_delivery,
                     expire_rogue_encounters,
@@ -161,43 +156,21 @@ pub struct RogueEncounterDef {
     pub physical: bool,
 }
 
-#[derive(Resource)]
-struct PendingRogueSecurityScript(Handle<RogueSecurityScript>);
 
-#[derive(Resource, Deref)]
-struct Script(RogueSecurityScript);
+/// This thread's authored script, once loaded.
+type Script = threat::Authored<RogueSecurityScript>;
 
 #[derive(Resource)]
 struct RogueSpawner {
     timer: Timer,
 }
 
-fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(PendingRogueSecurityScript(
-        assets.load("data/station.rogue_security.ron"),
-    ));
-}
 
-fn promote_script(
-    mut commands: Commands,
-    pending: Option<Res<PendingRogueSecurityScript>>,
-    mut scripts: ResMut<Assets<RogueSecurityScript>>,
-) {
-    let Some(pending) = pending else {
-        return;
-    };
-    let Some(script) = scripts.remove(&pending.0) else {
-        return;
-    };
-    commands.insert_resource(Script(script));
-    commands.remove_resource::<PendingRogueSecurityScript>();
-}
-
-/// See `shift::arm_first_visit` for why this has to re-run on
+/// See `threat::arm_first_visit` for why this has to re-run on
 /// `OnEnter(AppState::Playing)` every session rather than only once at
 /// process start.
 fn arm_spawner(mut commands: Commands) {
-    shift::arm_first_visit(&mut commands, INITIAL_GAP_SECONDS, |timer| RogueSpawner {
+    threat::arm_first_visit(&mut commands, threat::ROGUE_FIRST_CHECK, |timer| RogueSpawner {
         timer,
     });
 }
@@ -252,7 +225,7 @@ fn schedule_rogue_encounter(
 
     let mut rng = rand::rng();
     let rules = current_rules(&station.config, &shift, chemists.iter().count());
-    spawner.timer = shift::roll_next_gap(&mut rng, &rules, script.gap_multiplier);
+    spawner.timer = threat::roll_next_gap(&mut rng, &rules, script.gap_multiplier);
 
     // The gate: silence unless Security standing has actually soured.
     if shift.standing(Department::Security) > script.hostile_below {
@@ -639,7 +612,7 @@ mod tests {
                 crew: crew(),
                 config: config(),
             })
-            .insert_resource(Script(script()))
+            .insert_resource(threat::Authored(script()))
             .insert_resource(RogueSpawner {
                 timer: Timer::from_seconds(0.01, TimerMode::Once),
             })
@@ -763,7 +736,7 @@ mod tests {
     fn resolution_app() -> App {
         let mut app = App::new();
         app.insert_resource(ChemDb(data()))
-            .insert_resource(Script(script()))
+            .insert_resource(threat::Authored(script()))
             .init_resource::<Shift>()
             .init_resource::<Time>()
             .init_resource::<RadioLog>()
@@ -861,7 +834,7 @@ mod tests {
     #[test]
     fn redemption_spawns_the_deterrent_exactly_once() {
         let mut app = App::new();
-        app.insert_resource(Script(script()))
+        app.insert_resource(threat::Authored(script()))
             .init_resource::<Shift>()
             .init_resource::<RadioLog>()
             .init_resource::<RogueRedeemed>()
@@ -886,7 +859,7 @@ mod tests {
     #[test]
     fn a_low_standing_grants_no_reward() {
         let mut app = App::new();
-        app.insert_resource(Script(script()))
+        app.insert_resource(threat::Authored(script()))
             .init_resource::<Shift>()
             .init_resource::<RadioLog>()
             .init_resource::<RogueRedeemed>()

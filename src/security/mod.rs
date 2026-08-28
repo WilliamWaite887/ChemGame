@@ -14,30 +14,33 @@
 //! the officer's model happens to be standing.
 
 use bevy::prelude::*;
-use bevy_common_assets::ron::RonAssetPlugin;
 use chem_sim::Category;
 use serde::Deserialize;
 
-use crate::antagonist::SecuritySuspicion;
+use crate::antagonist::{clear_suspicion, SecuritySuspicion};
 use crate::chem_data::ChemDb;
 use crate::containers::Container;
 use crate::crew::{spawn_crew_member, CrewDef, CrewPhase, CrewRoute};
 use crate::net::is_authority;
 use crate::orders::{Department, Shift};
 use crate::radio::{RadioEntry, RadioLog};
+use crate::threat;
 use crate::AppState;
 
 pub struct SecurityPlugin;
 
 impl Plugin for SecurityPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(RonAssetPlugin::<SecurityScript>::new(&["security.ron"]))
+        app.add_plugins(threat::ScriptPlugin::<SecurityScript>::new(
+            "data/station.security.ron",
+            "security.ron",
+        ))
             .init_resource::<RaidSchedule>()
-            .add_systems(Startup, start_loading)
             .add_systems(
                 Update,
-                (promote_script, schedule_raid, run_sweep)
+                (schedule_raid, run_sweep)
                     .chain()
+                    .after(threat::PromoteScripts)
                     .run_if(is_authority)
                     .run_if(in_state(AppState::Playing)),
             );
@@ -69,32 +72,9 @@ pub struct SecurityScript {
     pub clean_line: String,
 }
 
-#[derive(Resource)]
-struct PendingSecurityScript(Handle<SecurityScript>);
+/// This thread's authored script, once loaded.
+type Script = threat::Authored<SecurityScript>;
 
-#[derive(Resource, Deref)]
-struct Script(SecurityScript);
-
-fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(PendingSecurityScript(
-        assets.load("data/station.security.ron"),
-    ));
-}
-
-fn promote_script(
-    mut commands: Commands,
-    pending: Option<Res<PendingSecurityScript>>,
-    mut scripts: ResMut<Assets<SecurityScript>>,
-) {
-    let Some(pending) = pending else {
-        return;
-    };
-    let Some(script) = scripts.remove(&pending.0) else {
-        return;
-    };
-    commands.insert_resource(Script(script));
-    commands.remove_resource::<PendingSecurityScript>();
-}
 
 // ---------------------------------------------------------------------------
 // The warning, and the officer
@@ -124,7 +104,21 @@ struct RaidOfficer {
 /// already-`Some` the same way it would after its own threshold check.
 #[derive(Resource, Default)]
 pub(crate) struct RaidSchedule {
-    pub(crate) warning_in: Option<f32>,
+    pub(crate) clock: threat::Countdown,
+}
+
+impl RaidSchedule {
+    /// Arms the raid directly, bypassing the ordinary suspicion threshold.
+    ///
+    /// One caller: `antagonist::handle_illicit_resolutions`'s Spy-flavoured
+    /// sting. The "only if nothing is already armed" guard lives here rather
+    /// than at that call site, because it is this schedule's invariant, not
+    /// the stinger's.
+    pub(crate) fn arm_sting(&mut self, seconds: f32) {
+        if !self.clock.is_armed() {
+            self.clock.arm(seconds, 0);
+        }
+    }
 }
 
 /// Watches suspicion, warns, then sends the officer in.
@@ -151,44 +145,46 @@ fn schedule_raid(
         return;
     }
 
-    if let Some(warning) = schedule.warning_in.as_mut() {
-        *warning -= time.delta_secs();
-        if *warning > 0.0 {
+    match schedule.clock.tick(time.delta_secs()) {
+        threat::Ticked::Waiting => return,
+        threat::Ticked::Fires(_) => {
+            let officer_def = CrewDef {
+                name: "Security".to_string(),
+                role: "Security".to_string(),
+                color: [0.80, 0.18, 0.18],
+            };
+            let officer = spawn_crew_member(&mut commands, &officer_def, 0.0);
+            commands.entity(officer).insert(RaidOfficer {
+                dwell: script.dwell_seconds,
+            });
             return;
         }
-        schedule.warning_in = None;
-
-        let officer_def = CrewDef {
-            name: "Security".to_string(),
-            role: "Security".to_string(),
-            color: [0.80, 0.18, 0.18],
-        };
-        let officer = spawn_crew_member(&mut commands, &officer_def, 0.0);
-        commands.entity(officer).insert(RaidOfficer {
-            dwell: script.dwell_seconds,
-        });
-        return;
+        threat::Ticked::Idle => {}
     }
 
-    if suspicion.0 >= script.threshold {
+    if suspicion.level() >= script.threshold {
         // A `LookTheOtherWay` requisition absorbs the raid before it's ever
         // called in: suspicion still clears (matching the ordinary case
         // below), but no warning is armed and no officer ever spawns.
-        if shift.requisition.raid_wards > 0 {
-            shift.requisition.raid_wards -= 1;
-            suspicion.0 = 0;
-            radio.push(
-                RadioEntry::new(
-                    crate::radio::RadioChannel::Security,
-                    "Security had questions about recent deliveries, then let it drop.",
-                )
-                .speaker("Warden Bex")
-                .positive(),
-            );
+        // Unlike the three department minors, this one also clears the meter
+        // and returns outright rather than continuing a loop — the helper
+        // spends the ward and speaks, it does not decide what else happens.
+        if threat::ward_absorbed(
+            &mut shift,
+            &mut radio,
+            threat::Ward::Raid,
+            RadioEntry::new(
+                crate::radio::RadioChannel::Security,
+                "Security had questions about recent deliveries, then let it drop.",
+            )
+            .speaker("Warden Bex")
+            .positive(),
+        ) {
+            clear_suspicion(&mut suspicion);
             return;
         }
 
-        schedule.warning_in = Some(script.warning_seconds);
+        schedule.clock.arm(script.warning_seconds, 0);
         radio.push(
             RadioEntry::new(
                 crate::radio::RadioChannel::Security,
@@ -202,7 +198,7 @@ fn schedule_raid(
         // resetting here rather than after the sweep means a second illicit
         // delivery during the warning window starts building fresh rather
         // than instantly re-triggering the moment this one clears.
-        suspicion.0 = 0;
+        clear_suspicion(&mut suspicion);
         // A raid actually *firing* — not the raw suspicion, which resets
         // whether the raid succeeds or fails either way — is the discrete,
         // "this went unresolved" signal worth sampling.
@@ -321,7 +317,7 @@ mod tests {
     fn sweep_app() -> App {
         let mut app = App::new();
         app.insert_resource(ChemDb(data()))
-            .insert_resource(Script(
+            .insert_resource(threat::Authored::<SecurityScript>(
                 ron::from_str(include_str!("../../assets/data/station.security.ron")).unwrap(),
             ))
             .init_resource::<Shift>()
@@ -340,7 +336,7 @@ mod tests {
     /// Enough app to run `schedule_raid` directly, headless.
     fn schedule_app() -> App {
         let mut app = App::new();
-        app.insert_resource(Script(
+        app.insert_resource(threat::Authored::<SecurityScript>(
             ron::from_str(include_str!("../../assets/data/station.security.ron")).unwrap(),
         ))
         .init_resource::<RaidSchedule>()
@@ -359,17 +355,17 @@ mod tests {
     fn crossing_the_threshold_without_a_ward_arms_the_warning_as_before() {
         let mut app = schedule_app();
         let threshold = app.world().resource::<Script>().0.threshold;
-        app.world_mut().resource_mut::<SecuritySuspicion>().0 = threshold;
+        app.world_mut().resource_mut::<SecuritySuspicion>().restore(threshold);
 
         app.update();
 
         assert_eq!(
-            app.world().resource::<SecuritySuspicion>().0,
+            app.world().resource::<SecuritySuspicion>().level(),
             0,
             "suspicion resets the moment a warning is armed"
         );
         assert!(
-            app.world().resource::<RaidSchedule>().warning_in.is_some(),
+            app.world().resource::<RaidSchedule>().clock.is_armed(),
             "without a ward, crossing the threshold should still arm a raid"
         );
         assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
@@ -379,7 +375,7 @@ mod tests {
     fn a_raid_ward_absorbs_the_warning_and_resets_suspicion() {
         let mut app = schedule_app();
         let threshold = app.world().resource::<Script>().0.threshold;
-        app.world_mut().resource_mut::<SecuritySuspicion>().0 = threshold;
+        app.world_mut().resource_mut::<SecuritySuspicion>().restore(threshold);
         app.world_mut()
             .resource_mut::<Shift>()
             .requisition
@@ -388,12 +384,12 @@ mod tests {
         app.update();
 
         assert_eq!(
-            app.world().resource::<SecuritySuspicion>().0,
+            app.world().resource::<SecuritySuspicion>().level(),
             0,
             "a warded raid still clears suspicion, same as an unwarded one"
         );
         assert!(
-            app.world().resource::<RaidSchedule>().warning_in.is_none(),
+            !app.world().resource::<RaidSchedule>().clock.is_armed(),
             "a Look the Other Way requisition should have absorbed this before it armed"
         );
         assert_eq!(

@@ -17,7 +17,6 @@
 //! `Container::solution` is what drives the liquid's colour.
 
 use bevy::prelude::*;
-use bevy_common_assets::ron::RonAssetPlugin;
 use chem_sim::Units;
 use rand::prelude::*;
 use serde::Deserialize;
@@ -26,35 +25,33 @@ use crate::chem_data::ChemDb;
 use crate::containers::{Container, HeldBy, InSlot, Stored};
 use crate::crew::CrewDef;
 use crate::net::is_authority;
-use crate::orders::{OrderResolved, Outcome, Shift, StationData};
+use crate::orders::{OrderResolved, Shift, StationData};
 use crate::player::Chemist;
 use crate::radio::{channel_for, RadioEntry, RadioLog};
-use crate::shift::{self, current_rules};
+use crate::shift::current_rules;
+use crate::threat;
 use crate::AppState;
-
-const INITIAL_GAP_SECONDS: (f32, f32) = (240.0, 420.0);
 
 pub struct SaboteurPlugin;
 
 impl Plugin for SaboteurPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(RonAssetPlugin::<SaboteurScript>::new(&["saboteur.ron"]))
-            .init_resource::<SaboteurProgress>()
-            .add_systems(Startup, start_loading)
-            .add_systems(OnEnter(AppState::Playing), arm_spawner)
-            .add_systems(
-                Update,
-                (
-                    promote_script,
-                    generate_saboteur_visit,
-                    handle_saboteur_resolution,
-                )
-                    .chain()
-                    .run_if(is_authority)
-                    // No `arc::is_active` gate, unlike a main antagonist —
-                    // see the module doc.
-                    .run_if(in_state(AppState::Playing)),
-            );
+        app.add_plugins(threat::ScriptPlugin::<SaboteurScript>::new(
+            "data/station.saboteur.ron",
+            "saboteur.ron",
+        ))
+        .init_resource::<SaboteurProgress>()
+        .add_systems(OnEnter(AppState::Playing), arm_spawner)
+        .add_systems(
+            Update,
+            (generate_saboteur_visit, handle_saboteur_resolution)
+                .chain()
+                .after(threat::PromoteScripts)
+                .run_if(is_authority)
+                // No `arc::is_active` gate, unlike a main antagonist —
+                // see the module doc.
+                .run_if(in_state(AppState::Playing)),
+        );
     }
 }
 
@@ -89,43 +86,19 @@ pub struct SaboteurVisitDef {
     pub plea: String,
 }
 
-#[derive(Resource)]
-struct PendingSaboteurScript(Handle<SaboteurScript>);
-
-#[derive(Resource, Deref)]
-struct Script(SaboteurScript);
+/// This thread's authored script, once loaded.
+type Script = threat::Authored<SaboteurScript>;
 
 #[derive(Resource)]
 struct SaboteurSpawner {
     timer: Timer,
 }
 
-fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(PendingSaboteurScript(
-        assets.load("data/station.saboteur.ron"),
-    ));
-}
-
-fn promote_script(
-    mut commands: Commands,
-    pending: Option<Res<PendingSaboteurScript>>,
-    mut scripts: ResMut<Assets<SaboteurScript>>,
-) {
-    let Some(pending) = pending else {
-        return;
-    };
-    let Some(script) = scripts.remove(&pending.0) else {
-        return;
-    };
-    commands.insert_resource(Script(script));
-    commands.remove_resource::<PendingSaboteurScript>();
-}
-
-/// See `shift::arm_first_visit` for why this has to re-run on
+/// See `threat::arm_first_visit` for why this has to re-run on
 /// `OnEnter(AppState::Playing)` every session rather than only once at
 /// process start.
 fn arm_spawner(mut commands: Commands) {
-    shift::arm_first_visit(&mut commands, INITIAL_GAP_SECONDS, |timer| {
+    threat::arm_first_visit(&mut commands, threat::MINOR_FIRST_VISIT, |timer| {
         SaboteurSpawner { timer }
     });
 }
@@ -146,21 +119,19 @@ fn generate_saboteur_visit(
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
     };
-    if !shift.accepting_orders {
-        return;
-    }
-    if !spawner.timer.tick(time.delta()).just_finished() {
-        return;
-    }
 
     let mut rng = rand::rng();
     let rules = current_rules(&station.config, &shift, chemists.iter().count());
-    spawner.timer = shift::roll_next_gap(&mut rng, &rules, script.gap_multiplier);
-
-    let Some(visit) = script
-        .visits
-        .get(progress.0.min(script.visits.len().saturating_sub(1)))
-    else {
+    let Some(visit) = threat::due_visit(
+        &time,
+        &shift,
+        &mut spawner.timer,
+        &rules,
+        &mut rng,
+        script.gap_multiplier,
+        threat::ChainProgress(progress.0),
+        &script.visits,
+    ) else {
         return;
     };
     let Some(reagent) = db.reagents.id_of(&visit.reagent) else {
@@ -168,12 +139,12 @@ fn generate_saboteur_visit(
         return;
     };
 
-    shift::spawn_scripted_visit(
+    threat::spawn_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
         &rules,
-        shift::ScriptedVisit {
+        threat::ScriptedVisit {
             name: &script.name,
             role: &script.role,
             color: script.color,
@@ -221,26 +192,37 @@ fn handle_saboteur_resolution(
     let mut campaign = campaign;
     let mut instability = instability;
 
-    for report in resolved.read() {
-        if report.name != script.name {
-            continue;
-        }
-        progress.0 = (progress.0 + 1).min(script.visits.len().saturating_sub(1));
-        if report.outcome != Outcome::Expired {
+    // Ignored fires it, and a spent visit is spent however it graded — the
+    // opposite of `cult`, which fires on a delivery that *landed* and leaves
+    // its chain where it was otherwise.
+    let mut chain = threat::ChainProgress(progress.0);
+    let steps = threat::step_chain(
+        &mut resolved,
+        &mut chain,
+        &script.name,
+        script.visits.len(),
+        threat::Trigger::Ignored,
+        threat::Advance::EveryVisit,
+    );
+    progress.0 = chain.0;
+
+    for step in steps {
+        if !step.fires {
             continue;
         }
 
         // A `SecondInspection` requisition absorbs one contamination before
         // it happens.
-        if shift.requisition.saboteur_wards > 0 {
-            shift.requisition.saboteur_wards -= 1;
-            radio.push(
-                RadioEntry::new(
-                    channel_for(&script.role),
-                    "Engineering signed off without touching the glassware.",
-                )
-                .positive(),
-            );
+        if threat::ward_absorbed(
+            &mut shift,
+            &mut radio,
+            threat::Ward::Saboteur,
+            RadioEntry::new(
+                channel_for(&script.role),
+                "Engineering signed off without touching the glassware.",
+            )
+            .positive(),
+        ) {
             continue;
         }
 
@@ -290,6 +272,7 @@ fn handle_saboteur_resolution(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orders::Outcome;
     use crate::containers::ContainerKind;
     use crate::orders::{Department, OrderKind};
 
@@ -309,7 +292,7 @@ mod tests {
     fn resolution_app() -> App {
         let mut app = App::new();
         app.insert_resource(ChemDb(data()))
-            .insert_resource(Script(script()))
+            .insert_resource(threat::Authored(script()))
             .init_resource::<SaboteurProgress>()
             .init_resource::<Shift>()
             .init_resource::<RadioLog>()

@@ -17,7 +17,6 @@
 //! [`OrderResolved`] to advance the authored sequence.
 
 use bevy::prelude::*;
-use bevy_common_assets::ron::RonAssetPlugin;
 use serde::Deserialize;
 
 use crate::chem_data::ChemDb;
@@ -27,29 +26,27 @@ use crate::net::is_authority;
 use crate::orders::{OrderResolved, Shift, StationData};
 use crate::player::Chemist;
 use crate::radio::{channel_for, RadioEntry, RadioLog};
-use crate::shift::{self, current_rules};
+use crate::shift::current_rules;
+use crate::threat;
 use crate::AppState;
 
 /// Seconds before the very first possible visit. Long — this is meant to be
 /// rare and, the first time, easy to write off as an odd customer.
-const INITIAL_GAP_SECONDS: (f32, f32) = (600.0, 900.0);
-
 pub struct ObsessedPlugin;
 
 impl Plugin for ObsessedPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(RonAssetPlugin::<ObsessedScript>::new(&["obsessed.ron"]))
+        app.add_plugins(threat::ScriptPlugin::<ObsessedScript>::new(
+            "data/station.obsessed.ron",
+            "obsessed.ron",
+        ))
             .init_resource::<ObsessedProgress>()
-            .add_systems(Startup, start_loading)
             .add_systems(OnEnter(AppState::Playing), arm_spawner)
             .add_systems(
                 Update,
-                (
-                    promote_script,
-                    generate_obsessed_visit,
-                    handle_obsessed_resolution,
-                )
+                (generate_obsessed_visit, handle_obsessed_resolution)
                     .chain()
+                    .after(threat::PromoteScripts)
                     .run_if(is_authority)
                     .run_if(in_state(AppState::Playing)),
             );
@@ -101,43 +98,19 @@ pub struct ObsessedVisitDef {
     pub leaves_token: bool,
 }
 
-#[derive(Resource)]
-struct PendingObsessedScript(Handle<ObsessedScript>);
-
-#[derive(Resource, Deref)]
-struct Script(ObsessedScript);
+/// This thread's authored script, once loaded.
+type Script = threat::Authored<ObsessedScript>;
 
 #[derive(Resource)]
 struct ObsessedSpawner {
     timer: Timer,
 }
 
-fn start_loading(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(PendingObsessedScript(
-        assets.load("data/station.obsessed.ron"),
-    ));
-}
-
-fn promote_script(
-    mut commands: Commands,
-    pending: Option<Res<PendingObsessedScript>>,
-    mut scripts: ResMut<Assets<ObsessedScript>>,
-) {
-    let Some(pending) = pending else {
-        return;
-    };
-    let Some(script) = scripts.remove(&pending.0) else {
-        return;
-    };
-    commands.insert_resource(Script(script));
-    commands.remove_resource::<PendingObsessedScript>();
-}
-
-/// See `shift::arm_first_visit` for why this has to re-run on
+/// See `threat::arm_first_visit` for why this has to re-run on
 /// `OnEnter(AppState::Playing)` every session rather than only once at
 /// process start.
 fn arm_spawner(mut commands: Commands) {
-    shift::arm_first_visit(&mut commands, INITIAL_GAP_SECONDS, |timer| {
+    threat::arm_first_visit(&mut commands, threat::STALKER_FIRST_VISIT, |timer| {
         ObsessedSpawner { timer }
     });
 }
@@ -163,21 +136,18 @@ fn generate_obsessed_visit(
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
     };
-    if !shift.accepting_orders {
-        return;
-    }
-    if !spawner.timer.tick(time.delta()).just_finished() {
-        return;
-    }
-
     let mut rng = rand::rng();
     let rules = current_rules(&station.config, &shift, chemists.iter().count());
-    spawner.timer = shift::roll_next_gap(&mut rng, &rules, script.gap_multiplier);
-
-    let Some(visit) = script
-        .visits
-        .get(progress.0.min(script.visits.len().saturating_sub(1)))
-    else {
+    let Some(visit) = threat::due_visit(
+        &time,
+        &shift,
+        &mut spawner.timer,
+        &rules,
+        &mut rng,
+        script.gap_multiplier,
+        threat::ChainProgress(progress.0),
+        &script.visits,
+    ) else {
         return;
     };
     let Some(reagent) = db.reagents.id_of(&visit.reagent) else {
@@ -185,12 +155,12 @@ fn generate_obsessed_visit(
         return;
     };
 
-    shift::spawn_scripted_visit(
+    threat::spawn_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
         &rules,
-        shift::ScriptedVisit {
+        threat::ScriptedVisit {
             name: &script.name,
             role: &script.role,
             color: script.color,
@@ -254,18 +224,26 @@ fn handle_obsessed_resolution(
         resolved.clear();
         return;
     };
-    let last = script.visits.len().saturating_sub(1);
-    for report in resolved.read() {
-        if report.name != script.name {
-            continue;
-        }
-        let before = progress.0;
-        progress.0 = (progress.0 + 1).min(last);
+    // `Trigger::Never`: nothing this thread does hangs off *how* a visit
+    // graded. Every resolution simply moves the chain, and the only moment
+    // that matters is the one that reaches the last authored beat.
+    let mut chain = threat::ChainProgress(progress.0);
+    let steps = threat::step_chain(
+        &mut resolved,
+        &mut chain,
+        &script.name,
+        script.visits.len(),
+        threat::Trigger::Never,
+        threat::Advance::EveryVisit,
+    );
+    progress.0 = chain.0;
+
+    for step in steps {
         // Nudged only on the transition into the *final* authored visit —
         // the culmination of an escalating pattern the player was meant to
         // notice, not a running tax on a thread that otherwise "costs
         // nothing mechanically" by design (see this module's own doc).
-        if progress.0 == last && before != last {
+        if step.reached_finale {
             if let Some(instability) = instability.as_mut() {
                 crate::instability::nudge_instability(instability, OBSESSED_FINALE_INSTABILITY);
             }
@@ -330,7 +308,7 @@ mod tests {
 
     fn resolution_app() -> App {
         let mut app = App::new();
-        app.insert_resource(Script(script()))
+        app.insert_resource(threat::Authored(script()))
             .init_resource::<ObsessedProgress>()
             .init_resource::<crate::instability::Instability>()
             .add_message::<OrderResolved>()

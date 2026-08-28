@@ -46,6 +46,7 @@ mod settings;
 mod shift;
 mod showdown;
 mod smuggler;
+mod threat;
 mod ui;
 
 use bevy::prelude::*;
