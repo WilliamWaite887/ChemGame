@@ -38,12 +38,12 @@ use crate::audio::{EmitWorldSfx, Sfx};
 use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, HeldBy};
-use crate::crew::{spawn_crew_member, CrewDef, CrewPhase, CrewRoute};
+use crate::crew::{spawn_crew_member, CrewDef, CrewPhase, CrewRoute, BODY_OFFSET};
 use crate::hazards::{HazardFelt, HazardKind, SmokeCloud, SmokePayload};
 use crate::interaction::{InteractRequested, Interactable};
 use crate::lab::{CrisisSpots, MapReady, WalkableAreas};
 use crate::machines::chemist_entity;
-use crate::nav::{NavGraph, NAV_RADIUS};
+use crate::nav::{NavGraph, Trail};
 use crate::net::is_authority;
 use crate::orders::reference_category;
 use crate::player::Chemist;
@@ -123,11 +123,10 @@ pub struct Pursuit {
     hit_every: f32,
     /// Brute damage dealt per hit.
     hit_brute: i32,
-    /// Cached portal route to the target's last sampled position.
-    path: Vec<Vec3>,
-    waypoint: usize,
-    /// Seconds until the moving target is sampled and the route is rebuilt.
-    repath_in: f32,
+    /// The route to the target's last sampled position, and the walking of it.
+    /// Shared with `crate::crew::Errand`, which wants exactly this and none of
+    /// the hitting — see [`Trail`].
+    trail: Trail,
 }
 
 impl Pursuit {
@@ -139,9 +138,10 @@ impl Pursuit {
             cooldown: hit_every,
             hit_every,
             hit_brute,
-            path: Vec::new(),
-            waypoint: 0,
-            repath_in: 0.0,
+            // A default `Trail` is due for its first replan immediately, which
+            // is the "no route until the first tick" state this used to spell
+            // out with an explicit `repath_in: 0.0`.
+            trail: Trail::default(),
         }
     }
 }
@@ -527,7 +527,6 @@ fn run_pursuers(
             continue;
         }
         pursuit.cooldown -= dt;
-        pursuit.repath_in -= dt;
 
         // Nearest by squared distance — the square root would only be needed
         // to compare against `ASSAILANT_REACH`, which is cheaper to square.
@@ -543,51 +542,29 @@ fn run_pursuers(
             continue;
         };
 
-        if pursuit.repath_in <= 0.0 {
-            pursuit.repath_in = ASSAILANT_REPATH_SECONDS;
-            pursuit.waypoint = 0;
-            pursuit.path = nav
-                .as_deref()
-                .and_then(|graph| graph.path(transform.translation, target))
-                .unwrap_or_default();
+        if pursuit.trail.due_for_replan(dt, ASSAILANT_REPATH_SECONDS) {
+            pursuit
+                .trail
+                .plan(nav.as_deref(), transform.translation, target);
         }
 
         // Euclidean proximity alone is not enough: two people can be less
         // than arm's reach apart on opposite sides of a wall. The cached route
         // must both end at this sampled target and be short enough to hit.
-        let route_targets_chemist = pursuit.path.last().is_some_and(|sampled| {
-            Vec2::new(sampled.x - target.x, sampled.z - target.z).length_squared() <= 0.0001
-        });
-        let route_in_reach = remaining_route_length(transform.translation, &pursuit)
+        let route_targets_chemist = pursuit.trail.ends_at(target);
+        let route_in_reach = pursuit
+            .trail
+            .remaining(transform.translation)
             .is_some_and(|walk| walk <= ASSAILANT_REACH);
         if distance > ASSAILANT_REACH * ASSAILANT_REACH || !route_targets_chemist || !route_in_reach
         {
             // Follow portal waypoints rather than walking straight through
             // department walls. No route deliberately means no motion: a
             // disconnected graph must not revive the old wall-phasing path.
-            let mut remaining = pursuit.speed * dt;
-            while remaining > 0.0 {
-                let Some(waypoint) = pursuit.path.get(pursuit.waypoint).copied() else {
-                    break;
-                };
-                let step = waypoint - transform.translation;
-                let waypoint_distance = step.length();
-                if waypoint_distance <= 0.02 {
-                    pursuit.waypoint += 1;
-                    continue;
-                }
-                let walked = remaining.min(waypoint_distance);
-                let candidate = transform.translation + step / waypoint_distance * walked;
-                transform.translation = areas.as_deref().map_or(candidate, |areas| {
-                    areas.contain_on_surface(candidate, NAV_RADIUS, 0.93)
-                });
-                remaining -= walked;
-                if walked >= waypoint_distance {
-                    pursuit.waypoint += 1;
-                } else {
-                    break;
-                }
-            }
+            let step = pursuit.speed * dt;
+            pursuit
+                .trail
+                .walk(&mut transform, areas.as_deref(), step, BODY_OFFSET);
             continue;
         }
         if pursuit.cooldown > 0.0 {
@@ -621,22 +598,6 @@ fn run_pursuers(
             break;
         }
     }
-}
-
-/// Length of the unwalked part of a cached route, measured on the floor plane.
-fn remaining_route_length(from: Vec3, pursuit: &Pursuit) -> Option<f32> {
-    if pursuit.path.is_empty() {
-        return None;
-    }
-    let mut previous = from;
-    let mut total = 0.0;
-    for waypoint in pursuit.path.iter().skip(pursuit.waypoint) {
-        let mut leg = *waypoint - previous;
-        leg.y = 0.0;
-        total += leg.length();
-        previous = *waypoint;
-    }
-    Some(total)
 }
 
 // ---------------------------------------------------------------------------
@@ -1300,8 +1261,8 @@ mod tests {
             "the first leg should aim for the corridor portal, not cut diagonally through the wall"
         );
         assert_eq!(
-            app.world().get::<Pursuit>(assailant).unwrap().path.last(),
-            Some(&original_target)
+            app.world().get::<Pursuit>(assailant).unwrap().trail.end(),
+            Some(original_target)
         );
 
         app.world_mut()
@@ -1310,14 +1271,14 @@ mod tests {
             .translation = moved_target;
         advance(&mut app, 0.1);
         assert_eq!(
-            app.world().get::<Pursuit>(assailant).unwrap().path.last(),
-            Some(&original_target),
+            app.world().get::<Pursuit>(assailant).unwrap().trail.end(),
+            Some(original_target),
             "the route should be cached between quarter-second samples"
         );
         advance(&mut app, 0.16);
         assert_eq!(
-            app.world().get::<Pursuit>(assailant).unwrap().path.last(),
-            Some(&moved_target.with_y(0.93))
+            app.world().get::<Pursuit>(assailant).unwrap().trail.end(),
+            Some(moved_target.with_y(0.93))
         );
     }
 
@@ -1349,7 +1310,7 @@ mod tests {
             .world()
             .get::<Pursuit>(assailant)
             .unwrap()
-            .path
+            .trail
             .is_empty());
     }
 

@@ -49,6 +49,7 @@ impl Plugin for CrewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Departments>()
             .init_resource::<CrewPosts>()
+            .add_message::<ErrandResolved>()
             .add_systems(OnEnter(AppState::Playing), load_crew_assets)
             .add_systems(
                 Update,
@@ -65,6 +66,10 @@ impl Plugin for CrewPlugin {
                         handle_medical_evacuation,
                         ambient_behaviour,
                         walk_route,
+                        // After `walk_route`, so an errand set in reaction to
+                        // an arrival this frame starts walking on the next one
+                        // rather than half a frame late.
+                        run_errands,
                         handle_crew_collapse,
                     )
                         .chain()
@@ -332,6 +337,18 @@ impl CrewRoute {
             delivery_lane: DeliveryLane::Public,
             lane_offset: 0.0,
         }
+    }
+
+    /// A fresh route straight back out of the station.
+    ///
+    /// For a body that has no `CrewRoute` at all to send away — one that has
+    /// just finished an [`Errand`], which took its route off it. Built through
+    /// [`CrewRoute::leave`] rather than beside it so there is still exactly one
+    /// description of what leaving means.
+    pub fn leaving() -> Self {
+        let mut route = Self::to(Vec3::ZERO);
+        route.leave();
+        route
     }
 
     /// Sends them back out to the station.
@@ -1243,7 +1260,7 @@ fn crew_stride_multiplier(entity: Entity, t: f32, blood: Option<&Bloodstream>) -
     }
 }
 
-fn walk_route(
+pub(crate) fn walk_route(
     mut commands: Commands,
     time: Res<Time>,
     nav: Res<crate::nav::NavGraph>,
@@ -1351,6 +1368,225 @@ fn walk_route(
         // Face the direction of travel so they read as people rather than
         // sliding props.
         transform.rotation = Quat::from_rotation_y(to_target.x.atan2(to_target.z));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Errands
+// ---------------------------------------------------------------------------
+
+/// How often an errand-runner re-samples its goal and rebuilds its route.
+/// Matches `showdown`'s pursuit cadence: an errand goal can move (a beaker in
+/// someone's hand) for exactly the same reason a chemist can.
+const ERRAND_REPLAN_SECONDS: f32 = 0.25;
+/// How close an errand-runner has to get to count as having arrived. The same
+/// distance an assailant needs to land a hit, and for the same reason: it is
+/// arm's length, and everything an errand does on arrival is something a
+/// person does with their hands.
+const ERRAND_REACH: f32 = 1.2;
+/// How long an errand may take before it is written off.
+///
+/// The backstop, not the mechanism. Nav failing outright already ends an
+/// errand immediately; this catches the slower failures that have no single
+/// frame to point at — a goal drifting away as fast as it is chased, or a
+/// route that exists but leads somewhere the walker can never quite reach.
+/// Without it an errand-runner walks into a corner forever.
+const ERRAND_DEADLINE_SECONDS: f32 = 45.0;
+
+/// What an errand is aimed at.
+///
+/// A moving [`ErrandGoal::Target`] rather than only a fixed point because the
+/// interesting errands are aimed at *objects*, and an object can be picked up
+/// mid-walk. That is not a failure to handle defensively — it is the player
+/// beating the saboteur to the beaker, and the errand has to be able to say so.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ErrandGoal {
+    /// Somewhere on the station. No consumer yet — `saboteur`, the first
+    /// thread migrated onto errands, is aimed at an object — but `security`'s
+    /// sweep is a walk to a *place*, and the tests below cover this arm today.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Point(Vec3),
+    Target(Entity),
+}
+
+/// Walk somewhere, then do something when you get there.
+///
+/// The verb the station's NPCs were missing. Until this, a body could stand at
+/// the counter holding an [`crate::orders::Order`], chase the chemist
+/// (`showdown::Pursuit`), or wander ([`Ambient`]) — so any antagonist whose
+/// payoff was neither of those three had nowhere to put it and reached for a
+/// global query instead, acting on the far side of the station without ever
+/// walking there.
+///
+/// **Replaces [`CrewRoute`] rather than coexisting with it**, exactly as
+/// `Pursuit` does and for the same reason: two systems writing one `Transform`
+/// fight, and a fixed waypoint list has nothing useful to say about a goal that
+/// can move or vanish. Use [`send_on_errand`], which does both halves; the
+/// query in [`run_errands`] additionally refuses to walk a body that still has
+/// a `CrewRoute`, so forgetting is inert rather than a body shuddering between
+/// two destinations.
+///
+/// Ends exactly once, by removing itself and writing one [`ErrandResolved`].
+/// Whoever set the errand decides what that means — this component has no
+/// opinion about what happens on arrival, which is what lets one primitive
+/// serve a theft, a contamination and a sweep.
+#[derive(Component)]
+pub struct Errand {
+    goal: ErrandGoal,
+    speed: f32,
+    arrive_within: f32,
+    /// Seconds before the errand is written off. See
+    /// [`ERRAND_DEADLINE_SECONDS`].
+    expires_in: f32,
+    trail: crate::nav::Trail,
+}
+
+impl Errand {
+    fn new(goal: ErrandGoal) -> Self {
+        Self {
+            goal,
+            // An errand is an ordinary walk, at an ordinary walking pace —
+            // the same `WALK_SPEED` every other crew member on the station
+            // moves at. Only a pursuit has a reason to be faster.
+            speed: WALK_SPEED,
+            arrive_within: ERRAND_REACH,
+            expires_in: ERRAND_DEADLINE_SECONDS,
+            trail: crate::nav::Trail::default(),
+        }
+    }
+}
+
+/// How an errand ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrandOutcome {
+    /// Got there. Whatever the errand was for can happen now.
+    Arrived,
+    /// Did not, and will not: the goal was picked up, drunk or despawned, no
+    /// route to it exists, or it took too long. Deliberately one outcome
+    /// rather than three — every caller so far does the same thing with all of
+    /// them, and splitting them would invite a caller to handle one and
+    /// silently drop the others.
+    Unreachable,
+}
+
+/// One errand, finished.
+///
+/// A message rather than a component mutation so a thread module can react to
+/// an arrival without owning any locomotion — the same separation
+/// [`crate::orders::OrderResolved`] already gives the order pipeline, and the
+/// reason `saboteur` can be rebuilt around walking without gaining a single
+/// line about waypoints.
+/// Deliberately identifies the *walker* rather than the goal. A thread that
+/// sent someone on an errand marks them with its own component (`saboteur`'s
+/// `Meddling`), so it can tell its own arrivals from another module's and
+/// carry whatever else it needs to know alongside — which the goal alone could
+/// not do anyway.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct ErrandResolved {
+    pub walker: Entity,
+    pub outcome: ErrandOutcome,
+}
+
+/// Sends a body on an errand, taking them off their ordinary route.
+///
+/// The `CrewRoute` removal is not the caller's to remember — see [`Errand`].
+pub fn send_on_errand(commands: &mut Commands, walker: Entity, goal: ErrandGoal) {
+    commands
+        .entity(walker)
+        .remove::<CrewRoute>()
+        .insert(Errand::new(goal));
+}
+
+/// Walks everyone who is on an errand, and reports the ones that ended.
+///
+/// The locomotion itself is [`crate::nav::Trail`], shared with
+/// `showdown::run_pursuers` — including the three-part arrival test, which is
+/// not paranoia: Euclidean proximity alone counts a body as having arrived at
+/// something on the far side of a wall it is standing against.
+pub(crate) fn run_errands(
+    mut commands: Commands,
+    time: Res<Time>,
+    nav: Option<Res<crate::nav::NavGraph>>,
+    areas: Option<Res<crate::lab::WalkableAreas>>,
+    mut resolved: MessageWriter<ErrandResolved>,
+    mut runners: Query<
+        (Entity, &mut Transform, &mut Errand, Option<&Bloodstream>),
+        Without<CrewRoute>,
+    >,
+    goals: Query<&Transform, Without<Errand>>,
+) {
+    let dt = time.delta_secs();
+
+    for (entity, mut transform, mut errand, blood) in &mut runners {
+        // Sedation stops a body mid-errand, exactly as `walk_route` already
+        // stops a sedated crew member on an ordinary route. A saboteur you
+        // put down on their way to the beaker does not keep walking, and the
+        // errand is not cancelled either — it resumes if they come round.
+        if blood.is_some_and(|blood| {
+            blood.0.status(StatusKind::Sedated).intensity > 0.0 || blood.0.incapacitated()
+        }) {
+            continue;
+        }
+
+        // Where the goal is *now*, not where it was when the errand was set.
+        let at = match errand.goal {
+            ErrandGoal::Point(at) => Some(at),
+            ErrandGoal::Target(target) => goals.get(target).ok().map(|at| at.translation),
+        };
+
+        errand.expires_in -= dt;
+        let give_up = |commands: &mut Commands, resolved: &mut MessageWriter<ErrandResolved>| {
+            commands.entity(entity).remove::<Errand>();
+            resolved.write(ErrandResolved {
+                walker: entity,
+                outcome: ErrandOutcome::Unreachable,
+            });
+        };
+
+        // The goal went away mid-walk — picked up, drunk, despawned — or the
+        // errand has simply run out of time.
+        let (Some(at), true) = (at, errand.expires_in > 0.0) else {
+            give_up(&mut commands, &mut resolved);
+            continue;
+        };
+
+        if errand.trail.due_for_replan(dt, ERRAND_REPLAN_SECONDS) {
+            errand.trail.plan(nav.as_deref(), transform.translation, at);
+        }
+        // Nav has nothing to say, and this system only runs once the map is
+        // ready — so this is not a graph still loading, it is genuinely no way
+        // there. Stop rather than straight-lining through the wall between.
+        if errand.trail.is_empty() {
+            give_up(&mut commands, &mut resolved);
+            continue;
+        }
+
+        let reach = errand.arrive_within;
+        let arrived = transform.translation.distance_squared(at) <= reach * reach
+            && errand.trail.ends_at(at)
+            && errand
+                .trail
+                .remaining(transform.translation)
+                .is_some_and(|walk| walk <= reach);
+        if arrived {
+            commands.entity(entity).remove::<Errand>();
+            resolved.write(ErrandResolved {
+                walker: entity,
+                outcome: ErrandOutcome::Arrived,
+            });
+            continue;
+        }
+
+        let step = errand.speed * dt;
+        if let Some(heading) = errand
+            .trail
+            .walk(&mut transform, areas.as_deref(), step, BODY_OFFSET)
+        {
+            // Face the way they are going, the same as `walk_route` — an
+            // errand-runner is a person crossing the room, and the whole point
+            // of the primitive is that the player can watch them do it.
+            transform.rotation = Quat::from_rotation_y(heading.x.atan2(heading.z));
+        }
     }
 }
 
@@ -2739,6 +2975,311 @@ mod tests {
                 .resource::<Shift>()
                 .standing(Department::Medical),
             0
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Errands
+    // -----------------------------------------------------------------------
+
+    /// Every errand resolution the app has produced, accumulated as it goes.
+    ///
+    /// `Messages` keeps two frames' worth, and walking an errand to its end
+    /// takes hundreds of ticks — reading the buffer at the finish would find
+    /// nothing at all.
+    #[derive(Resource, Default)]
+    struct ErrandLog(Vec<ErrandResolved>);
+
+    fn record_errands(mut log: ResMut<ErrandLog>, mut resolved: MessageReader<ErrandResolved>) {
+        log.0.extend(resolved.read().copied());
+    }
+
+    /// [`contained_walking_app`] plus the errand machinery.
+    fn errand_app() -> App {
+        let mut app = contained_walking_app();
+        app.init_resource::<ErrandLog>()
+            .add_message::<ErrandResolved>()
+            .add_systems(Update, (run_errands, record_errands).chain());
+        app
+    }
+
+    /// A body standing at `at` with no route of its own, ready to be sent.
+    fn errand_runner(app: &mut App, at: Vec3) -> Entity {
+        app.world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Tester".into(),
+                    role: "Engineering".into(),
+                },
+                Transform::from_translation(at),
+            ))
+            .id()
+    }
+
+    fn send(app: &mut App, walker: Entity, goal: ErrandGoal) {
+        let mut commands = app.world_mut().commands();
+        send_on_errand(&mut commands, walker, goal);
+        app.world_mut().flush();
+    }
+
+    fn errands(app: &App) -> &[ErrandResolved] {
+        &app.world().resource::<ErrandLog>().0
+    }
+
+    /// Walks until the errand ends, or gives up after `ticks`.
+    fn walk_errand(app: &mut App, walker: Entity, ticks: usize) {
+        for _ in 0..ticks {
+            tick(app, 0.05);
+            if app.world().get::<Errand>(walker).is_none() {
+                return;
+            }
+        }
+    }
+
+    fn in_reaction_bay() -> Vec3 {
+        let at = crate::lab::ROOMS[crate::lab::REACTION_BAY].center();
+        Vec3::new(at.x, BODY_OFFSET, at.z)
+    }
+
+    #[test]
+    fn an_errand_runner_is_never_outside_the_walkable_floor() {
+        // The same guarantee `a_crew_member_walking_across_the_station_is_
+        // never_outside_the_walkable_floor` gives an ordinary route. An errand
+        // is a *second* system writing `Transform`, so it needs its own proof:
+        // sharing `nav::Trail` with `walk_route`'s containment is the intent,
+        // not evidence.
+        let mut app = errand_app();
+        let start = in_reaction_bay();
+        let walker = errand_runner(&mut app, start);
+        let lobby = crate::lab::ROOMS[crate::lab::LOBBY].center();
+        send(
+            &mut app,
+            walker,
+            ErrandGoal::Point(Vec3::new(lobby.x, BODY_OFFSET, lobby.z)),
+        );
+
+        for step in 0..600 {
+            tick(&mut app, 0.05);
+            let Some(at) = app.world().get::<Transform>(walker) else {
+                break;
+            };
+            let strayed = off_the_floor(&app, at.translation);
+            assert!(
+                strayed < 0.01,
+                "step {step}: stood {strayed:.3}m off the walkable floor at {:?}",
+                at.translation,
+            );
+            if app.world().get::<Errand>(walker).is_none() {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn an_errand_ends_once_it_arrives_and_never_twice() {
+        let mut app = errand_app();
+        let start = in_reaction_bay();
+        let walker = errand_runner(&mut app, start);
+        let goal = start + Vec3::new(1.5, 0.0, 0.0);
+        send(&mut app, walker, ErrandGoal::Point(goal));
+
+        walk_errand(&mut app, walker, 400);
+
+        assert!(
+            app.world().get::<Errand>(walker).is_none(),
+            "an arrived errand takes itself off, which is what makes 'once' structural",
+        );
+        assert_eq!(
+            errands(&app).len(),
+            1,
+            "exactly one resolution: {:?}",
+            errands(&app),
+        );
+        assert_eq!(errands(&app)[0].outcome, ErrandOutcome::Arrived);
+        assert_eq!(errands(&app)[0].walker, walker);
+
+        // And it stays ended — nothing re-fires now the component is gone.
+        for _ in 0..20 {
+            tick(&mut app, 0.05);
+        }
+        assert_eq!(errands(&app).len(), 1);
+    }
+
+    #[test]
+    fn an_errand_follows_a_target_that_moves_rather_than_where_it_started() {
+        // The reason a goal is re-sampled at all. A fixed point would send the
+        // saboteur to where the beaker *was* when the visit expired, and have
+        // them meddle with the empty counter it has since left.
+        let mut app = errand_app();
+        let start = in_reaction_bay();
+        let walker = errand_runner(&mut app, start);
+        let beaker = app
+            .world_mut()
+            .spawn(Transform::from_translation(start + Vec3::new(3.0, 0.0, 0.0)))
+            .id();
+        send(&mut app, walker, ErrandGoal::Target(beaker));
+
+        tick(&mut app, 0.05);
+        let moved = start + Vec3::new(0.0, 0.0, 2.0);
+        app.world_mut().get_mut::<Transform>(beaker).unwrap().translation = moved;
+
+        walk_errand(&mut app, walker, 400);
+
+        assert_eq!(
+            errands(&app).first().map(|ended| ended.outcome),
+            Some(ErrandOutcome::Arrived),
+            "the walk should have followed the beaker to where it went",
+        );
+        let at = app.world().get::<Transform>(walker).unwrap().translation;
+        assert!(
+            at.distance(moved) <= ERRAND_REACH,
+            "ended {:.2}m from the target it was chasing",
+            at.distance(moved),
+        );
+    }
+
+    #[test]
+    fn an_errand_whose_target_vanishes_ends_rather_than_walking_at_nothing() {
+        // The player getting to the beaker first. Not a defensive edge case —
+        // it is the counterplay, and the errand has to be able to report it.
+        let mut app = errand_app();
+        let start = in_reaction_bay();
+        let walker = errand_runner(&mut app, start);
+        let beaker = app
+            .world_mut()
+            .spawn(Transform::from_translation(start + Vec3::new(4.0, 0.0, 0.0)))
+            .id();
+        send(&mut app, walker, ErrandGoal::Target(beaker));
+
+        tick(&mut app, 0.05);
+        app.world_mut().entity_mut(beaker).despawn();
+
+        walk_errand(&mut app, walker, 100);
+
+        assert!(app.world().get::<Errand>(walker).is_none());
+        assert_eq!(
+            errands(&app).first().map(|ended| ended.outcome),
+            Some(ErrandOutcome::Unreachable),
+        );
+    }
+
+    #[test]
+    fn a_goal_that_cannot_be_reached_never_walks_a_body_off_the_floor() {
+        // The counterpart to `an_assailant_stops_when_the_nav_graph_has_no_
+        // route`, and the half that matters most: whatever else an impossible
+        // goal does, it must never be pursued through a wall.
+        //
+        // Note what it does *not* do — `NavGraph::path` falls back to the
+        // nearest region for a goal inside no region at all, so a route to
+        // the void exists and is walked, right up to the wall. Containment is
+        // what stops it there.
+        let mut app = errand_app();
+        let start = in_reaction_bay();
+        let walker = errand_runner(&mut app, start);
+        let void = Vec3::new(-400.0, BODY_OFFSET, -400.0);
+        send(&mut app, walker, ErrandGoal::Point(void));
+
+        for _ in 0..200 {
+            tick(&mut app, 0.05);
+            let at = app.world().get::<Transform>(walker).unwrap().translation;
+            let strayed = off_the_floor(&app, at);
+            assert!(
+                strayed < 0.01,
+                "chasing an impossible goal walked them {strayed:.3}m off the floor",
+            );
+        }
+    }
+
+    #[test]
+    fn an_errand_that_never_gets_there_is_written_off_rather_than_run_forever() {
+        // The deadline, and the only thing that ends this case. The body above
+        // is stopped at the wall by containment but still *wants* the goal:
+        // its route is non-empty, it just never shrinks. Nothing in the
+        // geometry will ever resolve that, so the clock has to.
+        let mut app = errand_app();
+        let start = in_reaction_bay();
+        let walker = errand_runner(&mut app, start);
+        send(
+            &mut app,
+            walker,
+            ErrandGoal::Point(Vec3::new(-400.0, BODY_OFFSET, -400.0)),
+        );
+
+        // Past `ERRAND_DEADLINE_SECONDS`, at the tick rate the others use.
+        walk_errand(&mut app, walker, (ERRAND_DEADLINE_SECONDS / 0.05) as usize + 20);
+
+        assert!(
+            app.world().get::<Errand>(walker).is_none(),
+            "the errand should have been written off by now",
+        );
+        assert_eq!(
+            errands(&app).first().map(|ended| ended.outcome),
+            Some(ErrandOutcome::Unreachable),
+            "and reported, so the caller can stop waiting on it",
+        );
+    }
+
+    #[test]
+    fn a_body_still_carrying_a_crew_route_is_never_walked_by_two_systems_at_once() {
+        // `send_on_errand` removes the route, so this state is only reachable
+        // by inserting `Errand` by hand. The query filter is what makes that
+        // mistake inert rather than a body shuddering between two
+        // destinations — `walk_route` and `run_errands` both write `Transform`.
+        let mut app = errand_app();
+        let start = in_reaction_bay();
+        let walker = errand_runner(&mut app, start);
+        let goal = start + Vec3::new(1.5, 0.0, 0.0);
+        app.world_mut()
+            .entity_mut(walker)
+            .insert((CrewRoute::to(start), Errand::new(ErrandGoal::Point(goal))));
+
+        for _ in 0..40 {
+            tick(&mut app, 0.05);
+        }
+
+        assert!(
+            app.world().get::<Errand>(walker).is_some(),
+            "the errand should have been left entirely alone, not half-run",
+        );
+        assert!(errands(&app).is_empty());
+    }
+
+    #[test]
+    fn a_sedated_errand_runner_stops_where_they_are() {
+        // The same rule `walk_route` already applies to an ordinary route: a
+        // body you have put down does not keep walking. Putting the saboteur
+        // to sleep on their way to the beaker has to actually stop them, or
+        // sedation reads as cosmetic.
+        let mut app = errand_app();
+        let start = in_reaction_bay();
+        let walker = errand_runner(&mut app, start);
+        let lobby = crate::lab::ROOMS[crate::lab::LOBBY].center();
+        send(
+            &mut app,
+            walker,
+            ErrandGoal::Point(Vec3::new(lobby.x, BODY_OFFSET, lobby.z)),
+        );
+
+        for _ in 0..10 {
+            tick(&mut app, 0.05);
+        }
+        let mut blood = Bloodstream(chem_sim::Bloodstream::default());
+        blood.0.add_status(StatusKind::Sedated, 20.0, 2.0);
+        app.world_mut().entity_mut(walker).insert(blood);
+        let stopped_at = app.world().get::<Transform>(walker).unwrap().translation;
+
+        for _ in 0..40 {
+            tick(&mut app, 0.05);
+        }
+
+        assert_eq!(
+            app.world().get::<Transform>(walker).unwrap().translation,
+            stopped_at,
+            "a sedated body must not keep walking its errand",
+        );
+        assert!(
+            app.world().get::<Errand>(walker).is_some(),
+            "and the errand is held, not cancelled — it resumes if they come round",
         );
     }
 }
