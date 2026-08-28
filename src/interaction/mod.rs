@@ -37,14 +37,18 @@ const POINT_NETWORK_TOLERANCE: f32 = 0.15;
 /// between a mesh hit and its gameplay root while still rejecting remote
 /// interaction. Non-finite coordinates are rejected here as well so they can
 /// never make distance comparisons fail open.
-pub(crate) fn authority_target_in_reach(actor: Vec3, target_root: Vec3) -> bool {
-    finite_within(actor, target_root, REACH + TARGET_CENTRE_TOLERANCE)
+///
+/// `reach` is the caller's own distance, not always [`REACH`] — a held item
+/// can reach further (`ContainerKind::reach`); a bare-hands caller passes
+/// [`REACH`] itself.
+pub(crate) fn authority_target_in_reach(actor: Vec3, target_root: Vec3, reach: f32) -> bool {
+    finite_within(actor, target_root, reach + TARGET_CENTRE_TOLERANCE)
 }
 
 /// Exact world hit used by a floor pour. Unlike an entity root, this should be
 /// almost exactly where the client ray ended.
-pub(crate) fn authority_point_in_reach(actor: Vec3, point: Vec3) -> bool {
-    finite_within(actor, point, REACH + POINT_NETWORK_TOLERANCE)
+pub(crate) fn authority_point_in_reach(actor: Vec3, point: Vec3, reach: f32) -> bool {
+    finite_within(actor, point, reach + POINT_NETWORK_TOLERANCE)
 }
 
 fn finite_within(actor: Vec3, endpoint: Vec3, distance: f32) -> bool {
@@ -110,6 +114,41 @@ pub(crate) fn authority_segment_blocked(
     // contact at the actor's own origin. A real intervening wall occupies a
     // measurable portion of the segment between those two margins.
     enter < 0.985 && exit > 0.015
+}
+
+/// Every body within a cone from `actor` toward `aim_direction`, out to
+/// `reach`, filtered by `half_angle_deg` and the same per-target occlusion
+/// [`authority_segment_blocked`] already performs for a single endpoint — the
+/// many-target counterpart of [`authority_target_in_reach`] for an aimed
+/// area weapon (a cone-spray held item) rather than a single crosshair
+/// target.
+///
+/// `aim_direction` must already be normalized; a zero vector matches nothing,
+/// since `dot` against it can never clear `cos_half_angle`.
+pub(crate) fn bodies_in_cone(
+    actor: Vec3,
+    aim_direction: Vec3,
+    reach: f32,
+    half_angle_deg: f32,
+    candidates: impl Iterator<Item = (Entity, Vec3)>,
+    solids: &Query<(&Transform, &crate::lab::Solid)>,
+) -> Vec<Entity> {
+    let cos_half_angle = half_angle_deg.to_radians().cos();
+    candidates
+        .filter(|(_, position)| {
+            let offset = *position - actor;
+            let distance = offset.length();
+            distance > 0.0
+                && distance <= reach
+                && offset.normalize().dot(aim_direction) >= cos_half_angle
+        })
+        .filter(|(_, position)| {
+            !solids.iter().any(|(transform, solid)| {
+                authority_segment_blocked(actor, *position, transform.translation, solid.half_extents)
+            })
+        })
+        .map(|(entity, _)| entity)
+        .collect()
 }
 
 pub struct InteractionPlugin;
@@ -232,12 +271,32 @@ fn apply_machine_opened(
 /// cursor" when not. Split across two systems those race within a frame — the
 /// panel closes and the same keypress immediately frees the cursor.
 #[allow(clippy::too_many_arguments)]
+/// Whether Escape is currently forbidden from closing the pause overlay.
+///
+/// A real evacuation (`ending::Ending::evacuated`) is not something Escape
+/// gets to dismiss. Every *other* ending — a merely resolved, still-playable
+/// arc — keeps its existing Escape-to-dismiss behaviour untouched; this is
+/// deliberately the only new gate here. Pure, so the one keypress this
+/// project cannot afford to get wrong is testable without a window, a cursor
+/// or a full `App`.
+pub(crate) fn escape_blocked_by_evacuation(
+    screen: crate::settings::PauseScreen,
+    finished: Option<&crate::ending::FinishedArc>,
+) -> bool {
+    screen == crate::settings::PauseScreen::Ending
+        && finished
+            .and_then(|finished| finished.showing())
+            .is_some_and(|ending| ending.evacuated)
+}
+
 fn panel_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     cursor: Single<&mut CursorOptions>,
     settings: Res<crate::settings::Settings>,
     mut paused: ResMut<crate::settings::Paused>,
+    screen: Res<crate::settings::PauseScreen>,
+    finished: Option<Res<crate::ending::FinishedArc>>,
     mut released: ResMut<CursorReleased>,
     mut players: Query<(Entity, &mut InteractionMode), With<LocalPlayer>>,
     mut machines: Query<&mut Machine>,
@@ -245,12 +304,13 @@ fn panel_input(
 ) {
     let escape = keys.just_pressed(KeyCode::Escape);
     let book = keys.just_pressed(settings.bindings.book);
+    let blocks_escape = escape_blocked_by_evacuation(*screen, finished.as_deref());
 
     // The pause menu owns Escape whenever it is up, and nothing else here
     // should run underneath it — a keypress meant to close the menu must not
     // also toggle the book behind it.
     if paused.0 {
-        if escape {
+        if escape && !blocks_escape {
             paused.0 = false;
         }
         free_the_cursor(cursor, true);
@@ -428,6 +488,7 @@ fn update_focus(
     interactables: Query<(), With<Interactable>>,
     parents: Query<&ChildOf>,
     held: Query<(), With<HeldBy>>,
+    holding: Query<(&HeldBy, &Container)>,
     smoke: Query<(), With<SmokeVisual>>,
     hazards: Query<(), With<HazardVisual>>,
     puddles: Query<(), With<PuddleVisual>>,
@@ -444,6 +505,17 @@ fn update_focus(
             }
             continue;
         }
+
+        // A longer-reach held item (a confrontation item) widens this ray's
+        // own cutoff, not just the server's authority check. Client focus is
+        // presentation, not the gate itself, but a hit past ordinary REACH
+        // would otherwise be discarded before Focus is ever set, so F would
+        // silently do nothing no matter how far the item actually reaches.
+        let max_reach = holding
+            .iter()
+            .find(|(holder, _)| holder.0 == camera.chemist)
+            .map(|(_, container)| container.kind.reach())
+            .unwrap_or(REACH);
 
         let ray = Ray3d::new(camera_transform.translation(), camera_transform.forward());
         // A carried beaker rides in front of the camera and would otherwise
@@ -464,7 +536,7 @@ fn update_focus(
         let hit = ray_cast
             .cast_ray(ray, &settings)
             .first()
-            .filter(|(_, hit)| hit.distance <= REACH);
+            .filter(|(_, hit)| hit.distance <= max_reach);
         focus.point = hit.map(|(_, hit)| hit.point);
         focus.target =
             hit.and_then(|(entity, _)| interactable_ancestor(*entity, &interactables, &parents));
@@ -615,17 +687,22 @@ fn update_prompt(
                                 .target
                                 .filter(|target| containers.contains(*target))
                                 .map(|_| "[F]  test approximate pH".to_string()),
-                            (ContainerKind::Syringe, true) => focus
+                            (ContainerKind::Syringe | ContainerKind::SyringeGun, true) => focus
                                 .target
                                 .filter(|target| containers.contains(*target))
                                 .map(|_| "[F]  draw".to_string()),
-                            (ContainerKind::Syringe, false) => Some("[F]  inject".to_string()),
+                            (ContainerKind::Syringe | ContainerKind::SyringeGun, false) => {
+                                Some("[F]  inject".to_string())
+                            }
                             (_, true) => None,
                             (ContainerKind::Pill, false) => Some("[R]  swallow".to_string()),
                             (ContainerKind::Patch, false) => Some("[R]  apply patch".to_string()),
-                            (ContainerKind::SprayBottle, false) => {
-                                Some("[F]  spray chemical".to_string())
-                            }
+                            (
+                                ContainerKind::SprayBottle
+                                | ContainerKind::PressureSprayer
+                                | ContainerKind::WaterGun,
+                                false,
+                            ) => Some("[F]  spray chemical".to_string()),
                             (ContainerKind::SmokeProjector, false) => {
                                 Some("[R]  project smoke payload".to_string())
                             }
@@ -678,14 +755,93 @@ mod tests {
     #[test]
     fn authority_reach_rejects_remote_and_non_finite_requests() {
         let actor = Vec3::new(0.0, 1.7, 0.0);
-        assert!(authority_target_in_reach(actor, Vec3::new(3.0, 1.0, 0.0)));
-        assert!(!authority_target_in_reach(actor, Vec3::new(8.0, 1.0, 0.0)));
-        assert!(authority_point_in_reach(actor, Vec3::new(1.0, 0.0, 0.0)));
-        assert!(!authority_point_in_reach(actor, Vec3::new(4.0, 0.0, 0.0)));
+        assert!(authority_target_in_reach(actor, Vec3::new(3.0, 1.0, 0.0), REACH));
+        assert!(!authority_target_in_reach(
+            actor,
+            Vec3::new(8.0, 1.0, 0.0),
+            REACH
+        ));
+        assert!(authority_point_in_reach(actor, Vec3::new(1.0, 0.0, 0.0), REACH));
+        assert!(!authority_point_in_reach(actor, Vec3::new(4.0, 0.0, 0.0), REACH));
         assert!(!authority_point_in_reach(
             actor,
-            Vec3::new(f32::NAN, 0.0, 0.0)
+            Vec3::new(f32::NAN, 0.0, 0.0),
+            REACH
         ));
+    }
+
+    #[test]
+    fn a_wider_reach_actually_changes_the_outcome() {
+        // Proves the parameterization changes the answer, not just compiles:
+        // a target 5m out is beyond ordinary hand reach but within a Syringe
+        // Gun's own 6.0m.
+        let actor = Vec3::new(0.0, 1.7, 0.0);
+        let target = Vec3::new(5.0, 1.7, 0.0);
+        assert!(!authority_target_in_reach(actor, target, REACH));
+        assert!(authority_target_in_reach(actor, target, 6.0));
+    }
+
+    #[test]
+    fn bodies_in_cone_filters_by_angle_reach_and_occlusion() {
+        let mut world = World::new();
+        let actor = Vec3::ZERO;
+        let aim = Vec3::new(1.0, 0.0, 0.0);
+
+        // Dead ahead, within reach and angle: hits.
+        let ahead = world.spawn_empty().id();
+        // Off to the side, outside the 20 degree half-angle: misses.
+        let off_angle = world.spawn_empty().id();
+        // Dead ahead but past the reach: misses.
+        let too_far = world.spawn_empty().id();
+        // Dead ahead, in reach and angle, but behind a wall: misses.
+        let occluded = world.spawn_empty().id();
+        world.spawn((
+            Transform::from_xyz(2.0, 0.0, 0.0),
+            crate::lab::Solid {
+                half_extents: Vec3::new(0.1, 1.0, 1.0),
+            },
+        ));
+
+        let mut state = SystemState::<Query<(&Transform, &crate::lab::Solid)>>::new(&mut world);
+        let solids = state.get(&world).unwrap();
+
+        let candidates = [
+            (ahead, Vec3::new(1.0, 0.0, 0.0)),
+            (off_angle, Vec3::new(1.0, 0.0, 2.0)),
+            (too_far, Vec3::new(10.0, 0.0, 0.0)),
+            (occluded, Vec3::new(3.0, 0.0, 0.0)),
+        ];
+
+        let hits = bodies_in_cone(actor, aim, 4.5, 20.0, candidates.into_iter(), &solids);
+
+        assert_eq!(hits, vec![ahead]);
+    }
+
+    #[test]
+    fn bodies_in_cone_hits_every_body_it_catches() {
+        let mut world = World::new();
+        let mut state = SystemState::<Query<(&Transform, &crate::lab::Solid)>>::new(&mut world);
+        let solids = state.get(&world).unwrap();
+
+        let a = Entity::from_raw_u32(1).unwrap();
+        let b = Entity::from_raw_u32(2).unwrap();
+        let candidates = [
+            (a, Vec3::new(1.0, 0.0, 0.1)),
+            (b, Vec3::new(1.0, 0.0, -0.1)),
+        ];
+
+        let mut hits = bodies_in_cone(
+            Vec3::ZERO,
+            Vec3::new(1.0, 0.0, 0.0),
+            4.5,
+            20.0,
+            candidates.into_iter(),
+            &solids,
+        );
+        hits.sort();
+        let mut expected = vec![a, b];
+        expected.sort();
+        assert_eq!(hits, expected);
     }
 
     #[test]

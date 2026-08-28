@@ -50,6 +50,10 @@ impl Plugin for SecurityPlugin {
 /// deliberately holding contraband, where a collapse is an accident.
 const RAID_PENALTY: i32 = -4;
 
+/// What a raid actually firing nudges `instability::Instability` by — see
+/// `instability::INCOMPETENCE_PER_IGNORED_SHENANIGAN` for the same scale.
+const RAID_INSTABILITY: i32 = 4;
+
 // ---------------------------------------------------------------------------
 // Data
 // ---------------------------------------------------------------------------
@@ -135,6 +139,7 @@ fn schedule_raid(
     script: Option<Res<Script>>,
     mut schedule: ResMut<RaidSchedule>,
     mut suspicion: ResMut<SecuritySuspicion>,
+    mut instability: Option<ResMut<crate::instability::Instability>>,
     mut shift: ResMut<Shift>,
     mut radio: ResMut<RadioLog>,
     officers: Query<(), With<RaidOfficer>>,
@@ -198,6 +203,12 @@ fn schedule_raid(
         // delivery during the warning window starts building fresh rather
         // than instantly re-triggering the moment this one clears.
         suspicion.0 = 0;
+        // A raid actually *firing* — not the raw suspicion, which resets
+        // whether the raid succeeds or fails either way — is the discrete,
+        // "this went unresolved" signal worth sampling.
+        if let Some(instability) = instability.as_mut() {
+            crate::instability::nudge_instability(instability, RAID_INSTABILITY);
+        }
     }
 }
 

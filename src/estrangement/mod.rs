@@ -59,6 +59,10 @@ pub const RECONCILED_AT: i32 = -8;
 /// sale.
 const ESTRANGEMENT_SUSPICION: i32 = 5;
 
+/// What entering estrangement nudges `instability::Instability` by — see
+/// `instability::INCOMPETENCE_PER_IGNORED_SHENANIGAN` for the same scale.
+const ESTRANGEMENT_INSTABILITY: i32 = 4;
+
 /// Who is currently estranged, by `station.crew.ron` name. A career fact,
 /// persisted in `ProgressSave.estranged` — not reset when a shift is called,
 /// the same reasoning `rogue_security::RogueRedeemed` uses.
@@ -72,6 +76,7 @@ fn watch_estrangement(
     station: Option<Res<StationData>>,
     mut estranged: ResMut<Estranged>,
     mut suspicion: ResMut<SecuritySuspicion>,
+    mut instability: Option<ResMut<crate::instability::Instability>>,
     mut radio: ResMut<RadioLog>,
 ) {
     let Some(station) = station else {
@@ -84,6 +89,12 @@ fn watch_estrangement(
         if !already && standing < ESTRANGED_BELOW {
             estranged.0.insert(member.name.clone());
             suspicion.0 += ESTRANGEMENT_SUSPICION;
+            // A relationship burning this badly is itself evidence the crew
+            // is fraying — a separate, station-wide signal from the personal
+            // one `SecuritySuspicion` above already captures.
+            if let Some(instability) = instability.as_mut() {
+                crate::instability::nudge_instability(instability, ESTRANGEMENT_INSTABILITY);
+            }
             radio.push(
                 RadioEntry::new(
                     channel_for(&member.role),
@@ -124,6 +135,7 @@ mod tests {
         .init_resource::<Shift>()
         .init_resource::<Estranged>()
         .init_resource::<SecuritySuspicion>()
+        .init_resource::<crate::instability::Instability>()
         .init_resource::<RadioLog>()
         .add_systems(Update, watch_estrangement);
         app
@@ -156,6 +168,11 @@ mod tests {
             "several frames below the floor must not stack the bump"
         );
         assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
+        assert_eq!(
+            app.world().resource::<crate::instability::Instability>().level,
+            ESTRANGEMENT_INSTABILITY,
+            "several frames below the floor must not stack this bump either"
+        );
     }
 
     #[test]

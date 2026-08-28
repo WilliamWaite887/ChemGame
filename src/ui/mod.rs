@@ -33,7 +33,7 @@ use crate::machines::{
     DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested, GrindRequested, Hopper,
     HplcReport, Machine, MachineKind, MachineSlot, PackageRequested, PurifyRequested,
     SetHeaterPower, SetTargetTemperature, TakeRequested, Thermostat, HPLC_RECIPE_REQUIREMENT,
-    LOCKER_CAPACITY, TEMPERATURE_MARKS, TEMPERATURE_MAX, TEMPERATURE_MIN,
+    LOCKER_CAPACITY, TEMPERATURE_MAX, TEMPERATURE_MIN,
 };
 use crate::orders::{
     reference_category, Department, DevelopmentOrder, GlasswarePackId, Order, Shift, StationData,
@@ -45,6 +45,7 @@ use crate::shift::{
     can_afford, can_call_it, npc_can_afford, shift_report, CallItAShift, CareerStage,
     NpcRequisitionKind, NpcRequisitionRequested, OpenUpAgain, RequisitionKind,
     RequisitionRequested, ShiftReport, ToggleAcceptingOrders, OVERCLOCK_COST,
+    PRESSURE_SPRAYER_COST, SYRINGE_GUN_COST, WATER_GUN_COST,
 };
 use crate::AppState;
 
@@ -1125,7 +1126,7 @@ fn standing_board_body(
                         );
                     }
                     if let Some(station) = station {
-                        let items: Vec<_> = station
+                        let mut items: Vec<_> = station
                             .config
                             .supply
                             .personal_packs
@@ -1142,6 +1143,12 @@ fn standing_board_body(
                                 )
                             })
                             .collect();
+                        items.push((
+                            "Water Gun".to_string(),
+                            "Cheap and weak, but hits everyone caught in its spray, not just one target.".to_string(),
+                            WATER_GUN_COST,
+                            PanelAction::NpcPack(NpcRequisitionKind::SatoWaterGun),
+                        ));
                         draw_seller_section(
                             scroll,
                             "Miner Sato",
@@ -1154,13 +1161,27 @@ fn standing_board_body(
                         scroll,
                         "Tech Lindqvist",
                         shift.npc_standing("Tech Lindqvist"),
-                        "Sells a coil that overclocks the Reaction Chamber — faster, not safer.",
-                        &[(
-                            "Overclock Coil".to_string(),
-                            "Temporarily doubles the chamber's heating rate. Repurchasing tops up charges.".to_string(),
-                            OVERCLOCK_COST,
-                            PanelAction::NpcPack(NpcRequisitionKind::LindqvistOverclock),
-                        )],
+                        "Sells a coil that overclocks the Reaction Chamber, and a pair of longer-reach confrontation tools.",
+                        &[
+                            (
+                                "Overclock Coil".to_string(),
+                                "Temporarily doubles the chamber's heating rate. Repurchasing tops up charges.".to_string(),
+                                OVERCLOCK_COST,
+                                PanelAction::NpcPack(NpcRequisitionKind::LindqvistOverclock),
+                            ),
+                            (
+                                "Syringe Gun".to_string(),
+                                "A syringe with real range — draws and injects from well beyond arm's reach.".to_string(),
+                                SYRINGE_GUN_COST,
+                                PanelAction::NpcPack(NpcRequisitionKind::LindqvistSyringeGun),
+                            ),
+                            (
+                                "Pressure Sprayer".to_string(),
+                                "A pressurized sprayer: longer reach than a hand bottle, and it catches everyone in its cone.".to_string(),
+                                PRESSURE_SPRAYER_COST,
+                                PanelAction::NpcPack(NpcRequisitionKind::LindqvistPressureSprayer),
+                            ),
+                        ],
                     );
                 });
         }
@@ -2122,21 +2143,9 @@ fn heater_body(
                                 BackgroundColor(BUTTON_ACTIVE),
                                 TempSliderFill,
                             ));
-                            for kelvin in TEMPERATURE_MARKS {
-                                track.spawn((
-                                    Node {
-                                        position_type: PositionType::Absolute,
-                                        left: percent(temp_fraction_of(kelvin) * 100.0),
-                                        width: px(2),
-                                        height: percent(100),
-                                        ..default()
-                                    },
-                                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.42)),
-                                ));
-                            }
                         });
                     thermal.spawn(label(
-                        "173 K     recipe thresholds     600 K",
+                        format!("{TEMPERATURE_MIN:.0} K                                    {TEMPERATURE_MAX:.0} K"),
                         10.0,
                         TEXT_DIM,
                     ));
@@ -6716,17 +6725,6 @@ mod tests {
         assert_ne!(panel_profiles(&first), panel_profiles(&second));
     }
 
-    #[test]
-    fn the_dial_range_covers_every_recipe_threshold_with_margin() {
-        // The whole reason 173-600K was chosen: 100K of headroom past the
-        // lowest and highest temperatures anything in the data gates on.
-        for kelvin in TEMPERATURE_MARKS {
-            assert!(
-                kelvin > TEMPERATURE_MIN && kelvin < TEMPERATURE_MAX,
-                "{kelvin}K threshold sits outside the dial's own range"
-            );
-        }
-    }
 
     #[test]
     fn chamber_forecast_explains_a_known_blocked_temperature_without_leaking_methods() {

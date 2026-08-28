@@ -66,6 +66,7 @@ fn clear_session_state(world: &mut World) {
     reset::<crate::crisis::CrisisSchedule>(world);
     reset::<crate::shift::PendingRestock>(world);
     reset::<crate::crew::Departments>(world);
+    reset::<crate::instability::Instability>(world);
 
     // The authored-chain counters. Each is "how far into this thread's script
     // the career has reached", restored from `progress.ron` on load — so a new
@@ -80,7 +81,6 @@ fn clear_session_state(world: &mut World) {
     // System state that used to be `Local` and had to stop being, precisely
     // because a `Local` cannot be reached from here. See each type's own doc.
     reset::<crate::shift::PersistedProgress>(world);
-    reset::<crate::shift::ThwartingRecorded>(world);
     reset::<crate::shift::ForecastClock>(world);
     reset::<crate::hazards::IncidentGrace>(world);
     reset::<crate::addiction::CarriedSuspicion>(world);

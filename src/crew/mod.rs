@@ -1194,6 +1194,7 @@ fn handle_medical_evacuation(
             || !crate::interaction::authority_target_in_reach(
                 actor_transform.translation,
                 resident_transform.translation,
+                crate::interaction::REACH,
             )
         {
             continue;

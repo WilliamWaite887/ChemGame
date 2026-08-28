@@ -566,7 +566,11 @@ fn reset_subject_and_samples(
         else {
             continue;
         };
-        if !crate::interaction::authority_target_in_reach(actor.translation, target.translation) {
+        if !crate::interaction::authority_target_in_reach(
+            actor.translation,
+            target.translation,
+            crate::interaction::REACH,
+        ) {
             continue;
         }
 

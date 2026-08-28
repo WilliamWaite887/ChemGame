@@ -324,6 +324,7 @@ fn handle_smuggler_resolution(
     script: Option<Res<Script>>,
     arc_script: Option<Res<crate::arc::Script>>,
     campaign: Option<ResMut<crate::arc::Campaign>>,
+    instability: Option<ResMut<crate::instability::Instability>>,
     mut resolved: MessageReader<OrderResolved>,
     mut progress: ResMut<SmugglerProgress>,
     mut shift: ResMut<Shift>,
@@ -335,6 +336,7 @@ fn handle_smuggler_resolution(
         return;
     };
     let mut campaign = campaign;
+    let mut instability = instability;
 
     for report in resolved.read() {
         if report.name != script.name {
@@ -376,6 +378,12 @@ fn handle_smuggler_resolution(
         if let (Some(arc_script), Some(campaign)) = (arc_script.as_deref(), campaign.as_mut()) {
             crate::arc::note_ignored_shenanigan(arc_script, campaign);
         }
+        if let Some(instability) = instability.as_mut() {
+            crate::instability::nudge_instability(
+                instability,
+                crate::instability::INCOMPETENCE_PER_IGNORED_SHENANIGAN,
+            );
+        }
     }
 }
 
@@ -396,6 +404,7 @@ mod tests {
             .init_resource::<SmugglerProgress>()
             .init_resource::<Shift>()
             .init_resource::<RadioLog>()
+            .init_resource::<crate::instability::Instability>()
             .add_message::<OrderResolved>()
             .add_systems(Update, handle_smuggler_resolution);
         app
@@ -490,6 +499,11 @@ mod tests {
             "an unattended beaker is exactly what a side business is for"
         );
         assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
+        assert_eq!(
+            app.world().resource::<crate::instability::Instability>().level,
+            crate::instability::INCOMPETENCE_PER_IGNORED_SHENANIGAN,
+            "an ignored shenanigan is exactly the signal the instability meter watches for"
+        );
     }
 
     #[test]

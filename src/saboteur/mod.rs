@@ -207,6 +207,7 @@ fn handle_saboteur_resolution(
     script: Option<Res<Script>>,
     arc_script: Option<Res<crate::arc::Script>>,
     campaign: Option<ResMut<crate::arc::Campaign>>,
+    instability: Option<ResMut<crate::instability::Instability>>,
     mut resolved: MessageReader<OrderResolved>,
     mut progress: ResMut<SaboteurProgress>,
     mut shift: ResMut<Shift>,
@@ -218,6 +219,7 @@ fn handle_saboteur_resolution(
         return;
     };
     let mut campaign = campaign;
+    let mut instability = instability;
 
     for report in resolved.read() {
         if report.name != script.name {
@@ -275,6 +277,12 @@ fn handle_saboteur_resolution(
         // is really about.
         if let (Some(arc_script), Some(campaign)) = (arc_script.as_deref(), campaign.as_mut()) {
             crate::arc::note_ignored_shenanigan(arc_script, campaign);
+        }
+        if let Some(instability) = instability.as_mut() {
+            crate::instability::nudge_instability(
+                instability,
+                crate::instability::INCOMPETENCE_PER_IGNORED_SHENANIGAN,
+            );
         }
     }
 }

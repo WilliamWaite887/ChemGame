@@ -186,14 +186,10 @@ impl Default for Thermostat {
 /// with the mouse cursor freed the same way the settings screen is (see
 /// `interaction::panel_input`), so a drag control turned out to work fine —
 /// the "crosshair" concern that ruled it out originally no longer applies.
-pub const TEMPERATURE_MIN: f32 = 173.0;
-pub const TEMPERATURE_MAX: f32 = 600.0;
+pub const TEMPERATURE_MIN: f32 = 100.0;
+pub const TEMPERATURE_MAX: f32 = 1000.0;
 
-/// Where the dial actually matters, for the tick marks drawn on it — not
-/// buttons any more, just a hint of where the real recipe thresholds sit.
-/// `ice`'s 273K, `phlogiston`/`methamphetamine`'s shared 374K, `cyanide`'s
-/// 380K, `chlorine_trifluoride`'s 424K minimum, and its 500K overheat.
-pub const TEMPERATURE_MARKS: [f32; 5] = [273.0, 374.0, 380.0, 424.0, 500.0];
+
 
 /// Fraction of the remaining gap a powered chamber closes per second.
 ///

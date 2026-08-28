@@ -225,7 +225,38 @@ impl ShiftRules {
 pub fn current_rules(config: &OrderConfig, shift: &Shift, chemist_count: usize) -> ShiftRules {
     let tier = shift.succeeded / config.ramp.orders_per_tier.max(1);
     let base = ShiftRules::for_tier(config, &config.ramp, tier);
-    scale_for_chemists(base, chemist_count, &config.ramp)
+    let scaled = scale_for_chemists(base, chemist_count, &config.ramp);
+    scale_for_defeated(scaled, shift.defeated_count, chemist_count, &config.ramp)
+}
+
+/// Tightens arrival gaps once per antagonist this career has already
+/// thwarted — the third wrapping layer, after tier and chemist-count.
+/// `Shift::defeated_count` only ever rises on a genuine chemist-mode win
+/// (`shift::record_thwarting`), never on a loss, so failing an arc can never
+/// make the lab harder the way failing an order already cannot (see
+/// `failing_never_makes_the_lab_harder`).
+///
+/// Zero defeats reproduces the input unchanged, the same "solo/first-win is
+/// a no-op" property `scale_for_chemists` already guarantees for its own
+/// dimension. `chemist_count` is threaded through only to recompute the same
+/// team-divided floor `scale_for_chemists` already applied — clamping
+/// against the *undivided* `gap_floor` here would silently undo that team
+/// floor's own division for a full table, since this pass runs after it.
+fn scale_for_defeated(
+    rules: ShiftRules,
+    defeated_count: u32,
+    chemist_count: usize,
+    ramp: &RampDef,
+) -> ShiftRules {
+    let decay = ramp.defeated_gap_scale.powi(defeated_count as i32);
+    let team_floor = ramp.gap_floor / chemist_count.max(1) as f32;
+    ShiftRules {
+        gap_seconds: (
+            (rules.gap_seconds.0 * decay).max(team_floor),
+            (rules.gap_seconds.1 * decay).max(team_floor),
+        ),
+        ..rules
+    }
 }
 
 /// Widens the counter and shortens arrival gaps for however many chemists
@@ -804,6 +835,15 @@ pub enum NpcRequisitionKind {
     IvyPack(produce::ProducePackId),
     SatoPack(GlasswarePackId),
     LindqvistOverclock,
+    /// A longer-reach syringe. Sold by Lindqvist alongside the Overclock —
+    /// same "precision tool" flavor.
+    LindqvistSyringeGun,
+    /// The stronger of the two cone sprayers. Sold by Lindqvist.
+    LindqvistPressureSprayer,
+    /// The cheap cone sprayer. Sold by Sato — bulk/novelty goods, matching
+    /// his glassware flavor — rather than Lindqvist, so the two Engineering
+    /// items stay the pricier, more deliberate purchase.
+    SatoWaterGun,
 }
 
 impl NpcRequisitionKind {
@@ -812,8 +852,10 @@ impl NpcRequisitionKind {
     pub fn owner(self) -> &'static str {
         match self {
             NpcRequisitionKind::IvyPack(_) => "Botanist Ivy",
-            NpcRequisitionKind::SatoPack(_) => "Miner Sato",
-            NpcRequisitionKind::LindqvistOverclock => "Tech Lindqvist",
+            NpcRequisitionKind::SatoPack(_) | NpcRequisitionKind::SatoWaterGun => "Miner Sato",
+            NpcRequisitionKind::LindqvistOverclock
+            | NpcRequisitionKind::LindqvistSyringeGun
+            | NpcRequisitionKind::LindqvistPressureSprayer => "Tech Lindqvist",
         }
     }
 }
@@ -823,6 +865,14 @@ impl NpcRequisitionKind {
 /// exactly one item to price. `pub(crate)` so `ui::standing_board_body` can
 /// show the same number on the button it draws.
 pub(crate) const OVERCLOCK_COST: i32 = 5;
+
+/// The three confrontation items' own costs — first-pass constants,
+/// calibrated against `OVERCLOCK_COST`'s and the glassware packs' existing
+/// 2-10 scale, not playtested. `pub(crate)` for the same reason
+/// `OVERCLOCK_COST` is.
+pub(crate) const SYRINGE_GUN_COST: i32 = 10;
+pub(crate) const PRESSURE_SPRAYER_COST: i32 = 6;
+pub(crate) const WATER_GUN_COST: i32 = 2;
 
 /// The same affordability rule [`can_afford`] applies, against one person's
 /// own standing instead of a department's average.
@@ -902,7 +952,52 @@ pub fn apply_npc_requisition(
             }
             true
         }
+        NpcRequisitionKind::LindqvistSyringeGun => {
+            if !npc_can_afford(shift.npc_standing(owner), SYRINGE_GUN_COST) {
+                return false;
+            }
+            shift.adjust_npc(owner, -SYRINGE_GUN_COST);
+            spawn_purchased_item(commands, ContainerKind::SyringeGun, delivery_station, 0.6);
+            true
+        }
+        NpcRequisitionKind::LindqvistPressureSprayer => {
+            if !npc_can_afford(shift.npc_standing(owner), PRESSURE_SPRAYER_COST) {
+                return false;
+            }
+            shift.adjust_npc(owner, -PRESSURE_SPRAYER_COST);
+            spawn_purchased_item(commands, ContainerKind::PressureSprayer, delivery_station, 0.9);
+            true
+        }
+        NpcRequisitionKind::SatoWaterGun => {
+            if !npc_can_afford(shift.npc_standing(owner), WATER_GUN_COST) {
+                return false;
+            }
+            shift.adjust_npc(owner, -WATER_GUN_COST);
+            spawn_purchased_item(commands, ContainerKind::WaterGun, delivery_station, 0.6);
+            true
+        }
     }
+}
+
+/// Materializes a bought confrontation item at the counter, empty and ready
+/// to load — the `Container`-item counterpart of `machines::spawn_overclock`
+/// ("arrives instantly, no courier"), reusing `gift_container`'s own
+/// positioning idiom below it. `sideways` keeps two items bought close
+/// together (or the same item bought twice) from spawning exactly on top of
+/// one another.
+fn spawn_purchased_item(
+    commands: &mut Commands,
+    kind: ContainerKind,
+    station: DeliveryStation,
+    sideways: f32,
+) {
+    let (_, height) = kind.dimensions();
+    spawn_container(
+        commands,
+        kind,
+        station.drop_position(COUNTER_TOP + height * 0.5)
+            - (station.transform.rotation * Vec3::X) * sideways,
+    );
 }
 
 /// Spend standing on a department's supplies, any time affordability holds.
@@ -1318,7 +1413,6 @@ pub struct ProgressPlugin;
 impl Plugin for ProgressPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PersistedProgress>()
-            .init_resource::<ThwartingRecorded>()
             .add_systems(
                 OnEnter(AppState::Playing),
                 load_progress.run_if(is_authority),
@@ -1430,6 +1524,26 @@ struct ProgressSave {
     /// `estrangement::Estranged`.
     #[serde(default)]
     estranged: std::collections::HashSet<String>,
+    /// Antagonists thwarted this career. See `orders::Shift::defeated_count`.
+    #[serde(default)]
+    defeated_count: u32,
+    /// How close the crew are to falling apart on their own — a career fact
+    /// like `underworld_standing`, never replicated, never shown. See
+    /// `instability::Instability`.
+    #[serde(default)]
+    instability: crate::instability::Instability,
+    /// See `orders::Shift::evacuated`.
+    #[serde(default)]
+    evacuated: bool,
+}
+
+/// Whether the save at `path` has already evacuated — read straight off disk,
+/// the same way `arc_standing` already reads a save's `Campaign` without a
+/// live `World`. `saves::list_slots()` uses this to dim a save's row in the
+/// load list; `menu::handle_menu_clicks`'s `LoadSave` arm uses it again as
+/// defense-in-depth against a stale or forged click bypassing that dimming.
+pub fn is_evacuated(path: &std::path::Path) -> bool {
+    read_progress(path).is_some_and(|save| save.evacuated)
 }
 
 /// Restores the career on launch.
@@ -1447,6 +1561,7 @@ fn load_progress(
     mut thwarted: ResMut<crate::arc::ThwartedAntags>,
     mut addictions: ResMut<crate::addiction::Addictions>,
     estranged: Option<ResMut<crate::estrangement::Estranged>>,
+    instability: Option<ResMut<crate::instability::Instability>>,
     slot: Option<Res<SaveSlot>>,
 ) {
     // Cross-save, so it is read whether or not this session has a slot at all
@@ -1463,6 +1578,11 @@ fn load_progress(
 
     shift.succeeded = save.succeeded;
     shift.botched = save.botched;
+    shift.defeated_count = save.defeated_count;
+    shift.evacuated = save.evacuated;
+    if let Some(mut instability) = instability {
+        *instability = save.instability.clone();
+    }
     if !save.npc_standing.is_empty() {
         shift.npc_standing = save.npc_standing;
     } else if !save.department_standing.is_empty() {
@@ -1568,6 +1688,7 @@ fn persist_progress(
     campaign: Option<Res<crate::arc::Campaign>>,
     addictions: Res<crate::addiction::Addictions>,
     estranged: Option<Res<crate::estrangement::Estranged>>,
+    instability: Option<Res<crate::instability::Instability>>,
     slot: Option<Res<SaveSlot>>,
     mut written: ResMut<PersistedProgress>,
 ) {
@@ -1596,6 +1717,9 @@ fn persist_progress(
         campaign: campaign.map(|c| c.clone()),
         addictions: addictions.clone(),
         estranged: estranged.map(|e| e.0.clone()).unwrap_or_default(),
+        defeated_count: shift.defeated_count,
+        instability: instability.map(|i| i.clone()).unwrap_or_default(),
+        evacuated: shift.evacuated,
     };
     if written.0.as_ref() == Some(&save) {
         return;
@@ -1607,7 +1731,7 @@ fn persist_progress(
     slot.write_progress(&text);
 }
 
-/// Writes a beaten antagonist into the cross-save unlock file, once.
+/// Writes a beaten antagonist into the cross-save unlock file, once per arc.
 ///
 /// Only a **chemist** run counts. Winning an antagonist run means the
 /// antagonist got what they wanted, which is the opposite of having stopped
@@ -1617,21 +1741,35 @@ fn persist_progress(
 /// Its own system rather than a branch inside [`persist_progress`] because it
 /// writes a different file, on a different trigger (once, on resolution)
 /// rather than continuously.
+///
+/// The guard lives on `Campaign` itself (`thwarting_recorded`), not a
+/// session-global resource — a global bool meant a career that re-rolled its
+/// arc (`arc::reroll_campaign`) could only ever have its *first* win recorded
+/// in the same process's lifetime, silently dropping every later one. Also
+/// pushes straight into the live [`crate::arc::ThwartedAntags`] and bumps
+/// [`Shift::defeated_count`] at the exact moment a win is recorded — the
+/// correct, single condition both a same-session re-roll's draw-bias and the
+/// career's own difficulty scaling should react to.
 fn record_thwarting(
-    campaign: Option<Res<crate::arc::Campaign>>,
-    mut recorded: ResMut<ThwartingRecorded>,
+    campaign: Option<ResMut<crate::arc::Campaign>>,
+    mut thwarted: ResMut<crate::arc::ThwartedAntags>,
+    mut shift: ResMut<Shift>,
 ) {
-    if recorded.0 {
-        return;
-    }
-    let Some(campaign) = campaign else {
+    let Some(mut campaign) = campaign else {
         return;
     };
+    if campaign.thwarting_recorded {
+        return;
+    }
     if campaign.mode != crate::arc::Mode::Chemist || campaign.player_won() != Some(true) {
         return;
     }
     crate::saves::record_thwarted(campaign.antag);
-    recorded.0 = true;
+    if !thwarted.0.contains(&campaign.antag) {
+        thwarted.0.push(campaign.antag);
+    }
+    shift.defeated_count += 1;
+    campaign.thwarting_recorded = true;
 }
 
 /// The last career written to disk, so an unchanged one is not rewritten every
@@ -1643,15 +1781,6 @@ fn record_thwarting(
 /// compare equal and never be written to disk at all.
 #[derive(Resource, Default)]
 pub struct PersistedProgress(Option<ProgressSave>);
-
-/// Whether this session has already written its beaten antagonist to the
-/// cross-save unlock file.
-///
-/// Was a `Local` for the same reason and with a worse consequence: once one
-/// career had recorded a thwarting, every *later* career in the same process
-/// would silently fail to record its own, and the unlock would never appear.
-#[derive(Resource, Default)]
-pub struct ThwartingRecorded(bool);
 
 #[cfg(test)]
 mod tests {
@@ -1786,6 +1915,56 @@ mod tests {
         let rules = current_rules(&base, &shift, 1);
         let expected = ShiftRules::for_tier(&base, &base.ramp, 2);
         assert_eq!(rules, expected);
+    }
+
+    #[test]
+    fn defeating_more_antagonists_tightens_gaps_but_never_below_the_team_floor() {
+        let base = config();
+        let solo_zero = current_rules(&base, &Shift::default(), 1);
+        let solo_three = current_rules(
+            &base,
+            &Shift {
+                defeated_count: 3,
+                ..Shift::default()
+            },
+            1,
+        );
+        assert!(
+            solo_three.gap_seconds.0 <= solo_zero.gap_seconds.0
+                && solo_three.gap_seconds.1 <= solo_zero.gap_seconds.1,
+            "more defeats should never widen the gap"
+        );
+        assert!(
+            solo_three.gap_seconds.0 >= base.ramp.gap_floor - 0.01,
+            "even a deep career must not dip under the solo floor"
+        );
+    }
+
+    #[test]
+    fn zero_defeats_is_a_true_no_op_for_current_rules() {
+        // Regression guard for the bug this test caught during development:
+        // `scale_for_defeated`'s own floor clamp must not silently redo
+        // `scale_for_chemists`' team-divided floor with the full, undivided
+        // one — which would have widened a full table's gap back up even at
+        // `defeated_count == 0`.
+        let base = config();
+        let shift = Shift::default();
+        assert_eq!(
+            current_rules(&base, &shift, 1),
+            scale_for_chemists(
+                ShiftRules::for_tier(&base, &base.ramp, 0),
+                1,
+                &base.ramp
+            )
+        );
+        assert_eq!(
+            current_rules(&base, &shift, 4),
+            scale_for_chemists(
+                ShiftRules::for_tier(&base, &base.ramp, 0),
+                4,
+                &base.ramp
+            )
+        );
     }
 
     #[test]
@@ -2349,6 +2528,109 @@ mod tests {
             .resource_mut::<Shift>()
             .adjust(department, standing);
         (app, board)
+    }
+
+    /// The individual-NPC sibling of [`with_standing`].
+    fn with_npc_standing(name: &str, standing: i32) -> (App, Entity) {
+        let mut app = shift_app();
+        let board = board(&mut app);
+        app.world_mut()
+            .resource_mut::<Shift>()
+            .adjust_npc(name, standing);
+        (app, board)
+    }
+
+    /// The individual-NPC sibling of [`requisition`].
+    fn npc_requisition(app: &mut App, board: Entity, kind: NpcRequisitionKind) {
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: NpcRequisitionRequested { board, kind },
+        });
+        app.update();
+    }
+
+    #[test]
+    fn each_confrontation_item_is_bought_from_the_right_seller_at_the_right_price() {
+        let cases = [
+            (
+                NpcRequisitionKind::LindqvistSyringeGun,
+                "Tech Lindqvist",
+                SYRINGE_GUN_COST,
+                ContainerKind::SyringeGun,
+            ),
+            (
+                NpcRequisitionKind::LindqvistPressureSprayer,
+                "Tech Lindqvist",
+                PRESSURE_SPRAYER_COST,
+                ContainerKind::PressureSprayer,
+            ),
+            (
+                NpcRequisitionKind::SatoWaterGun,
+                "Miner Sato",
+                WATER_GUN_COST,
+                ContainerKind::WaterGun,
+            ),
+        ];
+        for (kind, seller, cost, spawned_kind) in cases {
+            let (mut app, board) = with_npc_standing(seller, cost);
+            npc_requisition(&mut app, board, kind);
+
+            assert_eq!(
+                app.world().resource::<Shift>().npc_standing(seller),
+                0,
+                "{seller} should be paid exactly {cost} for {spawned_kind:?}"
+            );
+            let world = app.world_mut();
+            let mut query = world.query::<&Container>();
+            assert!(
+                query.iter(world).any(|container| container.kind == spawned_kind),
+                "buying {spawned_kind:?} from {seller} should spawn one"
+            );
+        }
+    }
+
+    #[test]
+    fn a_confrontation_item_refuses_without_enough_standing_and_spends_nothing() {
+        let (mut app, board) =
+            with_npc_standing("Tech Lindqvist", SYRINGE_GUN_COST - 1);
+        npc_requisition(&mut app, board, NpcRequisitionKind::LindqvistSyringeGun);
+
+        assert_eq!(
+            app.world().resource::<Shift>().npc_standing("Tech Lindqvist"),
+            SYRINGE_GUN_COST - 1,
+            "a refused purchase must not spend even a partial amount"
+        );
+        let world = app.world_mut();
+        let mut query = world.query::<&Container>();
+        assert!(
+            !query
+                .iter(world)
+                .any(|container| container.kind == ContainerKind::SyringeGun),
+            "nothing should have spawned"
+        );
+    }
+
+    #[test]
+    fn an_estranged_seller_wont_sell_a_confrontation_item_either() {
+        // The blanket estrangement gate in `apply_npc_requisition` applies to
+        // every kind, not just the packs it was originally built for.
+        let (mut app, board) = with_npc_standing("Miner Sato", WATER_GUN_COST);
+        app.insert_resource(crate::estrangement::Estranged(
+            [String::from("Miner Sato")].into_iter().collect(),
+        ));
+
+        npc_requisition(&mut app, board, NpcRequisitionKind::SatoWaterGun);
+
+        assert_eq!(
+            app.world().resource::<Shift>().npc_standing("Miner Sato"),
+            WATER_GUN_COST,
+            "an estranged seller's shop is locked, standing untouched"
+        );
+        let world = app.world_mut();
+        let mut query = world.query::<&Container>();
+        assert!(!query
+            .iter(world)
+            .any(|container| container.kind == ContainerKind::WaterGun));
     }
 
     #[test]

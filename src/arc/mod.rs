@@ -75,6 +75,10 @@ impl Plugin for ArcPlugin {
                         // the frame its clock arms.
                         generate_counter_orders,
                         resolve_campaign,
+                        // After resolve_campaign, so a campaign that just
+                        // resolved this very frame starts its cooldown timer
+                        // from zero rather than being re-rolled a frame late.
+                        reroll_campaign,
                         broadcast_campaign,
                         // After the broadcast, so a client that joined this
                         // frame is not also caught by the change-detection
@@ -212,6 +216,20 @@ pub struct Campaign {
     /// ward the chemist earned.
     #[serde(default)]
     pub cult_incidents: Vec<bool>,
+    /// Whether `shift::record_thwarting` has already logged *this* arc's win
+    /// to `saves/campaign.ron`. Lives here rather than as a session-global
+    /// resource so it resets naturally with every new `Campaign` — including
+    /// one [`reroll_campaign`] produces — instead of being permanently spent
+    /// the first time any arc in the process's lifetime is won.
+    #[serde(default)]
+    pub thwarting_recorded: bool,
+    /// Every arc this career has already resolved, oldest first, appended by
+    /// [`reroll_campaign`] the moment it replaces one. The live arc's own
+    /// outcome lives in `outcome` above until the moment it is superseded —
+    /// this is deliberately a *history*, not a duplicate of the current
+    /// state.
+    #[serde(default)]
+    pub history: Vec<(AntagId, Mode, ArcOutcome)>,
 }
 
 impl Campaign {
@@ -224,6 +242,8 @@ impl Campaign {
             outcome: None,
             mode,
             cult_incidents: Vec::new(),
+            thwarting_recorded: false,
+            history: Vec::new(),
         }
     }
 
@@ -518,6 +538,66 @@ fn assign_campaign(
     // console because a developer needs to be able to see what a save rolled
     // without opening the save file.
     info!("campaign: {:?} ({:?} run)", antag, mode);
+}
+
+/// How long a resolved campaign sits quiet before a fresh one rolls in.
+/// Long enough not to read as relentless, short enough that "a resolved arc
+/// just goes quiet forever" — the problem this exists to fix — does not
+/// simply move a few minutes out. A starting constant; not playtested.
+const REROLL_COOLDOWN_SECONDS: f32 = 180.0;
+
+/// Re-rolls a resolved campaign into a fresh one, after a cooldown, so a
+/// resolved arc does not sit quiet for the rest of the career.
+///
+/// The sibling of [`assign_campaign`], not a branch inside it — the two
+/// conditions (`None` vs `Some(resolved)`) are mutually exclusive by
+/// construction, so the two systems can never race over the same frame.
+fn reroll_campaign(
+    time: Res<Time>,
+    script: Option<Res<Script>>,
+    campaign: Option<ResMut<Campaign>>,
+    thwarted: Res<ThwartedAntags>,
+    mut cooldown: Local<Option<Timer>>,
+) {
+    let (Some(script), Some(mut campaign)) = (script, campaign) else {
+        // No campaign at all yet (`assign_campaign` will roll one) — arm
+        // fresh once a resolved one exists to actually replace.
+        *cooldown = None;
+        return;
+    };
+    if campaign.outcome.is_none() {
+        *cooldown = None;
+        return;
+    }
+
+    let timer = cooldown
+        .get_or_insert_with(|| Timer::from_seconds(REROLL_COOLDOWN_SECONDS, TimerMode::Once));
+    if !timer.tick(time.delta()).just_finished() {
+        return;
+    }
+
+    let available: Vec<AntagId> = script.antagonists.iter().map(|def| def.id).collect();
+    let Some(antag) = pick_antag(&available, &thwarted.0, &mut rand::rng()) else {
+        warn!("station.arc.ron lists no antagonists — cannot re-roll a campaign");
+        return;
+    };
+    let steps = script
+        .antagonist(antag)
+        .map(|def| def.counter_steps.len())
+        .unwrap_or(0);
+
+    let mut history = std::mem::take(&mut campaign.history);
+    history.push((
+        campaign.antag,
+        campaign.mode,
+        campaign.outcome.expect("checked is_none above"),
+    ));
+    let mode = campaign.mode; // same side the player is playing from, unchanged across re-arcs
+    *campaign = Campaign::new(antag, mode, steps);
+    campaign.history = history;
+    *cooldown = None;
+
+    info!("campaign re-rolled: {:?} ({:?} run)", antag, mode);
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,6 +1122,7 @@ mod tests {
             .init_resource::<DriftClock>()
             .init_resource::<RadioLog>()
             .init_resource::<Time>()
+            .init_resource::<ThwartedAntags>()
             // `advance_plot` reads the accepting-orders sign to decide whether
             // the drift runs at all — the sign now starts down by default, so
             // this test app opens it explicitly.
@@ -1052,7 +1133,13 @@ mod tests {
             .add_message::<OrderResolved>()
             .add_systems(
                 Update,
-                (advance_plot, update_reveal, resolve_campaign).chain(),
+                (
+                    advance_plot,
+                    update_reveal,
+                    resolve_campaign,
+                    reroll_campaign,
+                )
+                    .chain(),
             );
         app
     }
@@ -1496,8 +1583,13 @@ mod tests {
         app.update();
         let lines = app.world().resource::<RadioLog>().entries.len();
 
-        // Everything that would normally move the meter, after the fact.
-        advance(&mut app, 300.0);
+        // Everything that would normally move the meter, after the fact —
+        // comfortably short of `reroll_campaign`'s own cooldown (which is
+        // `a_resolved_campaign_re_rolls_into_a_fresh_one_after_its_cooldown`'s
+        // own concern, not this test's), even accounting for `resolve`'s own
+        // `app.update()` reusing this same unadvanced `Time` delta a second
+        // time.
+        advance(&mut app, 30.0);
         resolve(&mut app, "Service", OrderKind::Illicit, Outcome::Success);
 
         assert_eq!(
@@ -1506,6 +1598,81 @@ mod tests {
             "a resolved arc must not keep airing closing lines"
         );
         assert_eq!(plot(&app), PLOT_MAX);
+    }
+
+    // -- re-arc --------------------------------------------------------
+
+    #[test]
+    fn a_resolved_campaign_re_rolls_into_a_fresh_one_after_its_cooldown() {
+        let mut app = arc_app(AntagId::Cult);
+        app.world_mut().resource_mut::<Campaign>().plot = PLOT_MAX;
+        app.update();
+        assert!(
+            app.world().resource::<Campaign>().outcome.is_some(),
+            "the old arc should have resolved first"
+        );
+
+        advance(&mut app, REROLL_COOLDOWN_SECONDS + 1.0);
+
+        let campaign = app.world().resource::<Campaign>();
+        assert_eq!(campaign.outcome, None, "a fresh arc has not resolved yet");
+        assert_eq!(campaign.reveal, Reveal::Hidden);
+        assert_eq!(
+            campaign.history,
+            vec![(AntagId::Cult, Mode::Chemist, ArcOutcome::PlotSucceeded)],
+            "the old arc's outcome should be preserved in history, exactly once"
+        );
+    }
+
+    #[test]
+    fn re_arc_does_not_fire_before_its_own_cooldown_elapses() {
+        let mut app = arc_app(AntagId::Cult);
+        app.world_mut().resource_mut::<Campaign>().plot = PLOT_MAX;
+        app.update();
+
+        advance(&mut app, REROLL_COOLDOWN_SECONDS - 1.0);
+
+        let campaign = app.world().resource::<Campaign>();
+        assert_eq!(
+            campaign.outcome,
+            Some(ArcOutcome::PlotSucceeded),
+            "the resolved arc should still be sitting there, not yet replaced"
+        );
+        assert!(campaign.history.is_empty());
+    }
+
+    #[test]
+    fn re_arc_respects_the_same_unbeaten_antagonist_bias_the_first_roll_uses() {
+        // `reroll_campaign` reuses `pick_antag` directly, so this is really a
+        // wiring check: the live `ThwartedAntags` resource actually reaches it.
+        let mut app = arc_app(AntagId::Cult);
+        app.world_mut().resource_mut::<Campaign>().plot = PLOT_MAX;
+        app.world_mut().resource_mut::<ThwartedAntags>().0 = vec![
+            AntagId::Cult,
+            AntagId::Spy,
+            AntagId::Changeling,
+            AntagId::Ai,
+        ];
+        app.update();
+
+        advance(&mut app, REROLL_COOLDOWN_SECONDS + 1.0);
+
+        assert_eq!(
+            app.world().resource::<Campaign>().antag,
+            AntagId::Blob,
+            "the only antagonist not already thwarted should always be the re-roll"
+        );
+    }
+
+    #[test]
+    fn an_unresolved_campaign_never_re_arcs() {
+        let mut app = arc_app(AntagId::Cult);
+
+        advance(&mut app, REROLL_COOLDOWN_SECONDS * 2.0);
+
+        let campaign = app.world().resource::<Campaign>();
+        assert_eq!(campaign.antag, AntagId::Cult, "still the original arc");
+        assert_eq!(campaign.outcome, None);
     }
 
     #[test]

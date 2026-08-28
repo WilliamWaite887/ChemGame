@@ -108,12 +108,24 @@ pub enum ContainerKind {
     /// A refillable portable smoke projector. Appended so existing serialized
     /// container discriminants retain their meaning.
     SmokeProjector,
+    /// A longer-range syringe. Draws and injects exactly like [`Self::Syringe`]
+    /// — only its [`Self::reach`] differs — appended so it never renumbers the
+    /// existing kinds.
+    SyringeGun,
+    /// A pressurized sprayer: same aimed-mist route as [`Self::SprayBottle`],
+    /// but reaches further and — unlike a hand sprayer — hits every body
+    /// caught in its cone, not just the one under the crosshair. See
+    /// [`Self::is_cone_spray`].
+    PressureSprayer,
+    /// The cheap sibling of [`Self::PressureSprayer`]: same cone, weaker
+    /// per-target dose (see [`Self::application_dose`]).
+    WaterGun,
 }
 
 impl ContainerKind {
     /// Ordered wire schema. Container variants are append-only because serde's
     /// binary representation uses their discriminants in multiplayer.
-    pub const NETWORK_SCHEMA: &'static str = "Beaker|LargeBeaker|Bottle|Pill|Syringe|ChemicalCharge5|ChemicalCharge10|ChemicalCharge20|SprayBottle|Patch|PhPaper|PhPaperStrongAcid|PhPaperAcid|PhPaperNeutral|PhPaperBase|PhPaperStrongBase|SmokeProjector";
+    pub const NETWORK_SCHEMA: &'static str = "Beaker|LargeBeaker|Bottle|Pill|Syringe|ChemicalCharge5|ChemicalCharge10|ChemicalCharge20|SprayBottle|Patch|PhPaper|PhPaperStrongAcid|PhPaperAcid|PhPaperNeutral|PhPaperBase|PhPaperStrongBase|SmokeProjector|SyringeGun|PressureSprayer|WaterGun";
 
     pub fn capacity(self) -> Units {
         match self {
@@ -121,11 +133,17 @@ impl ContainerKind {
             ContainerKind::LargeBeaker => Units::whole(100),
             ContainerKind::Bottle => Units::whole(30),
             ContainerKind::Pill => Units::whole(20),
-            ContainerKind::Syringe => Units::whole(15),
+            // Isolates the balance question to reach alone — a Syringe Gun
+            // draws and injects exactly like a Syringe otherwise.
+            ContainerKind::Syringe | ContainerKind::SyringeGun => Units::whole(15),
             ContainerKind::ChemicalCharge5
             | ContainerKind::ChemicalCharge10
             | ContainerKind::ChemicalCharge20 => Units::whole(50),
             ContainerKind::SprayBottle => Units::whole(30),
+            // More capacity is the point of paying for the upgrade — more
+            // shots before a trip back to refill.
+            ContainerKind::PressureSprayer => Units::whole(45),
+            ContainerKind::WaterGun => Units::whole(45),
             ContainerKind::Patch => Units::whole(10),
             ContainerKind::PhPaper
             | ContainerKind::PhPaperStrongAcid
@@ -156,6 +174,9 @@ impl ContainerKind {
             ContainerKind::PhPaperBase => "pH Paper — basic (9–11)",
             ContainerKind::PhPaperStrongBase => "pH Paper — strong base (12–14)",
             ContainerKind::SmokeProjector => "Smoke Projector",
+            ContainerKind::SyringeGun => "Syringe Gun",
+            ContainerKind::PressureSprayer => "Pressure Sprayer",
+            ContainerKind::WaterGun => "Water Gun",
         }
     }
 
@@ -179,6 +200,9 @@ impl ContainerKind {
             | ContainerKind::PhPaperBase
             | ContainerKind::PhPaperStrongBase => (0.018, 0.004),
             ContainerKind::SmokeProjector => (0.045, 0.15),
+            ContainerKind::SyringeGun => (0.02, 0.16),
+            ContainerKind::PressureSprayer => (0.05, 0.20),
+            ContainerKind::WaterGun => (0.045, 0.14),
         }
     }
 
@@ -193,8 +217,52 @@ impl ContainerKind {
             ContainerKind::Pill
                 | ContainerKind::Bottle
                 | ContainerKind::Syringe
+                | ContainerKind::SyringeGun
                 | ContainerKind::Patch
         )
+    }
+
+    /// How far this item reaches, in metres. Every existing kind keeps the
+    /// ordinary hand-reach distance; only the confrontation items extend it.
+    /// First-pass constants, not tuned against real play.
+    pub fn reach(self) -> f32 {
+        match self {
+            ContainerKind::SyringeGun => 6.0,
+            ContainerKind::PressureSprayer => 4.5,
+            ContainerKind::WaterGun => 5.0,
+            _ => crate::interaction::REACH,
+        }
+    }
+
+    /// Whether this item hits every body within an aimed cone rather than a
+    /// single crosshair target. First-pass half-angle, not tuned.
+    pub fn is_cone_spray(self) -> bool {
+        matches!(
+            self,
+            ContainerKind::PressureSprayer | ContainerKind::WaterGun
+        )
+    }
+
+    /// Half-angle of the cone, in degrees. Zero for anything that is not a
+    /// cone spray — callers should gate on [`Self::is_cone_spray`] rather
+    /// than trust this alone.
+    pub fn cone_half_angle_deg(self) -> f32 {
+        match self {
+            ContainerKind::PressureSprayer | ContainerKind::WaterGun => 20.0,
+            _ => 0.0,
+        }
+    }
+
+    /// How much this item transfers per application — per hand-pour, per
+    /// splash, or (for a cone spray) per body caught in one press. Reuses
+    /// `body`'s own `SPRAY_DOSE`/`HAND_TRANSFER` constants rather than a
+    /// second, driftable copy of the numbers.
+    pub fn application_dose(self) -> Units {
+        match self {
+            ContainerKind::SprayBottle | ContainerKind::PressureSprayer => crate::body::SPRAY_DOSE,
+            ContainerKind::WaterGun => crate::body::WATER_GUN_DOSE,
+            _ => crate::body::HAND_TRANSFER,
+        }
     }
 
     pub fn charge_fuse(self) -> Option<f32> {

@@ -2833,6 +2833,28 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             width: 1.35,
             depth: 0.28,
         },
+        // Both benches sit at the exact same raw origins as the two "relax"
+        // `crew_post` markers in the Service hall (`assets/maps/lab.map`),
+        // so the seat a resident's `Sitting` animation settles onto is
+        // physically where the game says they are standing.
+        Placement {
+            kind: "svc.bench",
+            origin: "-840 1400 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-900 1350 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
     ];
 
     let map = parse();
@@ -2911,10 +2933,14 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         // overhang walkable floor — you brush past a shelf. A bed cannot: with
         // no collider on the scene and no `Solid` for crew to consult, standing
         // in walkable ground is the same as not being there.
-        // Security deliberately keeps one continuous walkable floor. These
+        // Security deliberately keeps one continuous walkable floor, and its
         // fixtures have matching runtime `Solid` envelopes, so their visible
         // geometry -- not a hidden floor boundary -- stops the player.
-        let collider_backed_security_fixture = matches!(
+        // `svc.bench` is the same shape for a different reason: it must
+        // coincide exactly with a `crew_post` relax marker a resident's
+        // `NavGraph` route has to reach, so it cannot be carved out of the
+        // walkable volume the way an ordinary fixture is.
+        let collider_backed_walkable_fixture = matches!(
             placement.kind,
             "sec.dispatch_console"
                 | "sec.officer_desk_bank"
@@ -2922,8 +2948,9 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
                 | "sec.equipment_locker_bank"
                 | "sec.brig_bunk"
                 | "sec.interrogation_table"
+                | "svc.bench"
         );
-        if placement.mount == Mount::Floor && !collider_backed_security_fixture {
+        if placement.mount == Mount::Floor && !collider_backed_walkable_fixture {
             let walkable: Vec<Bounds> = map
                 .iter()
                 .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
@@ -3305,6 +3332,10 @@ fn every_decoration_kind_has_an_exported_glb() {
             "assets/3dassets/station_starter_kit/glb/decor_svc_drinks_board.glb",
         ),
         (
+            "svc.bench",
+            "assets/3dassets/station_starter_kit/glb/decor_svc_bench.glb",
+        ),
+        (
             "bridge.holomap_island",
             "assets/3dassets/station_starter_kit/glb/decor_bridge_holomap_island.glb",
         ),
@@ -3388,8 +3419,8 @@ fn every_station_kit_glb_parses_with_bevys_gltf_parser() {
         });
     }
     assert_eq!(
-        count, 109,
-        "the station starter kit should contain 109 GLBs"
+        count, 110,
+        "the station starter kit should contain 110 GLBs"
     );
 }
 

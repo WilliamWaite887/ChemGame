@@ -3391,7 +3391,7 @@
 // and the SERVICE / CHAPEL room sign — both inside the same brush 1 box.
 {
 "classname" "crew_post"
-"origin" "-800 1400 0"
+"origin" "-840 1400 0"
 "occupant" ""
 "kind" "relax"
 }
@@ -3400,6 +3400,21 @@
 "origin" "-900 1350 0"
 "occupant" ""
 "kind" "relax"
+}
+// decoration_spot: the physical seat for each relax spot above — same raw
+// origin as its crew_post, so a resident's Sitting animation settles onto
+// something actually there. Floor fixture, so no "angles" beyond rest.
+{
+"classname" "decoration_spot"
+"origin" "-840 1400 0"
+"kind" "svc.bench"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-900 1350 0"
+"kind" "svc.bench"
+"angles" "0 0 0"
 }
 // crew_post: illicit-flavoured loitering spot, Cargo-adjacent — where
 // smuggler::loiter_smuggler visibly hangs around between scripted visits.

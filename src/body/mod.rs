@@ -34,11 +34,20 @@ use crate::AppState;
 const SIP: Units = Units::whole(5);
 
 /// A hand pour is large enough to matter and small enough to correct.
-const HAND_TRANSFER: Units = Units::whole(10);
+///
+/// `pub(crate)` so `ContainerKind::application_dose` can return the same
+/// value rather than a second, driftable copy of the number.
+pub(crate) const HAND_TRANSFER: Units = Units::whole(10);
 
 /// A sprayer trades volume for control: several aimed applications per bottle
 /// and better absorption than a thrown splash.
-const SPRAY_DOSE: Units = Units::whole(3);
+///
+/// `pub(crate)` for the same reason as [`HAND_TRANSFER`].
+pub(crate) const SPRAY_DOSE: Units = Units::whole(3);
+
+/// The Water Gun's own per-hit dose — weaker than [`SPRAY_DOSE`] on purpose,
+/// the cheap sibling of the Pressure Sprayer. First-pass constant, not tuned.
+pub(crate) const WATER_GUN_DOSE: Units = Units::whole(2);
 
 /// Ticks to run at most in one frame.
 ///
@@ -225,7 +234,10 @@ fn handle_apply_held(
     chemists: Query<(Entity, &Chemist)>,
     transforms: Query<&Transform>,
     solids: Query<(&Transform, &crate::lab::Solid)>,
-    mut bodies: Query<(&mut Body, &mut Bloodstream)>,
+    // `Entity` rides along so a cone spray can scan every body for candidates
+    // via `bodies.iter()` without a second query — this function is already
+    // at Bevy's system-parameter arity limit.
+    mut bodies: Query<(Entity, &mut Body, &mut Bloodstream)>,
     held: Query<(Entity, &HeldBy)>,
     mut containers: Query<&mut Container>,
     chemist_bodies: Query<(), With<Chemist>>,
@@ -252,22 +264,46 @@ fn handle_apply_held(
         if !actor_position.is_finite() || request.point.is_some_and(|point| !point.is_finite()) {
             continue;
         }
+        if bodies
+            .get(player)
+            .is_ok_and(|(_, body, blood)| body.0.collapsed || blood.0.incapacitated())
+        {
+            continue;
+        }
+        // The held item has to be known before reach can be checked — a
+        // confrontation item (a Syringe Gun, a Pressure Sprayer, a Water Gun)
+        // reaches further than `ContainerKind::reach`'s ordinary hand-reach
+        // default, and that per-item distance is not knowable until `kind` is.
+        let Some((held_entity, _)) = held.iter().find(|(_, holder)| holder.0 == player) else {
+            continue;
+        };
+        let Ok(container) = containers.get(held_entity) else {
+            continue;
+        };
+        let kind = container.kind;
+
+        // A chemical charge is sealed. F is deliberately not another way to
+        // pour or splash its payload.
+        if kind.charge_fuse().is_some() {
+            continue;
+        }
 
         // Focus and its mesh raycast live on the client. Re-establish their
         // reach/occlusion guarantees on the authority before splitting even a
         // hundredth of a unit from the held solution. Entity roots get a small
         // collider-centre allowance; floor points are exact ray hits.
+        let reach = kind.reach();
         let endpoint = if let Some(target) = request.target {
             let Ok(target_transform) = transforms.get(target) else {
                 continue;
             };
             let endpoint = target_transform.translation;
-            if !crate::interaction::authority_target_in_reach(actor_position, endpoint) {
+            if !crate::interaction::authority_target_in_reach(actor_position, endpoint, reach) {
                 continue;
             }
             Some(endpoint)
         } else if let Some(point) = request.point {
-            if !crate::interaction::authority_point_in_reach(actor_position, point) {
+            if !crate::interaction::authority_point_in_reach(actor_position, point, reach) {
                 continue;
             }
             Some(point)
@@ -286,25 +322,6 @@ fn handle_apply_held(
                 )
             })
         }) {
-            continue;
-        }
-        if bodies
-            .get(player)
-            .is_ok_and(|(body, blood)| body.0.collapsed || blood.0.incapacitated())
-        {
-            continue;
-        }
-        let Some((held_entity, _)) = held.iter().find(|(_, holder)| holder.0 == player) else {
-            continue;
-        };
-        let Ok(container) = containers.get(held_entity) else {
-            continue;
-        };
-        let kind = container.kind;
-
-        // A chemical charge is sealed. F is deliberately not another way to
-        // pour or splash its payload.
-        if kind.charge_fuse().is_some() {
             continue;
         }
 
@@ -328,7 +345,7 @@ fn handle_apply_held(
             continue;
         }
 
-        if kind != ContainerKind::Syringe {
+        if !matches!(kind, ContainerKind::Syringe | ContainerKind::SyringeGun) {
             // A pill has no open liquid surface; R remains its only deliberate
             // use. Beakers and bottles share the hand-pour interaction.
             if matches!(
@@ -338,58 +355,162 @@ fn handle_apply_held(
                 continue;
             }
 
-            if let Some(target) = request.target.filter(|target| *target != held_entity) {
-                if containers.contains(target) {
-                    let space = containers
-                        .get(target)
-                        .map(|container| container.solution.available_volume())
-                        .unwrap_or(Units::ZERO);
-                    let amount = if kind == ContainerKind::SprayBottle {
-                        SPRAY_DOSE
-                    } else {
-                        HAND_TRANSFER
-                    }
-                    .min(space);
-                    if !amount.is_positive() {
-                        continue;
-                    }
-                    let mut moved = containers
-                        .get_mut(held_entity)
-                        .map(|mut source| source.mutate(&db, |solution| solution.split(amount)).0)
-                        .unwrap_or_else(|_| chem_sim::Solution::unbounded());
-                    if moved.is_empty() {
-                        continue;
-                    }
-                    if let Ok(mut destination) = containers.get_mut(target) {
-                        let (_, report) = destination.mutate(&db, |solution| {
-                            let destination_volume = solution.total_volume().as_f32();
-                            let moved_volume = moved.total_volume().as_f32();
-                            let combined = destination_volume + moved_volume;
-                            if combined > 0.0 {
-                                solution.temperature.0 = (solution.temperature.0
-                                    * destination_volume
-                                    + moved.temperature.0 * moved_volume)
-                                    / combined;
-                            }
-                            let moved_volume = moved.total_volume();
-                            let _ = moved.transfer_to(solution, moved_volume);
-                        });
-                        if let Some(message) = ReactionsFired::from_report(target, &report) {
-                            fired.write(message);
+            // Filling another container is always a precise, single-target
+            // pour, even for a cone-spray item — aiming a hose into someone's
+            // beaker is still aiming at one thing, not spraying an area.
+            if let Some(target) = request
+                .target
+                .filter(|target| *target != held_entity && containers.contains(*target))
+            {
+                let space = containers
+                    .get(target)
+                    .map(|container| container.solution.available_volume())
+                    .unwrap_or(Units::ZERO);
+                let amount = kind.application_dose().min(space);
+                if !amount.is_positive() {
+                    continue;
+                }
+                let mut moved = containers
+                    .get_mut(held_entity)
+                    .map(|mut source| source.mutate(&db, |solution| solution.split(amount)).0)
+                    .unwrap_or_else(|_| chem_sim::Solution::unbounded());
+                if moved.is_empty() {
+                    continue;
+                }
+                if let Ok(mut destination) = containers.get_mut(target) {
+                    let (_, report) = destination.mutate(&db, |solution| {
+                        let destination_volume = solution.total_volume().as_f32();
+                        let moved_volume = moved.total_volume().as_f32();
+                        let combined = destination_volume + moved_volume;
+                        if combined > 0.0 {
+                            solution.temperature.0 = (solution.temperature.0
+                                * destination_volume
+                                + moved.temperature.0 * moved_volume)
+                                / combined;
                         }
-                        if let Ok(transform) = transforms.get(target) {
-                            emit_world_sfx(&mut sounds, Sfx::DirectPour, transform.translation);
+                        let moved_volume = moved.total_volume();
+                        let _ = moved.transfer_to(solution, moved_volume);
+                    });
+                    if let Some(message) = ReactionsFired::from_report(target, &report) {
+                        fired.write(message);
+                    }
+                    if let Ok(transform) = transforms.get(target) {
+                        emit_world_sfx(&mut sounds, Sfx::DirectPour, transform.translation);
+                    }
+                }
+                continue;
+            }
+
+            // A cone-spray item (Pressure Sprayer, Water Gun) hits every body
+            // within its cone, regardless of which specific entity (if any)
+            // the crosshair actually resolved to — aiming a hose is about
+            // direction, not a single point target. `endpoint` is already
+            // reach/occlusion-validated above, so it is a safe aim source.
+            if kind.is_cone_spray() {
+                let Some(endpoint) = endpoint else {
+                    continue;
+                };
+                let aim_direction = (endpoint - actor_position).normalize_or_zero();
+                if aim_direction == Vec3::ZERO {
+                    continue;
+                }
+                let candidates = bodies.iter().filter_map(|(entity, _, _)| {
+                    transforms.get(entity).ok().map(|t| (entity, t.translation))
+                });
+                let hits = crate::interaction::bodies_in_cone(
+                    actor_position,
+                    aim_direction,
+                    reach,
+                    kind.cone_half_angle_deg(),
+                    candidates,
+                    &solids,
+                );
+                if hits.is_empty() {
+                    // Nobody caught in the cone — still wets the floor, same
+                    // as an ordinary hand-pour aimed at nothing but the
+                    // ground.
+                    if let Some(point) = request.point {
+                        let spilled = containers
+                            .get_mut(held_entity)
+                            .map(|mut source| {
+                                source
+                                    .mutate(&db, |solution| solution.split(kind.application_dose()))
+                                    .0
+                            })
+                            .unwrap_or_else(|_| chem_sim::Solution::unbounded());
+                        if spawn_puddle(&mut commands, spilled, point, Some(player)).is_some() {
+                            emit_world_sfx(&mut sounds, Sfx::Splash, point);
                         }
                     }
                     continue;
                 }
-
-                if bodies.contains(target) {
-                    let application = if kind == ContainerKind::SprayBottle {
-                        SPRAY_DOSE
-                    } else {
-                        HAND_TRANSFER
+                for target in hits {
+                    let mut dose = containers
+                        .get_mut(held_entity)
+                        .map(|mut source| {
+                            source
+                                .mutate(&db, |solution| solution.split(kind.application_dose()))
+                                .0
+                        })
+                        .unwrap_or_else(|_| chem_sim::Solution::unbounded());
+                    if dose.is_empty() {
+                        // The container ran dry mid-cone; every further hit
+                        // would draw nothing too.
+                        break;
+                    }
+                    let snapshot = dose.clone();
+                    let Ok((_, mut body, mut blood)) = bodies.get_mut(target) else {
+                        continue;
                     };
+                    let route = Route::Sprayed;
+                    let assessment = assess_exposure(&snapshot, route, &body, &blood, &db);
+                    let requested =
+                        orders
+                            .get(target)
+                            .is_ok_and(|(order, illicit, crisis, counter)| {
+                                !assessment.overdose
+                                    && order_authorizes_dose(
+                                        &snapshot,
+                                        order,
+                                        crate::orders::OrderKind::of(illicit, crisis, counter),
+                                        &db,
+                                    )
+                            });
+                    let crisis_care = crisis_targets.contains(target)
+                        && assessment.helpful
+                        && !assessment.illicit
+                        && !assessment.overdose;
+                    blood.0.receive(&mut dose, route, &mut body.0, &db);
+                    exposures.write(ChemicalExposure {
+                        actor: Some(player),
+                        target,
+                        route,
+                        source: ExposureSource::Direct,
+                        solution: snapshot,
+                        authorized: target == player
+                            || chemist_bodies.contains(target)
+                            || test_subjects.contains(target)
+                            || requested
+                            || crisis_care,
+                        helpful: assessment.helpful,
+                        harmful: assessment.harmful,
+                        illicit: assessment.illicit,
+                        overdose: assessment.overdose,
+                    });
+                    if let Ok(transform) = transforms.get(target) {
+                        emit_world_sfx(&mut sounds, Sfx::Splash, transform.translation);
+                    }
+                }
+                continue;
+            }
+
+            // Existing single-target behavior for SprayBottle and every
+            // hand-pour item. If `target` were a container, the block above
+            // already matched and `continue`d, so anything reaching here is
+            // either a body, an inert machine/prop, or nothing at all.
+            if let Some(target) = request.target.filter(|target| *target != held_entity) {
+                if bodies.contains(target) {
+                    let application = kind.application_dose();
                     let mut dose = containers
                         .get_mut(held_entity)
                         .map(|mut source| {
@@ -400,7 +521,7 @@ fn handle_apply_held(
                         continue;
                     }
                     let snapshot = dose.clone();
-                    let Ok((mut body, mut blood)) = bodies.get_mut(target) else {
+                    let Ok((_, mut body, mut blood)) = bodies.get_mut(target) else {
                         continue;
                     };
                     let route = if kind == ContainerKind::SprayBottle {
@@ -453,11 +574,7 @@ fn handle_apply_held(
             }
 
             if let Some(point) = request.point {
-                let application = if kind == ContainerKind::SprayBottle {
-                    SPRAY_DOSE
-                } else {
-                    HAND_TRANSFER
-                };
+                let application = kind.application_dose();
                 let spilled = containers
                     .get_mut(held_entity)
                     .map(|mut source| source.mutate(&db, |solution| solution.split(application)).0)
@@ -519,7 +636,7 @@ fn handle_apply_held(
             continue;
         }
         let snapshot = dose.clone();
-        let Ok((mut body, mut blood)) = bodies.get_mut(patient) else {
+        let Ok((_, mut body, mut blood)) = bodies.get_mut(patient) else {
             continue;
         };
         let assessment = assess_exposure(&snapshot, Route::Injected, &body, &blood, &db);
@@ -1657,6 +1774,224 @@ mod tests {
         app.update();
 
         assert_eq!(contents_of(&app, source).total_volume(), Units::whole(40));
+        assert!(blood_of(&app, target).is_empty());
+    }
+
+    #[test]
+    fn a_syringe_gun_injects_from_beyond_ordinary_reach_but_not_from_beyond_its_own() {
+        let mut app = test_app();
+        let (_, _) = chemist_holding(&mut app, ContainerKind::SyringeGun, "dylovene", 15);
+        // 5m is well past the ordinary 2.6m hand reach, but inside a Syringe
+        // Gun's own 6.0m.
+        let target = app
+            .world_mut()
+            .spawn((
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_xyz(5.0, crate::player::EYE_HEIGHT, 0.0),
+            ))
+            .id();
+
+        apply(&mut app, Some(target));
+
+        let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
+        assert!(
+            blood_of(&app, target).blood.volume_of(dylovene).is_positive(),
+            "5m is within a Syringe Gun's own reach"
+        );
+    }
+
+    #[test]
+    fn a_syringe_gun_cannot_fire_past_its_own_reach() {
+        let mut app = test_app();
+        let (_, source) = chemist_holding(&mut app, ContainerKind::SyringeGun, "dylovene", 15);
+        // Beyond even the Syringe Gun's 6.0m reach plus its own centre
+        // tolerance.
+        let target = app
+            .world_mut()
+            .spawn((
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_xyz(8.0, crate::player::EYE_HEIGHT, 0.0),
+            ))
+            .id();
+
+        apply(&mut app, Some(target));
+
+        assert_eq!(contents_of(&app, source).total_volume(), Units::whole(15));
+        assert!(blood_of(&app, target).is_empty());
+    }
+
+    #[test]
+    fn an_ordinary_syringe_still_cannot_reach_five_metres() {
+        // Regression guard: widening the Syringe branch to include
+        // SyringeGun must not widen an ordinary Syringe's own reach too.
+        let mut app = test_app();
+        let (_, source) = chemist_holding(&mut app, ContainerKind::Syringe, "dylovene", 15);
+        let target = app
+            .world_mut()
+            .spawn((
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_xyz(5.0, crate::player::EYE_HEIGHT, 0.0),
+            ))
+            .id();
+
+        apply(&mut app, Some(target));
+
+        assert_eq!(contents_of(&app, source).total_volume(), Units::whole(15));
+        assert!(blood_of(&app, target).is_empty());
+    }
+
+    #[test]
+    fn a_pressure_sprayer_hits_every_body_caught_in_its_cone_but_not_one_outside_it() {
+        let mut app = test_app();
+        let (_, source) = chemist_holding(&mut app, ContainerKind::PressureSprayer, "dylovene", 30);
+        // Two bodies a few centimetres apart, both dead ahead at 3m — well
+        // inside the 20 degree half-angle.
+        let in_cone_a = app
+            .world_mut()
+            .spawn((
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_xyz(3.0, crate::player::EYE_HEIGHT, 0.15),
+            ))
+            .id();
+        let in_cone_b = app
+            .world_mut()
+            .spawn((
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_xyz(3.0, crate::player::EYE_HEIGHT, -0.15),
+            ))
+            .id();
+        // Nearly perpendicular to the aim direction: outside the cone
+        // entirely, regardless of allegiance — nothing about this fixture
+        // marks it as an ally or a hostile, which is the point.
+        let outside_cone = app
+            .world_mut()
+            .spawn((
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_xyz(0.1, crate::player::EYE_HEIGHT, 3.0),
+            ))
+            .id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: ApplyHeldRequested {
+                target: None,
+                point: Some(Vec3::new(3.0, crate::player::EYE_HEIGHT, 0.0)),
+            },
+        });
+        app.update();
+
+        let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
+        assert!(blood_of(&app, in_cone_a).blood.volume_of(dylovene).is_positive());
+        assert!(blood_of(&app, in_cone_b).blood.volume_of(dylovene).is_positive());
+        assert!(
+            blood_of(&app, outside_cone).is_empty(),
+            "a body outside the cone's half-angle is untouched — a cone weapon has no ally/hostile filter, only geometry"
+        );
+        // Each of the two hits independently drew SPRAY_DOSE from the one
+        // shared tank.
+        assert_eq!(
+            contents_of(&app, source).total_volume(),
+            Units::whole(30 - 3 - 3)
+        );
+        let records: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ChemicalExposure>>()
+            .drain()
+            .collect();
+        assert_eq!(records.len(), 2, "one exposure per body actually caught");
+    }
+
+    #[test]
+    fn a_cone_sprays_second_hit_is_a_true_no_op_once_the_tank_runs_dry() {
+        let mut app = test_app();
+        // Exactly one SPRAY_DOSE in the tank — only one of the two bodies can
+        // possibly be dosed.
+        let (_, source) = chemist_holding(&mut app, ContainerKind::PressureSprayer, "dylovene", 3);
+        let a = app
+            .world_mut()
+            .spawn((
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_xyz(3.0, crate::player::EYE_HEIGHT, 0.05),
+            ))
+            .id();
+        let b = app
+            .world_mut()
+            .spawn((
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_xyz(3.0, crate::player::EYE_HEIGHT, -0.05),
+            ))
+            .id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: ApplyHeldRequested {
+                target: None,
+                point: Some(Vec3::new(3.0, crate::player::EYE_HEIGHT, 0.0)),
+            },
+        });
+        app.update();
+
+        assert_eq!(
+            contents_of(&app, source).total_volume(),
+            Units::ZERO,
+            "the whole tank went to exactly one hit"
+        );
+        let records: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ChemicalExposure>>()
+            .drain()
+            .collect();
+        assert_eq!(
+            records.len(),
+            1,
+            "the second hit drew from an empty tank and wrote no exposure"
+        );
+        let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
+        let hit_total =
+            blood_of(&app, a).blood.volume_of(dylovene) + blood_of(&app, b).blood.volume_of(dylovene);
+        assert!(hit_total.is_positive(), "exactly one of the two got dosed");
+    }
+
+    #[test]
+    fn a_solid_wall_blocks_a_cone_sprays_extended_reach_too() {
+        // Extended reach must not shoot through walls. Mirrors
+        // `a_solid_wall_blocks_a_forged_splash_inside_the_distance_limit`,
+        // but at a distance only a cone-spray item's own reach would allow.
+        let mut app = test_app();
+        let (_, source) = chemist_holding(&mut app, ContainerKind::PressureSprayer, "dylovene", 30);
+        let target = app
+            .world_mut()
+            .spawn((
+                Body::default(),
+                Bloodstream::default(),
+                Transform::from_xyz(4.0, crate::player::EYE_HEIGHT, 0.0),
+            ))
+            .id();
+        app.world_mut().spawn((
+            Transform::from_xyz(2.0, crate::player::EYE_HEIGHT, 0.0),
+            crate::lab::Solid {
+                half_extents: Vec3::new(0.1, 1.0, 1.0),
+            },
+        ));
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: ApplyHeldRequested {
+                target: Some(target),
+                point: None,
+            },
+        });
+        app.update();
+
+        assert_eq!(contents_of(&app, source).total_volume(), Units::whole(30));
         assert!(blood_of(&app, target).is_empty());
     }
 

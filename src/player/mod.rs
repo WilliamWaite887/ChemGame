@@ -101,8 +101,14 @@ impl Plugin for PlayerPlugin {
                                 .after(mouse_look)
                                 .run_if(not(is_authority)),
                         )
-                            .run_if(crate::settings::not_paused),
-                        follow_chemist,
+                            .run_if(crate::settings::not_paused)
+                            // While capture mode's free camera is flying,
+                            // the real chemist's own head/body input is
+                            // suspended too — otherwise WASD would walk the
+                            // actual player around underneath the shot. See
+                            // `capture`'s own doc comment.
+                            .run_if(crate::capture::player_follows_camera),
+                        follow_chemist.run_if(crate::capture::player_follows_camera),
                     )
                         .chain(),
                 )

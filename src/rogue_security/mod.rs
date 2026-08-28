@@ -64,6 +64,11 @@ const ROGUE_COMPLY_PENALTY: i32 = -1;
 /// A shove/baton hit, not violence meant to be lethal — survivable several
 /// times over from full health.
 const ROGUE_ASSAULT_BRUTE: i32 = 20;
+/// What a physical shakedown nudges `instability::Instability` by. Larger
+/// than `instability::INCOMPETENCE_PER_IGNORED_SHENANIGAN`'s 4 — real,
+/// unmitigated harm to a crew member is a stronger signal than a shenanigan
+/// left unaddressed.
+const ROGUE_ASSAULT_INSTABILITY: i32 = 8;
 /// How many uses the reward is worth before it is spent.
 const DETERRENT_CHARGES: u32 = 2;
 
@@ -387,6 +392,7 @@ fn expire_rogue_encounters(
     script: Option<Res<Script>>,
     mut commands: Commands,
     mut shift: ResMut<Shift>,
+    mut instability: Option<ResMut<crate::instability::Instability>>,
     mut radio: ResMut<RadioLog>,
     mut felt: MessageWriter<ToClients<HazardFelt>>,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
@@ -449,6 +455,15 @@ fn expire_rogue_encounters(
                     });
                     if let (Some(sounds), Some(transform)) = (&mut sounds, transform) {
                         sounds.write(EmitWorldSfx::new(Sfx::AssaultImpact, transform.translation));
+                    }
+                    // Real, unmitigated harm to a crew member — arguably the
+                    // single strongest instability signal available, and one
+                    // this module never fed into `arc` at all.
+                    if let Some(instability) = instability.as_mut() {
+                        crate::instability::nudge_instability(
+                            instability,
+                            ROGUE_ASSAULT_INSTABILITY,
+                        );
                     }
                 }
             }

@@ -296,6 +296,11 @@ pub struct SlotSummary {
     /// save with no campaign *and* for one whose antagonist the player has not
     /// worked out yet — see [`ArcStanding`].
     pub arc: Option<ArcStanding>,
+    /// Whether this save has already evacuated (`orders::Shift::evacuated`) —
+    /// a real, permanent stop, not merely a resolved arc. `menu::
+    /// show_save_screen` dims this row and refuses the click rather than
+    /// loading it.
+    pub evacuated: bool,
 }
 
 /// What the load list is allowed to say about a save's campaign.
@@ -332,8 +337,9 @@ impl SlotSummary {
             Some(standing) => format!(" · {}", standing.phrase()),
             None => String::new(),
         };
+        let prefix = if self.evacuated { "Evacuated — " } else { "" };
         format!(
-            "{} delivered, {} botched{recipes}{arc}",
+            "{prefix}{} delivered, {} botched{recipes}{arc}",
             self.delivered, self.botched
         )
     }
@@ -367,6 +373,7 @@ pub fn list_slots() -> Vec<SlotSummary> {
                 SlotSummary {
                     known: crate::knowledge::known_count_in(&slot.knowledge_path()),
                     arc: crate::shift::arc_standing(&slot.progress_path()),
+                    evacuated: crate::shift::is_evacuated(&slot.progress_path()),
                     name: slot.name,
                     delivered,
                     botched,
@@ -607,6 +614,7 @@ mod tests {
             botched: 2,
             known: Some(9),
             arc: None,
+            evacuated: false,
         };
         assert_eq!(summary.detail(), "9 delivered, 2 botched · 9 recipes");
 
@@ -617,6 +625,7 @@ mod tests {
             botched: 0,
             known: None,
             arc: None,
+            evacuated: false,
         };
         assert_eq!(fresh.detail(), "0 delivered, 0 botched");
 
@@ -627,6 +636,7 @@ mod tests {
             botched: 1,
             known: Some(1),
             arc: None,
+            evacuated: false,
         };
         assert_eq!(one.detail(), "5 delivered, 1 botched · 1 recipe");
     }
@@ -642,6 +652,7 @@ mod tests {
                 antag: AntagId::Cult,
                 won: Some(true),
             }),
+            evacuated: false,
         };
         assert_eq!(
             won.detail(),
@@ -657,6 +668,7 @@ mod tests {
                 antag: AntagId::Blob,
                 won: Some(false),
             }),
+            evacuated: false,
         };
         assert_eq!(
             lost.detail(),
@@ -675,10 +687,30 @@ mod tests {
                 antag: AntagId::Spy,
                 won: None,
             }),
+            evacuated: false,
         };
         assert_eq!(
             live.detail(),
             "20 delivered, 1 botched · 8 recipes · hunting the Syndicate"
+        );
+    }
+
+    #[test]
+    fn an_evacuated_save_leads_its_detail_line_and_is_marked_summary() {
+        let evacuated = SlotSummary {
+            name: "Chemist".into(),
+            delivered: 40,
+            botched: 3,
+            known: Some(12),
+            arc: Some(ArcStanding {
+                antag: AntagId::Cult,
+                won: Some(false),
+            }),
+            evacuated: true,
+        };
+        assert_eq!(
+            evacuated.detail(),
+            "Evacuated — 40 delivered, 3 botched · 12 recipes · the Cult won"
         );
     }
 

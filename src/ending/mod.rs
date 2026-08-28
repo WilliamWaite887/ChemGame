@@ -34,7 +34,9 @@ impl Plugin for EndingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FinishedArc>().add_systems(
             Update,
-            notice_the_ending.run_if(in_state(AppState::Playing)),
+            (notice_the_ending, watch_for_crew_collapse)
+                .chain()
+                .run_if(in_state(AppState::Playing)),
         );
     }
 }
@@ -63,7 +65,10 @@ pub struct FinishedArc {
 /// rewrote its own numbers afterwards would be reporting a different run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ending {
-    outcome: ArcOutcome,
+    /// `None` only for a crew-collapse evacuation
+    /// (`watch_for_crew_collapse`) — that loss path is not an `ArcOutcome`
+    /// at all, and can fire on a `Campaign` that is still fully live.
+    outcome: Option<ArcOutcome>,
     /// What to call them. Always available here: `ui::arc_headline` names the
     /// antagonist unconditionally once the arc has an outcome, whatever the
     /// reveal tier reached — there is nothing left to spoil.
@@ -81,6 +86,14 @@ pub struct Ending {
     /// `shift::record_thwarting`'s rule — a chemist run, won — plus "and it was
     /// not already unlocked", which is what makes it worth saying out loud.
     unlocked: bool,
+    /// Whether this ending is a real evacuation — a save that stops being
+    /// resumable, not merely a resolved arc a player can dismiss and keep
+    /// playing past. Set for a Chemist-mode `ArcOutcome::PlotSucceeded` loss,
+    /// or for a crew-collapse ending (`outcome: None`) — never for a win of
+    /// either kind. `ending::draw` omits "Keep playing" when this is set, and
+    /// `Shift::evacuated` (persisted) is what makes the save itself unloadable
+    /// afterward.
+    pub(crate) evacuated: bool,
 }
 
 impl Ending {
@@ -98,7 +111,10 @@ impl Ending {
     /// is a victory from one chair and a defeat from the other, which is the
     /// one place the two modes actually diverge.
     pub fn headline(&self) -> String {
-        match (self.mode, self.outcome) {
+        let Some(outcome) = self.outcome else {
+            return "EVACUATION".to_string();
+        };
+        match (self.mode, outcome) {
             (Mode::Chemist, ArcOutcome::StoppedDirectly) => "YOU STOPPED THEM".to_string(),
             (Mode::Chemist, ArcOutcome::StoppedByDepartments) => "THEY WERE STOPPED".to_string(),
             (Mode::Chemist, ArcOutcome::PlotSucceeded) => "THE STATION IS LOST".to_string(),
@@ -109,7 +125,12 @@ impl Ending {
 
     /// The line under the banner: what actually happened, in one sentence.
     pub fn blurb(&self) -> String {
-        match (self.mode, self.outcome) {
+        let Some(outcome) = self.outcome else {
+            return "The crew could not hold together, whatever else was happening. \
+                    Command has called the shuttle."
+                .to_string();
+        };
+        match (self.mode, outcome) {
             (Mode::Chemist, ArcOutcome::StoppedDirectly) => format!(
                 "{} came for the lab and the lab held. Command sends thanks.",
                 self.name
@@ -144,7 +165,7 @@ fn notice_the_ending(
     script: Option<Res<crate::arc::Script>>,
     db: Option<Res<ChemDb>>,
     knowledge: Option<Res<Knowledge>>,
-    shift: Res<Shift>,
+    mut shift: ResMut<Shift>,
     thwarted: Res<ThwartedAntags>,
     mut finished: ResMut<FinishedArc>,
     mut paused: ResMut<Paused>,
@@ -160,6 +181,12 @@ fn notice_the_ending(
     if previous.is_some() || outcome.is_none() {
         return;
     }
+    // A crew-collapse evacuation (`watch_for_crew_collapse`) may already have
+    // raised the screen this session, on a `Campaign` that only resolved
+    // afterward — once any ending is up, nothing here may overwrite it.
+    if finished.showing.is_some() {
+        return;
+    }
 
     let (Some(campaign), Some(db), Some(knowledge)) = (campaign, db, knowledge) else {
         // An outcome with no campaign is impossible, and the two assets are
@@ -172,8 +199,17 @@ fn notice_the_ending(
         return;
     };
 
+    let resolved_outcome = campaign.outcome.expect("checked above");
+    // Only a Chemist-mode loss to the plot meter is a real evacuation — a
+    // win (either side) or an Antagonist-mode loss both stay ordinary,
+    // dismissable endings a career can carry on past.
+    let evacuated = campaign.mode == Mode::Chemist && resolved_outcome == ArcOutcome::PlotSucceeded;
+    if evacuated {
+        shift.evacuated = true;
+    }
+
     finished.showing = Some(Ending {
-        outcome: campaign.outcome.expect("checked above"),
+        outcome: Some(resolved_outcome),
         name: headline
             .name
             // `arc_headline` names the antagonist for any resolved arc, so this
@@ -192,6 +228,61 @@ fn notice_the_ending(
         unlocked: campaign.mode == Mode::Chemist
             && campaign.player_won() == Some(true)
             && !thwarted.0.contains(&campaign.antag),
+        evacuated,
+    });
+
+    paused.0 = true;
+    *screen = PauseScreen::Ending;
+}
+
+/// Raises the ending the moment the crew-instability meter reaches
+/// `Breaking` — the second, independent loss path alongside a resolved
+/// `Campaign::outcome` above. Its own system rather than a branch inside
+/// `notice_the_ending`: this one is not gated on `Campaign` resolving at
+/// all, and fires on an arc that may still be fully live.
+fn watch_for_crew_collapse(
+    instability: Option<Res<crate::instability::Instability>>,
+    campaign: Option<Res<Campaign>>,
+    db: Option<Res<ChemDb>>,
+    knowledge: Option<Res<Knowledge>>,
+    mut shift: ResMut<Shift>,
+    mut finished: ResMut<FinishedArc>,
+    mut paused: ResMut<Paused>,
+    mut screen: ResMut<PauseScreen>,
+) {
+    let Some(instability) = instability else {
+        return;
+    };
+    if instability.tier != crate::instability::InstabilityTier::Breaking {
+        return;
+    }
+    // One-shot, `arc::finish`-style: once any ending is showing, never
+    // overwrite it — including with a second frame of this same trigger.
+    if finished.showing.is_some() {
+        return;
+    }
+    let (Some(db), Some(knowledge)) = (db, knowledge) else {
+        return;
+    };
+
+    shift.evacuated = true;
+    finished.showing = Some(Ending {
+        outcome: None,
+        name: campaign
+            .as_deref()
+            .map(|c| c.antag.label().to_string())
+            .unwrap_or_else(|| "whoever was really behind it".to_string()),
+        won: false,
+        mode: campaign.as_deref().map(|c| c.mode).unwrap_or_default(),
+        countered: 0,
+        counter_steps: 0,
+        shifts: shift.shift_number,
+        delivered: shift.succeeded,
+        botched: shift.botched,
+        recipes: knowledge.known_count(),
+        total_recipes: db.reactions.len(),
+        unlocked: false,
+        evacuated: true,
     });
 
     paused.0 = true;
@@ -265,11 +356,15 @@ pub(crate) fn draw(commands: &mut Commands, ending: &Ending, root: impl Bundle) 
         }
         panel.spawn(label("", 8.0, TEXT_DIM));
 
-        panel.spawn(choice(
-            "Keep playing",
-            "The save stays open. The counter is still there, and so is the career.",
-            PauseAction::Resume,
-        ));
+        // A real evacuation is not something to dismiss and carry on past —
+        // see `Ending::evacuated`'s own doc for exactly which endings these are.
+        if !ending.evacuated {
+            panel.spawn(choice(
+                "Keep playing",
+                "The save stays open. The counter is still there, and so is the career.",
+                PauseAction::Resume,
+            ));
+        }
         panel.spawn(choice(
             "Main menu",
             "Start a new career against somebody else, or load another save.",
@@ -350,7 +445,7 @@ mod tests {
         assert!(is_up(&app));
         let finished = app.world().resource::<FinishedArc>();
         let shown = finished.showing().expect("the screen has content");
-        assert_eq!(shown.outcome, ArcOutcome::StoppedDirectly);
+        assert_eq!(shown.outcome, Some(ArcOutcome::StoppedDirectly));
         assert!(shown.won);
         assert!(
             shown.headline().contains("STOPPED"),
@@ -425,6 +520,97 @@ mod tests {
         );
     }
 
+    // -- evacuation ----------------------------------------------------
+
+    #[test]
+    fn a_chemist_loss_to_the_plot_meter_evacuates() {
+        let mut app = ending_app(live_campaign());
+        app.world_mut().resource_mut::<Campaign>().outcome = Some(ArcOutcome::PlotSucceeded);
+        app.update();
+
+        let shown = app.world().resource::<FinishedArc>().showing().unwrap();
+        assert!(shown.evacuated, "the station being lost is a real evacuation");
+        assert!(
+            app.world().resource::<Shift>().evacuated,
+            "the save itself must become unloadable"
+        );
+    }
+
+    #[test]
+    fn a_chemist_win_never_evacuates_even_at_the_meters_own_ceiling() {
+        // Guards against a false positive keyed off the numeric threshold
+        // alone rather than the actual outcome variant.
+        for outcome in [ArcOutcome::StoppedDirectly, ArcOutcome::StoppedByDepartments] {
+            let mut app = ending_app(live_campaign());
+            app.world_mut().resource_mut::<Campaign>().outcome = Some(outcome);
+            app.update();
+
+            let shown = app.world().resource::<FinishedArc>().showing().unwrap();
+            assert!(!shown.evacuated, "{outcome:?} is a win, not an evacuation");
+            assert!(!app.world().resource::<Shift>().evacuated);
+        }
+    }
+
+    #[test]
+    fn an_antagonist_runs_plot_succeeding_never_evacuates() {
+        // From the antagonist's own chair, `PlotSucceeded` is the player's
+        // win — nothing about the station gets evacuated over it.
+        let mut campaign = live_campaign();
+        campaign.mode = Mode::Antagonist;
+        let mut app = ending_app(campaign);
+        app.world_mut().resource_mut::<Campaign>().outcome = Some(ArcOutcome::PlotSucceeded);
+        app.update();
+
+        let shown = app.world().resource::<FinishedArc>().showing().unwrap();
+        assert!(!shown.evacuated);
+        assert!(!app.world().resource::<Shift>().evacuated);
+    }
+
+    #[test]
+    fn the_crew_instability_meter_reaching_breaking_evacuates_independently_of_the_arc() {
+        // The second loss path — fires on a `Campaign` that is still fully
+        // live, with no `outcome` of its own at all.
+        let mut app = ending_app(live_campaign());
+        app.insert_resource(crate::instability::Instability {
+            level: crate::instability::INSTABILITY_MAX,
+            tier: crate::instability::InstabilityTier::Breaking,
+        });
+        app.update();
+
+        assert!(is_up(&app));
+        let shown = app.world().resource::<FinishedArc>().showing().unwrap();
+        assert!(shown.evacuated);
+        assert_eq!(shown.outcome, None);
+        assert_eq!(shown.headline(), "EVACUATION");
+        assert!(app.world().resource::<Shift>().evacuated);
+        assert!(
+            app.world().resource::<Campaign>().outcome.is_none(),
+            "the arc itself is untouched — this loss path does not resolve it"
+        );
+    }
+
+    #[test]
+    fn a_crew_collapse_ending_never_gets_overwritten_by_the_arc_resolving_afterward() {
+        let mut app = ending_app(live_campaign());
+        app.insert_resource(crate::instability::Instability {
+            level: crate::instability::INSTABILITY_MAX,
+            tier: crate::instability::InstabilityTier::Breaking,
+        });
+        app.update();
+        let first = app.world().resource::<FinishedArc>().showing().cloned();
+
+        // The arc resolves in a later frame — must not clobber the screen
+        // already up.
+        app.world_mut().resource_mut::<Campaign>().outcome = Some(ArcOutcome::StoppedDirectly);
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<FinishedArc>().showing().cloned(),
+            first,
+            "once any ending is showing, nothing here may overwrite it"
+        );
+    }
+
     #[test]
     fn losing_an_antagonist_run_never_unlocks_anything() {
         // Winning an antagonist run means the antagonist got what they wanted,
@@ -442,7 +628,7 @@ mod tests {
 
     fn ending(mode: Mode, outcome: ArcOutcome) -> Ending {
         Ending {
-            outcome,
+            outcome: Some(outcome),
             name: "the Cult".to_string(),
             won: Campaign {
                 antag: AntagId::Cult,
@@ -452,6 +638,8 @@ mod tests {
                 outcome: Some(outcome),
                 mode,
                 cult_incidents: Vec::new(),
+                thwarting_recorded: false,
+                history: Vec::new(),
             }
             .player_won()
             .unwrap(),
@@ -464,6 +652,7 @@ mod tests {
             recipes: 9,
             total_recipes: 41,
             unlocked: false,
+            evacuated: false,
         }
     }
 
@@ -489,6 +678,42 @@ mod tests {
         assert!(!ending(Mode::Antagonist, stopped).won);
         assert!(!ending(Mode::Chemist, succeeded).won);
         assert!(ending(Mode::Antagonist, succeeded).won);
+    }
+
+    #[test]
+    fn escape_is_blocked_only_on_the_ending_screen_and_only_when_evacuated() {
+        use crate::interaction::escape_blocked_by_evacuation;
+        use crate::settings::PauseScreen;
+
+        let mut evacuated_ending = ending(Mode::Chemist, ArcOutcome::PlotSucceeded);
+        evacuated_ending.evacuated = true;
+        let evacuated = FinishedArc {
+            showing: Some(evacuated_ending),
+            watched: None,
+        };
+        let ordinary = FinishedArc {
+            showing: Some(ending(Mode::Chemist, ArcOutcome::StoppedDirectly)),
+            watched: None,
+        };
+        let nothing_showing = FinishedArc::default();
+
+        assert!(
+            escape_blocked_by_evacuation(PauseScreen::Ending, Some(&evacuated)),
+            "an evacuated ending must block Escape"
+        );
+        assert!(
+            !escape_blocked_by_evacuation(PauseScreen::Ending, Some(&ordinary)),
+            "an ordinary, merely-resolved ending must keep dismissing normally"
+        );
+        assert!(
+            !escape_blocked_by_evacuation(PauseScreen::Root, Some(&evacuated)),
+            "the block only ever applies on the Ending screen itself"
+        );
+        assert!(!escape_blocked_by_evacuation(
+            PauseScreen::Ending,
+            Some(&nothing_showing)
+        ));
+        assert!(!escape_blocked_by_evacuation(PauseScreen::Ending, None));
     }
 
     #[test]

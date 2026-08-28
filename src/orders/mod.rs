@@ -228,6 +228,13 @@ pub struct RampDef {
     /// queue into something nobody can read.
     #[serde(default = "default_max_active_chemist_cap")]
     pub max_active_chemist_cap: usize,
+    /// Multiplied into the gap between orders once per antagonist the career
+    /// has already thwarted (`Shift::defeated_count`), same shape as
+    /// `gap_scale`'s tier decay and `chemist_gap_scale`'s headcount decay —
+    /// see `shift::current_rules`. `1.0` at zero defeats by construction, so
+    /// this is inert until the career's first win.
+    #[serde(default = "default_defeated_gap_scale")]
+    pub defeated_gap_scale: f32,
 }
 
 /// Matches `station.orders.ron`'s own default — see
@@ -246,6 +253,14 @@ fn default_max_active_per_chemist() -> usize {
 /// `RampDef::max_active_chemist_cap`.
 fn default_max_active_chemist_cap() -> usize {
     3
+}
+
+/// Matches `station.orders.ron`'s own default — see
+/// `RampDef::defeated_gap_scale`. Gentler than `chemist_gap_scale`'s 0.60:
+/// a career's first few wins should tighten things, not immediately double
+/// the pace of everything else.
+fn default_defeated_gap_scale() -> f32 {
+    0.90
 }
 
 fn default_stretch_after_successes() -> u32 {
@@ -280,6 +295,7 @@ impl Default for RampDef {
             chemist_gap_scale: default_chemist_gap_scale(),
             max_active_per_chemist: default_max_active_per_chemist(),
             max_active_chemist_cap: default_max_active_chemist_cap(),
+            defeated_gap_scale: default_defeated_gap_scale(),
         }
     }
 }
@@ -906,6 +922,22 @@ pub struct Shift {
     /// shift the player has already closed. The board reconstructs the
     /// debrief from the opening snapshot and career totals.
     pub called: bool,
+    /// Antagonists thwarted this career, across however many re-arcs
+    /// `arc::reroll_campaign` has produced. Bumped by `shift::record_thwarting`
+    /// at the exact moment a win is recorded — the same condition that feeds
+    /// `arc::ThwartedAntags`' own draw-bias. Read by `current_rules`'s own
+    /// internal scaling pass, the third wrapping layer after tier and
+    /// chemist-count — every one of its ~12 call sites already takes `&shift`,
+    /// so none of them need to change.
+    pub defeated_count: u32,
+    /// Set once, the moment `ending::notice_the_ending`/`ending::
+    /// watch_for_crew_collapse` raises a real evacuation ending (see
+    /// `ending::Ending::evacuated`). Persisted: this is what makes the save
+    /// itself unloadable afterward — `saves::SlotSummary::evacuated` reads it
+    /// straight off disk to dim the row in the load list, and `menu::
+    /// handle_menu_clicks`'s `LoadSave` arm refuses the click as
+    /// defense-in-depth even if that dimming were somehow bypassed.
+    pub evacuated: bool,
 }
 
 impl Default for Shift {
@@ -924,6 +956,8 @@ impl Default for Shift {
             shift_number: 1,
             opened_at: None,
             called: false,
+            defeated_count: 0,
+            evacuated: false,
         }
     }
 }
@@ -1606,6 +1640,7 @@ fn expire_orders(
                 order.waited,
                 order.patience,
                 0,
+                None,
             );
         }
 
@@ -1620,6 +1655,11 @@ fn expire_orders(
 /// Applies a resolution's reputation delta to the department the crew
 /// member's role names, warning rather than panicking if it names none — a
 /// content bug in `station.crew.ron` should not take the shift down with it.
+///
+/// `instability` is `None` at the one call site (an expired order) that can
+/// never carry `Outcome::Success` in the first place — [`misdelivered`]
+/// would be a guaranteed no-op there regardless, so there is nothing to
+/// thread through for it.
 fn adjust_for_role(
     shift: &mut Shift,
     role: &str,
@@ -1627,6 +1667,7 @@ fn adjust_for_role(
     waited: f32,
     patience: f32,
     potency: u32,
+    instability: Option<&crate::instability::Instability>,
 ) {
     let Some(department) = Department::from_role(role) else {
         warn!("order resolved for unrecognised department role '{role}'");
@@ -1634,9 +1675,39 @@ fn adjust_for_role(
     };
     shift.adjust(
         department,
-        reputation_delta(outcome, waited, patience, potency),
+        reputation_delta(misdelivered(outcome, instability), waited, patience, potency),
     );
 }
+
+/// A fraying crew occasionally does not notice a delivery went right — for
+/// *standing* purposes only. Never changes what `OrderResolved` reports or
+/// what the player's own delivered/botched totals count: those stay honest
+/// even when this fires, which is what makes it a mood the player can grow
+/// to suspect rather than a lie the game tells about their own record.
+///
+/// Gated on `instability::InstabilityTier::Fraying`+ — fully inert at
+/// `Calm`, so ordinary early-career play is untouched. A flat probability
+/// rather than one that keeps climbing with the raw meter: the *tier* is the
+/// dial here, not the level underneath it.
+fn misdelivered(outcome: Outcome, instability: Option<&crate::instability::Instability>) -> Outcome {
+    if outcome != Outcome::Success {
+        return outcome;
+    }
+    let Some(instability) = instability else {
+        return outcome;
+    };
+    if instability.tier < crate::instability::InstabilityTier::Fraying {
+        return outcome;
+    }
+    if rand::rng().random_bool(MISDELIVERY_CHANCE) {
+        Outcome::Short
+    } else {
+        outcome
+    }
+}
+
+/// First-pass constant, not tuned against real play.
+const MISDELIVERY_CHANCE: f64 = 0.15;
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn handle_delivery(
@@ -1658,6 +1729,7 @@ fn handle_delivery(
     containers: Query<(Entity, &Container, &HeldBy)>,
     chemists: Query<(Entity, &Chemist)>,
     mut knowledge: ResMut<Knowledge>,
+    instability: Option<Res<crate::instability::Instability>>,
 ) {
     for request in requests.read() {
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
@@ -1684,6 +1756,7 @@ fn handle_delivery(
             &mut resolved,
             &mut exposures,
             &mut knowledge,
+            instability.as_deref(),
             Handover {
                 crew: request.target,
                 actor: Some(player),
@@ -1730,6 +1803,7 @@ fn complete_delivery(
     resolved: &mut MessageWriter<OrderResolved>,
     exposures: &mut MessageWriter<ChemicalExposure>,
     knowledge: &mut Knowledge,
+    instability: Option<&crate::instability::Instability>,
     handover: Handover,
 ) -> Outcome {
     let Handover {
@@ -1804,6 +1878,7 @@ fn complete_delivery(
             order.waited,
             order.patience,
             potency,
+            instability,
         );
     }
 
@@ -1940,6 +2015,7 @@ fn handle_window_delivery(
         Has<CounterOrder>,
     )>,
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
+    instability: Option<Res<crate::instability::Instability>>,
 ) {
     for (window, machine, lane) in &windows {
         if machine.kind != MachineKind::DeliveryWindow {
@@ -1996,6 +2072,7 @@ fn handle_window_delivery(
             &mut resolved,
             &mut exposures,
             &mut knowledge,
+            instability.as_deref(),
             Handover {
                 crew: crew_entity,
                 actor: None,
@@ -2177,6 +2254,56 @@ mod tests {
             let _ = solution.add(data.reagent(key), Units::whole(*amount));
         }
         solution
+    }
+
+    // -- misdelivery ----------------------------------------------------
+
+    #[test]
+    fn misdelivery_is_inert_at_calm_and_with_no_meter_at_all() {
+        let calm = crate::instability::Instability::default();
+        for _ in 0..200 {
+            assert_eq!(misdelivered(Outcome::Success, Some(&calm)), Outcome::Success);
+            assert_eq!(misdelivered(Outcome::Success, None), Outcome::Success);
+        }
+    }
+
+    #[test]
+    fn misdelivery_never_touches_an_outcome_that_was_never_a_success() {
+        let breaking = crate::instability::Instability {
+            level: crate::instability::INSTABILITY_MAX,
+            tier: crate::instability::InstabilityTier::Breaking,
+        };
+        for outcome in [
+            Outcome::Short,
+            Outcome::Impure,
+            Outcome::Overdose,
+            Outcome::Wrong,
+            Outcome::Expired,
+        ] {
+            for _ in 0..50 {
+                assert_eq!(
+                    misdelivered(outcome, Some(&breaking)),
+                    outcome,
+                    "misdelivery only ever downgrades a real Success"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn misdelivery_is_a_real_probabilistic_roll_once_the_crew_is_fraying() {
+        let fraying = crate::instability::Instability {
+            level: 50,
+            tier: crate::instability::InstabilityTier::Fraying,
+        };
+        let downgraded = (0..500)
+            .filter(|_| misdelivered(Outcome::Success, Some(&fraying)) != Outcome::Success)
+            .count();
+        assert!(downgraded > 0, "some deliveries should misfire at Fraying");
+        assert!(
+            downgraded < 500,
+            "not every delivery should misfire — this is a mood, not a wall"
+        );
     }
 
     // -- delivery window ----------------------------------------------------

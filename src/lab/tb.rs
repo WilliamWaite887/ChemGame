@@ -1544,6 +1544,10 @@ const DECORATION_KINDS: &[(&str, &str)] = &[
         "3dassets/station_starter_kit/glb/decor_svc_drinks_board.glb",
     ),
     (
+        "svc.bench",
+        "3dassets/station_starter_kit/glb/decor_svc_bench.glb",
+    ),
+    (
         "bridge.holomap_island",
         "3dassets/station_starter_kit/glb/decor_bridge_holomap_island.glb",
     ),
@@ -1773,6 +1777,16 @@ const FLOOR_COLLIDER_ENVELOPES: &[(&str, Vec3)] = &[
     ("bot.hydro_rack", Vec3::new(1.50, 2.20, 0.60)),
     ("bot.research_desk", Vec3::new(1.20, 1.70, 0.80)),
     ("bot.nutrient_tank", Vec3::new(0.60, 2.40, 0.60)),
+    // Service's relax-spot stool. Unlike every other floor fixture above,
+    // this one is *meant* to sit on ordinary walkable floor rather than a
+    // carved-out non-walkable strip: it has to coincide exactly with a
+    // `crew_post` relax marker, which a resident's `NavGraph` route must be
+    // able to reach. Crew ignore `Solid` entirely (they path from
+    // `WalkableAreas` alone), so this collider only ever stops the player —
+    // the same reasoning `decoration_markers_have_known_assets_and_fit_
+    // their_rooms` already carves out for Security's own walk-up fixtures.
+    // Real top is 0.47 m, nowhere near `SET_DOWN_REACH` (1.4 m), so no bump.
+    ("svc.bench", Vec3::new(0.21, 0.47, 0.21)),
 ];
 
 fn floor_collider_envelope(kind: &str) -> Option<Vec3> {

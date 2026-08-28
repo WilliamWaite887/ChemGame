@@ -55,6 +55,10 @@
         chemist_gap_scale: 0.60,
         max_active_per_chemist: 1,
         max_active_chemist_cap: 3,
+        // Tightens the pace once the career starts beating antagonists —
+        // see `RampDef::defeated_gap_scale`. Gentler than `chemist_gap_scale`:
+        // a first win should sharpen things, not double the whole pace.
+        defeated_gap_scale: 0.90,
     ),
 
     // Cargo tops the lab up to `glassware_target` on a periodic check.

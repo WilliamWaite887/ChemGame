@@ -5,6 +5,9 @@ mod antagonist;
 mod arc;
 mod audio;
 mod body;
+/// Screenshot-capture dev tool: HUD hide + free camera. See its own doc
+/// comment for why this is safe to toggle mid-session.
+mod capture;
 mod character_lab;
 mod chem_data;
 mod chem_world;
@@ -20,6 +23,7 @@ mod estrangement;
 mod freight;
 mod fx;
 mod hazards;
+mod instability;
 mod interaction;
 mod knowledge;
 mod lab;
@@ -122,6 +126,12 @@ fn main() {
             // `arc::is_active` has to see an assigned campaign before a
             // main antagonist's own thread decides whether to run.
             arc::ArcPlugin,
+            // The crew-instability meter. Early, alongside `arc`, since it
+            // is fed by name from several plugins below (`estrangement`,
+            // `security`, `rogue_security`, `smuggler`, `saboteur`, `quack`,
+            // `obsessed`) and the `Instability` resource has to exist before
+            // any of them can nudge it.
+            instability::InstabilityPlugin,
             // The hidden antagonist thread. After orders/shift/radio,
             // since it leans on `Order`, `current_rules` and
             // `PendingBroadcasts`.
@@ -209,6 +219,11 @@ fn main() {
     // compile it in at all.
     #[cfg(feature = "trenchbroom")]
     app.add_plugins(freight::FreightPlugin);
+
+    // Kept out of the tuple above for the same "near the 16-plugin limit"
+    // reason as `freight` — a dev-only screenshot tool, unrelated to any of
+    // the groupings above, so it has no natural home in one of them anyway.
+    app.add_plugins(capture::CapturePlugin);
 
     // Kept out of the tuple above (already near Bevy's 16-plugin limit) and
     // added only when Steam actually initialised — its systems assume

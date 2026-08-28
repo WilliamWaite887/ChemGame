@@ -257,8 +257,19 @@ fn show_save_screen(mut commands: Commands, pending: Res<PendingMode>) {
                 panel.spawn(label("No saved games yet.", 14.0, TEXT_DIM));
             } else {
                 for slot in slots {
+                    let evacuated = slot.evacuated;
                     let action = MenuAction::LoadSave(slot.name.clone());
-                    panel.spawn(choice(slot.name.clone(), &slot.detail(), action));
+                    let mut spawned = panel.spawn(choice(slot.name.clone(), &slot.detail(), action));
+                    // Dimmed, not removed: the row still names the save and
+                    // says why it stopped (`SlotSummary::detail`'s "Evacuated
+                    // — " prefix), it just cannot be clicked back into. The
+                    // actual gate is `handle_menu_clicks`'s own defensive
+                    // re-check, same "dim the button, refuse the click"
+                    // convention `ui::draw_department_shop`'s `Refused`
+                    // marker already uses for an unaffordable purchase.
+                    if evacuated {
+                        spawned.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
+                    }
                 }
             }
 
@@ -556,17 +567,28 @@ fn handle_menu_clicks(
                 &mut app_state,
                 &mut screen,
             ),
-            MenuAction::LoadSave(name) => start(
-                &mut commands,
-                SaveSlot::new(name),
-                pending.0,
-                // The save carries its own campaign; forcing one here would
-                // overwrite the arc already in progress.
-                None,
-                &mut mode,
-                &mut app_state,
-                &mut screen,
-            ),
+            MenuAction::LoadSave(name) => {
+                // Defense-in-depth: `show_save_screen` already dims an
+                // evacuated save's row and does not attach a working
+                // `MenuAction`, but a click is trusted input from this
+                // client's own UI, not the network — re-checking here means
+                // a stale or forged one still cannot bypass the gate.
+                let slot = SaveSlot::new(name);
+                if crate::shift::is_evacuated(&slot.progress_path()) {
+                    continue;
+                }
+                start(
+                    &mut commands,
+                    slot,
+                    pending.0,
+                    // The save carries its own campaign; forcing one here
+                    // would overwrite the arc already in progress.
+                    None,
+                    &mut mode,
+                    &mut app_state,
+                    &mut screen,
+                );
+            }
             MenuAction::Connect => {
                 let typed = input.text.trim().to_string();
                 let Some(address) = parse_address(&typed) else {

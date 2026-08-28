@@ -248,18 +248,36 @@ fn handle_obsessed_resolution(
     script: Option<Res<Script>>,
     mut resolved: MessageReader<OrderResolved>,
     mut progress: ResMut<ObsessedProgress>,
+    mut instability: Option<ResMut<crate::instability::Instability>>,
 ) {
     let Some(script) = script else {
         resolved.clear();
         return;
     };
+    let last = script.visits.len().saturating_sub(1);
     for report in resolved.read() {
         if report.name != script.name {
             continue;
         }
-        progress.0 = (progress.0 + 1).min(script.visits.len().saturating_sub(1));
+        let before = progress.0;
+        progress.0 = (progress.0 + 1).min(last);
+        // Nudged only on the transition into the *final* authored visit —
+        // the culmination of an escalating pattern the player was meant to
+        // notice, not a running tax on a thread that otherwise "costs
+        // nothing mechanically" by design (see this module's own doc).
+        if progress.0 == last && before != last {
+            if let Some(instability) = instability.as_mut() {
+                crate::instability::nudge_instability(instability, OBSESSED_FINALE_INSTABILITY);
+            }
+        }
     }
 }
+
+/// What reaching the obsessed thread's final authored visit nudges
+/// `instability::Instability` by — comparable to
+/// `instability::INCOMPETENCE_PER_IGNORED_SHENANIGAN`, since this is a
+/// one-shot culmination rather than a per-visit tax.
+const OBSESSED_FINALE_INSTABILITY: i32 = 4;
 
 #[cfg(test)]
 mod tests {
@@ -314,6 +332,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(Script(script()))
             .init_resource::<ObsessedProgress>()
+            .init_resource::<crate::instability::Instability>()
             .add_message::<OrderResolved>()
             .add_systems(Update, handle_obsessed_resolution);
         app
@@ -364,6 +383,44 @@ mod tests {
             app.world().resource::<ObsessedProgress>().0,
             last,
             "progress must never run past the authored content"
+        );
+    }
+
+    #[test]
+    fn only_the_final_authored_visit_nudges_instability() {
+        // The regression guard for a real design tension: this thread "costs
+        // nothing mechanically" by its own module doc, so the escalating
+        // sequence itself must stay free — only its culmination is worth
+        // anything to the instability meter, and only once.
+        let mut app = resolution_app();
+        let name = app.world().resource::<Script>().0.name.clone();
+        let last = app.world().resource::<Script>().0.visits.len() - 1;
+
+        // `last - 1` resolves land on `last - 1`, one short of the final
+        // beat; the next resolve below is the one that actually transitions
+        // into it.
+        for _ in 0..last.saturating_sub(1) {
+            resolve(&mut app, &name);
+        }
+        assert_eq!(
+            app.world().resource::<crate::instability::Instability>().level,
+            0,
+            "every visit short of the last one must nudge nothing"
+        );
+
+        resolve(&mut app, &name);
+        assert_eq!(
+            app.world().resource::<crate::instability::Instability>().level,
+            OBSESSED_FINALE_INSTABILITY,
+            "the transition into the final visit nudges exactly once"
+        );
+
+        resolve(&mut app, &name);
+        resolve(&mut app, &name);
+        assert_eq!(
+            app.world().resource::<crate::instability::Instability>().level,
+            OBSESSED_FINALE_INSTABILITY,
+            "repeating the final beat must not nudge again"
         );
     }
 }
