@@ -967,6 +967,69 @@ fn populate_departments(
     }
 }
 
+/// Marks a visiting customer as actually a station resident temporarily
+/// pulled off ambient duty — see [`recall_resident_for_order`]. Read once, by
+/// [`walk_route`], at the exact moment an ordinary visit would despawn: this
+/// one resumes [`Ambient`] duty instead of vanishing for the rest of the
+/// shift.
+#[derive(Component)]
+pub(crate) struct ReturnsToDuty;
+
+/// Sends an existing off-duty resident to the counter to collect an order,
+/// instead of spawning a second, unlinked entity under the same name.
+///
+/// [`populate_departments`]'s own dedupe comment already states the rule —
+/// "spawning a second Dr. Vance would put the same named individual in two
+/// places" — but only guarded the resident side of it. `orders::
+/// generate_orders` and `generate_specific_orders` draw customers from the
+/// exact same roster, and until this existed did precisely that: the named
+/// resident kept wandering the station exactly as before while a second,
+/// identical-looking body under the same name separately walked to the
+/// counter to collect their order. From the player's chair the two are
+/// indistinguishable, so it read as "the order never switches over to
+/// walking to the window" — whichever one they were watching genuinely never
+/// did, because it was never the one carrying the order.
+///
+/// Reused rather than respawned so the walk starts from wherever the
+/// resident actually is this instant, not a fresh off-screen door spawn.
+/// `route` is written through the live query rather than via
+/// `Commands::insert`, which would re-trigger [`start_crew_at_their_department`]'s
+/// Added-`CrewRoute` teleport and snap them home first.
+///
+/// `None` if nobody by that name is currently free to be pulled off duty —
+/// no map loaded at all (residents never populate without one), or the one
+/// resident by that name is down. The caller falls back to spawning an
+/// ordinary, disposable customer in that case, exactly as before this
+/// existed.
+pub fn recall_resident_for_order(
+    commands: &mut Commands,
+    residents: &mut Query<
+        (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
+        With<Ambient>,
+    >,
+    name: &str,
+    role: &str,
+    lane_offset: f32,
+) -> Option<Entity> {
+    for (entity, member, body, blood, mut route) in residents.iter_mut() {
+        if member.name != name || body.0.collapsed || blood.0.incapacitated() {
+            continue;
+        }
+        let lane = if role == "Medical" {
+            DeliveryLane::Medical
+        } else {
+            DeliveryLane::Public
+        };
+        *route = CrewRoute::arrival_for(lane, lane_offset);
+        commands
+            .entity(entity)
+            .remove::<Ambient>()
+            .insert(ReturnsToDuty);
+        return Some(entity);
+    }
+    None
+}
+
 /// Sends idle crew somewhere new, and sends everyone to their post when a
 /// casualty turns up.
 ///
@@ -1287,9 +1350,10 @@ pub(crate) fn walk_route(
         &mut CrewRoute,
         Option<&CrewMember>,
         Option<&Bloodstream>,
+        Has<ReturnsToDuty>,
     )>,
 ) {
-    for (entity, mut transform, mut route, member, blood) in &mut crew {
+    for (entity, mut transform, mut route, member, blood, returns_to_duty) in &mut crew {
         // Any chemical sedation stops a resident in place. Mild sedation is
         // still drowsiness rather than incapacity, but letting that resident
         // briskly walk home immediately after deciding to leave contradicts
@@ -1331,9 +1395,22 @@ pub(crate) fn walk_route(
         }
 
         let Some(target) = route.waypoints.get(route.index).copied() else {
-            // Route finished. Arriving crew wait; leaving crew are done.
+            // Route finished. Arriving crew wait; leaving crew are done —
+            // unless they were only ever a resident recalled for this one
+            // order (see `recall_resident_for_order`), in which case "done"
+            // means back to ambient duty, not gone for the rest of the shift.
             if route.phase == CrewPhase::Leaving {
-                commands.entity(entity).despawn();
+                if returns_to_duty {
+                    commands
+                        .entity(entity)
+                        .remove::<ReturnsToDuty>()
+                        .insert(Ambient::new(rand::random_range(
+                            DWELL_SECONDS.0..=DWELL_SECONDS.1,
+                        )));
+                    route.phase = CrewPhase::Arriving;
+                } else {
+                    commands.entity(entity).despawn();
+                }
             } else if route.phase == CrewPhase::Arriving {
                 route.phase = CrewPhase::Waiting;
                 commands
@@ -2014,6 +2091,121 @@ mod tests {
             at.distance(counter) < 0.5,
             "stopped {:.2}m short of the counter, at {at:?}",
             at.distance(counter),
+        );
+    }
+
+    #[test]
+    fn a_recalled_resident_walks_from_wherever_they_already_are_to_the_counter() {
+        // The actual bug this fixes: before `recall_resident_for_order`
+        // existed, an order always spawned a brand new customer under the
+        // drawn name, leaving the *real* resident of that name still
+        // wandering the station untouched — the player was watching the
+        // wrong body, and it read as "the order never switches over to
+        // walking to the window". Reusing the resident directly means the
+        // body already on screen is the one that turns towards the counter.
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = walking_app();
+        let elsewhere = Vec3::new(-6.0, BODY_OFFSET, -6.0);
+        let resident = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Dr. Vance".into(),
+                    role: "Medical".into(),
+                },
+                Transform::from_translation(elsewhere),
+                CrewRoute::to(elsewhere),
+                Body::default(),
+                Bloodstream::default(),
+                Ambient::new(5.0),
+            ))
+            .id();
+
+        fn recall_dr_vance(
+            mut commands: Commands,
+            mut residents: Query<
+                (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
+                With<Ambient>,
+            >,
+        ) -> Option<Entity> {
+            recall_resident_for_order(&mut commands, &mut residents, "Dr. Vance", "Medical", 0.0)
+        }
+        let recalled = app.world_mut().run_system_once(recall_dr_vance).unwrap();
+        assert_eq!(
+            recalled,
+            Some(resident),
+            "the existing resident should have been reused, not left untouched",
+        );
+        assert!(
+            app.world().get::<Ambient>(resident).is_none(),
+            "a recalled resident must give up ambient duty for the length of the visit",
+        );
+
+        for _ in 0..400 {
+            tick(&mut app, 0.05);
+            if app.world().get::<CrewRoute>(resident).unwrap().phase == CrewPhase::Waiting {
+                break;
+            }
+        }
+        assert_eq!(
+            app.world().get::<CrewRoute>(resident).unwrap().phase,
+            CrewPhase::Waiting,
+            "the same body that was wandering must be the one that reaches the counter",
+        );
+    }
+
+    #[test]
+    fn a_recalled_resident_resumes_ambient_duty_instead_of_vanishing_when_the_visit_ends() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = walking_app();
+        let from = crate::lab::ROOMS[crate::lab::REACTION_BAY].center();
+        let start = Vec3::new(from.x, BODY_OFFSET, from.z);
+        let resident = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Dr. Vance".into(),
+                    role: "Medical".into(),
+                },
+                Transform::from_translation(start),
+                CrewRoute::to(start),
+                Body::default(),
+                Bloodstream::default(),
+                Ambient::new(5.0),
+            ))
+            .id();
+
+        fn recall_dr_vance(
+            mut commands: Commands,
+            mut residents: Query<
+                (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
+                With<Ambient>,
+            >,
+        ) {
+            recall_resident_for_order(&mut commands, &mut residents, "Dr. Vance", "Medical", 0.0);
+        }
+        app.world_mut().run_system_once(recall_dr_vance).unwrap();
+        app.world_mut()
+            .get_mut::<CrewRoute>(resident)
+            .unwrap()
+            .leave();
+
+        for _ in 0..400 {
+            tick(&mut app, 0.05);
+            if app.world().get::<Ambient>(resident).is_some() {
+                break;
+            }
+        }
+
+        assert!(
+            app.world().get::<CrewMember>(resident).is_some(),
+            "a recalled resident must not despawn when their visit ends",
+        );
+        assert!(
+            app.world().get::<Ambient>(resident).is_some(),
+            "they must resume ambient duty rather than vanish for the rest of the shift",
         );
     }
 

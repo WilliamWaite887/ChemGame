@@ -16,7 +16,10 @@ use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::chem_world::{assess_exposure, ChemicalExposure, ExposureSource};
 use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlot, Stored};
-use crate::crew::{spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewRoute};
+use crate::crew::{
+    recall_resident_for_order, spawn_crew_member, Ambient, CrewDef, CrewMember, CrewPhase,
+    CrewRoute,
+};
 use crate::interaction::{InteractRequested, Interactable};
 use crate::knowledge::{research_for_delivery_at_purity, Knowledge};
 use crate::lab::{DeliveryLane, DeliveryStation, DeliveryStations, COUNTER_SPOT};
@@ -1221,6 +1224,10 @@ fn generate_orders(
     forecast: Option<Res<CurrentForecast>>,
     mut radio: ResMut<RadioLog>,
     active: Query<&CrewMember, crate::crew::NotResident>,
+    mut residents: Query<
+        (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
+        With<Ambient>,
+    >,
     development_orders: Query<(), With<DevelopmentOrder>>,
     chemists: Query<(), With<Chemist>>,
     containers: Query<&Container>,
@@ -1341,7 +1348,15 @@ fn generate_orders(
         shift.requisition.patience_bonus_orders -= 1;
         patience += crate::shift::COMPED_PATIENCE_BONUS_SECONDS;
     }
-    let crew = spawn_crew_member(&mut commands, crew_def, waiting as f32 * 0.95);
+    let lane_offset = waiting as f32 * 0.95;
+    let crew = recall_resident_for_order(
+        &mut commands,
+        &mut residents,
+        &crew_def.name,
+        &crew_def.role,
+        lane_offset,
+    )
+    .unwrap_or_else(|| spawn_crew_member(&mut commands, crew_def, lane_offset));
 
     // An ordinary order spawned here always describes what it needs, not
     // the exact chemical — naming one outright is `generate_specific_orders`'
@@ -1417,6 +1432,10 @@ fn generate_specific_orders(
     forecast: Option<Res<CurrentForecast>>,
     mut radio: ResMut<RadioLog>,
     active: Query<&CrewMember, crate::crew::NotResident>,
+    mut residents: Query<
+        (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
+        With<Ambient>,
+    >,
     chemists: Query<(), With<Chemist>>,
     containers: Query<&Container>,
     produce: Query<&Produce>,
@@ -1496,7 +1515,15 @@ fn generate_specific_orders(
 
     let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1)
         * request.patience_scale.max(0.25);
-    let crew = spawn_crew_member(&mut commands, crew_def, waiting as f32 * 0.95);
+    let lane_offset = waiting as f32 * 0.95;
+    let crew = recall_resident_for_order(
+        &mut commands,
+        &mut residents,
+        &crew_def.name,
+        &crew_def.role,
+        lane_offset,
+    )
+    .unwrap_or_else(|| spawn_crew_member(&mut commands, crew_def, lane_offset));
 
     let reagent_name = db.reagents.get(reagent).name.clone();
     commands.entity(crew).insert((
