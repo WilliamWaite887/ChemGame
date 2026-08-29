@@ -1,0 +1,51 @@
+// What the station says about a chemistry lab that has stopped taking
+// requests — see `src/shift/impatience.rs`.
+//
+// The penalty this accompanies is deliberately slow and deliberately loud. An
+// invisible drain is indistinguishable from a bug, so the warning fires BEFORE
+// anything is lost, and the departments keep complaining while it continues.
+(
+    // Aired once, the moment the grace period lapses. Nothing has been lost
+    // yet — this is the shot across the bow, and reopening now costs nothing.
+    warnings: [
+        "Chemistry, this is the Bridge. You've been shut a while. Everything all right down there?",
+        "Bridge to chemistry — we're getting asked when you're taking requests again.",
+        "Chemistry's still showing closed. Somebody want to tell us how long for?",
+        "Bridge to chemistry. The queue upstairs isn't getting any shorter.",
+    ],
+
+    // Aired as standing is actually taken, in the complaining department's own
+    // voice and on its own channel. Every department needs at least two, or a
+    // draw can come up empty and that department silently never complains.
+    complaints: [
+        (role: "Medical", text: "Medbay to chemistry. We have people waiting and nowhere to send them."),
+        (role: "Medical", text: "Still shut. I'm writing 'unavailable' on the third chart today."),
+        (role: "Medical", text: "If chemistry isn't open, somebody upstairs needs to say so officially."),
+
+        (role: "Security", text: "Security to chemistry. Noted that you're closed. Noted again."),
+        (role: "Security", text: "We've an officer who's been waiting on a requisition since the shift started."),
+        (role: "Security", text: "Chemistry's shut. That's going in the log, for what it's worth."),
+
+        (role: "Engineering", text: "Engineering. We're improvising down here because chemistry won't answer."),
+        (role: "Engineering", text: "Still closed? Right. I'll do it the dangerous way, then."),
+        (role: "Engineering", text: "Third time asking. Is anyone actually in that lab?"),
+
+        (role: "Cargo", text: "Cargo. We've stock sat on the dock for a lab that isn't open."),
+        (role: "Cargo", text: "Chemistry's closed again. I'll stop scheduling deliveries, shall I?"),
+        (role: "Cargo", text: "Manifest says chemistry. Chemistry says closed. Wonderful."),
+
+        (role: "Service", text: "Service to chemistry. The bar's had complaints, and they're about you."),
+        (role: "Service", text: "People have started asking whether there's a chemist on this station at all."),
+        (role: "Service", text: "Still shut. Morale's noticed, and morale talks."),
+    ],
+
+    // Aired on reopening, but only if they had actually started to care.
+    // Warm, not sarcastic: the point is relief that it is over, which is what
+    // makes reopening feel like fixing something.
+    relief: [
+        "Chemistry's taking requests again. Pass it on.",
+        "Bridge to all departments — chemistry is back open.",
+        "There we are. Chemistry's answering again.",
+        "Chemistry's back. Everyone can stop asking us now.",
+    ],
+)

@@ -156,6 +156,10 @@ pub enum Sfx {
     RadiationPulse,
     Cough,
     AssaultImpact,
+    /// Someone in the room said something (`crate::speech`). A tick, not a
+    /// voice: its whole job is to make a chemist facing a machine panel look
+    /// up, which the bubble on its own cannot do.
+    Speak,
 }
 
 impl Sfx {
@@ -194,6 +198,10 @@ impl Sfx {
             | Sfx::RadiationPulse
             | Sfx::AssaultImpact => 0.8,
             Sfx::Slip => 0.7,
+            // Under every other one-shot on purpose. It fires whenever anyone
+            // in the room opens their mouth, which is often, and it is meant
+            // to be noticed rather than heard.
+            Sfx::Speak => 0.35,
             // The full-length station announcements. Held under the one-shots
             // because each runs for several seconds over whatever else the
             // room is doing, and each lands in the same frame as the radio
@@ -358,6 +366,11 @@ impl SfxAssets {
             }
             Sfx::Cough => &self.coughs[usize::from(variant) % self.coughs.len()],
             Sfx::AssaultImpact => &self.assault_impact,
+            // Reuses an already-credited one-shot rather than introducing an
+            // asset, exactly as the radio channel-ident palette above does
+            // (see `CREDITS.md`). A dedicated sample would be better and is
+            // worth doing before launch.
+            Sfx::Speak => &self.package_pop,
         }
         .clone()
     }

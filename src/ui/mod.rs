@@ -4681,7 +4681,17 @@ fn accepting_banner_line(shift: &Shift) -> String {
     } else {
         "CLOSED — not accepting requests"
     };
-    format!("SHIFT {}  ·  {state}", shift.shift_number)
+    // A drain nobody can see is indistinguishable from a bug, and this is the
+    // one line already on screen saying the lab is shut. `closure_pressure` is
+    // points already taken from every department, so it reads as a running
+    // total rather than a warning the player has to interpret. Zero whenever
+    // the lab is open, so the open banner is untouched — see
+    // `shift::impatience`.
+    let souring = match shift.closure_pressure {
+        0 => String::new(),
+        points => format!("  ·  departments souring (−{points})"),
+    };
+    format!("SHIFT {}  ·  {state}{souring}", shift.shift_number)
 }
 
 fn update_phase_banner(shift: Res<Shift>, banner: BannerText) {

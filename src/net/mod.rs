@@ -44,6 +44,7 @@ use crate::player::Player;
 use crate::produce::Produce;
 use crate::rogue_security::Deterrent;
 use crate::showdown::{Assailant, Breach};
+use crate::speech::Speech;
 use crate::AppState;
 
 pub mod steam;
@@ -597,6 +598,13 @@ fn register_replication(app: &mut App) {
         .replicate::<Produce>()
         .replicate::<CrewMember>()
         .replicate::<CrewAppearance>()
+        // What someone is currently saying out loud. Deciding what gets said
+        // is simulation and happens once, on the authority, so both chemists
+        // hear the same station — the same reason radio chatter is written
+        // server-side. Note this component is inserted once and removed once,
+        // never ticked: its countdown lives in an unreplicated `SpeechTimer`
+        // so a line does not re-send its own string every frame it is up.
+        .replicate::<Speech>()
         // Interaction labels are gameplay affordances, not decoration: a
         // guest cannot hand over an order or evacuate an incapacitated
         // resident if their focus ray is unable to recognise that entity as

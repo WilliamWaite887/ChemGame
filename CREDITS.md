@@ -39,6 +39,8 @@ Freesound page that had since been deleted) were excluded rather than guessed at
 
 The radio channel-ident palette reuses the credited one-shots above: Medical uses the scanner finish, Security the refused buzz, Engineering the buffer bubbles, Cargo the requisition coin, Service the package pop, and Bridge the UI click. Traffic that carries a station-wide cue instead of a channel ident — the announcement chime, the PA fanfare, the alert klaxon, the evacuation call — uses the announcement stings credited in their own rows. No additional uncredited audio asset is introduced by that palette.
 
+`Sfx::Speak` — the soft tick under a line of crew speech (`src/speech`) — reuses `ss14/pop.ogg`, credited in its own row below, on the same basis. It is a deliberate placeholder: a dedicated sample would serve it better and is worth commissioning before launch, but nothing uncredited ships in the meantime.
+
 **Compliance notes:**
 - CC0 files need no credit and carry no restriction — this table lists them anyway for traceability.
 - CC BY-SA 3.0 files require attribution (this table serves as that) and, if redistributed as a standalone asset (not just baked into the compiled game), must remain under CC BY-SA 3.0 themselves. It does not affect ChemGame's own code license.

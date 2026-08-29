@@ -933,6 +933,23 @@ pub struct Shift {
     /// chemist-count — every one of its ~12 call sites already takes `&shift`,
     /// so none of them need to change.
     pub defeated_count: u32,
+    /// How much standing this closure has already cost, in points per
+    /// department. Zero whenever the lab is open — see `shift::impatience`.
+    ///
+    /// Lives on `Shift` rather than in its own replicated resource because
+    /// `ShiftSync` already carries this whole struct to every peer, and the
+    /// HUD banner has to draw the same warning for a guest as for the host.
+    /// Safe to put here only because it moves at most once a minute: a field
+    /// that changed every frame would re-replicate all of `Shift` every frame,
+    /// which is the trap `Order::waited` and `AgitationRun` were both caught
+    /// in.
+    ///
+    /// Deliberately **not** persisted — `ProgressSave` names its fields one by
+    /// one and does not carry this. Reloading a save that was closed should
+    /// not resume mid-grudge, the same reasoning `SecuritySuspicion` is not
+    /// saved for.
+    #[serde(default)]
+    pub closure_pressure: u32,
     /// Set once, the moment `ending::notice_the_ending`/`ending::
     /// watch_for_crew_collapse` raises a real evacuation ending (see
     /// `ending::Ending::evacuated`). Persisted: this is what makes the save
@@ -960,6 +977,7 @@ impl Default for Shift {
             opened_at: None,
             called: false,
             defeated_count: 0,
+            closure_pressure: 0,
             evacuated: false,
         }
     }

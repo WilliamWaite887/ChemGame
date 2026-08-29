@@ -301,7 +301,15 @@ pub struct CrewRoute {
 }
 
 impl CrewRoute {
-    fn is_moving(&self) -> bool {
+    /// Whether they are actually walking somewhere right now.
+    ///
+    /// `pub` for `speech`, which pairs off idle residents for an overheard
+    /// exchange. The obvious alternative — reading `phase == CrewPhase::
+    /// Waiting` — would have been a seventh reader of a flag `docs/npc-ai.md`
+    /// already lists as overloaded ("six systems across five modules read it
+    /// as 'arrived and stopped'"), and this is the precise question those six
+    /// are all approximating.
+    pub fn is_moving(&self) -> bool {
         self.pending.is_some() || self.waypoints.get(self.index).is_some()
     }
 
@@ -349,6 +357,26 @@ impl CrewRoute {
         let mut route = Self::to(Vec3::ZERO);
         route.leave();
         route
+    }
+
+    /// A route that has already finished: standing exactly where they are.
+    ///
+    /// Test-only, because production never builds one — every real route is
+    /// created with somewhere to go and *becomes* this by having `walk_route`
+    /// consume its waypoints. `speech`'s exchange tests need a resident who is
+    /// demonstrably not walking, which is otherwise only reachable by standing
+    /// up the whole nav stack to walk one there.
+    #[cfg(test)]
+    pub(crate) fn standing() -> Self {
+        CrewRoute {
+            waypoints: Vec::new(),
+            index: 0,
+            phase: CrewPhase::Waiting,
+            pending: None,
+            counter_bound: false,
+            delivery_lane: DeliveryLane::Public,
+            lane_offset: 0.0,
+        }
     }
 
     /// Sends them back out to the station.
@@ -851,15 +879,26 @@ fn tag_crew_surfaces(
 /// Dinged against Medical, same as a chemist's own collapse — it is a medical
 /// mishap regardless of whose lab it happened in.
 fn handle_crew_collapse(
+    mut commands: Commands,
     mut shift: ResMut<Shift>,
     mut radio: ResMut<RadioLog>,
-    mut crew: Query<(&Body, &CrewMember, &mut CrewRoute), Changed<Body>>,
+    speech: Option<Res<crate::threat::Authored<crate::speech::SpeechScript>>>,
+    mut crew: Query<(Entity, &Body, &CrewMember, &mut CrewRoute), Changed<Body>>,
 ) {
-    for (body, member, mut route) in &mut crew {
+    for (entity, body, member, mut route) in &mut crew {
         if !body.0.collapsed || route.phase == CrewPhase::Leaving {
             continue;
         }
         route.leave();
+        // Said in the room, on the way down, before the radio's report of it
+        // reaches anyone. `speech` owns the pool and the picking; this system
+        // owns *when* someone falls over, and there is deliberately only one
+        // query watching for that.
+        if let Some((line, tone)) =
+            crate::speech::collapse_line(speech.as_ref().map(|script| &script.0), member)
+        {
+            crate::speech::say(&mut commands, entity, line, tone);
+        }
         shift.adjust(Department::Medical, COLLAPSE_PENALTY);
         radio.push(
             RadioEntry::new(

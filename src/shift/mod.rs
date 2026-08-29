@@ -42,8 +42,10 @@ use crate::radio::RadioLog;
 use crate::saves::SaveSlot;
 use crate::AppState;
 
+mod impatience;
 mod restock;
 
+pub use impatience::ImpatiencePlugin;
 pub use restock::{PendingRestock, RestockPlugin};
 
 /// The whole cycle, minus the phases: difficulty, forecasts and requisitions.
