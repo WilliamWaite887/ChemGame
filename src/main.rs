@@ -46,6 +46,7 @@ mod settings;
 mod shift;
 mod showdown;
 mod smuggler;
+mod speech;
 mod threat;
 mod ui;
 
@@ -118,9 +119,18 @@ fn main() {
             shift::ShiftPlugin,
             shift::RestockPlugin,
             shift::ProgressPlugin,
+            // What it costs to leave the sign down. After `ShiftPlugin`,
+            // which owns the sign it watches.
+            shift::ImpatiencePlugin,
         ),
         produce::ProducePlugin,
-        radio::RadioPlugin,
+        // The station's two talking channels, nested together to stay inside
+        // Bevy's 16-plugin tuple limit. `speech` is the radio's sibling: what
+        // the crew say out loud where they are standing, rather than what the
+        // station reports about them half a minute later. After `radio` for
+        // the same reason `radio` is after `orders` — it reacts to
+        // `OrderResolved` — and after `crew`, whose `Errand` it watches.
+        (radio::RadioPlugin, speech::SpeechPlugin),
         (
             // The campaign spine. First in this tuple: it owns the
             // `Campaign` every thread below either gates on or feeds, and

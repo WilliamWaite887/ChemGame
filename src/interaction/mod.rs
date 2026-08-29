@@ -60,6 +60,12 @@ fn finite_within(actor: Vec3, endpoint: Vec3, distance: f32) -> bool {
 
 /// Whether a lab [`crate::lab::Solid`] occludes a hand action.
 ///
+/// "Authority" names where this was born, not a restriction on who may call
+/// it: it is pure geometry with no authority semantics, and `speech` uses the
+/// same test client-side to decide whether a speech bubble is behind a wall.
+/// A wall blocking a reach and a wall blocking a line of sight are one
+/// question, and two copies of the answer would drift.
+///
 /// Rendering raycasts do not exist on a headless authority. The lab already
 /// describes walls, benches and machine cases as axis-aligned boxes for
 /// movement, so a segment/AABB test supplies the same important guarantee
@@ -648,6 +654,7 @@ fn spawn_hud(mut commands: Commands) {
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_prompt(
     players: Query<(Entity, &Focus), With<LocalPlayer>>,
     interactables: Query<&Interactable>,
@@ -655,12 +662,14 @@ fn update_prompt(
     held: Query<(&HeldBy, &Container)>,
     containers: Query<(), With<Container>>,
     bodies: Query<(), With<crate::body::Body>>,
+    crew: Query<&crate::crew::CrewMember>,
     prompt: Single<&mut Text, With<InteractionPrompt>>,
 ) {
     let mut text = prompt.into_inner();
     let message = players
         .iter()
         .find_map(|(player, focus)| {
+            let empty_handed = !held.iter().any(|(holder, _)| holder.0 == player);
             let looking_at = focus.target.and_then(|target| {
                 let label = &interactables.get(target).ok()?.label;
                 // Occupied machines still show a prompt, just an unusable one,
@@ -670,7 +679,18 @@ fn update_prompt(
                     Ok(machine) if !machine.available_to(player) => {
                         format!("{label} — in use")
                     }
-                    _ => format!("[E]  {label}"),
+                    // An empty hand aimed at a person is the one press nothing
+                    // else in the game claims, and `speech::handle_talk` takes
+                    // it. Saying so here is what makes the mechanic findable:
+                    // the label alone ("Dr. Vance — Medical") reads as an
+                    // affordance the player has no reason to think does
+                    // anything without a beaker in hand.
+                    _ => match crew.get(target) {
+                        Ok(member) if empty_handed => {
+                            format!("[E]  speak to {}", member.name)
+                        }
+                        _ => format!("[E]  {label}"),
+                    },
                 })
             });
 

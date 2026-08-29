@@ -1,0 +1,331 @@
+// What the crew say out loud, in the room — see `src/speech/mod.rs`.
+//
+// `{name}` and `{role}` are substituted in. `role` restricts a line to one
+// department; lines without it can be used by anyone, and every situation
+// keeps a role-agnostic pool so a department nobody has written for yet is
+// never struck mute.
+//
+// Keep these SHORT. A radio report is read off a card in the corner at
+// leisure; this is read off someone's head while they walk past you, and a
+// line long enough to need a second glance is a line the player misses.
+//
+// How long a line stays up is NOT authored here — it is derived from the
+// text by `speech::speech_seconds`, because a client never loads this file
+// and both ends have to agree. See the module doc.
+(
+    // How long before the same body will speak unprompted again. Long enough
+    // that a resident pacing in and out of the lab doorway is not a
+    // chatterbox, short enough that a real second visit gets a real greeting.
+    cooldown_seconds: (16.0, 30.0),
+
+    arrivals: [
+        // ---- Errand -------------------------------------------------------
+        // The one that matters. Someone has crossed the threshold on their way
+        // to do something with their hands, and the player has the length of
+        // the walk to decide whether to let them.
+        //
+        // Nothing here admits to anything. The tell is that it is too casual
+        // for someone who has no business at your bench — the same kind of
+        // tell `smuggler::loiter_smuggler` gives, and deliberately not a label.
+        (situation: Errand, text: "Just going to check your glassware while I'm here."),
+        (situation: Errand, text: "Won't be a second. Don't mind me."),
+        (situation: Errand, text: "Need to get at something behind you."),
+        (situation: Errand, text: "Ah — while I've got you. Two minutes."),
+        (situation: Errand, role: Some("Engineering"), text: "Maintenance sweep. Standard. Very boring."),
+        (situation: Errand, role: Some("Engineering"), text: "Just eyeballing your equipment. Regulations."),
+        (situation: Errand, role: Some("Security"), text: "Routine look around. Carry on."),
+        (situation: Errand, role: Some("Cargo"), text: "Stocktake. I count things. It's a whole thing."),
+
+        // ---- Waiting ------------------------------------------------------
+        // They came to collect something and are on their way to the counter.
+        (situation: Waiting, tone: Urgent, text: "Chemistry — got a minute?"),
+        (situation: Waiting, text: "Hi. I put an order in?"),
+        (situation: Waiting, text: "Don't rush on my account. I'll be at the window."),
+        (situation: Waiting, text: "There you are. I've been sent down for something."),
+        (situation: Waiting, role: Some("Medical"), tone: Urgent, text: "Medbay's waiting on me. Please tell me it's ready."),
+        (situation: Waiting, role: Some("Medical"), text: "Vance sent me. That's usually bad news for both of us."),
+        (situation: Waiting, role: Some("Security"), text: "Chemistry. I'll wait. I'm very good at waiting."),
+        (situation: Waiting, role: Some("Security"), tone: Wary, text: "Let's do this properly and we'll both have a nice day."),
+        (situation: Waiting, role: Some("Engineering"), text: "Deck two's on fire. Metaphorically. Mostly."),
+        (situation: Waiting, role: Some("Cargo"), text: "Signed for, stamped, and I'm still here. Wonderful."),
+        (situation: Waiting, role: Some("Service"), text: "Bar's dry and the crew have noticed. No pressure."),
+
+        // ---- Passing ------------------------------------------------------
+        // A resident who lives here, just moving through. Most of what the
+        // player ever hears — so it has to stay cheap and stay varied.
+        (situation: Passing, text: "Don't mind me."),
+        (situation: Passing, text: "Just cutting through."),
+        (situation: Passing, text: "Afternoon."),
+        (situation: Passing, text: "Smells expensive in here."),
+        (situation: Passing, text: "Still no chairs in this department. Noted."),
+        (situation: Passing, role: Some("Medical"), text: "Quiet shift. I'm not saying it out loud again."),
+        (situation: Passing, role: Some("Medical"), text: "If anyone asks, I was never in chemistry."),
+        (situation: Passing, role: Some("Security"), text: "Everything in order down here?"),
+        (situation: Passing, role: Some("Security"), tone: Wary, text: "Long way round to the brig. Long way."),
+        (situation: Passing, role: Some("Engineering"), text: "That vent's been making a noise for a week."),
+        (situation: Passing, role: Some("Engineering"), text: "Whatever that smell is, it's not structural. Probably."),
+        (situation: Passing, role: Some("Cargo"), text: "Anything going back up to Cargo?"),
+        (situation: Passing, role: Some("Cargo"), text: "Half our crates come back here and never leave."),
+        (situation: Passing, role: Some("Service"), text: "Kitchen's doing something brave with the protein."),
+        (situation: Passing, role: Some("Service"), text: "Come up to the bar sometime. It's nicer than this."),
+
+        // ---- Hostile ------------------------------------------------------
+        // Short. Nobody making a speech is actually coming for you.
+        (situation: Hostile, tone: Urgent, text: "Stay where you are."),
+        (situation: Hostile, tone: Urgent, text: "Don't."),
+        (situation: Hostile, tone: Urgent, text: "This was always going to happen."),
+        (situation: Hostile, tone: Urgent, text: "You should have kept your head down."),
+    ],
+
+    // Said as the errand is set, before they start walking — so the line and
+    // the walk are one event rather than two.
+    errands: [
+        (text: "Right. Won't take a moment."),
+        (text: "Fine. I'll do it myself."),
+        (text: "No trouble. I know where it is."),
+        (text: "Since nobody's serving, I'll help myself to a look."),
+        (role: Some("Engineering"), text: "I'll just have a quick look at your glassware."),
+        (role: Some("Engineering"), text: "Won't touch anything. Much."),
+        (role: Some("Cargo"), text: "I'll take an inventory while I'm down here."),
+        (role: Some("Security"), text: "Then I'll have a look for myself."),
+    ],
+
+    // What they say about how it went, at the counter, before they turn
+    // around. The radio's own report is separate and still deliberately late.
+    resolutions: [
+        // ---- Success ------------------------------------------------------
+        (outcome: Success, tone: Friendly, text: "That's the one. Thanks."),
+        (outcome: Success, tone: Friendly, text: "Perfect. You're a lifesaver."),
+        (outcome: Success, tone: Friendly, text: "Lovely. I'll put a word in for you."),
+        (outcome: Success, role: Some("Medical"), tone: Friendly, text: "This'll do nicely. Back to the ward."),
+        (outcome: Success, role: Some("Security"), tone: Friendly, text: "Clean work. I'll note that."),
+        (outcome: Success, role: Some("Engineering"), tone: Friendly, text: "Grand. That's deck two sorted."),
+        (outcome: Success, role: Some("Cargo"), tone: Friendly, text: "Signed for. Pleasure doing business."),
+        (outcome: Success, role: Some("Service"), tone: Friendly, text: "The bar thanks you. Sincerely."),
+
+        // ---- Short --------------------------------------------------------
+        (outcome: Short, tone: Wary, text: "That's... less than I asked for."),
+        (outcome: Short, tone: Wary, text: "Is this all of it?"),
+        (outcome: Short, role: Some("Medical"), tone: Wary, text: "This won't cover the ward. I'll stretch it."),
+        (outcome: Short, role: Some("Cargo"), tone: Wary, text: "I'll have to go back and explain this."),
+
+        // ---- Impure -------------------------------------------------------
+        (outcome: Impure, tone: Wary, text: "There's something else in here."),
+        (outcome: Impure, tone: Wary, text: "It's cloudy. Should it be cloudy?"),
+        (outcome: Impure, role: Some("Medical"), tone: Wary, text: "I can't put this in someone. Not like this."),
+        (outcome: Impure, role: Some("Security"), tone: Wary, text: "That's not clean. I'll pretend I didn't see."),
+
+        // ---- Overdose -----------------------------------------------------
+        (outcome: Overdose, tone: Urgent, text: "That's far too strong. Far too strong."),
+        (outcome: Overdose, tone: Urgent, text: "You've given me twice what I asked for."),
+        (outcome: Overdose, role: Some("Medical"), tone: Urgent, text: "This would kill somebody. Do you understand?"),
+        (outcome: Overdose, role: Some("Engineering"), tone: Urgent, text: "I'm not carrying this through a corridor."),
+
+        // ---- Wrong --------------------------------------------------------
+        (outcome: Wrong, tone: Wary, text: "This isn't what I came down for."),
+        (outcome: Wrong, tone: Wary, text: "That's the wrong bottle entirely."),
+        (outcome: Wrong, role: Some("Medical"), tone: Wary, text: "I asked for something else. Twice, I think."),
+        (outcome: Wrong, role: Some("Security"), tone: Wary, text: "Wrong item. I'll be writing that down."),
+        (outcome: Wrong, role: Some("Service"), tone: Wary, text: "Nobody's drinking this. Nobody."),
+
+        // ---- Expired ------------------------------------------------------
+        (outcome: Expired, tone: Wary, text: "Forget it. I'll sort it myself."),
+        (outcome: Expired, tone: Wary, text: "I've waited long enough."),
+        (outcome: Expired, role: Some("Medical"), tone: Wary, text: "I can't wait any longer. People are waiting on me."),
+        (outcome: Expired, role: Some("Security"), tone: Wary, text: "Right. Noted, and remembered."),
+        (outcome: Expired, role: Some("Engineering"), tone: Wary, text: "I'll bodge it. I always do."),
+        (outcome: Expired, role: Some("Cargo"), tone: Wary, text: "Order's cancelled. Don't bother."),
+    ],
+
+    // On the way down. Short, because they are not finishing the sentence.
+    collapses: [
+        (tone: Urgent, text: "I don't— something's wrong—"),
+        (tone: Urgent, text: "Wait. Wait, I can't—"),
+        (tone: Urgent, text: "What was in that—"),
+        (role: Some("Security"), tone: Urgent, text: "You did this—"),
+        (role: Some("Medical"), tone: Urgent, text: "Get Vance. Get Vance now—"),
+    ],
+
+    // -----------------------------------------------------------------------
+    // Gossip: what they tell you when you walk up empty-handed and ask.
+    // -----------------------------------------------------------------------
+    //
+    // `when` conditions must ALL hold. An empty `when` is small talk, always
+    // available, which is what stops anyone ever being mute.
+    //
+    // `weight` orders them: highest first, and each person works down the list
+    // as you keep asking. Repeating themselves means nothing has changed since
+    // you last asked — that is a signal, not a bug.
+    //
+    // THE RULE, enforced by
+    // `every_authored_line_is_only_spoken_by_someone_who_could_know_it`:
+    // a condition may only appear on a line whose `role` is one of the
+    // departments `Knows::known_by` says could hold it. Security hears about
+    // suspicion, Medical about the ward, Engineering about the station, Cargo
+    // about stock, Service about the mood. A line that hands over a fact its
+    // speaker has no way of knowing is a readout with a portrait attached, not
+    // a clue.
+    gossip: [
+        // ---- Security: suspicion, contraband, the raid coming --------------
+        (role: Some("Security"), when: [SuspicionHigh], weight: 90, tone: Urgent,
+         text: "Between us? Your name's come up in a briefing. Twice."),
+        (role: Some("Security"), when: [SuspicionHigh], weight: 88, tone: Urgent,
+         text: "Warden's been asking who signs for what down here. I'd tidy up."),
+        (role: Some("Security"), when: [SuspicionStirring], weight: 60, tone: Wary,
+         text: "People have been asking questions about the lab. Not me. People."),
+        (role: Some("Security"), when: [SuspicionStirring], weight: 58, tone: Wary,
+         text: "Do yourself a favour and keep your paperwork straight this week."),
+        (role: Some("Security"), when: [UnderworldActive], weight: 50, tone: Wary,
+         text: "There's a market for something on this station. We haven't found the supplier."),
+        (role: Some("Security"), when: [UnderworldActive], weight: 48, tone: Wary,
+         text: "Somebody's moving product. Contraband locker's been busy."),
+
+        // ---- Medical: the ward, and who keeps turning up in it -------------
+        (role: Some("Medical"), when: [CrisisActive], weight: 95, tone: Urgent,
+         text: "Not now — I've got someone going off in front of me."),
+        (role: Some("Medical"), when: [CrewGettingHooked], weight: 70, tone: Wary,
+         text: "Same faces keep coming back to the ward. Shaking. Nobody'll say why."),
+        (role: Some("Medical"), when: [CrewGettingHooked], weight: 68, tone: Wary,
+         text: "I've started keeping a list. It's getting longer than I'd like."),
+        (role: Some("Medical"), when: [CrewGettingHooked], weight: 66, tone: Wary,
+         text: "Withdrawal, if I had to write it down. I haven't written it down."),
+
+        // ---- Engineering: the station itself -------------------------------
+        (role: Some("Engineering"), when: [StationBreaking], weight: 92, tone: Urgent,
+         text: "Nobody's holding this together any more. I've stopped pretending."),
+        (role: Some("Engineering"), when: [StationFraying], weight: 64, tone: Wary,
+         text: "Whole deck's gone sloppy. Work orders half done, nobody signing off."),
+        (role: Some("Engineering"), when: [StationFraying], weight: 62, tone: Wary,
+         text: "Something's off with this crew. It's not the wiring, before you ask."),
+        (role: Some("Engineering"), when: [StationFraying], weight: 60, tone: Wary,
+         text: "Third bodged repair I've found this week. Not mine."),
+
+        // ---- Cargo: what has stopped coming back ---------------------------
+        (role: Some("Cargo"), when: [StockGoingMissing], weight: 65, tone: Wary,
+         text: "Stock's walking off. Manifest says one thing, shelf says another."),
+        (role: Some("Cargo"), when: [StockGoingMissing], weight: 63, tone: Wary,
+         text: "Glassware goes down to you and doesn't come back. I've noticed."),
+        (role: Some("Cargo"), when: [StockGoingMissing], weight: 61, tone: Wary,
+         text: "Somebody's signing for crates that never arrive. Not my handwriting."),
+
+        // ---- Service: the mood, and whatever is under it -------------------
+        (role: Some("Service"), when: [AntagSuspected], weight: 85, tone: Urgent,
+         text: "People are frightened. Properly frightened, and they've stopped joking about it."),
+        (role: Some("Service"), when: [PlotStirring], weight: 62, tone: Wary,
+         text: "Crew's gone quiet at the bar. That's never once been good news."),
+        (role: Some("Service"), when: [PlotStirring], weight: 60, tone: Wary,
+         text: "Somebody's been acting strange. Won't say who. You'll see it yourself."),
+        (role: Some("Service"), when: [PlotStirring], weight: 58, tone: Wary,
+         text: "Two of the regulars stopped coming in. Nobody's saying where they went."),
+
+        // ---- Anyone: it's on the board now ---------------------------------
+        (when: [AntagNamed], weight: 80, tone: Urgent,
+         text: "It's on the board. Everyone knows now. Small comfort."),
+        (when: [AntagNamed], weight: 78, tone: Urgent,
+         text: "They've named it. Doesn't make me feel better, mind."),
+
+        // ---- Anyone: you've had the sign down too long ---------------------
+        // Weighted above an ordinary grudge: this is the thing they came over
+        // to say, and it is the one the player can fix in one keypress.
+        (when: [LabHasBeenShut], weight: 68, tone: Wary,
+         text: "You've had that sign down a long while. People have noticed."),
+        (when: [LabHasBeenShut], weight: 66, tone: Wary,
+         text: "Are you open or not? Nobody upstairs can get a straight answer."),
+        (when: [LabHasBeenShut], weight: 64, tone: Wary,
+         text: "I came down twice already. Twice, to a closed window."),
+        (role: Some("Medical"), when: [LabHasBeenShut], weight: 70, tone: Urgent,
+         text: "I have people waiting and you're not taking requests. Sort it out."),
+        (role: Some("Cargo"), when: [LabHasBeenShut], weight: 69, tone: Wary,
+         text: "I've stock on the dock for a lab that won't open. It's not staying there."),
+
+        // ---- Anyone: how they personally feel about you --------------------
+        (when: [Estranged], weight: 75, tone: Wary,
+         text: "I've nothing to say to you."),
+        (when: [Estranged], weight: 73, tone: Wary,
+         text: "We're done, you and me. Ask somebody else."),
+        (when: [ResentsYou], weight: 40, tone: Wary,
+         text: "You've cost me more than once. I've not forgotten."),
+        (when: [ResentsYou], weight: 38, tone: Wary,
+         text: "I'd rather deal with anyone else, frankly."),
+        (when: [Withdrawing], weight: 72, tone: Urgent,
+         text: "You know what I need. Don't make me say it out loud."),
+        (when: [LikesYou], weight: 35, tone: Friendly,
+         text: "You've done right by me. That counts for something up here."),
+        (when: [LikesYou], weight: 33, tone: Friendly,
+         text: "Any time you need something from my department, you ask me first."),
+        (when: [DepartmentPleased], weight: 25, tone: Friendly,
+         text: "You're well thought of in my lot at the moment. Enjoy it."),
+
+        // ---- Small talk: always available, so nobody is ever mute ----------
+        (weight: 5, text: "Nothing much. Same shift, different day."),
+        (weight: 5, text: "Quiet enough. I'm not complaining about quiet."),
+        (weight: 5, text: "Long way from home, this place."),
+        (role: Some("Medical"), weight: 6, text: "Ward's holding. Ask me again in an hour."),
+        (role: Some("Security"), weight: 6, text: "No incidents. Which is its own kind of suspicious."),
+        (role: Some("Engineering"), weight: 6, text: "Everything's held together with tape and optimism. As usual."),
+        (role: Some("Cargo"), weight: 6, text: "Shuttle's late. Shuttle's always late."),
+        (role: Some("Service"), weight: 6, text: "Bar's open, if you ever leave this room."),
+    ],
+
+    // Once they've told you everything they have. Deliberately a little flat:
+    // this is the sound of nothing having changed since you last asked.
+    exhausted: [
+        (text: "That's all I've got."),
+        (text: "Nothing new since you last asked."),
+        (text: "You've had everything I know."),
+        (role: Some("Security"), text: "Nothing further to report."),
+        (role: Some("Medical"), text: "No change. I'd tell you if there were."),
+        (role: Some("Engineering"), text: "Same as it was five minutes ago."),
+        (role: Some("Cargo"), text: "Nothing else on the manifest."),
+        (role: Some("Service"), text: "Same as I said. Come up to the bar if you want more."),
+    ],
+
+    // Two residents standing together, for you to overhear. `when` is checked
+    // against the OPENER, so the same knowledge rule applies — an exchange
+    // that leaks a department's clue must be opened by that department.
+    exchange_gap_seconds: (70.0, 130.0),
+    exchanges: [
+        (lines: [
+            (text: "You been down to chemistry lately?"),
+            (text: "Once. Smelled like a bad decision."),
+        ]),
+        (lines: [
+            (text: "Did they ever fix the light in the corridor?"),
+            (text: "They fixed it. Then it broke. Then they fixed it again."),
+            (text: "So no, then."),
+        ]),
+        (lines: [
+            (text: "Long shift?"),
+            (text: "Every shift is a long shift."),
+        ]),
+        (role: Some("Security"), when: [SuspicionStirring], lines: [
+            (tone: Wary, text: "Heard the Warden's taking an interest in the lab."),
+            (tone: Wary, text: "About time somebody did."),
+        ]),
+        (role: Some("Security"), when: [UnderworldActive], lines: [
+            (tone: Wary, text: "Somebody's selling something on this station."),
+            (tone: Wary, text: "Somebody's always selling something."),
+            (tone: Wary, text: "Not like this."),
+        ]),
+        (role: Some("Medical"), when: [CrewGettingHooked], lines: [
+            (tone: Wary, text: "That's the third one this week with the shakes."),
+            (tone: Wary, text: "Don't say that where anyone can hear you."),
+        ]),
+        (role: Some("Engineering"), when: [StationFraying], lines: [
+            (tone: Wary, text: "Nobody's finishing their work orders."),
+            (tone: Wary, text: "Nobody's finishing anything."),
+        ]),
+        (role: Some("Cargo"), when: [StockGoingMissing], lines: [
+            (tone: Wary, text: "Another crate short on the manifest."),
+            (tone: Wary, text: "Don't look at me. I sign for what arrives."),
+        ]),
+        (role: Some("Service"), when: [PlotStirring], lines: [
+            (tone: Wary, text: "Have you noticed how quiet the bar's got?"),
+            (tone: Wary, text: "I'd noticed. I was hoping I was wrong."),
+        ]),
+        (lines: [
+            (text: "What do you reckon they actually do in there?"),
+            (text: "Chemistry, I assume. It's on the door."),
+        ]),
+    ],
+)
