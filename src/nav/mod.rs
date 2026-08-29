@@ -395,14 +395,21 @@ impl Trail {
             let Some(waypoint) = self.path.get(self.waypoint).copied() else {
                 break;
             };
+            // Horizontal, for the reason `crew::walk_route` spells out at
+            // length: `contain_on_surface` rewrites y every step, so a body
+            // cannot close a vertical gap, and a portal joining two floors up
+            // to [`MAX_PORTAL_STEP`] apart carries exactly such a gap into its
+            // waypoint. Measured in 3D, an errand-runner or a pursuer standing
+            // on the portal in XZ never reaches it and walks on the spot until
+            // its deadline writes it off.
             let step = waypoint - transform.translation;
-            let waypoint_distance = step.length();
+            let waypoint_distance = Vec2::new(step.x, step.z).length();
             if waypoint_distance <= 0.02 {
                 self.waypoint += 1;
                 continue;
             }
             let walked = remaining.min(waypoint_distance);
-            let direction = step / waypoint_distance;
+            let direction = Vec3::new(step.x, 0.0, step.z) / waypoint_distance;
             let candidate = transform.translation + direction * walked;
             transform.translation = areas.map_or(candidate, |areas| {
                 areas.contain_on_surface(candidate, NAV_RADIUS, body_offset)

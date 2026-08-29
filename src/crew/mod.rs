@@ -1459,15 +1459,37 @@ pub(crate) fn walk_route(
             continue;
         };
 
+        // Horizontal, on both counts, and that is load-bearing rather than a
+        // simplification.
+        //
+        // `contain_on_surface` below owns the vertical axis outright: it
+        // rewrites y to `floor + BODY_OFFSET` on every single step. A body
+        // therefore *cannot* close a vertical gap, so measuring one is asking
+        // a question the answer to which is permanently no.
+        //
+        // That is not hypothetical. `nav::MAX_PORTAL_STEP` deliberately joins
+        // regions whose floors differ by up to 0.45 m — a stair run meeting
+        // its landing — and the portal between them carries that difference
+        // into its waypoint. With a 3D test against [`ARRIVE_EPSILON`] (0.12)
+        // a body standing exactly on such a portal in XZ was still 0.24 m
+        // short in y, stepped straight up at it, got snapped back down by
+        // containment, and did that forever: stationary, facing a wall, with
+        // a live order nobody could fill. Twenty-odd such portals exist around
+        // the maintenance stairs.
+        //
+        // Height is the floor's business, which is exactly how slopes already
+        // work — walk horizontally, and let containment put the feet down.
         let to_target = target - transform.translation;
-        if to_target.length() <= ARRIVE_EPSILON {
+        let flat = Vec2::new(to_target.x, to_target.z);
+        if flat.length() <= ARRIVE_EPSILON {
             route.index += 1;
             continue;
         }
 
         let chemistry = blood.map_or(1.0, |blood| blood.0.movement_multiplier());
         let stumble = crew_stride_multiplier(entity, time.elapsed_secs(), blood);
-        let step = to_target.normalize() * WALK_SPEED * chemistry * stumble * time.delta_secs();
+        let heading = Vec3::new(to_target.x, 0.0, to_target.z).normalize_or_zero();
+        let step = heading * WALK_SPEED * chemistry * stumble * time.delta_secs();
         // Confined to the walkable floor, exactly like the chemist
         // (`player::apply_movement`) and a hostile pursuer
         // (`showdown::run_pursuers`). Following waypoints is not on its own
@@ -2751,6 +2773,76 @@ mod tests {
         let mut app = walking_app();
         app.insert_resource(crate::lab::WalkableAreas::from_floor_plan());
         app
+    }
+
+    /// Two flat regions at *different heights*, overlapping enough to be
+    /// joined after the nav inset — a stair run meeting its landing, which the
+    /// station has twenty-odd of around the maintenance decks.
+    ///
+    /// `from_floor_plan`'s five rooms are all at y = 0, so nothing built on it
+    /// can reproduce this at all. That is precisely why the bug below survived
+    /// every existing routing test.
+    fn stepped_floor_app(step_height: f32) -> App {
+        use crate::lab::{Bounds, FloorProfile};
+        let mut areas = crate::lab::WalkableAreas::default();
+        areas.push_surface(
+            Bounds { min_x: -6.0, max_x: 0.5, min_z: -3.0, max_z: 3.0 },
+            Some("Lower".to_string()),
+            None,
+            FloorProfile::Flat(0.0),
+        );
+        areas.push_surface(
+            Bounds { min_x: -0.5, max_x: 6.0, min_z: -3.0, max_z: 3.0 },
+            Some("Upper".to_string()),
+            None,
+            FloorProfile::Flat(step_height),
+        );
+
+        let mut app = walking_app();
+        app.insert_resource(crate::nav::NavGraph::build(&areas, crate::nav::NAV_RADIUS));
+        app.insert_resource(areas);
+        app
+    }
+
+    #[test]
+    fn a_crew_member_crosses_a_step_between_two_floors_at_different_heights() {
+        // The bug this pins put twenty-odd permanent traps around the
+        // maintenance stairs, and it is worth stating exactly, because the
+        // shape of it is not obvious from any one file.
+        //
+        // `nav::MAX_PORTAL_STEP` deliberately joins regions whose floors
+        // differ by up to 0.45 m. The portal between them inherits that
+        // difference. `contain_on_surface` then owns the vertical axis
+        // outright — it rewrites y to `floor + BODY_OFFSET` every step — so a
+        // body physically cannot move vertically. Measured in 3D against
+        // `ARRIVE_EPSILON` (0.12), a body standing dead on such a portal in XZ
+        // was still short in y, stepped up at it, got snapped back down, and
+        // repeated that forever: motionless, facing a wall, holding an order
+        // no chemist could ever fill.
+        //
+        // The step here is larger than `ARRIVE_EPSILON` and smaller than
+        // `MAX_PORTAL_STEP`, which is exactly the band the real map lands in.
+        let step_height = 0.24;
+        assert!(step_height > ARRIVE_EPSILON, "a smaller step would not bite");
+
+        let mut app = stepped_floor_app(step_height);
+        let start = Vec3::new(-4.0, BODY_OFFSET, 0.0);
+        let goal = Vec3::new(4.0, step_height + BODY_OFFSET, 0.0);
+        let walker = walker(&mut app, start, CrewRoute::to(goal));
+
+        for _ in 0..600 {
+            tick(&mut app, 0.05);
+        }
+
+        let at = app.world().get::<Transform>(walker).unwrap().translation;
+        assert!(
+            at.x > 3.0,
+            "the body stopped at x={:.2} (started at {:.2}) — it is stuck on \
+             the step between the two floors, which is what every crew member \
+             on the maintenance stairs used to do, permanently",
+            at.x,
+            start.x
+        );
     }
 
     /// How far off the walkable floor a body is standing, in metres.
