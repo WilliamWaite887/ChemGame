@@ -21,6 +21,7 @@ use crate::character_lab::{
 use crate::interaction::{Interactable, InteractionMode};
 use crate::lab::{DeliveryLane, DeliveryStations, MapReady, COUNTER_SPOT, DOOR_MAX_X, DOOR_MIN_X};
 use crate::machines::chemist_entity;
+use crate::nav::ProgressWatch;
 use crate::net::is_authority;
 use crate::orders::{Department, Shift};
 use crate::player::Chemist;
@@ -42,6 +43,13 @@ const POST_PROXIMITY: f32 = 1.5;
 /// origin — the `body_offset` [`crate::lab::WalkableAreas::contain_on_surface`]
 /// wants, and the height [`spawn_crew_member`] starts them at.
 pub(crate) const BODY_OFFSET: f32 = 0.93;
+/// How often a body whose steps are being eaten by the floor may plan again.
+///
+/// A scrape along a wall is common and usually harmless, so this is a rate
+/// limit on the fix rather than the fix itself: often enough that a body
+/// rounding a corner badly is put right before anyone notices, rarely enough
+/// that pressing against a wall is not a route search every frame.
+const BLOCKED_REPLAN_SECONDS: f32 = 0.5;
 
 pub struct CrewPlugin;
 
@@ -298,6 +306,14 @@ pub struct CrewRoute {
     counter_bound: bool,
     pub delivery_lane: DeliveryLane,
     lane_offset: f32,
+    /// Watches for the walk going nowhere. See [`walk_route`]'s recovery leg.
+    stall: ProgressWatch,
+    /// Cooldown on replanning a route containment has shoved the body off.
+    replan_in: f32,
+    /// Recovery legs taken toward the *current* goal, so a body that wedges
+    /// twice is sent somewhere new the second time. Reset when a fresh
+    /// destination is resolved into waypoints.
+    unstick: usize,
 }
 
 impl CrewRoute {
@@ -327,6 +343,9 @@ impl CrewRoute {
             counter_bound: true,
             delivery_lane,
             lane_offset,
+            stall: ProgressWatch::default(),
+            replan_in: 0.0,
+            unstick: 0,
         }
     }
 
@@ -344,6 +363,9 @@ impl CrewRoute {
             counter_bound: false,
             delivery_lane: DeliveryLane::Public,
             lane_offset: 0.0,
+            stall: ProgressWatch::default(),
+            replan_in: 0.0,
+            unstick: 0,
         }
     }
 
@@ -376,6 +398,9 @@ impl CrewRoute {
             counter_bound: false,
             delivery_lane: DeliveryLane::Public,
             lane_offset: 0.0,
+            stall: ProgressWatch::default(),
+            replan_in: 0.0,
+            unstick: 0,
         }
     }
 
@@ -386,6 +411,8 @@ impl CrewRoute {
         self.phase = CrewPhase::Leaving;
         self.pending = Some(Vec3::new(door_x(), 0.0, spawn_z()));
         self.counter_bound = false;
+        self.stall.restart();
+        self.unstick = 0;
     }
 }
 
@@ -1401,6 +1428,9 @@ pub(crate) fn walk_route(
         if blood.is_some_and(|blood| {
             blood.0.status(StatusKind::Sedated).intensity > 0.0 || blood.0.incapacitated()
         }) {
+            // Standing still on purpose is not being stuck, and the watchdog
+            // below cannot tell the two apart on its own.
+            route.stall.restart();
             continue;
         }
 
@@ -1419,6 +1449,19 @@ pub(crate) fn walk_route(
                 }
                 _ => requested_goal,
             };
+            // Anywhere but out of the station, the destination is pulled onto
+            // floor a body can stand on. Nobody authoring a delivery window, a
+            // department spot or a work post measures it against
+            // `nav::NAV_RADIUS`, and a goal a few centimetres inside the
+            // furniture is one containment holds them off of forever — the
+            // crew member a metre from the window whose order times out. A
+            // leaver is the exception on purpose: walking off the floor is how
+            // they exit, and clamping that would pin them at the threshold.
+            let goal = if route.phase == CrewPhase::Leaving {
+                goal
+            } else {
+                nav.standable_goal(goal)
+            };
             // If navigation has nothing to say, wait. The graph is empty for
             // a frame or two while the map loads, and walking directly to the
             // goal would cut through every intervening station wall.
@@ -1431,6 +1474,10 @@ pub(crate) fn walk_route(
             route.pending = None;
             route.waypoints = waypoints;
             route.index = 0;
+            // A new route is longer than whatever was left of the old one, so
+            // the watchdog's running measure no longer means anything.
+            route.stall.restart();
+            route.unstick = 0;
         }
 
         let Some(target) = route.waypoints.get(route.index).copied() else {
@@ -1458,6 +1505,44 @@ pub(crate) fn walk_route(
             }
             continue;
         };
+
+        // Getting nowhere: send them to open floor, then back to the same
+        // goal.
+        //
+        // Following waypoints is not the same as arriving at them. A body
+        // whose next waypoint lies past a corner it cannot round, or whose
+        // destination is authored a few centimetres inside a counter, walks
+        // straight at it and is held off by `contain_on_surface` — heading
+        // into the wall, animating a walk cycle, and not moving a millimetre,
+        // for the rest of the shift. That is the crew member standing beside
+        // the vending machine while their order at the delivery window times
+        // out, and it is invisible to every check the route already makes:
+        // the path is valid, the waypoint is standable, nothing has failed.
+        //
+        // So measure the one thing that fails — the route getting shorter.
+        // When it stops, the fix is not to plan the same route again (it was
+        // never the problem) but to walk somewhere with room around it first;
+        // from open floor the way on is usually clear. The goal is kept, so
+        // this costs a detour rather than the errand.
+        let remaining =
+            crate::nav::floor_length(transform.translation, &route.waypoints[route.index..]);
+        if route.stall.stalled(time.delta_secs(), remaining) {
+            let goal = *route.waypoints.last().expect("a target implies a route");
+            let detour = nav
+                .recovery_point(transform.translation, route.unstick)
+                .and_then(|recovery| Some((recovery, nav.path(recovery, goal)?)));
+            route.unstick += 1;
+            // No recovery point, or no way on from it: leave the route alone
+            // rather than replace it with something that ends nowhere near
+            // the goal — the phase logic above treats a finished route as an
+            // arrival, and a false arrival is worse than a stuck body.
+            if let Some((recovery, onward)) = detour {
+                route.waypoints = std::iter::once(recovery).chain(onward).collect();
+                route.index = 0;
+                route.stall.restart();
+                continue;
+            }
+        }
 
         // Horizontal, on both counts, and that is load-bearing rather than a
         // simplification.
@@ -1508,7 +1593,8 @@ pub(crate) fn walk_route(
         // `showdown::a_finished_showdown_never_leaves_anything_behind`
         // exists to catch. They are still confined for the whole walk
         // *through* the building; only the step out of the door is free.
-        let candidate = transform.translation + step;
+        let walked_from = transform.translation;
+        let candidate = walked_from + step;
         let leaving_the_station =
             route.phase == CrewPhase::Leaving && route.index + 1 == route.waypoints.len();
         transform.translation = match (leaving_the_station, areas.as_deref()) {
@@ -1520,6 +1606,36 @@ pub(crate) fn walk_route(
         // Face the direction of travel so they read as people rather than
         // sliding props.
         transform.rotation = Quat::from_rotation_y(to_target.x.atan2(to_target.z));
+
+        // Held back by the floor: the route is stale, so plan it again from
+        // where the body actually ended up.
+        //
+        // Containment does not merely stop a body, it *moves* it — a step into
+        // a wall comes back as a step along it, because `Bounds::nearest`
+        // clamps each axis on its own. So a body kept from walking its route
+        // is also being pushed off the line that route was planned for, and
+        // the waypoint it is still aiming at can end up behind a corner it
+        // cannot cut. One Dijkstra from its real position answers with the
+        // portal that suits the region it is really in, and it costs a corner
+        // scrape rather than the two seconds the watchdog above needs to
+        // notice — which is the difference between a walk that looks slightly
+        // clumsy and a crew member who visibly gives up.
+        //
+        // Deliberately does *not* touch the stall watchdog. A replan that
+        // hands back the same unwalkable route is precisely what the watchdog
+        // is for, and restarting its window here would let a body flip between
+        // two stale routes forever without ever being rescued.
+        route.replan_in -= time.delta_secs();
+        let held_back =
+            crate::nav::flat_distance(transform.translation, walked_from) < step.length() * 0.5;
+        if held_back && !leaving_the_station && route.replan_in <= 0.0 {
+            route.replan_in = BLOCKED_REPLAN_SECONDS;
+            let goal = *route.waypoints.last().expect("a target implies a route");
+            if let Some(fresh) = nav.path(transform.translation, goal) {
+                route.waypoints = fresh;
+                route.index = 0;
+            }
+        }
     }
 }
 
@@ -2658,19 +2774,7 @@ mod tests {
         blood.0.add_status(StatusKind::Euphoric, 10.0, 1.0);
         let resident = app
             .world_mut()
-            .spawn((
-                blood,
-                CrewRoute {
-                    waypoints: Vec::new(),
-                    index: 0,
-                    phase: CrewPhase::Waiting,
-                    pending: None,
-                    counter_bound: false,
-                    delivery_lane: DeliveryLane::Public,
-                    lane_offset: 0.0,
-                },
-                Ambient { dwell: 0.1 },
-            ))
+            .spawn((blood, CrewRoute::standing(), Ambient { dwell: 0.1 }))
             .id();
 
         app.update();
@@ -2683,15 +2787,7 @@ mod tests {
         let mut app = App::new();
         app.add_systems(Update, react_to_chemical_statuses);
 
-        let route = || CrewRoute {
-            waypoints: Vec::new(),
-            index: 0,
-            phase: CrewPhase::Waiting,
-            pending: None,
-            counter_bound: false,
-            delivery_lane: DeliveryLane::Public,
-            lane_offset: 0.0,
-        };
+        let route = CrewRoute::standing;
         let mut happy_blood = Bloodstream::default();
         happy_blood.0.add_status(StatusKind::Happiness, 10.0, 1.5);
         let happy = app
@@ -2918,6 +3014,197 @@ mod tests {
     }
 
     #[test]
+    fn a_destination_authored_off_the_floor_is_one_crew_can_still_arrive_at() {
+        // The other half of the test above, and the fix rather than the
+        // backstop. Stopping at the edge keeps a body out of the wall but
+        // leaves it *travelling* forever: never within `ARRIVE_EPSILON`, never
+        // `Waiting`, never `AtCounter` — which for an order is a customer who
+        // stands a metre from the window until their order times out. A goal
+        // nobody measured against `nav::NAV_RADIUS` is common enough (a
+        // delivery window, a work post, a department spot) that it has to be
+        // survivable, so the destination is pulled onto standable floor before
+        // anyone walks at it.
+        let void = Vec3::new(-10.0, BODY_OFFSET, 0.0);
+        let mut app = contained_walking_app();
+        assert!(
+            off_the_floor(&app, void) > 1.0,
+            "the fixture point must really be off the floor",
+        );
+
+        let from = crate::lab::ROOMS[crate::lab::REACTION_BAY].center();
+        let crew = walker(
+            &mut app,
+            Vec3::new(from.x, BODY_OFFSET, from.z),
+            CrewRoute::to(void),
+        );
+
+        for _ in 0..600 {
+            tick(&mut app, 0.05);
+            if app.world().get::<CrewRoute>(crew).unwrap().phase == CrewPhase::Waiting {
+                break;
+            }
+        }
+
+        let at = app.world().get::<Transform>(crew).unwrap().translation;
+        assert_eq!(
+            app.world().get::<CrewRoute>(crew).unwrap().phase,
+            CrewPhase::Waiting,
+            "never arrived — still walking at a point off the floor, from {at:?}",
+        );
+        assert!(
+            off_the_floor(&app, at) < 0.01,
+            "arrived somewhere they cannot stand, at {at:?}",
+        );
+        assert!(
+            app.world().get::<AtCounter>(crew).is_some(),
+            "arrival has to be the one the order queue can see",
+        );
+    }
+
+    #[test]
+    fn a_body_wedged_on_a_goal_it_can_never_reach_is_still_moved_off_the_wall() {
+        // The backstop behind the backstop. Planning again only helps when a
+        // better route exists; when the destination *itself* cannot be stood
+        // on, the route is correct and still unwalkable, and every replan
+        // hands back the same wall. The progress watchdog is what covers that:
+        // it does not look at the route at all, only at whether the body is
+        // getting anywhere, so it fires on causes nobody has diagnosed.
+        let mut app = contained_walking_app();
+        let from = crate::lab::ROOMS[crate::lab::REACTION_BAY].center();
+        let crew = walker(
+            &mut app,
+            Vec3::new(from.x, BODY_OFFSET, from.z),
+            CrewRoute::to(Vec3::new(from.x, BODY_OFFSET, from.z)),
+        );
+        tick(&mut app, 0.01);
+
+        // Somewhere out in the void, west of the station: reachable by no
+        // route, and therefore proof against replanning.
+        {
+            let mut route = app.world_mut().get_mut::<CrewRoute>(crew).unwrap();
+            route.waypoints = vec![Vec3::new(-40.0, BODY_OFFSET, 0.0)];
+            route.index = 0;
+        }
+        for _ in 0..40 {
+            tick(&mut app, 0.05);
+        }
+        let wedged = app.world().get::<Transform>(crew).unwrap().translation;
+
+        for _ in 0..100 {
+            tick(&mut app, 0.05);
+        }
+
+        let route = app.world().get::<CrewRoute>(crew).unwrap();
+        assert!(
+            route.unstick > 0,
+            "the watchdog never noticed a body walking into a wall for five seconds",
+        );
+        let at = app.world().get::<Transform>(crew).unwrap().translation;
+        assert!(
+            crate::nav::flat_distance(at, wedged) > 0.5,
+            "still standing where they wedged, at {at:?}",
+        );
+        assert!(
+            off_the_floor(&app, at) < 0.01,
+            "the rescue put them off the walkable floor at {at:?}",
+        );
+    }
+
+    #[test]
+    fn a_crew_member_on_a_leg_it_cannot_walk_still_reaches_its_destination() {
+        // The complaint this exists for: crew standing motionless against a
+        // wall somewhere on the station while the order they came for times
+        // out at a delivery window they never reached. Every check the route
+        // makes says it is fine — the path is valid, the waypoints are
+        // standable — because the failure is not in the route at all. It is a
+        // body held off its next waypoint by containment, walking into
+        // geometry forever.
+        //
+        // The fixture is a leg that cannot be walked: a waypoint out in the
+        // void west of the station, with the real destination behind it. Every
+        // other guard in the module passes it — the route is a list of points,
+        // the destination is standable, nothing errors — and the body walks at
+        // the impossible one until the shift ends. Sabotaging the waypoints
+        // directly is the only way to hold that shape still; in the wild it
+        // comes from geometry, and the whole difficulty is that geometry does
+        // not announce itself.
+        let mut app = contained_walking_app();
+        let from = crate::lab::ROOMS[crate::lab::REACTION_BAY].center();
+        let to = crate::lab::ROOMS[crate::lab::ANALYSIS].center();
+        let goal = Vec3::new(to.x, BODY_OFFSET, to.z);
+        let crew = walker(
+            &mut app,
+            Vec3::new(from.x, BODY_OFFSET, from.z),
+            CrewRoute::to(goal),
+        );
+        tick(&mut app, 0.01);
+
+        let void = Vec3::new(-40.0, BODY_OFFSET, 0.0);
+        {
+            let mut route = app.world_mut().get_mut::<CrewRoute>(crew).unwrap();
+            route.waypoints = vec![void, goal];
+            route.index = 0;
+        }
+
+        for _ in 0..600 {
+            tick(&mut app, 0.05);
+            let at = app.world().get::<Transform>(crew).unwrap().translation;
+            let strayed = off_the_floor(&app, at);
+            assert!(
+                strayed < 0.01,
+                "the rescue walked them {strayed:.3}m off the floor at {at:?}",
+            );
+            if app.world().get::<CrewRoute>(crew).unwrap().phase == CrewPhase::Waiting {
+                break;
+            }
+        }
+
+        let route = app.world().get::<CrewRoute>(crew).unwrap();
+        assert_eq!(
+            route.phase,
+            CrewPhase::Waiting,
+            "never got past the impossible leg — this is the crew member \
+             standing at a wall while their order times out",
+        );
+        let at = app.world().get::<Transform>(crew).unwrap().translation;
+        assert!(
+            crate::nav::flat_distance(at, goal) < 1.0,
+            "gave up somewhere else entirely, at {at:?} instead of {goal:?}",
+        );
+    }
+
+    #[test]
+    fn an_ordinary_walk_across_the_station_never_takes_a_recovery_leg() {
+        // The other half of the watchdog, and the half that costs something if
+        // it is wrong: a crew member walking normally — slowly, round corners,
+        // through two doorways — must never be mistaken for a stuck one and
+        // sent back to the middle of the room they just left.
+        let mut app = contained_walking_app();
+        let from = crate::lab::ROOMS[crate::lab::REACTION_BAY].center();
+        let to = crate::lab::ROOMS[crate::lab::ANALYSIS].center();
+        let crew = walker(
+            &mut app,
+            Vec3::new(from.x, BODY_OFFSET, from.z),
+            CrewRoute::to(Vec3::new(to.x, BODY_OFFSET, to.z)),
+        );
+
+        for _ in 0..600 {
+            tick(&mut app, 0.05);
+            if app.world().get::<CrewRoute>(crew).unwrap().phase == CrewPhase::Waiting {
+                break;
+            }
+        }
+
+        let route = app.world().get::<CrewRoute>(crew).unwrap();
+        assert_eq!(route.phase, CrewPhase::Waiting, "never finished the walk");
+        assert_eq!(
+            route.unstick, 0,
+            "an unobstructed walk was interrupted by {} recovery legs",
+            route.unstick,
+        );
+    }
+
+    #[test]
     fn a_crew_member_spawned_outside_the_station_walks_in_rather_than_through_the_wall() {
         // Crew spawn at the door, outside the floor: `spawn_crew_member` puts
         // them there and `NavGraph::locate` used to silently resolve that to
@@ -3078,15 +3365,7 @@ mod tests {
                     role: role.into(),
                 },
                 Transform::from_translation(at),
-                CrewRoute {
-                    waypoints: Vec::new(),
-                    index: 0,
-                    phase: CrewPhase::Waiting,
-                    pending: None,
-                    counter_bound: false,
-                    delivery_lane: DeliveryLane::Public,
-                    lane_offset: 0.0,
-                },
+                CrewRoute::standing(),
                 // Long dwell, so any movement in these tests is the crisis
                 // talking and never the idle wander.
                 Ambient { dwell: 1_000.0 },
@@ -3179,10 +3458,19 @@ mod tests {
         tick(&mut app, 0.01);
 
         let heading_for = destination(&app, hauler);
-        let home = Vec3::new(-5.0, 0.93, 18.0);
+        // As far toward Cargo as the floor goes. This fixture's departments sit
+        // at z = 18, well beyond the five-room test lab, and a destination off
+        // the walkable floor is now pulled onto it — otherwise the hauler walks
+        // to the same spot and then stands there "still travelling" forever.
+        // Cargo is at x = -5 and the casualty at x = 4, so this still tells the
+        // two apart, which is the whole point of the test.
+        let home = app
+            .world()
+            .resource::<crate::nav::NavGraph>()
+            .standable_goal(Vec3::new(-5.0, 0.93, 18.0));
         assert!(
             heading_for.distance(home) < 0.01,
-            "a hauler headed for {heading_for:?} instead of home to Cargo",
+            "a hauler headed for {heading_for:?} instead of home to Cargo at {home:?}",
         );
     }
 

@@ -35,6 +35,23 @@ pub const NAV_RADIUS: f32 = 0.35;
 /// flat landings within this tolerance; stacked decks remain separate.
 const MAX_PORTAL_STEP: f32 = 0.45;
 
+/// How long a body may cover no ground before [`ProgressWatch`] calls it wedged.
+const STALL_WINDOW: f32 = 2.0;
+
+/// How much route has to be walked off inside that window to count as headway.
+///
+/// Deliberately far below anything a walking body covers — the slowest crew
+/// member the chemistry can produce still manages a third of a metre a second —
+/// so this fires for bodies that are genuinely getting nowhere and not for ones
+/// merely having a bad day.
+const STALL_PROGRESS: f32 = 0.2;
+
+/// How far a recovery point has to be from the body it is meant to rescue.
+///
+/// Walking to a spot you are already standing on unwedges nothing, so a
+/// candidate nearer than this is skipped in favour of the next one out.
+const MIN_RECOVERY_STEP: f32 = 0.75;
+
 /// A walkable rectangle and the ways out of it.
 struct Node {
     bounds: Bounds,
@@ -253,6 +270,72 @@ impl NavGraph {
         Some(waypoints)
     }
 
+    /// A destination moved onto floor the route to it actually ends on.
+    ///
+    /// The counterpart to [`NavGraph::path`] leaving the goal alone, and the
+    /// answer to why it can: a caller that is *not* walking off the station
+    /// deliberately has to say so, and gets a goal it can stand on.
+    ///
+    /// This is where a destination authored a few centimetres inside a wall or
+    /// a counter stops being fatal. `path` faithfully returns such a point as
+    /// the final waypoint, containment then holds the body off it, and it
+    /// presses at the edge forever without ever coming within
+    /// `ARRIVE_EPSILON` — a crew member who never arrives, with an order that
+    /// times out at a window they are standing a metre from.
+    ///
+    /// Only the horizontal is touched. `path` normalizes height itself, from
+    /// the region the walker starts in.
+    pub fn standable_goal(&self, to: Vec3) -> Vec3 {
+        let Some((node, held)) = self.locate_or_nearest(to) else {
+            return to;
+        };
+        if held {
+            return to;
+        }
+        // The node the route ends in, not the nearest floor outright: clamping
+        // against the whole station could pull a goal just inside a wall
+        // through to the room on the other side of it.
+        let on_floor = self.standable_in(node, to);
+        Vec3::new(on_floor.x, to.y, on_floor.z)
+    }
+
+    /// Open floor to send a wedged body to before it tries its goal again.
+    ///
+    /// The escape hatch for the failure a portal graph cannot see: the graph
+    /// says a route exists and it does, but the body walking it is pinned by
+    /// `contain_on_surface` against a wall it is trying to walk through — a
+    /// corner cut too fine, a destination authored a few centimetres inside a
+    /// counter — and heads straight back at the same waypoint every frame,
+    /// forever. Nothing about the route is wrong, so replanning it changes
+    /// nothing; what breaks the deadlock is walking somewhere *else* first.
+    ///
+    /// The candidates are the middle of the region they are in and the middles
+    /// of the regions next door — points as far from any wall as that part of
+    /// the station allows, which is exactly what a body stuck against one
+    /// needs. `attempt` walks outward through them, so a body that wedges
+    /// again after being rescued is not handed the same useless point twice.
+    pub fn recovery_point(&self, from: Vec3, attempt: usize) -> Option<Vec3> {
+        let (node, _) = self.locate_or_nearest(from)?;
+        let body_offset = from.y - self.nodes[node].floor_at(from);
+        let mut candidates: Vec<Vec3> = std::iter::once(node)
+            .chain(self.nodes[node].edges.iter().map(|edge| edge.to))
+            .map(|index| {
+                let center = self.nodes[index].bounds.center();
+                Vec3::new(
+                    center.x,
+                    self.nodes[index].floor_at(center) + body_offset,
+                    center.z,
+                )
+            })
+            .filter(|point| flat_distance(*point, from) >= MIN_RECOVERY_STEP)
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        candidates.sort_by(|a, b| flat_distance(*a, from).total_cmp(&flat_distance(*b, from)));
+        Some(candidates[attempt % candidates.len()])
+    }
+
     /// The candidate reachable on foot by the shortest *route*, and how far a
     /// body would actually walk to reach it.
     ///
@@ -277,12 +360,17 @@ impl NavGraph {
     }
 }
 
+/// Distance between two points on the floor plane.
+pub(crate) fn flat_distance(a: Vec3, b: Vec3) -> f32 {
+    Vec2::new(a.x - b.x, a.z - b.z).length()
+}
+
 /// Length of a route, measured on the floor plane.
 ///
 /// Height is dropped on purpose: a stair's rise is not distance a body has to
 /// spend, and counting it would bias every comparison against routes that
 /// happen to change deck.
-fn floor_length(from: Vec3, path: &[Vec3]) -> f32 {
+pub(crate) fn floor_length(from: Vec3, path: &[Vec3]) -> f32 {
     let mut previous = from;
     let mut total = 0.0;
     for waypoint in path {
@@ -292,6 +380,68 @@ fn floor_length(from: Vec3, path: &[Vec3]) -> f32 {
         previous = *waypoint;
     }
     total
+}
+
+// ---------------------------------------------------------------------------
+// Getting nowhere
+// ---------------------------------------------------------------------------
+
+/// Watches a body that is walking a route and reports when it stops getting
+/// anywhere.
+///
+/// The measure is *route left to walk*, not distance travelled and not distance
+/// to the next waypoint. Distance travelled says a body scraping sideways along
+/// a wall is fine; distance to the next waypoint jumps up every time one is
+/// reached, so a long leg would read as a stall. Route left to walk only ever
+/// falls, and a body that is not making it fall is not going anywhere,
+/// whichever way it happens to be facing while it does so.
+pub struct ProgressWatch {
+    /// Route left when the current window opened.
+    mark: f32,
+    /// Seconds left in that window.
+    window: f32,
+}
+
+impl Default for ProgressWatch {
+    fn default() -> Self {
+        // An infinite mark means the first observation always counts as
+        // headway, so a fresh watch never accuses a body that has only just
+        // started walking.
+        Self {
+            mark: f32::INFINITY,
+            window: STALL_WINDOW,
+        }
+    }
+}
+
+impl ProgressWatch {
+    /// Starts the window again, forgetting whatever the body was doing.
+    ///
+    /// For every moment the measure stops being comparable with itself: a new
+    /// route (longer than the old one, through no fault of the walker) and a
+    /// body that has stopped walking for a legitimate reason and will resume.
+    pub fn restart(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Whether a whole window has passed without the route getting shorter.
+    ///
+    /// Reporting `true` also opens a fresh window, so a caller that cannot act
+    /// on the answer is told again a window later rather than every frame.
+    pub fn stalled(&mut self, dt: f32, remaining: f32) -> bool {
+        if self.mark - remaining >= STALL_PROGRESS {
+            self.mark = remaining;
+            self.window = STALL_WINDOW;
+            return false;
+        }
+        self.window -= dt;
+        if self.window > 0.0 {
+            return false;
+        }
+        self.mark = remaining;
+        self.window = STALL_WINDOW;
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -560,6 +710,80 @@ mod tests {
             path.len() >= 3,
             "expected a route through the hall, got {path:?}",
         );
+    }
+
+    #[test]
+    fn a_recovery_point_is_open_floor_a_body_is_not_already_standing_on() {
+        // What a wedged body is asking for: somewhere with room around it,
+        // far enough away to actually be a walk. A recovery point inside a
+        // wall would replace one trap with another, and one under the body's
+        // own feet would be no rescue at all.
+        let areas = WalkableAreas::from_floor_plan();
+        let graph = NavGraph::build(&areas, NAV_RADIUS);
+        let inset: Vec<Bounds> = areas
+            .regions()
+            .iter()
+            .map(|region| region.bounds.inset(NAV_RADIUS))
+            .filter(|bounds| bounds.is_standable())
+            .collect();
+
+        for room in &ROOMS {
+            // A corner of the room, which is where bodies actually wedge.
+            let corner = Vec3::new(room.min_x + NAV_RADIUS, 0.0, room.min_z + NAV_RADIUS);
+            let recovery = graph
+                .recovery_point(corner, 0)
+                .unwrap_or_else(|| panic!("nowhere to send a body stuck in {}", room.name));
+
+            assert!(
+                inset.iter().any(|bounds| bounds.holds(recovery)),
+                "{}: recovery point {recovery:?} is inside a wall",
+                room.name,
+            );
+            assert!(
+                flat_distance(recovery, corner) >= MIN_RECOVERY_STEP,
+                "{}: recovery point is under the body's own feet",
+                room.name,
+            );
+        }
+    }
+
+    #[test]
+    fn a_second_attempt_is_sent_somewhere_the_first_one_was_not() {
+        // A body that wedges again after being rescued has already proved the
+        // first point did not help. Handing it the same one forever is how a
+        // stuck NPC becomes a pacing one.
+        let graph = lab_graph();
+        let from = ROOMS[crate::lab::LOBBY].center();
+
+        let first = graph.recovery_point(from, 0).expect("a first candidate");
+        let second = graph.recovery_point(from, 1).expect("a second candidate");
+        assert!(
+            first.distance(second) > 0.01,
+            "both attempts sent the body to {first:?}",
+        );
+    }
+
+    #[test]
+    fn progress_is_only_a_stall_when_the_route_stops_getting_shorter() {
+        let mut watch = ProgressWatch::default();
+        // Walking: the route shrinks by a stride every tick.
+        let mut remaining = 20.0;
+        for _ in 0..200 {
+            remaining -= 0.1;
+            assert!(
+                !watch.stalled(0.05, remaining),
+                "a body covering ground was called stuck at {remaining:.2}m left",
+            );
+        }
+
+        // Wedged: the route stops shrinking, and one window later it is
+        // reported — once, not every frame after.
+        let stuck_at = remaining;
+        let ticks = (STALL_WINDOW / 0.05).ceil() as usize;
+        let reports = (0..ticks + 1)
+            .filter(|_| watch.stalled(0.05, stuck_at))
+            .count();
+        assert_eq!(reports, 1, "expected exactly one report per window");
     }
 
     #[test]
