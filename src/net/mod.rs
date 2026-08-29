@@ -605,6 +605,11 @@ fn register_replication(app: &mut App) {
         // never ticked: its countdown lives in an unreplicated `SpeechTimer`
         // so a line does not re-send its own string every frame it is up.
         .replicate::<Speech>()
+        // What is written on a bottle. The entire point is that *other*
+        // people read it, so a label only the host could see would deceive
+        // nobody — and it is what a guest's own Security sweep and delivery
+        // prompt read too.
+        .replicate::<crate::labels::Label>()
         // Interaction labels are gameplay affordances, not decoration: a
         // guest cannot hand over an order or evacuate an incapacitated
         // resident if their focus ray is unable to recognise that entity as

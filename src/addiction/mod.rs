@@ -1205,6 +1205,24 @@ mod tests {
     fn ordinary_medicine_is_never_addictive() {
         let data = data();
         for reagent in data.reagents.iter() {
+            // Illicit reagents are exempt, and the exemption is narrow enough
+            // to keep this guard's teeth.
+            //
+            // The trap being guarded against is an *accident*: reaching for
+            // the ordinary answer to an ordinary order and hooking someone
+            // without ever choosing to. An Illicit reagent is never the
+            // ordinary answer — no `RequestDef` in `station.orders.ron` names
+            // one (`no_legitimate_request_names_an_illicit_reagent`), and the
+            // honest shelf always holds a clean alternative. Synthesising
+            // krokodil and handing it across as a painkiller takes deliberate
+            // work at every step, which makes it exactly the decision this
+            // test's own message says it is protecting.
+            //
+            // What must stay true, and still does: nothing a chemist can
+            // reach for while filling an order *honestly* can build a habit.
+            if reagent.categories.contains(&chem_sim::Category::Illicit) {
+                continue;
+            }
             let treats_something = reagent.categories.iter().any(|category| {
                 matches!(
                     category,

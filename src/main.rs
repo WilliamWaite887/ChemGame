@@ -27,6 +27,9 @@ mod instability;
 mod interaction;
 mod knowledge;
 mod lab;
+/// Writing on the bottle: what a container claims to be, as distinct from
+/// what it is.
+mod labels;
 mod machines;
 mod menu;
 mod nav;
@@ -188,6 +191,9 @@ fn main() {
         (
             player::PlayerPlugin,
             interaction::InteractionPlugin,
+            // After `interaction`, whose `InteractionMode` it adds a variant
+            // to and whose cursor handling it relies on.
+            labels::LabelPlugin,
             chem_world::ChemWorldPlugin,
             body::BodyPlugin,
             // Debug builds get the imported character, sample rack and reset

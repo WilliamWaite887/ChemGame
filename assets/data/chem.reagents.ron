@@ -743,6 +743,37 @@
     // antagonist pool in `station.antagonist.ron` does. Discoverable the same
     // way Poisons are: mix into one by accident at the test bench, or deduce
     // it from hints.
+    //
+    // ---- The double life -------------------------------------------------
+    //
+    // Several of these carry a *legitimate* category as well as `Illicit`,
+    // and that is the point rather than an oversight. `Category` is
+    // multi-valued by design, and a drug that genuinely does what someone
+    // asked for genuinely satisfies them: methamphetamine really is a
+    // stimulant — the same `Hastened`-then-`Sluggish` shape as the perfectly
+    // legal hyperzine — so a stimulant order filled with it grades clean and
+    // the person who drank it is happy.
+    //
+    // Which is exactly the trap. The risk was never that they notice at the
+    // counter; it is the baggage. Every reagent on this shelf carries
+    // `addictive`, so `addiction::note_doses` hooks them silently, and
+    // `addiction::notice_the_high` turns an addict standing high in front of
+    // a Security officer into rising suspicion, per second, in the open.
+    //
+    // A reagent gains a legitimate category **only where its own effects
+    // genuinely earn one** — the stimulants below say so in their own
+    // `treats` text, and the two opiates numb real pain. The purely
+    // hallucinogenic ones (space drugs, mindbreaker, happiness, mushroom
+    // hallucinogen, bLaSToFF, SaturnX) and the maintenance sludges stay
+    // `Illicit` alone, because nothing they do answers a request anyone makes.
+    //
+    // Two things this must never break, both guarded by tests:
+    //   - No legitimate request may *name* one of these. Orders come from an
+    //     authored `RequestDef` pool, never generated from categories, so
+    //     adding a category here cannot make anyone ask for it.
+    //   - Every one of these keeps `Illicit`. `security::run_sweep`'s
+    //     contraband check keys off it, and dropping it would quietly
+    //     legalise a drug.
     (
         // `addictive` (see `src/addiction`): how readily repeated doses build
         // a habit in whoever takes them. The whole Illicit shelf carries one,
@@ -776,7 +807,7 @@
         color: (0.90, 0.42, 0.58),
         overdose: Some(15),
         treats: Some("Nothing. A jittery, paranoid stimulant."),
-        categories: [Illicit],
+        categories: [Illicit, Stimulants],
         effects: [
             Status(kind: Hastened, seconds: 5.0, intensity: 1.5),
             Status(kind: Paranoid, seconds: 7.0, intensity: 2.0),
@@ -794,7 +825,7 @@
         color: (0.52, 0.62, 0.40),
         overdose: Some(15),
         treats: Some("Nothing. Numbs injury while it rots you from the inside."),
-        categories: [Illicit],
+        categories: [Illicit, Trauma],
         effects: [
             Status(kind: Analgesic, seconds: 8.0, intensity: 1.0),
             Harm(Toxin, 1),
@@ -808,8 +839,13 @@
         name: "Methamphetamine",
         color: (0.88, 0.92, 0.96),
         overdose: Some(10),
+        // Structurally the illicit hyperzine: `Hastened` and a `Sluggish`
+        // comedown, exactly like the legitimate one, but harder and with a
+        // habit attached. So it genuinely *is* a stimulant, and a stimulant
+        // order filled with it satisfies the person who asked — see the
+        // double-life note at the top of this shelf.
         treats: Some("Nothing. A hard, grinding burst of speed."),
-        categories: [Illicit],
+        categories: [Illicit, Stimulants],
         effects: [
             Status(kind: Hastened, seconds: 6.0, intensity: 2.5),
             Status(kind: Unsteady, seconds: 3.0, intensity: 0.7),
@@ -842,8 +878,12 @@
         name: "Zombie Powder",
         color: (0.40, 0.44, 0.30),
         overdose: Some(10),
+        // `Stimulants` for the same reason chloral hydrate is: that category
+        // holds what alters your state, not only what speeds you up, and the
+        // legitimate shelf already files a sedative there. This is the
+        // illicit chloral hydrate.
         treats: Some("Nothing. Enough of it and you barely move at all."),
-        categories: [Illicit],
+        categories: [Illicit, Stimulants],
         effects: [
             Harm(Toxin, 2),
             Status(kind: Sedated, seconds: 12.0, intensity: 4.0),
@@ -1291,7 +1331,7 @@
         id: "aranesp", name: "Aranesp", color: (0.47, 1.00, 0.94), ph: 7.0,
         inverse: Some("epoetin_alfa"), controlled: true, addictive: 0.65,
         treats: Some("A highly addictive illicit stimulant that boosts movement and focus while steadily damaging respiration and toxin health."),
-        categories: [Illicit, Poisons], metabolism: Some(0.2),
+        categories: [Illicit, Poisons, Stimulants], metabolism: Some(0.2),
         effects: [
             Status(kind: Hastened, seconds: 6.0, intensity: 1.5),
             Status(kind: Focused, seconds: 5.0, intensity: 1.0),
@@ -1376,7 +1416,7 @@
         id: "pump_up", name: "Pump-Up", color: (0.78, 0.43, 0.12), ph: 7.0,
         controlled: true, addictive: 0.60, overdose: Some(30),
         treats: Some("An illicit endurance stimulant that temporarily resists collapse and sharpens focus at a respiratory cost."),
-        categories: [Illicit, Poisons], metabolism: Some(0.64),
+        categories: [Illicit, Poisons, Stimulants], metabolism: Some(0.64),
         effects: [
             Status(kind: Stabilized, seconds: 6.0, intensity: 1.0),
             Status(kind: Focused, seconds: 4.0, intensity: 0.5),
@@ -1486,7 +1526,7 @@
         id: "kronkaine", name: "Kronkaine", color: (0.74, 0.30, 0.86), ph: 8.0,
         controlled: true, addictive: 1.10, overdose: Some(20),
         treats: Some("A rare, intensely addictive speed drug that sharpens movement and action while straining the body."),
-        categories: [Illicit, Poisons], metabolism: Some(0.4),
+        categories: [Illicit, Poisons, Stimulants], metabolism: Some(0.4),
         effects: [
             Status(kind: Hastened, seconds: 8.0, intensity: 1.8),
             Status(kind: Focused, seconds: 6.0, intensity: 1.2),
@@ -1743,8 +1783,10 @@
         // impairment. Its eighteen-cycle loss of consciousness remains exact.
         id: "fentanyl", name: "Fentanyl", color: (0.77, 0.75, 0.84), ph: 9.0,
         controlled: true, addictive: 1.2,
+        // An opiate, so it files under `Trauma` beside krokodil: it reads as
+        // pain relief right up until the delayed sedation lands.
         treats: Some("A dangerously concentrated synthesized opiate that impairs coordination and causes delayed unconsciousness after eighteen cycles."),
-        categories: [Illicit, Poisons], metabolism: Some(0.2),
+        categories: [Illicit, Poisons, Trauma], metabolism: Some(0.2),
         effects: [
             Harm(Toxin, 2.5),
             Status(kind: Unsteady, seconds: 4.0, intensity: 0.8),

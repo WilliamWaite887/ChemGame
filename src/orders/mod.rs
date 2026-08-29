@@ -2805,6 +2805,71 @@ mod tests {
     }
 
     #[test]
+    fn a_stimulant_order_is_satisfied_by_methamphetamine() {
+        // The double life, working. A lenient order asks for a *category*, and
+        // meth is genuinely in `Stimulants` — the same `Hastened`-then-
+        // `Sluggish` shape as the perfectly legal hyperzine — so the person
+        // who asked for something to keep them sharp is not being fooled at
+        // the counter. They got what they wanted.
+        //
+        // The price is entirely downstream and entirely real: it is Illicit,
+        // so a sweep still finds it; it is `addictive`, so
+        // `addiction::note_doses` hooks them off the bloodstream alone; and
+        // `notice_the_high` turns them standing high in front of an officer
+        // into rising suspicion. That is the whole bargain in one delivery.
+        let db = db();
+        let meth = db.reagent("methamphetamine");
+        let delivered = solution_of(&db, &[("methamphetamine", 8)]);
+
+        let (outcome, matched) = grade(
+            Wanted::Category(Category::Stimulants),
+            Units::whole(8),
+            &delivered,
+            ContainerKind::Beaker,
+            &db,
+        );
+
+        assert_eq!(
+            outcome,
+            Outcome::Success,
+            "meth is a stimulant; a stimulant order filled with it should satisfy"
+        );
+        assert_eq!(matched, Some(meth));
+        assert!(
+            db.reagents.get(meth).addictive > 0.0,
+            "the whole point is that they come back for it"
+        );
+        assert!(
+            db.reagents
+                .get(meth)
+                .categories
+                .contains(&Category::Illicit),
+            "and that a raid would still find it"
+        );
+    }
+
+    #[test]
+    fn an_honest_stimulant_still_beats_meth_when_both_are_in_the_beaker() {
+        // Sanity on the substitution: `grade` picks the dominant category
+        // member by volume, so this is not a back door that lets a trace of
+        // meth hijack an otherwise honest delivery. A clean batch grades
+        // against the clean reagent.
+        let db = db();
+        let hyperzine = db.reagent("hyperzine");
+        let delivered = solution_of(&db, &[("hyperzine", 20), ("methamphetamine", 2)]);
+
+        let (_, matched) = grade(
+            Wanted::Category(Category::Stimulants),
+            Units::whole(20),
+            &delivered,
+            ContainerKind::Beaker,
+            &db,
+        );
+
+        assert_eq!(matched, Some(hyperzine));
+    }
+
+    #[test]
     fn contamination_is_caught_even_when_the_amount_is_right() {
         // This is the common failure: a sloppy mix leaves leftovers that keep
         // reacting, so the beaker holds the right medicine plus something else.
@@ -3490,6 +3555,81 @@ mod tests {
                 "'{}' resolves to {:?}, which nobody legitimately orders",
                 request.reagent,
                 cat
+            );
+        }
+    }
+
+    #[test]
+    fn no_legitimate_request_names_an_illicit_reagent() {
+        // The guarantee that lets illicit drugs lead a double life at all.
+        //
+        // Several of them now carry a legitimate category as well — meth
+        // really is a stimulant — so that filling a stimulant order with one
+        // genuinely satisfies the person who asked. That is only a *choice*
+        // for as long as nobody is ever asked for one directly: orders are
+        // drawn from this authored pool naming a reference reagent, never
+        // generated from categories, and this is what holds that line.
+        //
+        // It is also what makes `addiction::ordinary_medicine_is_never_addictive`
+        // safe to exempt Illicit reagents from. If a request ever named one,
+        // filling an honest order could build a habit by accident, which is
+        // the exact trap that test exists to prevent.
+        let db = db();
+        let config = station_orders();
+        for request in &config.requests {
+            let reagent = db.reagents.id_of(&request.reagent).unwrap();
+            assert!(
+                !db.reagents
+                    .get(reagent)
+                    .categories
+                    .contains(&Category::Illicit),
+                "'{}' is on the legitimate request pool but is Illicit — crew \
+                 must never be asked for one directly",
+                request.reagent
+            );
+        }
+    }
+
+    #[test]
+    fn every_illicit_reagent_keeps_its_illicit_category() {
+        // `security::run_sweep`'s contraband check keys off `Category::Illicit`
+        // alone. Now that several of these carry a legitimate category beside
+        // it, dropping the `Illicit` half while adding the other would quietly
+        // legalise a drug — a raid would walk past it, and the whole risk side
+        // of dealing would evaporate with nothing failing anywhere.
+        //
+        // Named explicitly rather than derived, the same way
+        // `Department::members` hardcodes its roster: these are exactly the
+        // reagents carrying a legitimate category *and* Illicit, so they are
+        // the only ones where tidying the category list could plausibly drop
+        // the wrong half. A derived check cannot express that — `addictive`
+        // does not identify them (hyperzine is legal, orderable and habit-
+        // forming), and "has a legitimate category" is the very thing under
+        // test.
+        let db = db();
+        for key in [
+            "methamphetamine",
+            "bath_salts",
+            "zombie_powder",
+            "krokodil",
+            "aranesp",
+            "pump_up",
+            "kronkaine",
+            "fentanyl",
+        ] {
+            let reagent = db.reagents.get(db.reagents.id_of(key).unwrap());
+            assert!(
+                reagent.categories.contains(&Category::Illicit),
+                "'{key}' builds a habit but is not Illicit, so a contraband \
+                 sweep would walk straight past it"
+            );
+            assert!(
+                reagent
+                    .categories
+                    .iter()
+                    .any(|category| category.is_legitimately_orderable()),
+                "'{key}' is listed here as leading a double life but no longer \
+                 satisfies any legitimate order"
             );
         }
     }

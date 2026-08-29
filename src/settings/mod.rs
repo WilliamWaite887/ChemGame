@@ -712,6 +712,8 @@ pub struct Bindings {
     pub drink: KeyCode,
     pub apply: KeyCode,
     pub book: KeyCode,
+    /// Write on whatever is in hand — see [`crate::labels`].
+    pub label: KeyCode,
 }
 
 impl Default for Bindings {
@@ -727,6 +729,7 @@ impl Default for Bindings {
             drink: KeyCode::KeyR,
             apply: KeyCode::KeyF,
             book: KeyCode::KeyB,
+            label: KeyCode::KeyL,
         }
     }
 }

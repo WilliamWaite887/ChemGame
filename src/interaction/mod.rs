@@ -331,7 +331,12 @@ fn panel_input(
         // up mid-batch is the common case, and having to close the dispenser
         // to do it — losing the claim, and the beaker's place in the queue —
         // was the wrong answer.
-        if book {
+        // Not while the label field is open: `b` is a letter there, and the
+        // reference book is the one keybind in the game that does not already
+        // gate itself on `is_roaming`. Every other action key — move, look,
+        // sprint, drop, drink, apply, use — is disabled for free by
+        // `Labelling` simply not being `Roaming`.
+        if book && !matches!(*mode, InteractionMode::Labelling(_)) {
             *mode = mode.toggled_book();
         }
 
@@ -403,6 +408,13 @@ pub enum InteractionMode {
     /// so the claim is deliberately kept while they read and the book closes
     /// back onto the panel they came from.
     ReadingBook(Option<Entity>),
+    /// Writing on the container they are holding — see [`crate::labels`].
+    ///
+    /// A mode rather than a flag for exactly the reason `ReadingBook` is one:
+    /// it inherits the released cursor and frozen camera, and — because every
+    /// gameplay keybind in the game gates on [`InteractionMode::is_roaming`] —
+    /// typing a label cannot also walk, drop, drink, inject or use anything.
+    Labelling(Entity),
 }
 
 impl InteractionMode {
@@ -422,6 +434,11 @@ impl InteractionMode {
             InteractionMode::ReadingBook(from) => {
                 from.map_or(InteractionMode::Roaming, InteractionMode::UsingMachine)
             }
+            // Unreachable in practice — `panel_input` does not offer the book
+            // key while the label field is open, because a `b` belongs in the
+            // word being typed. Answering "no change" rather than panicking
+            // keeps that a presentation decision rather than an invariant.
+            InteractionMode::Labelling(container) => InteractionMode::Labelling(container),
         }
     }
 
@@ -436,7 +453,8 @@ impl InteractionMode {
         match *self {
             InteractionMode::UsingMachine(machine) => Some(machine),
             InteractionMode::ReadingBook(machine) => machine,
-            InteractionMode::Roaming => None,
+            // A container, not a machine, and nothing to release.
+            InteractionMode::Roaming | InteractionMode::Labelling(_) => None,
         }
     }
 }
@@ -663,6 +681,7 @@ fn update_prompt(
     containers: Query<(), With<Container>>,
     bodies: Query<(), With<crate::body::Body>>,
     crew: Query<&crate::crew::CrewMember>,
+    written: Query<&crate::labels::Label>,
     prompt: Single<&mut Text, With<InteractionPrompt>>,
 ) {
     let mut text = prompt.into_inner();
@@ -689,7 +708,15 @@ fn update_prompt(
                         Ok(member) if empty_handed => {
                             format!("[E]  speak to {}", member.name)
                         }
-                        _ => format!("[E]  {label}"),
+                        // What it *claims* to be, shown beside what the lab
+                        // knows it is. Both, never one replacing the other:
+                        // the chemist who wrote the label is not the person
+                        // being deceived by it, and hiding the truth from
+                        // them would make their own shelf unreadable.
+                        _ => match written.get(target) {
+                            Ok(written) => format!("[E]  {label}   ·   marked “{}”", written.0),
+                            Err(_) => format!("[E]  {label}"),
+                        },
                     },
                 })
             });

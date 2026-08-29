@@ -628,7 +628,7 @@ mod tests {
         assert_eq!(gltf.skins().count(), 1, "the runtime mesh must stay rigged");
         assert_eq!(
             gltf.materials().count(),
-            6,
+            7,
             "the authored character palette must survive export"
         );
         let node_names: Vec<_> = gltf.nodes().filter_map(|node| node.name()).collect();
