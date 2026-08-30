@@ -65,6 +65,13 @@ ron = "0.11"
 # depends on, so `lab::tb_map` validates the map against the real thing rather
 # than against our own idea of the format.
 quake-map = "0.6"
+# `bevy_replicon`'s actual wire encoding — pinned to the version it already
+# depends on. Only for tests that need to prove a type survives postcard
+# specifically, not just RON: postcard is not self-describing, so a
+# hand-written `Deserialize` that only round-trips through RON's forgiveness
+# (`#[serde(default)]` et al.) can still panic-buffer-underrun over the wire.
+# See `arc::tests::campaign_roster_round_trips_through_the_actual_wire_format`.
+postcard = { version = "1.1", features = ["alloc"] }
 
 [profile.dev]
 opt-level = 1

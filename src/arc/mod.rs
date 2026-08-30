@@ -261,6 +261,35 @@ impl<'de> Deserialize<'de> for CampaignRoster {
     where
         D: serde::Deserializer<'de>,
     {
+        // The `Compat` migration below exists to read *save files* written
+        // before `active`/`max_active` existed, back when `CampaignArc`'s
+        // fields sat flat on this resource — a shape that can only appear in
+        // hand-editable, self-describing RON. `CampaignSync` puts this same
+        // type on the replication wire too, encoded with postcard, which is
+        // not self-describing: `deserialize_struct` there is a fixed-arity
+        // positional read (see `postcard::Deserializer::deserialize_struct`,
+        // which forwards straight to `deserialize_tuple(fields.len(), _)`),
+        // so `#[serde(default)]` on `Compat`'s eleven legacy-only fields is
+        // silently meaningless — postcard demands all thirteen fields be
+        // physically present. `Serialize` only ever emits two. The result
+        // was a guaranteed `Hit the end of buffer` on every join, since a
+        // network peer can never have sent the flat legacy save shape in the
+        // first place: nothing on the wire is a save file. Skip the
+        // migration entirely for anything that isn't human-readable and read
+        // the plain current shape instead.
+        if !deserializer.is_human_readable() {
+            #[derive(Deserialize)]
+            struct Wire {
+                active: Vec<CampaignArc>,
+                max_active: usize,
+            }
+            let wire = Wire::deserialize(deserializer)?;
+            return Ok(CampaignRoster {
+                active: wire.active,
+                max_active: wire.max_active,
+            });
+        }
+
         #[derive(Deserialize)]
         struct Compat {
             #[serde(default)]
@@ -1504,6 +1533,26 @@ mod tests {
         let roster: CampaignRoster = ron::from_str(&text).unwrap();
         assert_eq!(roster.active, vec![legacy]);
         assert_eq!(roster.max_active, 1);
+    }
+
+    #[test]
+    fn campaign_roster_round_trips_through_the_actual_wire_format() {
+        // Pins the bug `CampaignSync` shipped with: this type's `Deserialize`
+        // is hand-written to migrate old *save files* (self-describing RON,
+        // where a `#[serde(default)]` field is allowed to simply be absent)
+        // into the current `active`/`max_active` shape. `CampaignSync` sends
+        // this same type over the replication wire too, encoded with
+        // postcard — not self-describing, so `deserialize_struct` there is a
+        // fixed-arity positional read that has no concept of a defaulted or
+        // missing field. Every host a guest joined logged "Hit the end of
+        // buffer, expected more data" and silently dropped the campaign,
+        // because the migration path was reading eleven fields postcard was
+        // never going to supply. RON alone cannot catch this — only actually
+        // going through postcard does.
+        let campaign = Campaign::new(AntagId::Spy, Mode::Chemist, 2);
+        let bytes = postcard::to_allocvec(&campaign).expect("postcard serialize");
+        let roster: CampaignRoster = postcard::from_bytes(&bytes).expect("postcard deserialize");
+        assert_eq!(roster, campaign);
     }
 
     #[test]
