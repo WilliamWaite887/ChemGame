@@ -71,6 +71,12 @@ pub(crate) const ERROR_TEXT: Color = Color::srgb(0.85, 0.35, 0.35);
 /// The counterpart to [`ERROR_TEXT`], for the one notice on the standing board
 /// that can carry good news: an arc that ended with the station still standing.
 pub(crate) const GOOD_TEXT: Color = Color::srgb(0.45, 0.80, 0.50);
+/// Whatever the player wrote on a bottle themselves — see [`crate::labels`].
+///
+/// Its own colour, and warmer than anything the readouts use, because a label
+/// is the one piece of text in this UI the *game* did not write. Every number
+/// beside it is measured; this is a claim, and it needs to look like one.
+pub(crate) const LABEL_INK: Color = Color::srgb(0.92, 0.82, 0.55);
 pub(crate) const BUTTON_IDLE: Color = Color::srgb(0.17, 0.19, 0.23);
 const BUTTON_HOVER: Color = Color::srgb(0.25, 0.29, 0.35);
 /// The "this is the one that is currently set" tint, shared by the dispense
@@ -594,7 +600,14 @@ type MachineParts<'w, 's> = Query<
 >;
 
 /// Whatever a container is holding.
-type SlotContents<'w, 's> = Query<'w, 's, &'static Container>;
+/// What is in the slot, and what is written on the outside of it.
+///
+/// `crate::labels::Label` rides along here rather than as a seventeenth
+/// `sync_panel` parameter, which Bevy's sixteen-parameter ceiling has no room
+/// for — and it belongs here anyway: a container's label is part of reading
+/// the container, not a separate lookup.
+type SlotContents<'w, 's> =
+    Query<'w, 's, (&'static Container, Option<&'static crate::labels::Label>)>;
 
 /// What a locker's panel reads. Bundled because `sync_panel` is already close
 /// to Bevy's sixteen-parameter ceiling, and because these two are only ever
@@ -711,9 +724,15 @@ fn stored_items(
     stored_in(locker, &view.stored)
         .into_iter()
         .map(|item| {
-            let container = containers.get(item).ok();
-            let name = container
-                .map(|container| container.kind.label().to_string())
+            let entry = containers.get(item).ok();
+            let container = entry.map(|(container, _)| container);
+            // A shelf of identical beakers is exactly what labelling is for,
+            // so what is written on one wins over its kind here.
+            let name = entry
+                .and_then(|(_, marked)| marked)
+                .filter(|marked| !marked.0.trim().is_empty())
+                .map(|marked| format!("\"{}\"", marked.0))
+                .or_else(|| container.map(|container| container.kind.label().to_string()))
                 .or_else(|| view.labels.get(item).ok().map(|label| label.label.clone()))
                 .unwrap_or_else(|| "Item".to_string());
             let detail = container.map_or_else(String::new, |container| {
@@ -761,12 +780,16 @@ fn sync_panel(
         _ => None,
     };
     let loaded_entity = open_machine.and_then(|machine| slotted_container(machine, &slotted));
-    let loaded = loaded_entity.and_then(|entity| containers.get(entity).ok());
+    let slot = loaded_entity.and_then(|entity| containers.get(entity).ok());
+    let loaded = slot.map(|(container, _)| container);
+    let marked = slot.and_then(|(_, marked)| marked);
     // The Mixing Chamber's second beaker. `slotted_container_b` simply never
     // matches for any other machine, since only the Mixing Chamber ever gets
     // an `InSlotB` in the first place.
     let loaded_entity_b = open_machine.and_then(|machine| slotted_container_b(machine, &slotted_b));
-    let loaded_b = loaded_entity_b.and_then(|entity| containers.get(entity).ok());
+    let loaded_b = loaded_entity_b
+        .and_then(|entity| containers.get(entity).ok())
+        .map(|(container, _)| container);
     // Derived from the beaker and the chemistry rather than read off a marker
     // component, so a guest can answer it too. `machines::Reacting` is the
     // authority's own bookkeeping and is deliberately not on the wire; a
@@ -960,6 +983,7 @@ fn sync_panel(
                                 amount,
                                 loaded_entity,
                                 loaded,
+                                marked,
                                 reacting,
                             );
                         }
@@ -993,11 +1017,19 @@ fn sync_panel(
                                 hopper,
                                 loaded_entity,
                                 loaded,
+                                marked,
                                 reacting,
                             );
                         }
                         MachineKind::DeliveryWindow => {
-                            delivery_window_body(panel, &db, loaded_entity, loaded, reacting);
+                            delivery_window_body(
+                                panel,
+                                &db,
+                                loaded_entity,
+                                loaded,
+                                marked,
+                                reacting,
+                            );
                         }
                         MachineKind::StandingBoard => {
                             let radio_scroll = board.radio_scroll_state();
@@ -1594,6 +1626,7 @@ fn base_stock_groups(db: &ChemDb) -> Vec<(&'static str, Vec<GridChip<PanelAction
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispenser_body(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
@@ -1601,6 +1634,7 @@ fn dispenser_body(
     amount: Option<&DispenseAmount>,
     container_entity: Option<Entity>,
     loaded: Option<&Container>,
+    marked: Option<&crate::labels::Label>,
     reacting: bool,
 ) {
     let selected = amount.map(|a| a.0).unwrap_or(Units::whole(10));
@@ -1646,7 +1680,7 @@ fn dispenser_body(
         chip_grid(section, BASE_STOCK_CHIP_WIDTH, base_stock_groups(db));
     });
 
-    container_readout(panel, db, container_entity, loaded, reacting, true);
+    container_readout(panel, db, container_entity, loaded, marked, reacting, true);
 }
 
 /// The reaction chamber's target-temperature dial.
@@ -3152,6 +3186,7 @@ fn analyzer_body(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn grinder_body(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
@@ -3159,6 +3194,7 @@ fn grinder_body(
     hopper: Option<&Hopper>,
     container_entity: Option<Entity>,
     loaded: Option<&Container>,
+    marked: Option<&crate::labels::Label>,
     reacting: bool,
 ) {
     panel.spawn(label(
@@ -3211,7 +3247,7 @@ fn grinder_body(
         row.spawn(button("Grind all", PanelAction::Grind { all: true }));
     });
 
-    container_readout(panel, db, container_entity, loaded, reacting, true);
+    container_readout(panel, db, container_entity, loaded, marked, reacting, true);
 }
 
 /// The shelf.
@@ -3276,6 +3312,7 @@ fn delivery_window_body(
     db: &ChemDb,
     container_entity: Option<Entity>,
     loaded: Option<&Container>,
+    marked: Option<&crate::labels::Label>,
     reacting: bool,
 ) {
     panel.spawn(label(
@@ -3285,7 +3322,7 @@ fn delivery_window_body(
         TEXT_DIM,
     ));
 
-    container_readout(panel, db, container_entity, loaded, reacting, false);
+    container_readout(panel, db, container_entity, loaded, marked, reacting, false);
 
     let Some(container) = loaded else {
         return;
@@ -3325,11 +3362,13 @@ fn delivery_window_body(
 }
 
 /// Shared contents readout for whatever is sitting in the machine's slot.
+#[allow(clippy::too_many_arguments)]
 fn container_readout(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
     container_entity: Option<Entity>,
     loaded: Option<&Container>,
+    marked: Option<&crate::labels::Label>,
     reacting: bool,
     show_empty_button: bool,
 ) {
@@ -3363,6 +3402,18 @@ fn container_readout(
                         15.0,
                         TEXT,
                     ));
+
+                    // Under the real readout, never instead of it. The
+                    // chemist always knows what they made; the label is what
+                    // everyone *else* will read, and seeing both at once is
+                    // the point of showing it here at all.
+                    if let Some(marked) = marked.filter(|marked| !marked.0.trim().is_empty()) {
+                        column.spawn(label(
+                            format!("Marked \"{}\"", marked.0),
+                            13.0,
+                            LABEL_INK,
+                        ));
+                    }
 
                     if container.solution.is_empty() {
                         column.spawn(label("Empty.", 14.0, TEXT_DIM));
@@ -5011,6 +5062,20 @@ enum HotbarText {
     Amount(u8),
 }
 
+/// Everything a hotbar cell needs off the thing in the slot: what kind of
+/// glassware it is, what a non-container item calls itself, and whatever the
+/// player wrote on it.
+type HotbarItems<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static InventorySlot,
+        Option<&'static Container>,
+        Option<&'static Interactable>,
+        Option<&'static crate::labels::Label>,
+    ),
+>;
+
 fn hotbar_container_name(kind: ContainerKind) -> &'static str {
     match kind {
         ContainerKind::ChemicalCharge5 => "Charge · 5s",
@@ -5025,6 +5090,23 @@ fn hotbar_container_name(kind: ContainerKind) -> &'static str {
         ContainerKind::SmokeProjector => "Smoke Projector",
         _ => kind.label(),
     }
+}
+
+/// How much of a label a hotbar cell can show.
+///
+/// `labels::MAX_LABEL` (28) is sized for a bottle read at the counter, not for
+/// a slot this narrow. Cut short rather than wrapped, because the cell also
+/// has to hold a key number and a volume, and a name that reflows would move
+/// both of them.
+const HOTBAR_LABEL_CHARS: usize = 13;
+
+fn hotbar_label(marked: &crate::labels::Label) -> String {
+    let text = marked.0.trim();
+    if text.chars().count() <= HOTBAR_LABEL_CHARS {
+        return format!("\"{text}\"");
+    }
+    let cut: String = text.chars().take(HOTBAR_LABEL_CHARS).collect();
+    format!("\"{cut}…\"")
 }
 
 fn spawn_hotbar(mut commands: Commands) {
@@ -5094,7 +5176,7 @@ fn spawn_hotbar(mut commands: Commands) {
 
 fn update_hotbar(
     local: Query<(Entity, &SelectedInventorySlot), With<LocalPlayer>>,
-    items: Query<(&InventorySlot, Option<&Container>, Option<&Interactable>)>,
+    items: HotbarItems,
     mut cells: Query<(&HotbarCell, &mut BackgroundColor, &mut BorderColor)>,
     mut texts: Query<(&HotbarText, &mut Text, &mut TextColor)>,
 ) {
@@ -5129,25 +5211,32 @@ fn update_hotbar(
         };
         let item = items
             .iter()
-            .find(|(entry, _, _)| entry.owner == owner && entry.slot == slot);
+            .find(|(entry, _, _, _)| entry.owner == owner && entry.slot == slot);
         let (wanted, wanted_color) = match part {
             HotbarText::Key(_) => (format!("{}", slot + 1), TEXT_DIM),
             HotbarText::Name(_) => match item {
-                Some((_, Some(container), _)) => {
+                // The label wins over the kind here, and this is the place it
+                // earns the whole feature: a hotbar of four identical beakers
+                // is otherwise four cells reading "Beaker", and telling them
+                // apart means opening each one.
+                Some((_, Some(_), _, Some(marked))) if !marked.0.trim().is_empty() => {
+                    (hotbar_label(marked), LABEL_INK)
+                }
+                Some((_, Some(container), _, _)) => {
                     (hotbar_container_name(container.kind).to_string(), TEXT)
                 }
-                Some((_, None, Some(interactable))) => (interactable.label.clone(), TEXT),
+                Some((_, None, Some(interactable), _)) => (interactable.label.clone(), TEXT),
                 Some(_) => ("Item".to_string(), TEXT),
                 None => ("—".to_string(), Color::srgb(0.34, 0.37, 0.42)),
             },
             HotbarText::Amount(_) => match item {
-                Some((_, Some(container), _)) if container.kind.capacity().is_zero() => {
+                Some((_, Some(container), _, _)) if container.kind.capacity().is_zero() => {
                     ("TOOL".to_string(), TEXT_DIM)
                 }
-                Some((_, Some(container), _)) if container.solution.is_empty() => {
+                Some((_, Some(container), _, _)) if container.solution.is_empty() => {
                     ("EMPTY".to_string(), TEXT_DIM)
                 }
-                Some((_, Some(container), _)) => {
+                Some((_, Some(container), _, _)) => {
                     (format!("{}", container.solution.total_volume()), GOOD_TEXT)
                 }
                 Some(_) => ("ITEM".to_string(), TEXT_DIM),
@@ -6549,6 +6638,41 @@ fn handle_panel_clicks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hotbar_cell_shows_a_short_label_whole_and_quotes_it() {
+        // Quoted so it can never be mistaken for something the game wrote —
+        // a bottle marked "Bicaridine" must not read like a bottle the game
+        // is telling you contains bicaridine.
+        let marked = crate::labels::Label("Bicaridine".to_string());
+        assert_eq!(hotbar_label(&marked), "\"Bicaridine\"");
+    }
+
+    #[test]
+    fn a_hotbar_cell_cuts_a_long_label_short_rather_than_reflowing_the_row() {
+        // `labels::MAX_LABEL` is sized for a bottle, not for this cell, and a
+        // name that wrapped would move the key number and the volume with it.
+        let marked = crate::labels::Label("x".repeat(crate::labels::MAX_LABEL));
+        let shown = hotbar_label(&marked);
+        assert!(shown.ends_with("…\""), "a cut label has to look cut: {shown}");
+        assert!(
+            shown.chars().count() < crate::labels::MAX_LABEL,
+            "the whole point was not to print all {} characters: {shown}",
+            crate::labels::MAX_LABEL
+        );
+    }
+
+    #[test]
+    fn cutting_a_label_short_never_splits_a_character() {
+        // `MAX_LABEL` counts characters and so does this, but the two used to
+        // be easy to write as byte slices — which panics on any label a
+        // player types with an accent in it.
+        let marked = crate::labels::Label("é".repeat(crate::labels::MAX_LABEL));
+        assert_eq!(
+            hotbar_label(&marked).chars().filter(|c| *c == 'é').count(),
+            HOTBAR_LABEL_CHARS
+        );
+    }
 
     #[test]
     fn urgent_dispatch_preempts_and_resumes_routine_traffic() {

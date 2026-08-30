@@ -1436,6 +1436,8 @@ struct ProgressSave {
     saboteur_progress: usize,
     #[serde(default)]
     quack_progress: usize,
+    #[serde(default)]
+    bent_guard_progress: usize,
     /// This save's campaign — which main antagonist it drew, how far along
     /// they are, and how it ended if it has. See `arc::Campaign`.
     ///
@@ -1490,6 +1492,7 @@ fn load_progress(
     smuggler_progress: Option<ResMut<crate::smuggler::SmugglerProgress>>,
     saboteur_progress: Option<ResMut<crate::saboteur::SaboteurProgress>>,
     quack_progress: Option<ResMut<crate::quack::QuackProgress>>,
+    bent_guard_progress: Option<ResMut<crate::bent_guard::BentGuardProgress>>,
     mut thwarted: ResMut<crate::arc::ThwartedAntags>,
     mut addictions: ResMut<crate::addiction::Addictions>,
     estranged: Option<ResMut<crate::estrangement::Estranged>>,
@@ -1555,6 +1558,9 @@ fn load_progress(
     if let Some(mut progress) = quack_progress {
         progress.0 = save.quack_progress;
     }
+    if let Some(mut progress) = bent_guard_progress {
+        progress.0 = save.bent_guard_progress;
+    }
     // Inserted rather than assigned: this runs `OnEnter(Playing)`, before the
     // first `Update`, so `arc::assign_campaign` sees a campaign already here
     // and leaves it alone. A save from before campaigns existed carries `None`
@@ -1617,6 +1623,7 @@ fn persist_progress(
     smuggler_progress: Option<Res<crate::smuggler::SmugglerProgress>>,
     saboteur_progress: Option<Res<crate::saboteur::SaboteurProgress>>,
     quack_progress: Option<Res<crate::quack::QuackProgress>>,
+    bent_guard_progress: Option<Res<crate::bent_guard::BentGuardProgress>>,
     campaign: Option<Res<crate::arc::Campaign>>,
     addictions: Res<crate::addiction::Addictions>,
     estranged: Option<Res<crate::estrangement::Estranged>>,
@@ -1646,6 +1653,7 @@ fn persist_progress(
         smuggler_progress: smuggler_progress.map(|p| p.0).unwrap_or(0),
         saboteur_progress: saboteur_progress.map(|p| p.0).unwrap_or(0),
         quack_progress: quack_progress.map(|p| p.0).unwrap_or(0),
+        bent_guard_progress: bent_guard_progress.map(|p| p.0).unwrap_or(0),
         campaign: campaign.map(|c| c.clone()),
         addictions: addictions.clone(),
         estranged: estranged.map(|e| e.0.clone()).unwrap_or_default(),

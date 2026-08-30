@@ -77,6 +77,7 @@ fn clear_session_state(world: &mut World) {
     reset::<crate::smuggler::SmugglerProgress>(world);
     reset::<crate::saboteur::SaboteurProgress>(world);
     reset::<crate::quack::QuackProgress>(world);
+    reset::<crate::bent_guard::BentGuardProgress>(world);
 
     // System state that used to be `Local` and had to stop being, precisely
     // because a `Local` cannot be reached from here. See each type's own doc.

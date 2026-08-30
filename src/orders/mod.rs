@@ -1775,6 +1775,9 @@ fn handle_delivery(
     chemists: Query<(Entity, &Chemist)>,
     mut knowledge: ResMut<Knowledge>,
     instability: Option<Res<crate::instability::Instability>>,
+    labels: Query<&crate::labels::Label>,
+    estranged: Option<Res<crate::estrangement::Estranged>>,
+    mut suspicion: Option<ResMut<crate::antagonist::SecuritySuspicion>>,
 ) {
     for request in requests.read() {
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
@@ -1794,6 +1797,38 @@ fn handle_delivery(
             continue;
         };
 
+        let kind = OrderKind::of(illicit, crisis, counter);
+        let label = labels.get(container_entity).ok();
+        let is_estranged = estranged
+            .as_ref()
+            .is_some_and(|estranged| estranged.0.contains(&member.name));
+
+        // Face to face, they get to look at the bottle. Whether they bother
+        // is what the relationship buys — see `trust_in_a_label`.
+        if caught_lying(
+            &db,
+            order,
+            kind,
+            &container.solution,
+            label,
+            shift.npc_standing(&member.name),
+            is_estranged,
+            rand::rng().random::<f64>(),
+        ) {
+            // Refused, not graded. They keep their order and their patience
+            // clock, and the chemist keeps the bottle — being caught costs
+            // you the attempt and the relationship, not the glassware.
+            shift.adjust_npc(&member.name, CAUGHT_LYING_PENALTY);
+            if let Some(suspicion) = suspicion.as_mut() {
+                crate::antagonist::nudge_suspicion(suspicion, CAUGHT_LYING_SUSPICION);
+            }
+            continue;
+        }
+
+        let believed = believed_a_lie(&db, order, kind, &container.solution, label)
+            .then(|| claimed_reagent(&db, label))
+            .flatten();
+
         complete_delivery(
             &mut commands,
             &db,
@@ -1810,12 +1845,24 @@ fn handle_delivery(
                 route: &mut route,
                 container_entity,
                 container,
-                kind: OrderKind::of(illicit, crisis, counter),
+                kind,
                 body,
+                believed,
             },
         );
     }
 }
+
+/// What being caught out costs, with the person who caught you.
+///
+/// Individual rather than department-wide: they watched you try it. Deep
+/// enough to matter — three of these walks someone from neutral into
+/// `estrangement`'s range, and an estranged crew member never believes a
+/// label again, which is the real punishment.
+const CAUGHT_LYING_PENALTY: i32 = -5;
+/// And they mention it. Comparable to `antagonist::SUSPICION_PER_DELIVERY`:
+/// being caught passing something off is about as loud as one illicit sale.
+const CAUGHT_LYING_SUSPICION: i32 = 5;
 
 /// One crew member, one order, one container being handed across.
 struct Handover<'a> {
@@ -1834,6 +1881,13 @@ struct Handover<'a> {
     /// fetched it, not this function" shape for everything else; a missing
     /// body just means the dose is never felt rather than a panic.
     body: Option<(&'a mut Body, &'a mut Bloodstream)>,
+    /// What the label claimed this was, when the recipient took it on that
+    /// claim alone — `None` for every honest handover, and for a plain
+    /// wrong-beaker mistake with nothing written on it.
+    ///
+    /// The caller has already decided they believed it (see
+    /// [`caught_lying`]); this is what they believed.
+    believed: Option<ReagentId>,
 }
 
 /// Grades a handover and closes the order out.
@@ -1861,9 +1915,10 @@ fn complete_delivery(
         container,
         kind,
         body,
+        believed,
     } = handover;
 
-    let (mut outcome, matched) = grade(
+    let (mut outcome, mut matched) = grade(
         wanted_for(order, kind, db),
         order.amount,
         &container.solution,
@@ -1871,6 +1926,19 @@ fn complete_delivery(
         db,
     );
     outcome = enforce_minimum_purity(outcome, matched, order.minimum_purity, &container.solution);
+
+    // They read the bottle, believed it, and are grading what they think they
+    // were given. Nothing about the *contents* has changed — the real solution
+    // still goes into them below, still reacts, still grades them later — but
+    // at this counter, in this moment, the delivery is the one on the label.
+    //
+    // This is the whole reward side of lying: standing, research and a clean
+    // report, for a batch that was never made. The bill arrives when the
+    // chemistry does, through `authorized` further down.
+    if let Some(claimed) = believed {
+        outcome = Outcome::Success;
+        matched = Some(claimed);
+    }
 
     // An illicit or specific order always names its (already-known-to-the-
     // player) reagent. A plain lenient order names whatever was actually
@@ -1962,7 +2030,31 @@ fn complete_delivery(
                 // The crew member explicitly requested this handover. Wrong
                 // and overdosed deliveries are already graded and reported by
                 // the order system rather than counted as a second incident.
-                authorized: true,
+                // What they consented to, not merely that they consented.
+                //
+                // This one bool is the entire reveal, and it is what switches
+                // on `chem_world::respond_to_unwanted_exposure` — a complete
+                // consequence system (witness check at 8 m and same room,
+                // severity by illicit/overdose/harmful, the victim leaves,
+                // Security suspicion, a radio report) that every delivery has
+                // been skipping since it was written.
+                //
+                // Three cases, and the middle one is the point:
+                //
+                //  - **Honest.** They asked for a stimulant and got one. No
+                //    incident, whatever it was — this is what lets meth
+                //    answer a stimulant order and cost nothing *here*. Its
+                //    price is `addiction`: they get hooked, and being high in
+                //    front of an officer is what Security eventually notices.
+                //  - **Believed a lie, and it did something.** Harmful,
+                //    illicit or an overdose, taken on a claim that was false.
+                //    That is an incident, and whether it is pinned on you
+                //    depends on who else was in the room to see it.
+                //  - **Believed a lie, and it did nothing.** Water labelled as
+                //    medicine. Disappointing, already graded, not an assault —
+                //    so no incident, and `grade` alone answers for it.
+                authorized: believed.is_none()
+                    || !(assessment.harmful || assessment.illicit || assessment.overdose),
                 helpful: assessment.helpful,
                 harmful: assessment.harmful,
                 illicit: assessment.illicit,
@@ -2009,6 +2101,123 @@ fn container_matches(contents: &Solution, order: &Order, kind: OrderKind, db: &C
         }),
         None => contents.volume_of(order.reagent).is_positive(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Believing the bottle
+// ---------------------------------------------------------------------------
+//
+// A label is a *claim about which chemical this is* — see `crate::labels`.
+// Writing "Bicaridine" on a bottle of krokodil is the whole trick, and these
+// three pure functions are the entirety of whether it works.
+//
+// Note what is deliberately absent: the honest path never reaches any of this.
+// If the contents genuinely satisfy the order — including a double-life drug
+// like meth answering a stimulant request — nobody is being lied to, nothing
+// is rolled, and the delivery grades exactly as it always has.
+
+/// Standing at or above which someone simply takes your word.
+///
+/// The same number `speech`'s `Knows::LikesYou` uses, because it is the same
+/// judgement: a person pleased with you does not audit you.
+const TRUSTS_YOU: i32 = 6;
+
+/// What a label claims the container *is*, if it names a real chemical.
+///
+/// Matched against the reagent's display name rather than its key, because
+/// the player is writing what a crew member would expect to read on a bottle.
+/// Free text that names nothing — "Painkiller", "do not drink", an empty
+/// label — claims nothing and therefore deceives nobody: a crew member who
+/// asked for trauma treatment and is handed a bottle marked "Painkiller" is
+/// not being told it *is* the medicine, only that somebody thinks so.
+pub fn claimed_reagent(db: &ChemDb, label: Option<&crate::labels::Label>) -> Option<ReagentId> {
+    let claim = label?.0.trim();
+    if claim.is_empty() {
+        return None;
+    }
+    db.reagents
+        .iter()
+        .find(|reagent| reagent.name.eq_ignore_ascii_case(claim))
+        .and_then(|reagent| db.reagents.id_of(&reagent.key))
+}
+
+/// Whether a chemical of that name would have satisfied this order.
+pub fn claim_satisfies(db: &ChemDb, claimed: ReagentId, wanted: Wanted) -> bool {
+    match wanted {
+        Wanted::Exact(id) => claimed == id,
+        Wanted::Category(cat) => db.reagents.get(claimed).categories.contains(&cat),
+    }
+}
+
+/// How readily this crew member takes a label at its word, `0.0` to `1.0`.
+///
+/// The relationship *is* the mechanic. Someone pleased with you does not read
+/// the bottle; someone you have burned reads it properly; someone estranged
+/// has stopped accepting anything from you on trust at all. Which means
+/// burning a relationship costs you the ability to lie to that person — and
+/// `Shift::npc_standing`, a meter the game has always tracked per named crew
+/// member and never shown, becomes something the player can feel.
+///
+/// Pure, and takes no RNG, so the whole ladder is testable without a world.
+pub fn trust_in_a_label(standing: i32, estranged: bool) -> f64 {
+    // Bounded by `estrangement`'s own thresholds rather than fresh numbers, so
+    // "cool towards you" means one thing across both systems.
+    if estranged || standing <= crate::estrangement::RECONCILED_AT {
+        return 0.0;
+    }
+    if standing >= TRUSTS_YOU {
+        return 1.0;
+    }
+    let span = (TRUSTS_YOU - crate::estrangement::RECONCILED_AT) as f64;
+    ((standing - crate::estrangement::RECONCILED_AT) as f64 / span).clamp(0.0, 1.0)
+}
+
+/// Whether this handover is a lie that its recipient sees through.
+///
+/// `roll` is the caller's own `0.0..1.0`, kept as a parameter so every band of
+/// [`trust_in_a_label`] can be tested without reaching for a seeded RNG.
+///
+/// `false` for an honest delivery, and `false` for a plain mistake — handing
+/// over the wrong beaker with nothing written on it is not deception, it is a
+/// `Wrong` delivery, and it grades exactly as it always did.
+#[allow(clippy::too_many_arguments)]
+pub fn caught_lying(
+    db: &ChemDb,
+    order: &Order,
+    kind: OrderKind,
+    contents: &Solution,
+    label: Option<&crate::labels::Label>,
+    standing: i32,
+    estranged: bool,
+    roll: f64,
+) -> bool {
+    if container_matches(contents, order, kind, db) {
+        return false;
+    }
+    let Some(claimed) = claimed_reagent(db, label) else {
+        return false;
+    };
+    if !claim_satisfies(db, claimed, wanted_for(order, kind, db)) {
+        return false;
+    }
+    roll >= trust_in_a_label(standing, estranged)
+}
+
+/// Whether a handover only went through because the label lied for it.
+///
+/// The counterpart of [`caught_lying`]: same conditions, opposite side of the
+/// roll. What it gates is *consequence*, not grading — see the `authorized`
+/// computation in [`complete_delivery`].
+pub fn believed_a_lie(
+    db: &ChemDb,
+    order: &Order,
+    kind: OrderKind,
+    contents: &Solution,
+    label: Option<&crate::labels::Label>,
+) -> bool {
+    !container_matches(contents, order, kind, db)
+        && claimed_reagent(db, label)
+            .is_some_and(|claimed| claim_satisfies(db, claimed, wanted_for(order, kind, db)))
 }
 
 /// Which order a container in the window should go to, if any.
@@ -2128,6 +2337,14 @@ fn handle_window_delivery(
                 container,
                 kind: OrderKind::of(illicit, crisis, counter),
                 body,
+                // The delivery window is a drop box, not a conversation.
+                // Nobody is standing there to read the bottle, and
+                // `window_recipient` already refuses to route a beaker to an
+                // order its *contents* cannot satisfy — so a label can neither
+                // fool anyone nor be caught here. Deception is deliberately a
+                // face-to-face act: it costs the walk to the counter, and it
+                // is worth something because someone looked you in the eye.
+                believed: None,
             },
         );
     }
@@ -3557,6 +3774,251 @@ mod tests {
                 cat
             );
         }
+    }
+
+    fn painkiller_order(db: &ChemDb) -> Order {
+        Order {
+            reagent: db.reagent("bicaridine"),
+            specific: false,
+            minimum_purity: 0.0,
+            amount: Units::whole(20),
+            plea: "Something for the pain".to_string(),
+            patience: 60.0,
+            waited: 0.0,
+        }
+    }
+
+    fn marked(text: &str) -> crate::labels::Label {
+        crate::labels::Label(text.to_string())
+    }
+
+    #[test]
+    fn a_label_only_claims_something_when_it_names_a_real_chemical() {
+        let db = db();
+        assert_eq!(
+            claimed_reagent(&db, Some(&marked("Bicaridine"))),
+            Some(db.reagent("bicaridine")),
+            "a bottle marked with a real chemical's name claims to be it"
+        );
+        // Case and whitespace are the player typing, not a different claim.
+        assert_eq!(
+            claimed_reagent(&db, Some(&marked("  bicaridine  "))),
+            Some(db.reagent("bicaridine"))
+        );
+        // Free text names nothing, so it deceives nobody. Someone handed a
+        // bottle marked "Painkiller" has not been told what is in it.
+        assert_eq!(claimed_reagent(&db, Some(&marked("Painkiller"))), None);
+        assert_eq!(claimed_reagent(&db, Some(&marked("  "))), None);
+        assert_eq!(claimed_reagent(&db, None), None);
+    }
+
+    #[test]
+    fn the_relationship_is_what_lets_you_lie_to_them() {
+        // The trust ladder, and the reason `Shift::npc_standing` — hidden
+        // since it was written — suddenly matters to the player.
+        assert_eq!(trust_in_a_label(20, false), 1.0, "a friend takes your word");
+        assert_eq!(trust_in_a_label(TRUSTS_YOU, false), 1.0);
+        assert_eq!(
+            trust_in_a_label(20, true),
+            0.0,
+            "estrangement outranks any amount of standing"
+        );
+        assert_eq!(
+            trust_in_a_label(crate::estrangement::RECONCILED_AT, false),
+            0.0,
+            "someone you have burned reads the bottle"
+        );
+        assert_eq!(trust_in_a_label(-100, false), 0.0);
+        // In between, it really is in between — neither a certainty nor a
+        // coin that always lands the same way.
+        let middling = trust_in_a_label(0, false);
+        assert!(middling > 0.0 && middling < 1.0, "got {middling}");
+    }
+
+    #[test]
+    fn an_honest_delivery_is_never_a_lie_however_it_is_labelled() {
+        // The honest path must not touch any of this. A chemist who made the
+        // real thing and wrote the real name on it — or wrote nothing, or
+        // wrote something silly — is not deceiving anyone, and no roll should
+        // ever be able to refuse them.
+        let db = db();
+        let order = painkiller_order(&db);
+        let honest = solution_of(&db, &[("bicaridine", 20)]);
+
+        for label in [None, Some(&marked("Bicaridine")), Some(&marked("lunch"))] {
+            for roll in [0.0, 0.5, 1.0] {
+                assert!(
+                    !caught_lying(
+                        &db,
+                        &order,
+                        OrderKind::Normal,
+                        &honest,
+                        label,
+                        -100,
+                        true,
+                        roll
+                    ),
+                    "an honest delivery was refused as a lie"
+                );
+            }
+            assert!(!believed_a_lie(
+                &db,
+                &order,
+                OrderKind::Normal,
+                &honest,
+                label
+            ));
+        }
+    }
+
+    #[test]
+    fn meth_answering_a_stimulant_order_is_honest_and_needs_no_label() {
+        // The case that started all this. Meth genuinely is a stimulant, so
+        // nobody is being lied to — no claim, no roll, no refusal, and (in
+        // `complete_delivery`) no incident. The price lives entirely in
+        // `addiction`.
+        let db = db();
+        let order = Order {
+            reagent: db.reagent("hyperzine"),
+            ..painkiller_order(&db)
+        };
+        let swapped = solution_of(&db, &[("methamphetamine", 8)]);
+
+        assert!(
+            !believed_a_lie(&db, &order, OrderKind::Normal, &swapped, None),
+            "meth for a stimulant order is a substitution, not a deception"
+        );
+        assert!(
+            !caught_lying(
+                &db,
+                &order,
+                OrderKind::Normal,
+                &swapped,
+                None,
+                -100,
+                true,
+                1.0
+            ),
+            "there is nothing here for even an estranged crew member to catch"
+        );
+    }
+
+    #[test]
+    fn a_forged_label_fools_a_friend_and_never_an_enemy() {
+        // Krokodil marked as the trauma medicine it is not. Whether it lands
+        // is entirely the relationship.
+        let db = db();
+        let order = painkiller_order(&db);
+        // Space drugs: purely `Illicit`, no legitimate category at all, so
+        // it cannot answer a trauma order on its own merits the way krokodil
+        // now can. Only the bottle says otherwise.
+        let forged = solution_of(&db, &[("space_drugs", 20)]);
+        let label = Some(&marked("Bicaridine"));
+
+        assert!(
+            believed_a_lie(&db, &order, OrderKind::Normal, &forged, label),
+            "the bottle claims to be the medicine they asked for"
+        );
+        assert!(
+            !caught_lying(
+                &db,
+                &order,
+                OrderKind::Normal,
+                &forged,
+                label,
+                20,
+                false,
+                0.99
+            ),
+            "someone who trusts you does not read the bottle"
+        );
+        assert!(
+            caught_lying(
+                &db,
+                &order,
+                OrderKind::Normal,
+                &forged,
+                label,
+                crate::estrangement::ESTRANGED_BELOW,
+                true,
+                0.0
+            ),
+            "someone estranged reads it however lucky the roll"
+        );
+    }
+
+    #[test]
+    fn krokodil_answers_a_painkiller_order_honestly_and_that_is_the_horror() {
+        // Its authored comment has always said it "heals just enough that
+        // someone can tell themselves it is medicine". Now that is mechanical:
+        // krokodil is `Trauma`, so a painkiller order accepts it on its own
+        // merits. No label, no lie, no roll to catch — and because the
+        // delivery is honest, `complete_delivery` marks it authorized and no
+        // incident ever fires.
+        //
+        // The bill still arrives. It is `addictive`, so they come back; it
+        // does real Toxin and Burn damage every dose; and it is `Illicit`, so
+        // a sweep still finds it on your shelf. Nothing about that needed a
+        // forged label, which is exactly what makes it the nastiest option in
+        // the game.
+        let db = db();
+        let order = painkiller_order(&db);
+        let numbing = solution_of(&db, &[("krokodil", 20)]);
+
+        assert!(
+            container_matches(&numbing, &order, OrderKind::Normal, &db),
+            "krokodil is trauma treatment now, and the counter should take it"
+        );
+        assert!(
+            !believed_a_lie(&db, &order, OrderKind::Normal, &numbing, None),
+            "nobody is being deceived — it genuinely is what they asked for"
+        );
+        assert!(
+            db.reagents
+                .get(db.reagent("krokodil"))
+                .effects
+                .iter()
+                .any(|effect| effect.is_harmful()),
+            "and it is still doing them harm while it does it"
+        );
+    }
+
+    #[test]
+    fn a_wrong_beaker_with_nothing_written_on_it_is_a_mistake_not_a_lie() {
+        // Handing over the wrong thing has always been a `Wrong` delivery and
+        // stays one. Deception requires an actual claim — otherwise every
+        // fumbled order would start reading as an assault.
+        let db = db();
+        let order = painkiller_order(&db);
+        let wrong = solution_of(&db, &[("space_drugs", 20)]);
+
+        assert!(!believed_a_lie(
+            &db,
+            &order,
+            OrderKind::Normal,
+            &wrong,
+            None
+        ));
+        assert!(!caught_lying(
+            &db,
+            &order,
+            OrderKind::Normal,
+            &wrong,
+            None,
+            -100,
+            true,
+            1.0
+        ));
+        // ...and a label that names something which would not have satisfied
+        // the order either is not a lie about *this* order.
+        let useless = Some(&marked("Water"));
+        assert!(!believed_a_lie(
+            &db,
+            &order,
+            OrderKind::Normal,
+            &wrong,
+            useless
+        ));
     }
 
     #[test]

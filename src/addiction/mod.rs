@@ -379,8 +379,25 @@ fn notice_the_high(
             .filter(|(_, route, _)| route.phase != CrewPhase::Leaving)
     };
 
-    let security_watching = present()
-        .any(|(member, _, _)| Department::from_role(&member.role) == Some(Department::Security));
+    // An officer with a habit of their own is not a witness. They have the
+    // same reason as the person they would be reporting to let it go, and
+    // without this an officer who is *themselves* hooked and visibly high
+    // satisfies both halves of this check at once and quietly raises
+    // suspicion against the lab off nobody but himself.
+    //
+    // Reachable well before `crate::bent_guard` — `station.antagonist.ron`
+    // has always voiced illicit requests through Security roles, and
+    // `note_doses` hooks whoever drinks it — but a thread built entirely
+    // around selling to an officer is what made it worth stating outright.
+    // It is also the quietest strategy in the game: get the guards on it and
+    // there is nobody left to notice.
+    let security_watching = present().any(|(member, _, _)| {
+        Department::from_role(&member.role) == Some(Department::Security)
+            && !addictions
+                .0
+                .get(&member.name)
+                .is_some_and(|habit| habit.hooked(&script))
+    });
     if !security_watching {
         return;
     }
@@ -914,6 +931,40 @@ mod tests {
         assert!(
             app.world().resource::<SecuritySuspicion>().level() > 0,
             "an addict swaying in front of an officer is the whole risk of dealing"
+        );
+    }
+
+    #[test]
+    fn an_officer_with_a_habit_of_their_own_is_not_watching_anybody() {
+        // The quietest strategy in the game: the witness is a customer.
+        let mut app = addiction_app();
+        plant_addict(&mut app, "Chef Dubois", "Service");
+        plant_addict(&mut app, "Officer Reyes", "Security");
+
+        advance(&mut app, 30.0);
+
+        assert_eq!(
+            app.world().resource::<SecuritySuspicion>().level(),
+            0,
+            "an officer who is on it himself has the same reason as everyone else \
+             in the room to have seen nothing"
+        );
+    }
+
+    #[test]
+    fn a_high_officer_does_not_raise_suspicion_against_himself() {
+        // Both halves of the check used to be satisfiable by one person: the
+        // only Security in the room is also the only addict in the room, and
+        // suspicion climbed against a lab nobody had witnessed anything in.
+        let mut app = addiction_app();
+        plant_addict(&mut app, "Officer Reyes", "Security");
+
+        advance(&mut app, 30.0);
+
+        assert_eq!(
+            app.world().resource::<SecuritySuspicion>().level(),
+            0,
+            "he is the only person here and he is not going to report himself"
         );
     }
 

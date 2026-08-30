@@ -12,15 +12,22 @@
 //! the officer's entrance and exit; a multi-stop patrol would be animation
 //! with no mechanical payoff, since the check runs once regardless of where
 //! the officer's model happens to be standing.
+//!
+//! What the officer *reads*, though, is not simply what is in the bottle.
+//! A [`crate::labels::Label`] is a claim about which chemical a container
+//! holds, and an officer who is not looking very hard takes it at its word —
+//! see [`reads_as`] and [`officer_reads_the_labels`].
 
 use bevy::prelude::*;
-use chem_sim::Category;
+use chem_sim::{Category, ReagentId, Solution};
+use rand::prelude::*;
 use serde::Deserialize;
 
 use crate::antagonist::{clear_suspicion, SecuritySuspicion};
 use crate::chem_data::ChemDb;
 use crate::containers::Container;
 use crate::crew::{spawn_crew_member, CrewDef, CrewPhase, CrewRoute};
+use crate::labels::Label;
 use crate::net::is_authority;
 use crate::orders::{Department, Shift};
 use crate::radio::{RadioEntry, RadioLog};
@@ -53,6 +60,16 @@ impl Plugin for SecurityPlugin {
 /// deliberately holding contraband, where a collapse is an accident.
 const RAID_PENALTY: i32 = -4;
 
+/// What it costs when the officer reads a label, checks it against what is
+/// actually in the bottle, and finds they disagree.
+///
+/// Worse than [`RAID_PENALTY`], because it is a worse fact about you: leaving
+/// contraband on the bench is carelessness, and a forged label is a lie told
+/// directly to the department that would arrest you for it. One notch past
+/// `orders::CAUGHT_LYING_PENALTY` (-5), which is the same offence committed
+/// against someone with no power to charge you.
+const FORGERY_PENALTY: i32 = -6;
+
 /// What a raid actually firing nudges `instability::Instability` by — see
 /// `instability::INCOMPETENCE_PER_IGNORED_SHENANIGAN` for the same scale.
 const RAID_INSTABILITY: i32 = 4;
@@ -69,6 +86,9 @@ pub struct SecurityScript {
     pub dwell_seconds: f32,
     pub warning_line: String,
     pub confiscation_line: String,
+    /// Read instead of `confiscation_line` when what the officer found was a
+    /// label that disagreed with its own contents.
+    pub forged_line: String,
     pub clean_line: String,
 }
 
@@ -209,6 +229,73 @@ fn schedule_raid(
 }
 
 // ---------------------------------------------------------------------------
+// What the officer sees
+// ---------------------------------------------------------------------------
+
+/// Whether Security would seize this chemical on sight.
+///
+/// The one definition of contraband, so a reagent named on a *label* is
+/// judged by exactly the same rule as a reagent actually in the bottle —
+/// which is what stops "meth, marked as bath salts" from counting as cover.
+fn is_contraband(db: &ChemDb, id: ReagentId) -> bool {
+    let reagent = db.reagents.get(id);
+    reagent.categories.contains(&Category::Illicit) || reagent.controlled || reagent.explosive.is_some()
+}
+
+fn holds_contraband(db: &ChemDb, solution: &Solution) -> bool {
+    solution
+        .iter()
+        .any(|(id, amount)| amount.is_positive() && is_contraband(db, id))
+}
+
+/// What one container looks like to an officer standing over it, before any
+/// judgement about how hard they are looking.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Reads {
+    /// Nothing in it Security cares about.
+    Clean,
+    /// Contraband, behind a label claiming to be something legal.
+    Covered,
+    /// Contraband, with nothing written on it to say otherwise.
+    Bare,
+}
+
+/// Classifies one container for the sweep.
+///
+/// Cover requires the label to *name a real, legal chemical* — the same
+/// [`crate::orders::claimed_reagent`] rule the counter uses, so a bottle
+/// marked "Painkiller" or "do not drink" claims nothing here either. Vague
+/// reassurance is not a cover story; a specific false one is.
+fn reads_as(db: &ChemDb, solution: &Solution, label: Option<&Label>) -> Reads {
+    if !holds_contraband(db, solution) {
+        return Reads::Clean;
+    }
+    match crate::orders::claimed_reagent(db, label) {
+        Some(claimed) if !is_contraband(db, claimed) => Reads::Covered,
+        _ => Reads::Bare,
+    }
+}
+
+/// Whether this officer checks the labels against the contents.
+///
+/// Scaled off Security's own standing by the *same* ladder the counter uses
+/// for crew members ([`crate::orders::trust_in_a_label`]), because it is the
+/// same judgement being made: a department pleased with the lab does not
+/// audit the lab. Which means every raid you fail tightens the next one —
+/// the penalty for being caught is also what makes you likelier to be caught
+/// again.
+///
+/// `estranged: false` unconditionally: estrangement is tracked per named
+/// crew member, and the raid officer is built from a synthetic [`CrewDef`]
+/// that is deliberately not on the roster, so there is no relationship to
+/// have broken.
+///
+/// Pure, and takes its own `roll`, so every band is testable without a world.
+fn officer_reads_the_labels(standing: i32, roll: f64) -> bool {
+    roll >= crate::orders::trust_in_a_label(standing, false)
+}
+
+// ---------------------------------------------------------------------------
 // The sweep
 // ---------------------------------------------------------------------------
 
@@ -224,7 +311,7 @@ fn run_sweep(
     script: Option<Res<Script>>,
     time: Res<Time>,
     mut officers: Query<(Entity, &mut RaidOfficer, &mut CrewRoute)>,
-    mut containers: Query<&mut Container>,
+    mut containers: Query<(Entity, &mut Container, Option<&Label>)>,
     mut shift: ResMut<Shift>,
     mut radio: ResMut<RadioLog>,
 ) {
@@ -240,33 +327,62 @@ fn run_sweep(
             continue;
         }
 
-        let mut found = false;
-        for mut container in &mut containers {
-            let contraband = container.solution.iter().any(|(id, amount)| {
-                let reagent = db.reagents.get(id);
-                amount.is_positive()
-                    && (reagent.categories.contains(&Category::Illicit)
-                        || reagent.controlled
-                        || reagent.explosive.is_some())
-            });
-            if contraband {
-                found = true;
-                container.solution.clear();
+        // Two passes, because whether a labelled bottle survives depends on
+        // what the *rest* of the bench looks like, which is not known until
+        // everything has been classified.
+        let suspect: Vec<(Entity, Reads)> = containers
+            .iter()
+            .map(|(id, container, label)| (id, reads_as(&db, &container.solution, label)))
+            .filter(|(_, reads)| *reads != Reads::Clean)
+            .collect();
+
+        let bare = suspect.iter().any(|(_, reads)| *reads == Reads::Bare);
+        // One roll for the whole sweep rather than one per container: this is
+        // a single judgement about how thorough this officer is being. Rolling
+        // per bottle would mean a lab holding ten labelled beakers is caught
+        // near-certainly and one holding a single beaker almost never — which
+        // would punish keeping stock rather than telling a lie.
+        //
+        // And a bare bottle skips the roll entirely. Once the officer has
+        // physically turned up contraband nobody even tried to hide, they are
+        // going to read everything else properly: one careless beaker blows
+        // the cover on every careful one beside it.
+        let seized = bare
+            || (!suspect.is_empty()
+                && officer_reads_the_labels(
+                    shift.standing(Department::Security),
+                    rand::rng().random::<f64>(),
+                ));
+
+        if seized {
+            for (id, _) in &suspect {
+                if let Ok((_, mut container, _)) = containers.get_mut(*id) {
+                    container.solution.clear();
+                }
             }
         }
 
-        if found {
-            shift.adjust(Department::Security, RAID_PENALTY);
+        // Forgery is the more serious finding whenever it is among what was
+        // seized, however the officer came to look that closely.
+        let forged = seized && suspect.iter().any(|(_, reads)| *reads == Reads::Covered);
+
+        if seized {
+            let penalty = if forged { FORGERY_PENALTY } else { RAID_PENALTY };
+            let line = if forged {
+                &script.forged_line
+            } else {
+                &script.confiscation_line
+            };
+            shift.adjust(Department::Security, penalty);
             radio.push(
-                RadioEntry::new(
-                    crate::radio::RadioChannel::Security,
-                    script.confiscation_line.clone(),
-                )
-                .speaker("Officer Reyes")
-                .negative(),
+                RadioEntry::new(crate::radio::RadioChannel::Security, line.clone())
+                    .speaker("Officer Reyes")
+                    .negative(),
             );
-            info!("security raid: contraband confiscated, {RAID_PENALTY} standing");
+            info!("security raid: contraband confiscated, {penalty} standing (forged: {forged})");
         } else {
+            // Identical whether the bench was clean or the labels held. The
+            // player is not told which, and never should be.
             radio.push(
                 RadioEntry::new(
                     crate::radio::RadioChannel::Security,
@@ -275,7 +391,7 @@ fn run_sweep(
                 .speaker("Officer Reyes")
                 .positive(),
             );
-            info!("security raid: clean");
+            info!("security raid: clean ({} covered)", suspect.len());
         }
 
         commands.entity(entity).remove::<RaidOfficer>();
@@ -407,6 +523,50 @@ mod tests {
         app.world_mut().spawn(container).id()
     }
 
+    /// What a crew member would expect to read on a bottle of this, taken
+    /// from the database rather than hardcoded, so renaming a reagent in
+    /// `chem.reagents.ron` cannot quietly turn these labels into gibberish
+    /// that claims nothing and passes for the wrong reason.
+    fn display_name(app: &App, reagent: &str) -> String {
+        let db = app.world().resource::<ChemDb>();
+        db.reagents.get(db.reagent(reagent)).name.clone()
+    }
+
+    fn beaker_marked(app: &mut App, reagent: &str, amount: i32, claim: &str) -> Entity {
+        let text = display_name(app, claim);
+        let beaker = beaker_of(app, reagent, amount);
+        app.world_mut().entity_mut(beaker).insert(Label(text));
+        beaker
+    }
+
+    /// Puts Security's standing at exactly `standing`, which is what decides
+    /// how hard the officer looks.
+    fn security_thinks(app: &mut App, standing: i32) {
+        app.world_mut()
+            .resource_mut::<Shift>()
+            .adjust(Department::Security, standing);
+        assert_eq!(
+            app.world().resource::<Shift>().standing(Department::Security),
+            standing,
+            "test setup: Security's standing is the input to the whole sweep"
+        );
+    }
+
+    fn is_empty(app: &App, beaker: Entity) -> bool {
+        app.world()
+            .get::<Container>(beaker)
+            .unwrap()
+            .solution
+            .is_empty()
+    }
+
+    /// The two ends of the trust ladder where the sweep is deterministic, so
+    /// the end-to-end tests below need no seeded RNG. Both are asserted
+    /// rather than assumed, because they are properties of
+    /// `orders::trust_in_a_label`, which lives in another module.
+    const TAKES_YOUR_WORD: i32 = 6;
+    const READS_EVERYTHING: i32 = crate::estrangement::RECONCILED_AT;
+
     fn advance(app: &mut App, seconds: f32) {
         app.world_mut()
             .resource_mut::<Time>()
@@ -486,6 +646,230 @@ mod tests {
                 .standing(Department::Security),
             0,
             "an empty beaker gives the sweep nothing to find"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Labels
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_two_ends_of_the_ladder_really_are_certain() {
+        // Everything below leans on these, and they are decided in `orders`,
+        // so a change there must break this test rather than silently make
+        // the end-to-end tests flaky.
+        for roll in [0.0, 0.5, 0.999_999] {
+            assert!(
+                !officer_reads_the_labels(TAKES_YOUR_WORD, roll),
+                "an officer who thinks well of the lab takes the label at its word"
+            );
+            assert!(
+                officer_reads_the_labels(READS_EVERYTHING, roll),
+                "an officer who has been burned reads every bottle"
+            );
+        }
+    }
+
+    #[test]
+    fn between_those_ends_the_label_shifts_the_odds_without_settling_them() {
+        // Neutral standing: sometimes read, sometimes believed. The point of
+        // the middle band is that labelling contraband is a gamble, not a
+        // switch.
+        assert!(
+            !officer_reads_the_labels(0, 0.1),
+            "a distracted glance at neutral standing should believe the label"
+        );
+        assert!(
+            officer_reads_the_labels(0, 0.9),
+            "a careful look at neutral standing should catch it"
+        );
+    }
+
+    #[test]
+    fn a_labelled_bottle_survives_a_sweep_that_does_not_look_properly() {
+        let mut app = sweep_app();
+        security_thinks(&mut app, TAKES_YOUR_WORD);
+        officer_waiting(&mut app, 0.5);
+        let beaker = beaker_marked(&mut app, "space_drugs", 15, "bicaridine");
+
+        advance(&mut app, 1.0);
+
+        assert!(
+            !is_empty(&app, beaker),
+            "an officer who takes the label at its word has no reason to seize the bottle"
+        );
+        assert_eq!(
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Security),
+            TAKES_YOUR_WORD,
+            "a sweep that finds nothing costs nothing"
+        );
+    }
+
+    #[test]
+    fn the_report_on_a_forged_bottle_that_held_is_the_same_one_a_clean_bench_gets() {
+        // The deception is worthless if the radio announces that it worked.
+        let mut fooled = sweep_app();
+        security_thinks(&mut fooled, TAKES_YOUR_WORD);
+        officer_waiting(&mut fooled, 0.5);
+        beaker_marked(&mut fooled, "space_drugs", 15, "bicaridine");
+        advance(&mut fooled, 1.0);
+
+        let mut clean = sweep_app();
+        security_thinks(&mut clean, TAKES_YOUR_WORD);
+        officer_waiting(&mut clean, 0.5);
+        beaker_of(&mut clean, "kelotane", 20);
+        advance(&mut clean, 1.0);
+
+        let line_of = |app: &App| app.world().resource::<RadioLog>().entries[0].text.clone();
+        assert_eq!(
+            line_of(&fooled),
+            line_of(&clean),
+            "the player must not be able to tell a cover story that held from an empty bench"
+        );
+    }
+
+    #[test]
+    fn a_bottle_with_nothing_written_on_it_has_no_cover_story() {
+        // Even at the top of the ladder: there is no label to believe, so
+        // thoroughness never enters into it.
+        let mut app = sweep_app();
+        security_thinks(&mut app, TAKES_YOUR_WORD);
+        officer_waiting(&mut app, 0.5);
+        let beaker = beaker_of(&mut app, "space_drugs", 15);
+
+        advance(&mut app, 1.0);
+
+        assert!(is_empty(&app, beaker), "unlabelled contraband is always seized");
+        assert_eq!(
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Security),
+            TAKES_YOUR_WORD + RAID_PENALTY,
+            "carelessness costs the ordinary raid penalty, not the forgery one"
+        );
+    }
+
+    #[test]
+    fn vague_reassurance_on_a_label_is_not_a_cover_story() {
+        // "Painkiller" names no chemical, so it claims nothing — the same
+        // rule `orders::claimed_reagent` applies at the counter.
+        let mut app = sweep_app();
+        security_thinks(&mut app, TAKES_YOUR_WORD);
+        officer_waiting(&mut app, 0.5);
+        let beaker = beaker_of(&mut app, "space_drugs", 15);
+        app.world_mut()
+            .entity_mut(beaker)
+            .insert(Label("Painkiller".to_string()));
+
+        advance(&mut app, 1.0);
+
+        assert!(
+            is_empty(&app, beaker),
+            "a label has to name something specific to be worth believing"
+        );
+    }
+
+    #[test]
+    fn labelling_one_drug_as_another_drug_is_no_cover_at_all() {
+        // Cover is judged by the same contraband rule as contents, so a
+        // bottle marked with a chemical Security would seize anyway reads as
+        // exactly what it is.
+        let mut app = sweep_app();
+        security_thinks(&mut app, TAKES_YOUR_WORD);
+        officer_waiting(&mut app, 0.5);
+        let beaker = beaker_marked(&mut app, "space_drugs", 15, "methamphetamine");
+
+        advance(&mut app, 1.0);
+
+        assert!(
+            is_empty(&app, beaker),
+            "claiming to be a different controlled substance is still claiming to be contraband"
+        );
+    }
+
+    #[test]
+    fn one_careless_bottle_blows_the_cover_on_every_careful_one_beside_it() {
+        let mut app = sweep_app();
+        security_thinks(&mut app, TAKES_YOUR_WORD);
+        officer_waiting(&mut app, 0.5);
+        let careful = beaker_marked(&mut app, "space_drugs", 15, "bicaridine");
+        let careless = beaker_of(&mut app, "space_drugs", 15);
+
+        advance(&mut app, 1.0);
+
+        assert!(is_empty(&app, careless));
+        assert!(
+            is_empty(&app, careful),
+            "an officer holding contraband nobody hid will read everything else properly"
+        );
+    }
+
+    #[test]
+    fn security_reads_the_bottle_properly_once_you_have_burned_them() {
+        let mut app = sweep_app();
+        security_thinks(&mut app, READS_EVERYTHING);
+        officer_waiting(&mut app, 0.5);
+        let beaker = beaker_marked(&mut app, "space_drugs", 15, "bicaridine");
+
+        advance(&mut app, 1.0);
+
+        assert!(
+            is_empty(&app, beaker),
+            "the relationship is what lets you lie to them; burn it and the label is just ink"
+        );
+    }
+
+    #[test]
+    fn being_caught_forging_costs_more_than_being_caught_careless() {
+        // Same contraband, same officer, same standing — the only difference
+        // is whether there was a lie written on the bottle.
+        let cost = |labelled: bool| {
+            let mut app = sweep_app();
+            security_thinks(&mut app, READS_EVERYTHING);
+            officer_waiting(&mut app, 0.5);
+            if labelled {
+                beaker_marked(&mut app, "space_drugs", 15, "bicaridine");
+            } else {
+                beaker_of(&mut app, "space_drugs", 15);
+            }
+            advance(&mut app, 1.0);
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Security)
+                - READS_EVERYTHING
+        };
+
+        let careless = cost(false);
+        let forging = cost(true);
+        assert!(
+            forging < careless,
+            "lying to the department that would arrest you should hurt more than \
+             leaving a beaker out: forging cost {forging}, carelessness cost {careless}"
+        );
+    }
+
+    #[test]
+    fn a_forged_label_never_makes_a_legal_bottle_suspicious() {
+        // The safety property in the other direction: labels only ever help
+        // the sweep decide *what a suspect bottle is*. A container with
+        // nothing contraband in it is `Clean` before any label is consulted,
+        // so writing "Methamphetamine" on water cannot manufacture a raid.
+        let mut app = sweep_app();
+        security_thinks(&mut app, READS_EVERYTHING);
+        officer_waiting(&mut app, 0.5);
+        let beaker = beaker_marked(&mut app, "kelotane", 20, "methamphetamine");
+
+        advance(&mut app, 1.0);
+
+        assert!(!is_empty(&app, beaker), "there was nothing in it to seize");
+        assert_eq!(
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Security),
+            READS_EVERYTHING,
+            "a sweep judges contents; a label only ever explains them"
         );
     }
 }

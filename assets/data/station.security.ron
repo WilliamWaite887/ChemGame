@@ -5,11 +5,18 @@
 // confiscation or a clean report. `threshold` and the delays are tuned so a
 // warning gives real time to reach for `EmptyRequested` at any machine —
 // rinsing a beaker before the officer arrives is meant to work.
+//
+// `clean_line` is deliberately the *same* line whether the bench was actually
+// clean or whether the officer read a forged label and believed it. The
+// player never learns which, and that ambiguity is the whole point of
+// labelling contraband: you find out your cover held only by not being
+// arrested.
 (
     threshold: 15,
     warning_seconds: 25.0,
     dwell_seconds: 4.0,
     warning_line: "Security dispatch reports a spot inspection inbound to Chemistry.",
     confiscation_line: "Chemistry, that's a controlled substance. It's being logged, and it's not coming back.",
+    forged_line: "Chemistry, this bottle doesn't hold what the label says it holds. We're taking all of it.",
     clean_line: "Security swept Chemistry. Nothing out of place. Sorry for the trouble.",
 )

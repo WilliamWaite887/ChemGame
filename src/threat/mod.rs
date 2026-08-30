@@ -351,6 +351,15 @@ pub struct ChainStep {
     /// Whether advancing landed on the final authored entry for the first
     /// time — `obsessed`'s one-shot finale.
     pub reached_finale: bool,
+    /// How the visit actually graded.
+    ///
+    /// [`Trigger`] answers "is this the one thing my thread hangs off," which
+    /// is all five original callers ever needed. `bent_guard` is the first
+    /// with *two* consequences pointing opposite ways — a sale buys a favour,
+    /// a snub buys a grudge — and a single `fires` bool cannot express that.
+    /// Handing back what `step_chain` already read, rather than adding a
+    /// second `Trigger` variant, keeps the choice at the call site.
+    pub outcome: Outcome,
 }
 
 /// Reads this thread's own resolutions off the shared queue, advances its
@@ -391,6 +400,7 @@ pub fn step_chain(
             index,
             fires,
             reached_finale,
+            outcome: report.outcome,
         });
     }
     steps

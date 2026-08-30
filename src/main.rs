@@ -48,6 +48,7 @@ mod session;
 mod settings;
 mod shift;
 mod showdown;
+mod bent_guard;
 mod smuggler;
 mod speech;
 mod threat;
@@ -172,12 +173,19 @@ fn main() {
             estrangement::EstrangementPlugin,
             // The department minors: one per department, running in
             // every save regardless of which main antagonist was drawn.
-            // `obsessed` is Service's, `rogue_security` above is
-            // Security's. Each is independent of every other here.
+            // `obsessed` is Service's. Security has two, and they are two
+            // different people: `rogue_security` above is the officer who
+            // turns on you in the open when standing collapses, and
+            // `bent_guard` is the one who quietly wants what he would
+            // arrest you for. Each is independent of every other here.
             obsessed::ObsessedPlugin,
             smuggler::SmugglerPlugin,
             saboteur::SaboteurPlugin,
             quack::QuackPlugin,
+            // After `security`, whose `Requisition::raid_wards` a sale to
+            // him banks, and after `antagonist`, whose illicit-resolution
+            // handler charges that sale the ordinary way.
+            bent_guard::BentGuardPlugin,
             // A main antagonist, not a minor: gated on the save having
             // drawn the Cult. Cargo's minor is `smuggler`, above.
             cult::CultPlugin,

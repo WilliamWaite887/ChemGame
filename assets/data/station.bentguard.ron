@@ -1,0 +1,76 @@
+// Security's minor antagonist — see `src/bent_guard/mod.rs`.
+//
+// The one department minor whose visits are `IllicitOrder`s, which is why
+// this file has no equivalent of the other four's arrival broadcast: a bent
+// guard who announced himself over the Security channel would not be a bent
+// guard for very long. He walks in, he stands at the counter, and the only
+// thing in the game that says what he wants is the plea on the order itself.
+//
+// The escalation is in how thin the cover story gets. He opens with something
+// he could defend in a hearing and ends with something he plainly cannot, and
+// nothing in the game ever comments on the difference.
+(
+    name: "Cadet Ferreira",
+    role: "Security",
+    color: (0.24, 0.32, 0.48),
+
+    // Rarer than the other minors. Every one of these is a felony for both of
+    // you, and a station where the same officer turns up every four minutes
+    // asking for meth stops reading as a secret.
+    gap_multiplier: (6.0, 10.0),
+
+    visits: [
+        (
+            reagent: "methamphetamine",
+            amount: 15,
+            plea: "Double shift, and the Warden's got me on the docks after. Something to keep sharp. Off the log.",
+        ),
+        (
+            reagent: "bath_salts",
+            amount: 15,
+            plea: "Evidence locker's short a sample and I'd rather not file the discrepancy. You understand.",
+        ),
+        (
+            reagent: "space_drugs",
+            amount: 20,
+            plea: "Not for me. There's a lad in holding who talks a lot more when he's comfortable.",
+        ),
+        (
+            reagent: "methamphetamine",
+            amount: 30,
+            plea: "Same again, double. Don't make a face — you've been making it this whole time.",
+        ),
+        (
+            reagent: "krokodil",
+            amount: 20,
+            plea: "I'm not going to pretend this one's for work. You've come this far.",
+        ),
+    ],
+
+    // Aired quietly on the Security channel a beat after a sale. Never says
+    // what was bought, and never names him — it is the *absence* of a raid,
+    // dressed up as ordinary station paperwork.
+    payoff_lines: [
+        "Security's spot-inspection roster got reshuffled. Chemistry's off it this rotation.",
+        "The inspection log for Chemistry has a gap in it. Nobody's asking about the gap.",
+        "Whatever Security had queued up for the chem lab appears to have been filed somewhere else.",
+        "Word from Security: the lab's clear. No paperwork, no explanation, no follow-up.",
+    ],
+
+    // When he is already doing everything he can and takes the batch anyway.
+    saturated_lines: [
+        "Security's roster is as reshuffled as it's getting. Someone would notice a third time.",
+        "That's the last favour that fits on the sheet. Chemistry's covered as far as it goes.",
+    ],
+
+    // Aired when a visit expires unfilled. He is now an officer who asked a
+    // chemist for drugs and got nothing for it, and the cheapest way to make
+    // that conversation never have happened is for Chemistry to be the thing
+    // under review.
+    snub_lines: [
+        "Security's flagged the chem lab for review. No incident attached, no complainant named.",
+        "Someone in Security has put Chemistry on a watch list. The reason field is blank.",
+        "Security's asking around about the chem lab. Nobody seems to know who started it.",
+        "There's a note on Chemistry in the Security log tonight. It isn't signed.",
+    ],
+)

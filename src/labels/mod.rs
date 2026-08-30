@@ -81,7 +81,15 @@ impl Plugin for LabelPlugin {
                 (
                     // Local: what this player is typing is their own business
                     // until they press Enter.
-                    (start_labelling, type_label, draw_draft).chain(),
+                    //
+                    // The order is load-bearing, and not the obvious one.
+                    // `type_label` runs *before* `start_labelling` so that on
+                    // the frame the field opens, the keypress that opened it
+                    // has already been read and discarded by `type_label`'s
+                    // not-labelling branch. Chained the other way round, the
+                    // binding key types itself as the first character of every
+                    // label — press L and the field opens reading "l".
+                    (type_label, start_labelling, draw_draft).chain(),
                     handle_label_request.run_if(is_authority),
                 )
                     .run_if(in_state(AppState::Playing)),
@@ -203,6 +211,16 @@ fn type_label(
     }
 }
 
+/// The whole field: panel, text and the hint line under it.
+///
+/// Separate from [`DraftField`] because closing the field has to despawn the
+/// *root* — `despawn` takes the descendants with it, but despawning the text
+/// node alone leaves its panel and its hint sitting on screen forever with
+/// nothing written in them.
+#[derive(Component)]
+struct DraftRoot;
+
+/// Just the line being typed, which is the only part that changes.
 #[derive(Component)]
 struct DraftField;
 
@@ -211,7 +229,7 @@ fn draw_draft(
     mut commands: Commands,
     draft: Res<LabelDraft>,
     players: Query<&InteractionMode, With<LocalPlayer>>,
-    field: Query<Entity, With<DraftField>>,
+    field: Query<Entity, With<DraftRoot>>,
     mut text: Query<&mut Text, With<DraftField>>,
 ) {
     let writing = players
@@ -244,6 +262,7 @@ fn draw_draft(
             ..default()
         },
         GlobalZIndex(50),
+        DraftRoot,
         crate::until_we_leave_the_lab(),
         children![
             (
@@ -308,7 +327,149 @@ fn handle_label_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::input::keyboard::{Key, NativeKey};
     use crate::containers::{Container, ContainerKind};
+
+    // -----------------------------------------------------------------------
+    // The field itself
+    // -----------------------------------------------------------------------
+
+    /// Enough app to open, type into and close the field, with the systems in
+    /// the order `LabelPlugin` actually runs them.
+    fn typing_app() -> (App, Entity) {
+        let mut app = App::new();
+        app.init_resource::<LabelDraft>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<crate::settings::Settings>()
+            .add_message::<KeyboardInput>()
+            .add_message::<LabelRequested>()
+            .add_systems(Update, (type_label, start_labelling, draw_draft).chain());
+        let player = app
+            .world_mut()
+            .spawn((LocalPlayer, InteractionMode::Roaming))
+            .id();
+        app.world_mut()
+            .spawn((Container::new(ContainerKind::Bottle), HeldBy(player)));
+        (app, player)
+    }
+
+    /// One keypress, as the window would deliver it: both the pressed-key
+    /// table the bindings read and the character message typing reads.
+    fn press(app: &mut App, key_code: KeyCode, text: &str) {
+        let window = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(key_code);
+        app.world_mut().write_message(KeyboardInput {
+            key_code,
+            logical_key: if text.is_empty() {
+                Key::Unidentified(NativeKey::Unidentified)
+            } else {
+                Key::Character(text.into())
+            },
+            state: ButtonState::Pressed,
+            text: (!text.is_empty()).then(|| text.into()),
+            repeat: false,
+            window,
+        });
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+    }
+
+    fn mode(app: &App, player: Entity) -> InteractionMode {
+        *app.world().get::<InteractionMode>(player).unwrap()
+    }
+
+    #[test]
+    fn the_key_that_opens_the_field_does_not_type_itself_into_it() {
+        // The binding is a letter, and the frame it fires on is also a frame
+        // with that letter's character message in it — so a field opened by
+        // `L` used to open already reading "l", and every label came out with
+        // a stray first character.
+        let (mut app, player) = typing_app();
+
+        press(&mut app, KeyCode::KeyL, "l");
+
+        assert!(
+            matches!(mode(&app, player), InteractionMode::Labelling(_)),
+            "the field should have opened"
+        );
+        assert_eq!(
+            app.world().resource::<LabelDraft>().text,
+            "",
+            "the field opened with the binding key already typed into it"
+        );
+    }
+
+    #[test]
+    fn typing_after_the_field_is_open_still_reaches_the_draft() {
+        // The other half of the ordering fix: discarding the opening frame
+        // must not discard every frame.
+        let (mut app, _) = typing_app();
+        press(&mut app, KeyCode::KeyL, "l");
+
+        press(&mut app, KeyCode::KeyH, "h");
+        press(&mut app, KeyCode::KeyI, "i");
+
+        assert_eq!(app.world().resource::<LabelDraft>().text, "hi");
+    }
+
+    #[test]
+    fn closing_the_field_takes_the_whole_field_off_the_screen() {
+        // `DraftField` marks the text node, which is a grandchild of the panel
+        // it sits in. Despawning *that* left the panel and the "Enter to write
+        // it on" hint on screen for the rest of the shift with nothing in them.
+        let (mut app, player) = typing_app();
+        press(&mut app, KeyCode::KeyL, "l");
+        let drawn = app.world_mut().query::<&Text>().iter(app.world()).count();
+        assert!(drawn > 0, "the field should have drawn something");
+
+        *app.world_mut().get_mut::<InteractionMode>(player).unwrap() = InteractionMode::Roaming;
+        app.update();
+
+        assert_eq!(
+            app.world_mut().query::<&Text>().iter(app.world()).count(),
+            0,
+            "closing the field left {} piece(s) of it on screen",
+            app.world_mut().query::<&Text>().iter(app.world()).count()
+        );
+        assert_eq!(
+            app.world_mut().query::<&Node>().iter(app.world()).count(),
+            0,
+            "the panel behind the text outlived the text"
+        );
+    }
+
+    #[test]
+    fn committing_a_label_closes_the_field_behind_it() {
+        // The route the player actually takes out of the field, as opposed to
+        // the Escape one `interaction::panel_input` owns.
+        let (mut app, player) = typing_app();
+        press(&mut app, KeyCode::KeyL, "l");
+        press(&mut app, KeyCode::KeyH, "h");
+
+        press(&mut app, KeyCode::Enter, "");
+
+        assert_eq!(mode(&app, player), InteractionMode::Roaming);
+        assert_eq!(
+            app.world_mut().query::<&Node>().iter(app.world()).count(),
+            0,
+            "pressing Enter left the field on screen"
+        );
+        let sent: Vec<String> = app
+            .world_mut()
+            .resource_mut::<Messages<LabelRequested>>()
+            .drain()
+            .map(|request| request.text)
+            .collect();
+        assert_eq!(sent, vec!["h".to_string()]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Writing it on
+    // -----------------------------------------------------------------------
 
     fn labelling_app() -> (App, Entity, Entity) {
         let mut app = App::new();
