@@ -5231,6 +5231,18 @@
 }
 // entity 237
 {
+"classname" "crisis_spot"
+"origin" "-1800 1300 40"
+"id" "cult.finale_guard_1"
+}
+// entity 238
+{
+"classname" "crisis_spot"
+"origin" "-1880 1380 40"
+"id" "cult.finale_guard_2"
+}
+// entity 237
+{
 "classname" "light_point"
 "origin" "-400 1600 -60"
 "color" "1 0.72 0.24"

@@ -590,6 +590,7 @@ pub(crate) struct ArcHeadline {
     /// Cult-only case file: discovered anchors and the number neutralised.
     pub(crate) incidents: usize,
     pub(crate) treated_incidents: usize,
+    support_only: bool,
     resolved: Option<bool>,
 }
 
@@ -621,6 +622,9 @@ pub(crate) fn arc_headline(campaign: &Campaign, script: Option<&ArcScript>) -> O
         total: campaign.countered.len(),
         incidents: campaign.cult_incidents.len(),
         treated_incidents: campaign.cult_incidents.iter().filter(|done| **done).count(),
+        support_only: script
+            .and_then(|script| script.antagonist(campaign.antag))
+            .is_some_and(|def| def.counter_role == crate::arc::CounterTrackRole::SupportOnly),
         resolved: campaign.player_won(),
     })
 }
@@ -1662,6 +1666,10 @@ fn draw_arc_notice(panel: &mut ChildSpawnerCommands, arc: &ArcHeadline) {
             "Command won't say what. Departments are filing requests they won't explain."
                 .to_string()
         }
+        None if arc.total > 0 && arc.support_only => format!(
+            "Departments have filed {} of {} support reports. Their findings point toward direct intervention.",
+            arc.countered, arc.total
+        ),
         None if arc.total > 0 => format!(
             "Departments have {} of {} countermeasures in hand. They are asking you for the rest.",
             arc.countered, arc.total
@@ -1670,14 +1678,16 @@ fn draw_arc_notice(panel: &mut ChildSpawnerCommands, arc: &ArcHeadline) {
     };
     panel.spawn(label(detail, 12.0, TEXT_DIM));
     if arc.incidents > 0 {
-        panel.spawn(label(
-            format!(
-                "Cult case file: {} of {} manifestations neutralised. Each ward weakens the final breach.",
-                arc.treated_incidents, arc.incidents
-            ),
-            12.0,
-            TEXT_DIM,
-        ));
+        let status = if arc.treated_incidents >= crate::cult::FINALE_WARDS {
+            "Source exposed — the Chapel focus can be confronted."
+        } else if arc.treated_incidents >= 3 {
+            "Outer wards failing — the pattern is drawing toward a source."
+        } else if arc.treated_incidents > 0 {
+            "Pattern emerging — direct intervention is weakening it."
+        } else {
+            "Ritual signs documented — none neutralised yet."
+        };
+        panel.spawn(label(format!("Cult case file: {status}"), 12.0, TEXT_DIM));
     }
 }
 

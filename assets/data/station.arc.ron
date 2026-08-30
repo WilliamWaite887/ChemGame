@@ -78,15 +78,18 @@
         (
             id: Cult,
             display: "The Blood Cult",
+            // Department requests expose the ritual; the chemist still has
+            // to go to the Chapel and stop it in person.
+            counter_role: SupportOnly,
             // The ritual completes in your lab, and it did not come alone:
             // the breach is guarded. Ward count (`cult_incidents`) shrinks
             // the guard count same as it shrinks the gas, but never to zero
             // — there is always at least one to put down.
-            showdown: Siege(
-                spot: "showdown.breach",
+            showdown: Ritual(
+                spot: "cult.altar",
                 gas_reagent: "chloral_hydrate",
                 cure_reagent: "dylovene",
-                guard_count: 2,
+                guard_spots: ["cult.finale_guard_1", "cult.finale_guard_2"],
                 guard_name: "A Masked Acolyte",
             ),
             showdown_line: "It's HERE. The marks are burning through the lab wall and the air is going wrong.",

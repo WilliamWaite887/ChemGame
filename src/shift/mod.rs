@@ -1450,6 +1450,16 @@ struct ProgressSave {
     /// reached. See `cult::CultProgress`.
     #[serde(default)]
     cult_progress: usize,
+    /// Authority-only timed Cult state added after the original stage index.
+    /// Separate defaulted fields keep the old scalar save format readable.
+    #[serde(default)]
+    cult_wave_remaining: f32,
+    #[serde(default)]
+    cult_offered_stage: Option<usize>,
+    #[serde(default)]
+    cult_banked_intel: usize,
+    #[serde(default)]
+    cult_finale_started: bool,
     /// How far into each department minor's authored chain the career has
     /// reached — Cargo's, Engineering's and Medical's respectively. Same
     /// reasoning as `obsessed_progress`: an escalation the player is meant to
@@ -1608,7 +1618,11 @@ fn load_progress(
         progress.0 = save.obsessed_progress;
     }
     if let Some(mut progress) = cult_progress {
-        progress.0 = save.cult_progress;
+        progress.next_stage = save.cult_progress;
+        progress.wave_remaining = save.cult_wave_remaining;
+        progress.offered_stage = save.cult_offered_stage;
+        progress.banked_intel = save.cult_banked_intel;
+        progress.finale_started = save.cult_finale_started;
     }
     if let Some(mut progress) = smuggler_progress {
         progress.0 = save.smuggler_progress;
@@ -1710,7 +1724,17 @@ fn persist_progress(
         underworld_standing: underworld.map(|u| u.level()).unwrap_or(0),
         rogue_redeemed: rogue_redeemed.map(|r| r.0).unwrap_or(false),
         obsessed_progress: obsessed_progress.map(|p| p.0).unwrap_or(0),
-        cult_progress: cult_progress.map(|p| p.0).unwrap_or(0),
+        cult_progress: cult_progress.as_ref().map(|p| p.next_stage).unwrap_or(0),
+        cult_wave_remaining: cult_progress
+            .as_ref()
+            .map(|p| p.wave_remaining)
+            .unwrap_or(0.0),
+        cult_offered_stage: cult_progress.as_ref().and_then(|p| p.offered_stage),
+        cult_banked_intel: cult_progress.as_ref().map(|p| p.banked_intel).unwrap_or(0),
+        cult_finale_started: cult_progress
+            .as_ref()
+            .map(|p| p.finale_started)
+            .unwrap_or(false),
         smuggler_progress: smuggler_progress.map(|p| p.0).unwrap_or(0),
         saboteur_progress: saboteur_progress.map(|p| p.0).unwrap_or(0),
         quack_progress: quack_progress.map(|p| p.0).unwrap_or(0),
@@ -3258,6 +3282,25 @@ mod tests {
         let back: ProgressSave = ron::from_str(&text).unwrap();
 
         assert_eq!(back.campaign, Some(campaign));
+    }
+
+    #[test]
+    fn timed_cult_state_survives_a_save_round_trip() {
+        let save = ProgressSave {
+            cult_progress: 2,
+            cult_wave_remaining: 317.5,
+            cult_offered_stage: Some(2),
+            cult_banked_intel: 1,
+            cult_finale_started: true,
+            ..default()
+        };
+        let text = ron::ser::to_string(&save).unwrap();
+        let restored: ProgressSave = ron::from_str(&text).unwrap();
+        assert_eq!(restored.cult_progress, 2);
+        assert_eq!(restored.cult_wave_remaining, 317.5);
+        assert_eq!(restored.cult_offered_stage, Some(2));
+        assert_eq!(restored.cult_banked_intel, 1);
+        assert!(restored.cult_finale_started);
     }
 
     #[test]

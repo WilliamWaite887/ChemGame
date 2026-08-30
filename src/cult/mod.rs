@@ -12,12 +12,13 @@
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use chem_sim::Units;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 use crate::body::Body;
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, ContainerKind, HeldBy};
-use crate::crew::{spawn_crew_member, Ambient, CrewDef, CrewRoute};
+use crate::crew::{spawn_crew_member, Ambient, CrewDef, CrewMember, CrewRoute};
 use crate::interaction::{InteractRequested, Interactable};
 use crate::lab::{CrisisSpots, MapReady};
 use crate::machines::chemist_entity;
@@ -30,6 +31,12 @@ use crate::threat;
 use crate::AppState;
 
 const REWARD_SPOT: Vec3 = Vec3::new(2.4, 1.0, 2.5);
+const FIRST_WAVE_SECONDS: (f32, f32) = (360.0, 540.0);
+const LATER_WAVE_SECONDS: (f32, f32) = (600.0, 840.0);
+const CLOSED_CLOCK_SCALE: f32 = 0.5;
+const WAVE_PLOT: i32 = 8;
+const WARD_RELIEF: i32 = -4;
+pub const FINALE_WARDS: usize = 5;
 
 pub struct CultPlugin;
 
@@ -49,11 +56,16 @@ impl Plugin for CultPlugin {
             Update,
             (
                 restore_incidents,
-                generate_cult_visit,
                 handle_cult_resolution,
+                advance_ritual_clock,
+                generate_cult_visit,
+                handle_counter_support,
                 handle_incident_delivery,
                 aggro_cultists,
                 credit_defeated_guards,
+                expose_finale,
+                start_finale,
+                remember_started_finale,
             )
                 .chain()
                 .after(threat::PromoteScripts)
@@ -77,8 +89,35 @@ impl Plugin for CultPlugin {
 
 /// Which authored stage fires next. Persisted, same as
 /// `obsessed::ObsessedProgress`.
-#[derive(Resource, Default, Clone, Copy)]
-pub struct CultProgress(pub usize);
+#[derive(Resource, Clone, Debug)]
+pub struct CultProgress {
+    /// The next timed wave/offer in `CultScript::stages`.
+    pub next_stage: usize,
+    /// Authority-only countdown for that wave.
+    pub wave_remaining: f32,
+    /// The one stage Corwin has already offered, if any.
+    pub offered_stage: Option<usize>,
+    /// Stable owner so a later campaign cannot inherit this one's timer.
+    pub campaign: Option<crate::arc::CampaignId>,
+    /// Department reports earned while no active objective needed one.
+    pub banked_intel: usize,
+    /// Once true, reloading may restart the confrontation but never return to
+    /// the investigation phase.
+    pub finale_started: bool,
+}
+
+impl Default for CultProgress {
+    fn default() -> Self {
+        Self {
+            next_stage: 0,
+            wave_remaining: 0.0,
+            offered_stage: None,
+            campaign: None,
+            banked_intel: 0,
+            finale_started: false,
+        }
+    }
+}
 
 /// `assets/data/station.cult.ron`, as written.
 #[derive(Asset, TypePath, Deserialize)]
@@ -189,6 +228,11 @@ pub struct RitualAnchor {
     amount: Units,
 }
 
+/// The exposed outer focus. Interacting starts the Chapel confrontation; it
+/// is not itself the seal target, so the first interaction consumes nothing.
+#[derive(Component, Serialize, Deserialize)]
+pub struct RitualFocus;
+
 /// A hostile cult member. Reuses `showdown::Pursuit` wholesale for
 /// movement/combat — there is nothing cult-specific to duplicate there, so
 /// defeating one is exactly like defeating `showdown::Assailant`: any dose
@@ -222,6 +266,7 @@ fn reset_incident_restore(mut restored: ResMut<CultIncidentsRestored>) {
 #[allow(clippy::too_many_arguments)]
 fn restore_incidents(
     mut commands: Commands,
+    db: Res<ChemDb>,
     script: Option<Res<Script>>,
     campaign: Option<Res<crate::arc::Campaign>>,
     spots: Res<CrisisSpots>,
@@ -273,10 +318,14 @@ fn restore_incidents(
             radio.push(
                 RadioEntry::new(
                     crate::radio::RadioChannel::Lab,
-                    format!(
-                        "The {} is still waiting for someone to intervene.",
-                        incident.name
-                    ),
+                    if campaign.cult_reported.get(index) == Some(&true) {
+                        objective_intel(&db, &script, index).unwrap_or_else(|| {
+                            format!("The {} is still waiting for intervention.", incident.name)
+                        })
+                    } else {
+                        "An unresolved ritual disturbance is still present somewhere on the station."
+                            .to_string()
+                    },
                 )
                 .negative()
                 .urgent(),
@@ -306,9 +355,16 @@ fn restore_incidents(
         };
         place_guard(&mut commands, &stage.guard, index, transform);
         radio.push(
-            RadioEntry::new(crate::radio::RadioChannel::Lab, stage.guard.clue.clone())
-                .negative()
-                .urgent(),
+            RadioEntry::new(
+                crate::radio::RadioChannel::Lab,
+                if campaign.cult_reported.get(index) == Some(&true) {
+                    objective_intel(&db, &script, index).unwrap_or_else(|| stage.guard.clue.clone())
+                } else {
+                    "An unresolved Cult defender remains somewhere beyond the lab.".to_string()
+                },
+            )
+            .negative()
+            .urgent(),
         );
     }
     // The altar — unconditional, so it restores whenever it is not already
@@ -335,9 +391,18 @@ fn restore_incidents(
                 crate::until_we_leave_the_lab(),
             ));
             radio.push(
-                RadioEntry::new(crate::radio::RadioChannel::Lab, script.altar.clue.clone())
-                    .negative()
-                    .urgent(),
+                RadioEntry::new(
+                    crate::radio::RadioChannel::Lab,
+                    if campaign.cult_reported.get(altar_index) == Some(&true) {
+                        objective_intel(&db, &script, altar_index)
+                            .unwrap_or_else(|| script.altar.clue.clone())
+                    } else {
+                        "Service reports an old stain in the Chapel that does not belong there."
+                            .to_string()
+                    },
+                )
+                .negative()
+                .urgent(),
             );
         } else {
             error!(
@@ -361,6 +426,91 @@ fn arm_spawner(mut commands: Commands) {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn advance_ritual_clock(
+    mut commands: Commands,
+    time: Res<Time>,
+    db: Res<ChemDb>,
+    spots: Res<CrisisSpots>,
+    script: Option<Res<Script>>,
+    arc_script: Option<Res<crate::arc::Script>>,
+    campaign: Option<ResMut<crate::arc::Campaign>>,
+    mut progress: ResMut<CultProgress>,
+    shift: Res<Shift>,
+    mut radio: ResMut<RadioLog>,
+    active_offers: Query<(Entity, &CrewMember), With<crate::orders::HostileOrder>>,
+) {
+    let (Some(script), Some(arc_script), Some(mut campaign)) = (script, arc_script, campaign)
+    else {
+        return;
+    };
+    if progress.campaign.is_some_and(|owner| owner != campaign.id) {
+        *progress = CultProgress::default();
+    }
+    progress.campaign = Some(campaign.id);
+    if progress.finale_started {
+        campaign.plot = campaign.plot.max(arc_script.showdown_at);
+        return;
+    }
+    if progress.next_stage >= script.stages.len() || campaign.outcome.is_some() {
+        return;
+    }
+    if progress.wave_remaining <= 0.0 {
+        progress.wave_remaining = roll_wave_delay(progress.next_stage);
+        return;
+    }
+
+    if !tick_wave_clock(
+        &mut progress.wave_remaining,
+        time.delta_secs(),
+        shift.accepting_orders,
+    ) {
+        return;
+    }
+
+    for (entity, crew) in &active_offers {
+        if crew.name == script.name {
+            commands.entity(entity).despawn();
+        }
+    }
+    let stage_index = progress.next_stage;
+    activate_stage(
+        &mut commands,
+        &db,
+        &spots,
+        &script,
+        stage_index,
+        &mut campaign,
+        &mut progress,
+        &mut radio,
+        false,
+        0,
+    );
+}
+
+fn roll_wave_delay(stage: usize) -> f32 {
+    let range = if stage == 0 {
+        FIRST_WAVE_SECONDS
+    } else {
+        LATER_WAVE_SECONDS
+    };
+    rand::rng().random_range(range.0..=range.1)
+}
+
+fn tick_wave_clock(remaining: &mut f32, delta_seconds: f32, accepting_orders: bool) -> bool {
+    let scale = if accepting_orders {
+        1.0
+    } else {
+        CLOSED_CLOCK_SCALE
+    };
+    *remaining -= delta_seconds * scale;
+    *remaining <= 0.0
+}
+
+fn enough_wards(campaign: &crate::arc::Campaign) -> bool {
+    campaign.cult_incidents.iter().filter(|done| **done).count() >= FINALE_WARDS
+}
+
+#[allow(clippy::too_many_arguments)]
 fn generate_cult_visit(
     mut commands: Commands,
     time: Res<Time>,
@@ -368,7 +518,7 @@ fn generate_cult_visit(
     station: Option<Res<StationData>>,
     script: Option<Res<Script>>,
     mut spawner: Option<ResMut<CultSpawner>>,
-    progress: Res<CultProgress>,
+    mut progress: ResMut<CultProgress>,
     shift: Res<Shift>,
     mut radio: ResMut<RadioLog>,
     chemists: Query<(), With<Chemist>>,
@@ -376,6 +526,11 @@ fn generate_cult_visit(
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
     };
+    if progress.next_stage >= script.stages.len()
+        || progress.offered_stage == Some(progress.next_stage)
+    {
+        return;
+    }
     let mut rng = rand::rng();
     let rules = current_rules(&station.config, &shift, chemists.iter().count());
     let Some(stage) = threat::due_visit(
@@ -385,7 +540,7 @@ fn generate_cult_visit(
         &rules,
         &mut rng,
         script.gap_multiplier,
-        threat::ChainProgress(progress.0),
+        threat::ChainProgress(progress.next_stage),
         &script.stages,
     ) else {
         return;
@@ -410,6 +565,7 @@ fn generate_cult_visit(
         },
     );
     commands.entity(visitor).insert(crate::orders::HostileOrder);
+    progress.offered_stage = Some(progress.next_stage);
 
     radio.push(
         RadioEntry::new(channel_for(&script.role), stage.pretext.clone())
@@ -417,13 +573,13 @@ fn generate_cult_visit(
             .negative(),
     );
 
-    info!("cult: {} stage {}", script.name, progress.0);
+    info!("cult offer: {} stage {}", script.name, progress.next_stage);
 }
 
-/// Advances the ritual only on a successful delivery — matched by name for
+/// Accelerates the ritual only on a successful delivery — matched by name for
 /// the same reason `obsessed::handle_obsessed_resolution` is. Declining or
-/// botching a stage falls through to the ordinary reputation penalty and
-/// the ritual simply never moves.
+/// botching a stage spends that offer while the independent wave clock keeps
+/// running.
 #[allow(clippy::too_many_arguments)]
 fn handle_cult_resolution(
     mut commands: Commands,
@@ -436,58 +592,79 @@ fn handle_cult_resolution(
     mut progress: ResMut<CultProgress>,
     mut radio: ResMut<RadioLog>,
 ) {
-    let Some(script) = script else {
+    let (Some(script), Some(db), Some(spots), Some(arc_script), Some(mut campaign)) =
+        (script, db, spots, arc_script, campaign)
+    else {
         resolved.clear();
         return;
     };
-    let mut campaign = campaign;
-    // The inversion, and the reason `Trigger`/`Advance` are two separate
-    // axes rather than one: a *fulfilled* stage is what advances the ritual
-    // against you, and a declined one leaves it exactly where it was. Every
-    // department minor is the other way round on both counts.
-    let mut chain = threat::ChainProgress(progress.0);
-    let steps = threat::step_chain(
-        &mut resolved,
-        &mut chain,
-        &script.name,
-        script.stages.len(),
-        threat::Trigger::Fulfilled,
-        threat::Advance::OnTrigger,
-    );
-    progress.0 = chain.0;
-
-    for step in steps {
-        if !step.fires {
+    for report in resolved.read() {
+        if report.name != script.name || report.kind != crate::orders::OrderKind::Hostile {
             continue;
         }
-        let stage_index = step.index;
-        if let Some(stage) = script.stages.get(stage_index) {
-            radio.push(
-                RadioEntry::new(channel_for(&script.role), stage.ritual_line.clone())
-                    .speaker(&script.name)
-                    .negative(),
-            );
-            if let (Some(db), Some(spots)) = (db.as_deref(), spots.as_deref()) {
-                spawn_stage_consequences(
-                    &mut commands,
-                    db,
-                    spots,
-                    &script,
-                    stage,
-                    stage_index,
-                    &mut campaign,
-                    &mut radio,
-                );
-            }
+        let stage_index = progress.next_stage;
+        if progress.offered_stage != Some(stage_index) || !report.outcome.is_good() {
+            continue;
         }
-        // A fulfilled stage is the ritual moving forward, so it moves the
-        // campaign the same distance a fulfilled illicit order does. Without
-        // this the Cult could run its entire authored chain to the finale
-        // while its own plot meter sat wherever ambient drift had left it.
-        if let (Some(arc_script), Some(campaign)) = (arc_script.as_deref(), campaign.as_mut()) {
-            crate::arc::nudge_plot(campaign, arc_script.plot_per_aid);
-        }
+        activate_stage(
+            &mut commands,
+            &db,
+            &spots,
+            &script,
+            stage_index,
+            &mut campaign,
+            &mut progress,
+            &mut radio,
+            true,
+            arc_script.plot_per_aid,
+        );
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn activate_stage(
+    commands: &mut Commands,
+    db: &ChemDb,
+    spots: &CrisisSpots,
+    script: &CultScript,
+    stage_index: usize,
+    campaign: &mut crate::arc::Campaign,
+    progress: &mut CultProgress,
+    radio: &mut RadioLog,
+    reward: bool,
+    aid_plot: i32,
+) {
+    let Some(stage) = script.stages.get(stage_index) else {
+        return;
+    };
+    radio.push(
+        RadioEntry::new(channel_for(&script.role), stage.ritual_line.clone())
+            .speaker(&script.name)
+            .negative(),
+    );
+    spawn_stage_consequences(
+        commands,
+        db,
+        spots,
+        script,
+        stage,
+        stage_index,
+        campaign,
+        radio,
+        reward,
+    );
+    while progress.banked_intel > 0 && reveal_next_objective(db, script, campaign, radio) {
+        progress.banked_intel -= 1;
+    }
+    crate::arc::nudge_plot(campaign, WAVE_PLOT + aid_plot);
+    progress.next_stage = stage_index + 1;
+    progress.offered_stage = None;
+    progress.wave_remaining = if progress.next_stage < script.stages.len() {
+        roll_wave_delay(progress.next_stage)
+    } else {
+        0.0
+    };
+    info!("cult wave activated: stage {stage_index}");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -498,24 +675,21 @@ fn spawn_stage_consequences(
     script: &CultScript,
     stage: &CultStageDef,
     stage_index: usize,
-    campaign: &mut Option<ResMut<crate::arc::Campaign>>,
+    campaign: &mut crate::arc::Campaign,
     radio: &mut RadioLog,
+    reward: bool,
 ) {
     let base = script.stage_ward_base(stage_index);
     let guard_index = script.guard_ward_index(stage_index);
     // The guard's slot is always the last of this stage's three, so reserving
     // up to it also reserves the two anchors — one resize covers the block.
-    if let Some(campaign) = campaign.as_mut() {
-        if campaign.cult_incidents.len() < guard_index + 1 {
-            campaign.cult_incidents.resize(guard_index + 1, false);
-        }
+    if campaign.cult_incidents.len() < guard_index + 1 {
+        campaign.cult_incidents.resize(guard_index + 1, false);
+        campaign.cult_reported.resize(guard_index + 1, false);
     }
     for (offset, incident) in stage.incidents.iter().enumerate() {
         let index = base + offset;
-        if campaign
-            .as_ref()
-            .is_some_and(|c| c.cult_incidents.get(index) == Some(&true))
-        {
+        if campaign.cult_incidents.get(index) == Some(&true) {
             continue;
         }
         let Some(transform) = spots.get(&incident.spot) else {
@@ -540,33 +714,130 @@ fn spawn_stage_consequences(
             crate::until_we_leave_the_lab(),
         ));
         radio.push(
-            RadioEntry::new(crate::radio::RadioChannel::Lab, incident.clue.clone())
-                .negative()
-                .urgent(),
+            RadioEntry::new(
+                crate::radio::RadioChannel::Lab,
+                "A new ritual disturbance has been reported somewhere beyond the lab.".to_string(),
+            )
+            .negative()
+            .urgent(),
         );
     }
     // The payment is physical stock at the counter, not an invisible bonus.
-    if let Some(reagent) = db.reagents.id_of(&stage.reward_reagent) {
-        let mut vial = Container::new(ContainerKind::Bottle);
-        let _ = vial.solution.add_profiled(
-            reagent,
-            Units::whole(stage.reward_amount as i32),
-            1.0,
-            db.reagents.get(reagent).ph,
-        );
-        commands.spawn((
-            vial,
-            Transform::from_translation(REWARD_SPOT),
-            Visibility::default(),
-            Interactable::new(format!(
-                "Corwin's payment — {}",
-                db.reagents.get(reagent).name
-            )),
-            Replicated,
-            crate::until_we_leave_the_lab(),
-        ));
+    if reward {
+        if let Some(reagent) = db.reagents.id_of(&stage.reward_reagent) {
+            let mut vial = Container::new(ContainerKind::Bottle);
+            let _ = vial.solution.add_profiled(
+                reagent,
+                Units::whole(stage.reward_amount as i32),
+                1.0,
+                db.reagents.get(reagent).ph,
+            );
+            commands.spawn((
+                vial,
+                Transform::from_translation(REWARD_SPOT),
+                Visibility::default(),
+                Interactable::new(format!(
+                    "Corwin's payment — {}",
+                    db.reagents.get(reagent).name
+                )),
+                Replicated,
+                crate::until_we_leave_the_lab(),
+            ));
+        }
     }
     spawn_stage_guard(commands, spots, &stage.guard, guard_index, campaign, radio);
+}
+
+fn handle_counter_support(
+    db: Res<ChemDb>,
+    script: Option<Res<Script>>,
+    campaign: Option<ResMut<crate::arc::Campaign>>,
+    mut progress: ResMut<CultProgress>,
+    mut support: MessageReader<crate::arc::CounterSupportApplied>,
+    mut radio: ResMut<RadioLog>,
+) {
+    let (Some(script), Some(mut campaign)) = (script, campaign) else {
+        support.clear();
+        return;
+    };
+    for applied in support.read() {
+        if applied.antag != crate::arc::AntagId::Cult || applied.campaign != campaign.id {
+            continue;
+        }
+        if !reveal_next_objective(&db, &script, &mut campaign, &mut radio) {
+            progress.banked_intel += 1;
+            radio.push(
+                RadioEntry::new(
+                    crate::radio::RadioChannel::Common,
+                    "The department has banked its analysis. The next ritual sign will be easier to identify."
+                        .to_string(),
+                )
+                .positive(),
+            );
+        }
+    }
+}
+
+fn reveal_next_objective(
+    db: &ChemDb,
+    script: &CultScript,
+    campaign: &mut crate::arc::Campaign,
+    radio: &mut RadioLog,
+) -> bool {
+    let active = campaign.cult_incidents.len();
+    campaign.cult_reported.resize(active, false);
+    let Some(index) = campaign
+        .cult_incidents
+        .iter()
+        .enumerate()
+        .find(|(index, resolved)| !**resolved && !campaign.cult_reported[*index])
+        .map(|(index, _)| index)
+    else {
+        return false;
+    };
+    campaign.cult_reported[index] = true;
+    let line = objective_intel(db, script, index).unwrap_or_else(|| {
+        "A department report confirms another active ritual sign, but its analysis is incomplete."
+            .to_string()
+    });
+    radio.push(
+        RadioEntry::new(crate::radio::RadioChannel::Common, line)
+            .positive()
+            .urgent(),
+    );
+    true
+}
+
+fn objective_intel(db: &ChemDb, script: &CultScript, index: usize) -> Option<String> {
+    if index == CultScript::altar_ward_index() {
+        return Some(anchor_intel(db, &script.altar));
+    }
+    for (stage_index, stage) in script.stages.iter().enumerate() {
+        let base = script.stage_ward_base(stage_index);
+        if let Some(incident) = stage.incidents.get(index.checked_sub(base)?) {
+            return Some(anchor_intel(db, incident));
+        }
+        if index == script.guard_ward_index(stage_index) {
+            return Some(format!(
+                "{} Security confirms this is a defender, not a bystander; incapacitating them will break another ward.",
+                stage.guard.clue
+            ));
+        }
+    }
+    None
+}
+
+fn anchor_intel(db: &ChemDb, incident: &CultIncidentDef) -> String {
+    let family = db
+        .reagents
+        .id_of(&incident.treatment)
+        .and_then(|id| reference_category(db, id))
+        .map(|category| category.label())
+        .unwrap_or("matching");
+    format!(
+        "{} Department analysis points to the {family} chemical family.",
+        incident.clue
+    )
 }
 
 /// Stations this stage's guard at its authored spot, unless it is already
@@ -576,13 +847,10 @@ fn spawn_stage_guard(
     spots: &CrisisSpots,
     guard: &CultGuardDef,
     ward_index: usize,
-    campaign: &Option<ResMut<crate::arc::Campaign>>,
+    campaign: &crate::arc::Campaign,
     radio: &mut RadioLog,
 ) {
-    if campaign
-        .as_ref()
-        .is_some_and(|c| c.cult_incidents.get(ward_index) == Some(&true))
-    {
+    if campaign.cult_incidents.get(ward_index) == Some(&true) {
         return;
     }
     let Some(transform) = spots.get(&guard.spot) else {
@@ -594,9 +862,12 @@ fn spawn_stage_guard(
     };
     place_guard(commands, guard, ward_index, transform);
     radio.push(
-        RadioEntry::new(crate::radio::RadioChannel::Lab, guard.clue.clone())
-            .negative()
-            .urgent(),
+        RadioEntry::new(
+            crate::radio::RadioChannel::Lab,
+            "A masked figure has been reported guarding one of the new disturbances.".to_string(),
+        )
+        .negative()
+        .urgent(),
     );
 }
 
@@ -710,6 +981,8 @@ fn credit_defeated_guards(
             continue;
         }
         campaign.cult_incidents[index] = true;
+        campaign.cult_reported.resize(index + 1, false);
+        crate::arc::nudge_plot(campaign, WARD_RELIEF);
         commands.entity(entity).despawn();
         radio.push(
             RadioEntry::new(
@@ -719,6 +992,93 @@ fn credit_defeated_guards(
             .positive()
             .urgent(),
         );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expose_finale(
+    mut commands: Commands,
+    script: Option<Res<Script>>,
+    arc_script: Option<Res<crate::arc::Script>>,
+    campaign: Option<Res<crate::arc::Campaign>>,
+    progress: Res<CultProgress>,
+    spots: Res<CrisisSpots>,
+    focuses: Query<(), With<RitualFocus>>,
+    live: Option<Res<crate::showdown::Showdown>>,
+    mut radio: ResMut<RadioLog>,
+) {
+    let (Some(script), Some(arc_script), Some(campaign)) = (script, arc_script, campaign) else {
+        return;
+    };
+    if campaign.outcome.is_some()
+        || progress.finale_started
+        || live.is_some()
+        || !focuses.is_empty()
+        || !enough_wards(&campaign)
+        || campaign.plot >= arc_script.showdown_at
+    {
+        return;
+    }
+    let Some(transform) = spots.get(&script.altar.spot) else {
+        error!(
+            "cult finale names missing altar spot '{}'; cannot expose focus",
+            script.altar.spot
+        );
+        return;
+    };
+    commands.spawn((
+        RitualFocus,
+        transform,
+        Visibility::default(),
+        Interactable::new("Break the exposed outer ward — this starts the final rite"),
+        Replicated,
+        crate::until_we_leave_the_lab(),
+    ));
+    radio.push(
+        RadioEntry::new(
+            crate::radio::RadioChannel::Bridge,
+            "The broken signs converge on the Chapel. The outer ward is exposed; Chemistry can force the rite into the open now."
+                .to_string(),
+        )
+        .speaker("Duty Officer")
+        .negative()
+        .station_wide(),
+    );
+}
+
+fn start_finale(
+    mut commands: Commands,
+    arc_script: Option<Res<crate::arc::Script>>,
+    mut campaign: Option<ResMut<crate::arc::Campaign>>,
+    mut progress: ResMut<CultProgress>,
+    mut requests: MessageReader<FromClient<InteractRequested>>,
+    focuses: Query<(), With<RitualFocus>>,
+    mut showdown: MessageWriter<crate::showdown::RequestShowdown>,
+) {
+    let (Some(arc_script), Some(campaign)) = (arc_script, campaign.as_mut()) else {
+        requests.clear();
+        return;
+    };
+    for request in requests.read() {
+        if !focuses.contains(request.target) || !enough_wards(campaign) {
+            continue;
+        }
+        progress.finale_started = true;
+        campaign.plot = campaign.plot.max(arc_script.showdown_at);
+        showdown.write(crate::showdown::RequestShowdown {
+            campaign: campaign.id,
+        });
+        commands.entity(request.target).despawn();
+        break;
+    }
+}
+
+fn remember_started_finale(
+    live: Option<Res<crate::showdown::Showdown>>,
+    mut progress: ResMut<CultProgress>,
+) {
+    if live.is_some() {
+        progress.finale_started = true;
     }
 }
 
@@ -747,6 +1107,22 @@ fn handle_incident_delivery(
         let Some((container_entity, container, _)) =
             containers.iter().find(|(_, _, held)| held.0 == player)
         else {
+            let hint = db
+                .reagents
+                .id_of(&anchor.treatment)
+                .and_then(|id| reference_category(&db, id))
+                .map(|category| category.label())
+                .unwrap_or("matching");
+            radio.push(
+                RadioEntry::new(
+                    crate::radio::RadioChannel::Lab,
+                    format!(
+                        "{} Its residue reacts like it needs {hint} chemistry.",
+                        anchor.clue
+                    ),
+                )
+                .urgent(),
+            );
             continue;
         };
         let Some(treatment) = db.reagents.id_of(&anchor.treatment) else {
@@ -754,10 +1130,16 @@ fn handle_incident_delivery(
         };
         let landed = incident_units(&db, &container.solution, treatment);
         if landed < anchor.amount {
+            let hint = reference_category(&db, treatment)
+                .map(|category| category.label())
+                .unwrap_or("a closer match");
             radio.push(
                 RadioEntry::new(
                     crate::radio::RadioChannel::Lab,
-                    format!("The {} rejects that mixture.", anchor.name),
+                    format!(
+                        "The {} rejects that mixture without taking it. Its reaction points toward {hint} chemistry.",
+                        anchor.name
+                    ),
                 )
                 .negative(),
             );
@@ -770,6 +1152,8 @@ fn handle_incident_delivery(
             continue;
         }
         campaign.cult_incidents[anchor.index] = true;
+        campaign.cult_reported.resize(anchor.index + 1, false);
+        crate::arc::nudge_plot(campaign, WARD_RELIEF);
         commands.entity(container_entity).despawn();
         commands.entity(request.target).despawn();
         radio.push(
@@ -812,6 +1196,7 @@ fn dress_incidents(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     new: Query<Entity, Added<RitualAnchor>>,
+    new_focus: Query<Entity, Added<RitualFocus>>,
 ) {
     for entity in &new {
         commands.entity(entity).insert((
@@ -819,6 +1204,16 @@ fn dress_incidents(
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: Color::srgb(0.28, 0.03, 0.07),
                 emissive: LinearRgba::new(0.5, 0.02, 0.08, 1.0),
+                ..default()
+            })),
+        ));
+    }
+    for entity in &new_focus {
+        commands.entity(entity).insert((
+            Mesh3d(meshes.add(Cylinder::new(0.62, 0.14))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.42, 0.02, 0.06),
+                emissive: LinearRgba::new(1.4, 0.03, 0.10, 1.0),
                 ..default()
             })),
         ));
@@ -950,8 +1345,23 @@ mod tests {
     }
 
     fn resolution_app() -> App {
+        let arc_script: crate::arc::ArcScript =
+            ron::from_str(include_str!("../../assets/data/station.arc.ron")).unwrap();
+        let steps = arc_script
+            .antagonist(crate::arc::AntagId::Cult)
+            .unwrap()
+            .counter_steps
+            .len();
         let mut app = App::new();
         app.insert_resource(threat::Authored(script()))
+            .insert_resource(crate::threat::Authored(arc_script))
+            .insert_resource(crate::arc::Campaign::new(
+                crate::arc::AntagId::Cult,
+                crate::arc::Mode::Chemist,
+                steps,
+            ))
+            .insert_resource(ChemDb(data()))
+            .insert_resource(CrisisSpots::default())
             .init_resource::<CultProgress>()
             .init_resource::<RadioLog>()
             .add_message::<OrderResolved>()
@@ -960,13 +1370,18 @@ mod tests {
     }
 
     fn resolve(app: &mut App, name: &str, outcome: Outcome) {
+        let cult_name = app.world().resource::<Script>().name.clone();
+        if name == cult_name {
+            let stage = app.world().resource::<CultProgress>().next_stage;
+            app.world_mut().resource_mut::<CultProgress>().offered_stage = Some(stage);
+        }
         app.world_mut().write_message(OrderResolved {
             name: name.to_string(),
             role: "Cargo".to_string(),
             reagent: None,
             category: None,
             outcome,
-            kind: crate::orders::OrderKind::Normal,
+            kind: crate::orders::OrderKind::Hostile,
             quality: None,
             development: false,
             campaign: None,
@@ -982,7 +1397,7 @@ mod tests {
 
         resolve(&mut app, &name, Outcome::Success);
 
-        assert_eq!(app.world().resource::<CultProgress>().0, 1);
+        assert_eq!(app.world().resource::<CultProgress>().next_stage, 1);
     }
 
     #[test]
@@ -994,7 +1409,7 @@ mod tests {
         resolve(&mut app, &name, Outcome::Wrong);
 
         assert_eq!(
-            app.world().resource::<CultProgress>().0,
+            app.world().resource::<CultProgress>().next_stage,
             0,
             "only a real, good delivery should move the ritual forward"
         );
@@ -1006,7 +1421,7 @@ mod tests {
 
         resolve(&mut app, "Someone Else", Outcome::Success);
 
-        assert_eq!(app.world().resource::<CultProgress>().0, 0);
+        assert_eq!(app.world().resource::<CultProgress>().next_stage, 0);
     }
 
     // -- the campaign arc --------------------------------------------------
@@ -1066,7 +1481,7 @@ mod tests {
 
         assert_eq!(
             app.world().resource::<crate::arc::Campaign>().plot,
-            per_aid,
+            WAVE_PLOT + per_aid,
             "the ritual advancing is the Cult advancing — otherwise the whole \
              authored chain could run with the plot meter untouched"
         );
@@ -1080,7 +1495,7 @@ mod tests {
         resolve(&mut app, &name, Outcome::Wrong);
 
         assert_eq!(app.world().resource::<crate::arc::Campaign>().plot, 0);
-        assert_eq!(app.world().resource::<CultProgress>().0, 0);
+        assert_eq!(app.world().resource::<CultProgress>().next_stage, 0);
     }
 
     #[test]
@@ -1193,6 +1608,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(threat::Authored(content))
             .insert_resource(campaign)
+            .insert_resource(ChemDb(data()))
             .insert_resource(spots)
             .init_resource::<CultIncidentsRestored>()
             .init_resource::<RadioLog>()
@@ -1239,6 +1655,63 @@ mod tests {
         let _ = invalid.add(water, Units::whole(10));
         assert_eq!(incident_units(&db, &valid, cure), Units::whole(10));
         assert!(!incident_units(&db, &invalid, cure).is_positive());
+    }
+
+    #[test]
+    fn the_closed_lab_slows_the_ritual_clock_without_stopping_it() {
+        let mut open = 10.0;
+        let mut closed = 10.0;
+        assert!(!tick_wave_clock(&mut open, 4.0, true));
+        assert!(!tick_wave_clock(&mut closed, 4.0, false));
+        assert_eq!(open, 6.0);
+        assert_eq!(closed, 8.0);
+
+        assert!(tick_wave_clock(&mut closed, 16.0, false));
+    }
+
+    #[test]
+    fn wave_delays_use_the_authored_first_and_later_windows() {
+        for _ in 0..64 {
+            let first = roll_wave_delay(0);
+            let later = roll_wave_delay(1);
+            assert!((FIRST_WAVE_SECONDS.0..=FIRST_WAVE_SECONDS.1).contains(&first));
+            assert!((LATER_WAVE_SECONDS.0..=LATER_WAVE_SECONDS.1).contains(&later));
+        }
+    }
+
+    #[test]
+    fn five_direct_interventions_expose_the_finale_but_four_do_not() {
+        let mut campaign =
+            crate::arc::Campaign::new(crate::arc::AntagId::Cult, crate::arc::Mode::Chemist, 4);
+        campaign.cult_incidents = vec![true; FINALE_WARDS - 1];
+        assert!(!enough_wards(&campaign));
+        campaign.cult_incidents.push(true);
+        assert!(enough_wards(&campaign));
+    }
+
+    #[test]
+    fn department_intel_reports_one_live_objective_at_a_time() {
+        let db = ChemDb(data());
+        let script = script();
+        let mut campaign =
+            crate::arc::Campaign::new(crate::arc::AntagId::Cult, crate::arc::Mode::Chemist, 4);
+        campaign.cult_incidents = vec![false, false, false];
+        let mut radio = RadioLog::default();
+
+        assert!(reveal_next_objective(
+            &db,
+            &script,
+            &mut campaign,
+            &mut radio
+        ));
+        assert_eq!(campaign.cult_reported, vec![true, false, false]);
+        assert!(reveal_next_objective(
+            &db,
+            &script,
+            &mut campaign,
+            &mut radio
+        ));
+        assert_eq!(campaign.cult_reported, vec![true, true, false]);
     }
 
     // -- guards and the altar -----------------------------------------------
@@ -1417,7 +1890,8 @@ mod tests {
         let mut app = campaign_app();
         app.insert_resource(MapReady);
         app.init_resource::<CultIncidentsRestored>();
-        app.add_systems(Update, restore_incidents);
+        app.insert_resource(ChemDb(data()))
+            .add_systems(Update, restore_incidents);
 
         app.update();
         app.world_mut().flush();

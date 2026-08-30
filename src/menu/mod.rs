@@ -42,6 +42,10 @@ pub enum MenuScreen {
     /// Which side to play a brand new save from. Only ever reached when at
     /// least one antagonist has been thwarted — see [`show_campaign_screen`].
     Campaign,
+    /// Debug-only deterministic campaign selection for a fresh chemist save.
+    /// Shipping builds do not compile this screen or any route to it.
+    #[cfg(debug_assertions)]
+    AntagonistTest,
     /// The address to dial.
     Join,
     /// Waiting on `AppState::Connecting` to resolve — see its doc comment.
@@ -84,7 +88,10 @@ impl Plugin for MenuPlugin {
             // save list and comes back — cleared here rather than trusted to
             // reset itself, the same defensive footing `open_connecting`
             // already gives `ConnectError`.
-            .add_systems(OnExit(MenuScreen::Save), (clear_screen, reset_pending_delete))
+            .add_systems(
+                OnExit(MenuScreen::Save),
+                (clear_screen, reset_pending_delete),
+            )
             .add_systems(OnExit(MenuScreen::Campaign), clear_screen)
             .add_systems(OnExit(MenuScreen::Join), clear_screen)
             .add_systems(OnExit(MenuScreen::Connecting), clear_screen)
@@ -103,6 +110,12 @@ impl Plugin for MenuPlugin {
                     .chain()
                     .run_if(in_state(AppState::MainMenu).or_else(in_state(AppState::Connecting))),
             );
+        #[cfg(debug_assertions)]
+        app.add_systems(
+            OnEnter(MenuScreen::AntagonistTest),
+            show_antagonist_test_screen,
+        )
+        .add_systems(OnExit(MenuScreen::AntagonistTest), clear_screen);
     }
 }
 
@@ -167,6 +180,13 @@ enum MenuAction {
     ChooseSolo,
     ChooseJoin,
     NewSave,
+    /// Opens deterministic antagonist selection for a fresh chemist save.
+    /// Kept out of shipping builds along with its screen and click handler.
+    #[cfg(debug_assertions)]
+    NewAntagonistTestSave,
+    /// Starts a fresh chemist save against this known antagonist.
+    #[cfg(debug_assertions)]
+    NewTestChemistRun(AntagId),
     /// A new save played the ordinary way: a hidden antagonist, rolled for
     /// you. Only ever reached from the campaign screen — with nothing
     /// unlocked, [`MenuAction::NewSave`] starts one of these directly.
@@ -355,55 +375,54 @@ fn render_save_screen(commands: &mut Commands, mode: LaunchMode, pending_delete:
     };
     let slots = saves::list_slots();
 
-    menu_shell(
-        commands,
-        MenuRoot,
-        "Choose a save",
-        subtitle,
-        |panel| {
-            panel.spawn(choice(
-                "New save",
-                "Start over: shift 1, an empty notebook.",
-                MenuAction::NewSave,
-            ));
+    menu_shell(commands, MenuRoot, "Choose a save", subtitle, |panel| {
+        panel.spawn(choice(
+            "New save",
+            "Start over: shift 1, an empty notebook.",
+            MenuAction::NewSave,
+        ));
+        #[cfg(debug_assertions)]
+        panel.spawn(choice(
+            "New antagonist test save",
+            "Testing only: start a fresh chemist career against a chosen antagonist.",
+            MenuAction::NewAntagonistTestSave,
+        ));
 
-            if slots.is_empty() {
-                panel.spawn(label("No saved games yet.", 14.0, TEXT_DIM));
-            } else {
-                for slot in slots {
-                    if pending_delete.0.as_deref() == Some(slot.name.as_str()) {
-                        delete_confirmation_card(panel, &slot.name);
-                        continue;
-                    }
-
-                    let evacuated = slot.evacuated;
-                    let action = MenuAction::LoadSave(slot.name.clone());
-                    let mut spawned =
-                        panel.spawn(choice(slot.name.clone(), &slot.detail(), action));
-                    // Dimmed, not removed: the row still names the save and
-                    // says why it stopped (`SlotSummary::detail`'s "Evacuated
-                    // — " prefix), it just cannot be clicked back into. The
-                    // actual gate is `handle_menu_clicks`'s own defensive
-                    // re-check, same "dim the button, refuse the click"
-                    // convention `ui::draw_department_shop`'s `Refused`
-                    // marker already uses for an unaffordable purchase.
-                    if evacuated {
-                        spawned.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
-                    }
-                    panel.spawn(row()).with_children(|row| {
-                        row.spawn(button(
-                            "Delete save",
-                            MenuAction::RequestDeleteSave(slot.name.clone()),
-                        ));
-                    });
+        if slots.is_empty() {
+            panel.spawn(label("No saved games yet.", 14.0, TEXT_DIM));
+        } else {
+            for slot in slots {
+                if pending_delete.0.as_deref() == Some(slot.name.as_str()) {
+                    delete_confirmation_card(panel, &slot.name);
+                    continue;
                 }
-            }
 
-            panel.spawn(row()).with_children(|row| {
-                row.spawn(button("Back", MenuAction::Back));
-            });
-        },
-    );
+                let evacuated = slot.evacuated;
+                let action = MenuAction::LoadSave(slot.name.clone());
+                let mut spawned = panel.spawn(choice(slot.name.clone(), &slot.detail(), action));
+                // Dimmed, not removed: the row still names the save and
+                // says why it stopped (`SlotSummary::detail`'s "Evacuated
+                // — " prefix), it just cannot be clicked back into. The
+                // actual gate is `handle_menu_clicks`'s own defensive
+                // re-check, same "dim the button, refuse the click"
+                // convention `ui::draw_department_shop`'s `Refused`
+                // marker already uses for an unaffordable purchase.
+                if evacuated {
+                    spawned.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
+                }
+                panel.spawn(row()).with_children(|row| {
+                    row.spawn(button(
+                        "Delete save",
+                        MenuAction::RequestDeleteSave(slot.name.clone()),
+                    ));
+                });
+            }
+        }
+
+        panel.spawn(row()).with_children(|row| {
+            row.spawn(button("Back", MenuAction::Back));
+        });
+    });
 }
 
 /// Rebuilds the Save screen when a delete confirmation is armed or cleared.
@@ -495,6 +514,34 @@ fn show_campaign_screen(mut commands: Commands) {
                 ));
             }
 
+            panel.spawn(row()).with_children(|row| {
+                row.spawn(button("Back", MenuAction::Back));
+            });
+        },
+    );
+}
+
+/// Deterministic campaign selection for development and manual testing.
+///
+/// This is deliberately a separate screen from antagonist-mode unlocks: these
+/// buttons create an ordinary chemist campaign and do not grant, consume or
+/// imply any cross-save unlock. The whole function is absent from release
+/// builds, so the normal new-save flow cannot reveal the hidden roster.
+#[cfg(debug_assertions)]
+fn show_antagonist_test_screen(mut commands: Commands) {
+    menu_shell(
+        &mut commands,
+        MenuRoot,
+        "Antagonist test save",
+        "DEBUG TESTING — choose the hidden antagonist for a new chemist career.",
+        |panel| {
+            for antag in AntagId::ALL {
+                panel.spawn(choice(
+                    antag.label(),
+                    "Force this campaign without changing antagonist-run unlocks.",
+                    MenuAction::NewTestChemistRun(antag),
+                ));
+            }
             panel.spawn(row()).with_children(|row| {
                 row.spawn(button("Back", MenuAction::Back));
             });
@@ -724,6 +771,21 @@ fn handle_menu_clicks(
                     screen.set(MenuScreen::Campaign);
                 }
             }
+            #[cfg(debug_assertions)]
+            MenuAction::NewAntagonistTestSave => screen.set(MenuScreen::AntagonistTest),
+            #[cfg(debug_assertions)]
+            MenuAction::NewTestChemistRun(antag) => start(
+                &mut commands,
+                SaveSlot::new(saves::next_slot_name()),
+                pending.0,
+                Some(CampaignChoice {
+                    mode: Mode::Chemist,
+                    antag: Some(antag),
+                }),
+                &mut mode,
+                &mut app_state,
+                &mut screen,
+            ),
             MenuAction::NewChemistRun => start(
                 &mut commands,
                 SaveSlot::new(saves::next_slot_name()),
@@ -804,6 +866,8 @@ fn handle_menu_clicks(
             // rather than all the way back at Mode.
             MenuAction::Back => screen.set(match current.get() {
                 MenuScreen::Campaign => MenuScreen::Save,
+                #[cfg(debug_assertions)]
+                MenuScreen::AntagonistTest => MenuScreen::Save,
                 MenuScreen::Controls => MenuScreen::Settings,
                 _ => MenuScreen::Mode,
             }),
@@ -1125,6 +1189,34 @@ mod tests {
             choice.antag, None,
             "the menu must not decide, or the whole reveal is spoiled before the lab loads"
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn every_debug_antagonist_choice_starts_an_ordinary_chemist_campaign() {
+        for antag in AntagId::ALL {
+            let mut app = menu_app();
+            click(&mut app, MenuAction::ChooseSolo);
+            click(&mut app, MenuAction::NewTestChemistRun(antag));
+
+            assert_eq!(state(&app), AppState::Playing);
+            let choice = app.world().resource::<CampaignChoice>();
+            assert_eq!(choice.mode, Mode::Chemist);
+            assert_eq!(choice.antag, Some(antag));
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_picker_is_separate_from_antagonist_mode_unlocks() {
+        let mut app = menu_app();
+        click(&mut app, MenuAction::ChooseHost);
+        click(&mut app, MenuAction::NewAntagonistTestSave);
+        assert_eq!(screen(&app), MenuScreen::AntagonistTest);
+
+        click(&mut app, MenuAction::NewTestChemistRun(AntagId::Cult));
+        assert_eq!(*app.world().resource::<LaunchMode>(), LaunchMode::HostSteam);
+        assert_eq!(app.world().resource::<CampaignChoice>().mode, Mode::Chemist);
     }
 
     #[test]

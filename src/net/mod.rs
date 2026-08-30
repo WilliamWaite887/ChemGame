@@ -34,7 +34,7 @@ use crate::containers::{
     ArmedCharge, Container, HeldBy, InSlot, InSlotB, InventorySlot, SelectedInventorySlot, Stored,
 };
 use crate::crew::{AtCounter, CrewAppearance, CrewMember, NeedsMedicalEvacuation};
-use crate::cult::{Cultist, RitualAnchor};
+use crate::cult::{Cultist, RitualAnchor, RitualFocus};
 use crate::door::{Corroded, Door};
 use crate::hazards::{ActiveHazard, SmokeCloud, SmokeOwner, SmokePayload};
 use crate::interaction::Interactable;
@@ -901,6 +901,7 @@ fn register_replication(app: &mut App) {
         // with nothing to read or reason about. A pre-existing gap, fixed
         // alongside the Cultist work below since the same audit found it.
         .replicate::<RitualAnchor>()
+        .replicate::<RitualFocus>()
         // Same reasoning as `Assailant`: without this a guest watches an
         // ordinary-looking crew member idle in the chapel or take chemical
         // damage for no visible reason.

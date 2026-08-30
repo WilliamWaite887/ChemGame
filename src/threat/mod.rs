@@ -306,17 +306,13 @@ impl ChainProgress {
 /// Deliberately an enum named at every call site rather than an "on
 /// resolution" callback that quietly does something different per caller: a
 /// reader of `smuggler` should be able to see which of these it is without
-/// opening this file. The two are genuinely opposite, and the shared
-/// scaffolding must not paper over that.
+/// opening this file. The shared scaffolding must not paper over that.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trigger {
     /// The visit expired unfilled — `smuggler`, `saboteur`, `quack`. Not a
     /// wrong delivery: handing them the wrong thing is a mistake, leaving
     /// them standing there with nothing to do is what gives them the idea.
     Ignored,
-    /// The delivery landed and graded good — `cult`, where fulfilling a stage
-    /// is what advances the ritual against you.
-    Fulfilled,
     /// Nothing fires; the chain only moves. `obsessed`, whose whole weight is
     /// in the plea rather than any mechanical consequence.
     Never,
@@ -324,28 +320,18 @@ pub enum Trigger {
 
 /// When the authored chain moves on.
 ///
-/// The second axis, and the one that is *not* implied by [`Trigger`]: `cult`
-/// declines to advance on a botched stage, while a department minor's spent
-/// visit is spent either way.
+/// Kept explicit at each caller even though every remaining minor thread moves
+/// on after a spent visit. That makes the lifecycle visible without baking it
+/// into `step_chain`'s name or quietly changing the callers' contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Advance {
     /// Every resolution of this identity's name moves the chain on, however
-    /// it graded — `smuggler`, `saboteur`, `quack`, `obsessed`.
+    /// it graded.
     EveryVisit,
-    /// Only this thread's own [`Trigger`] moves it — `cult`, where declining
-    /// a stage leaves the ritual exactly where it was.
-    OnTrigger,
 }
 
 /// What one of this thread's resolutions meant to it.
 pub struct ChainStep {
-    /// The chain index that was live when this resolution arrived.
-    ///
-    /// Read the visit or stage out of the script with *this*, never the
-    /// post-advance value. `cult` needs the pre-advance stage for its
-    /// consequences and `saboteur` does not care, so handing back the right
-    /// one removes the single place those two could silently drift apart.
-    pub index: usize,
     /// Whether this resolution is this thread's own [`Trigger`].
     pub fires: bool,
     /// Whether advancing landed on the final authored entry for the first
@@ -387,17 +373,13 @@ pub fn step_chain(
         }
         let fires = match trigger {
             Trigger::Ignored => report.outcome == Outcome::Expired,
-            Trigger::Fulfilled => report.outcome.is_good(),
             Trigger::Never => false,
         };
-        let index = progress.index(len);
         let moves = match advance {
             Advance::EveryVisit => true,
-            Advance::OnTrigger => fires,
         };
         let reached_finale = moves && progress.advance(len);
         steps.push(ChainStep {
-            index,
             fires,
             reached_finale,
             outcome: report.outcome,

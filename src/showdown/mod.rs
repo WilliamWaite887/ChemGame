@@ -62,28 +62,30 @@ pub struct ShowdownPlugin;
 
 impl Plugin for ShowdownPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<EmitWorldSfx>().add_systems(
-            Update,
-            (
+        app.add_message::<EmitWorldSfx>()
+            .add_message::<RequestShowdown>()
+            .add_systems(
+                Update,
                 (
-                    arm_showdown,
-                    run_siege,
-                    handle_breach_delivery,
-                    turn_hostile_on_arrival,
-                    run_pursuers,
-                    resolve_showdown,
+                    (
+                        arm_showdown,
+                        run_siege,
+                        handle_breach_delivery,
+                        turn_hostile_on_arrival,
+                        run_pursuers,
+                        resolve_showdown,
+                    )
+                        .chain()
+                        .run_if(is_authority)
+                        .run_if(resource_exists::<MapReady>),
+                    // Presentation, on every peer. The assailant needs nothing
+                    // here — it is a `CrewMember`, so `crew::dress_crew` already
+                    // draws it — but a breach is not crew and has no mesh
+                    // otherwise.
+                    dress_breach,
                 )
-                    .chain()
-                    .run_if(is_authority)
-                    .run_if(resource_exists::<MapReady>),
-                // Presentation, on every peer. The assailant needs nothing
-                // here — it is a `CrewMember`, so `crew::dress_crew` already
-                // draws it — but a breach is not crew and has no mesh
-                // otherwise.
-                dress_breach,
-            )
-                .run_if(in_state(AppState::Playing)),
-        );
+                    .run_if(in_state(AppState::Playing)),
+            );
     }
 }
 
@@ -105,6 +107,14 @@ pub struct Breach;
 /// for no visible reason.
 #[derive(Component, Serialize, Deserialize)]
 pub struct Assailant;
+
+/// Requests this campaign's authored confrontation before its plot reaches
+/// the automatic threshold. Antagonist modules own the prerequisites; the
+/// shared showdown owns spawning, combat and resolution.
+#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequestShowdown {
+    pub campaign: crate::arc::CampaignId,
+}
 
 /// Walks toward the nearest chemist. Replaces [`CrewRoute`] rather than
 /// coexisting with it — two systems writing one `Transform` would fight, and
@@ -175,6 +185,9 @@ pub struct Showdown {
     treated: Units,
     /// How much is needed (siege only).
     needed: Units,
+    /// Ritual defenders can be disabled but never substitute for sealing the
+    /// objective itself.
+    ritual: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +205,7 @@ fn arm_showdown(
     script: Option<Res<Script>>,
     campaign: Option<Res<Campaign>>,
     live: Option<Res<Showdown>>,
+    mut requested: MessageReader<RequestShowdown>,
     spots: Res<CrisisSpots>,
     mut missing_spot_reported: Local<bool>,
     mut radio: ResMut<RadioLog>,
@@ -199,7 +213,10 @@ fn arm_showdown(
     let (Some(script), Some(campaign), None) = (script, campaign, live) else {
         return;
     };
-    if campaign.outcome.is_some() || campaign.plot < script.showdown_at {
+    let forced = requested
+        .read()
+        .any(|request| request.campaign == campaign.id);
+    if campaign.outcome.is_some() || (campaign.plot < script.showdown_at && !forced) {
         return;
     }
     let Some(def) = script.antagonist(campaign.antag) else {
@@ -254,6 +271,59 @@ fn arm_showdown(
                 }
             }
         }
+        ShowdownForm::Ritual {
+            cure_reagent,
+            spot,
+            guard_spots,
+            guard_name,
+            ..
+        } => {
+            let Some(transform) = spots.get(spot) else {
+                if !*missing_spot_reported {
+                    error!("ritual names missing crisis spot '{spot}'; skipping showdown");
+                    *missing_spot_reported = true;
+                }
+                return;
+            };
+            commands.spawn((
+                Breach,
+                transform,
+                Visibility::default(),
+                Interactable::new(format!(
+                    "Seal the rite — {cure_reagent} or anything like it"
+                )),
+                Replicated,
+                crate::until_we_leave_the_lab(),
+            ));
+
+            let wards = campaign.cult_incidents.iter().filter(|done| **done).count();
+            let extra = wards.saturating_sub(crate::cult::FINALE_WARDS);
+            let count = guard_spots.len().saturating_sub(extra / 3).max(1);
+            for guard_spot in guard_spots.iter().take(count) {
+                let Some(guard_transform) = spots.get(guard_spot) else {
+                    error!("ritual guard names missing crisis spot '{guard_spot}'; skipping guard");
+                    continue;
+                };
+                let guard_def = CrewDef {
+                    name: guard_name.clone(),
+                    role: "Cult".to_string(),
+                    color: [0.42, 0.05, 0.10],
+                };
+                let entity = spawn_crew_member(&mut commands, &guard_def, 0.0);
+                commands.entity(entity).remove::<CrewRoute>().insert((
+                    guard_transform,
+                    crate::cult::Cultist {
+                        wards_incident: None,
+                    },
+                    Pursuit::new(
+                        script.showdown.speed,
+                        script.showdown.hit_every_seconds,
+                        script.showdown.hit_brute,
+                    ),
+                    Replicated,
+                ));
+            }
+        }
         ShowdownForm::Assailant { name, color } => {
             // A synthetic identity, never drawn from `station.crew.ron` — the
             // same rule `security::RaidOfficer` and `rogue_security` follow,
@@ -269,18 +339,22 @@ fn arm_showdown(
         }
     }
 
-    let wards = campaign.cult_incidents.iter().filter(|done| **done).count() as f32;
-    let cult_siege = campaign.antag == crate::arc::AntagId::Cult;
+    let ritual = matches!(def.showdown, ShowdownForm::Ritual { .. });
+    let wards = campaign.cult_incidents.iter().filter(|done| **done).count();
+    let extra_wards = if ritual {
+        wards.saturating_sub(crate::cult::FINALE_WARDS)
+    } else {
+        0
+    };
     commands.insert_resource(Showdown {
         campaign: campaign.id,
-        deadline: script.showdown.deadline_seconds + if cult_siege { wards * 8.0 } else { 0.0 },
-        next_vent: script.showdown.gas_every_seconds + if cult_siege { wards * 1.5 } else { 0.0 },
+        deadline: script.showdown.deadline_seconds + extra_wards as f32 * 8.0,
+        next_vent: script.showdown.gas_every_seconds + extra_wards as f32 * 1.5,
         treated: Units::whole(0),
         needed: Units::whole(
-            (script.showdown.cure_units_needed as i32
-                - if cult_siege { wards as i32 * 2 } else { 0 })
-            .max(6),
+            (script.showdown.cure_units_needed as i32 - extra_wards as i32 * 2).max(6),
         ),
+        ritual,
     });
     // Immediate, not delayed: this is the one moment in the game where the
     // player needs to know *now*. `red_alert` rather than `station_wide` for
@@ -323,8 +397,11 @@ fn run_siege(
     let Some(def) = script.antagonist(campaign.antag) else {
         return;
     };
-    let ShowdownForm::Siege { gas_reagent, .. } = &def.showdown else {
-        return;
+    let gas_reagent = match &def.showdown {
+        ShowdownForm::Siege { gas_reagent, .. } | ShowdownForm::Ritual { gas_reagent, .. } => {
+            gas_reagent
+        }
+        ShowdownForm::Assailant { .. } => return,
     };
     let Ok(origin) = breaches.single().map(|t| t.translation) else {
         return;
@@ -334,27 +411,20 @@ fn run_siege(
     if showdown.next_vent > 0.0 {
         return;
     }
-    let wards = campaign.cult_incidents.iter().filter(|done| **done).count() as f32;
-    showdown.next_vent = script.showdown.gas_every_seconds
-        + if campaign.antag == crate::arc::AntagId::Cult {
-            wards * 1.5
-        } else {
-            0.0
-        };
+    let wards = campaign.cult_incidents.iter().filter(|done| **done).count();
+    let extra = if showdown.ritual {
+        wards.saturating_sub(crate::cult::FINALE_WARDS)
+    } else {
+        0
+    };
+    showdown.next_vent = script.showdown.gas_every_seconds + extra as f32 * 1.5;
 
     let Some(gas) = db.reagents.id_of(gas_reagent) else {
         warn!("siege names unknown gas reagent '{gas_reagent}'");
         return;
     };
     let mut payload = Solution::unbounded();
-    let wards = campaign.cult_incidents.iter().filter(|done| **done).count() as i32;
-    let units = (script.showdown.gas_units as i32
-        - if campaign.antag == crate::arc::AntagId::Cult {
-            wards
-        } else {
-            0
-        })
-    .max(1);
+    let units = (script.showdown.gas_units as i32 - extra as i32).max(1);
     let _ = payload.add(gas, Units::whole(units));
 
     commands.spawn((
@@ -405,8 +475,11 @@ fn handle_breach_delivery(
     let Some(def) = script.antagonist(campaign.antag) else {
         return;
     };
-    let ShowdownForm::Siege { cure_reagent, .. } = &def.showdown else {
-        return;
+    let cure_reagent = match &def.showdown {
+        ShowdownForm::Siege { cure_reagent, .. } | ShowdownForm::Ritual { cure_reagent, .. } => {
+            cure_reagent
+        }
+        ShowdownForm::Assailant { .. } => return,
     };
     let Some(cure) = db.reagents.id_of(cure_reagent) else {
         warn!("siege names unknown cure reagent '{cure_reagent}'");
@@ -635,7 +708,7 @@ fn run_pursuers(
 /// once by a `security::RaidOfficer` that was never removed and sat in the lab
 /// forever, and a showdown that leaves its breach behind would block every
 /// future one on the `arm_showdown` guard.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn resolve_showdown(
     mut commands: Commands,
     time: Res<Time>,
@@ -645,6 +718,13 @@ fn resolve_showdown(
     breaches: Query<Entity, With<Breach>>,
     assailants: Query<(Entity, &Body), With<Assailant>>,
     cultists: Query<(Entity, &Body, &crate::cult::Cultist)>,
+    ritual_entities: Query<
+        Entity,
+        Or<(
+            With<crate::cult::RitualAnchor>,
+            With<crate::cult::RitualFocus>,
+        )>,
+    >,
     chemists: Query<&Body, (With<Chemist>, Without<Assailant>)>,
     mut radio: ResMut<RadioLog>,
 ) {
@@ -678,7 +758,7 @@ fn resolve_showdown(
     let out_of_time = showdown.deadline <= 0.0;
     let overwhelmed = !chemists.is_empty() && chemists.iter().all(|body| body.0.collapsed);
 
-    let outcome = if treated || put_down || cultists_down {
+    let outcome = if treated || put_down || (cultists_down && !showdown.ritual) {
         ArcOutcome::StoppedDirectly
     } else if out_of_time || overwhelmed {
         ArcOutcome::PlotSucceeded
@@ -699,6 +779,9 @@ fn resolve_showdown(
     // too — the Cult's presence in the lab is over either way.
     for (cultist, _, _) in &cultists {
         commands.entity(cultist).despawn();
+    }
+    for entity in &ritual_entities {
+        commands.entity(entity).despawn();
     }
     commands.remove_resource::<Showdown>();
 }
@@ -763,6 +846,9 @@ mod tests {
             "showdown.breach",
             Transform::from_translation(TEST_BREACH_SPOT),
         );
+        spots.insert("cult.altar", Transform::from_translation(TEST_BREACH_SPOT));
+        spots.insert("cult.finale_guard_1", Transform::from_xyz(11.0, 1.0, -7.0));
+        spots.insert("cult.finale_guard_2", Transform::from_xyz(15.0, 1.0, -7.0));
 
         let mut app = App::new();
         app.insert_resource(ChemDb(data()))
@@ -773,6 +859,7 @@ mod tests {
             .init_resource::<Time>()
             .add_message::<ToClients<HazardFelt>>()
             .add_message::<FromClient<InteractRequested>>()
+            .add_message::<RequestShowdown>()
             .add_systems(
                 Update,
                 (
@@ -825,10 +912,9 @@ mod tests {
         );
         assert!(app.world().get_resource::<Showdown>().is_none());
 
-        app.world_mut().resource_mut::<CrisisSpots>().insert(
-            "showdown.breach",
-            Transform::from_translation(TEST_BREACH_SPOT),
-        );
+        app.world_mut()
+            .resource_mut::<CrisisSpots>()
+            .insert("cult.altar", Transform::from_translation(TEST_BREACH_SPOT));
         advance(&mut app, 0.1);
         assert_eq!(
             app.world_mut().query::<&Breach>().iter(app.world()).count(),
@@ -924,6 +1010,22 @@ mod tests {
     }
 
     #[test]
+    fn a_campaign_owned_request_arms_the_ritual_below_the_threshold() {
+        let mut app = showdown_app(SIEGE);
+        app.world_mut().resource_mut::<Campaign>().plot = 0;
+        let campaign = app.world().resource::<Campaign>().id;
+        app.world_mut().write_message(RequestShowdown { campaign });
+
+        advance(&mut app, 0.1);
+
+        assert_eq!(
+            app.world_mut().query::<&Breach>().iter(app.world()).count(),
+            1
+        );
+        assert!(app.world().resource::<Showdown>().ritual);
+    }
+
+    #[test]
     fn a_siege_vents_on_its_beat() {
         let mut app = showdown_app(SIEGE);
         advance(&mut app, 0.1);
@@ -982,6 +1084,9 @@ mod tests {
         for antag in [SIEGE, ASSAILANT] {
             let mut app = showdown_app(antag);
             advance(&mut app, 0.1);
+            if antag == SIEGE {
+                app.world_mut().spawn(crate::cult::RitualFocus);
+            }
             let deadline = app.world().resource::<Script>().showdown.deadline_seconds;
 
             advance(&mut app, deadline + 1.0);
@@ -1008,6 +1113,14 @@ mod tests {
                     .count(),
                 0,
                 "{antag:?} left a cultist standing after its arc ended"
+            );
+            assert_eq!(
+                app.world_mut()
+                    .query::<&crate::cult::RitualFocus>()
+                    .iter(app.world())
+                    .count(),
+                0,
+                "{antag:?} left a ritual interaction behind after its arc ended"
             );
             assert!(
                 app.world().get_resource::<Showdown>().is_none(),
@@ -1044,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn putting_the_finale_cultists_down_wins_the_siege_without_curing_it() {
+    fn putting_the_finale_cultists_down_does_not_replace_sealing_the_ritual() {
         let mut app = showdown_app(SIEGE);
         advance(&mut app, 0.1);
 
@@ -1057,6 +1170,20 @@ mod tests {
         for entity in cultists {
             app.world_mut().get_mut::<Body>(entity).unwrap().0.collapsed = true;
         }
+        advance(&mut app, 0.1);
+
+        let campaign = app.world().resource::<Campaign>();
+        assert_eq!(campaign.outcome, None);
+        assert!(app.world().get_resource::<Showdown>().is_some());
+    }
+
+    #[test]
+    fn completing_the_ritual_seal_stops_the_cult_directly() {
+        let mut app = showdown_app(SIEGE);
+        advance(&mut app, 0.1);
+        let needed = app.world().resource::<Showdown>().needed;
+        app.world_mut().resource_mut::<Showdown>().treated = needed;
+
         advance(&mut app, 0.1);
 
         let campaign = app.world().resource::<Campaign>();
@@ -1135,6 +1262,30 @@ mod tests {
                             "'{guard_name}' is on the ordinary roster, so a legitimate order could pick it"
                         );
                     }
+                }
+                ShowdownForm::Ritual {
+                    spot,
+                    gas_reagent,
+                    cure_reagent,
+                    guard_spots,
+                    guard_name,
+                } => {
+                    assert!(
+                        !spot.trim().is_empty(),
+                        "a ritual needs an authored map spot"
+                    );
+                    assert!(!guard_spots.is_empty(), "a ritual needs defenders");
+                    assert!(!guard_name.trim().is_empty());
+                    let gas = data
+                        .reagents
+                        .id_of(gas_reagent.as_str())
+                        .unwrap_or_else(|| panic!("'{gas_reagent}' names no real reagent"));
+                    let cure = data
+                        .reagents
+                        .id_of(cure_reagent.as_str())
+                        .unwrap_or_else(|| panic!("'{cure_reagent}' names no real reagent"));
+                    assert!(!data.reagents.get(cure).categories.is_empty());
+                    assert_ne!(gas, cure);
                 }
                 ShowdownForm::Assailant { name, .. } => {
                     assert!(!name.trim().is_empty());

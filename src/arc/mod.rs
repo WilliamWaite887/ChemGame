@@ -64,6 +64,7 @@ impl Plugin for ArcPlugin {
         ))
         .init_resource::<ThwartedAntags>()
         .init_resource::<DriftClock>()
+        .add_message::<CounterSupportApplied>()
         .add_server_message::<CampaignSync>(Channel::Ordered)
         .add_systems(
             Update,
@@ -219,6 +220,10 @@ pub struct CampaignArc {
     /// ward the chemist earned.
     #[serde(default)]
     pub cult_incidents: Vec<bool>,
+    /// Which activated Cult objectives have received precise department intel.
+    /// Parallel to `cult_incidents`; old saves default to no reports.
+    #[serde(default)]
+    pub cult_reported: Vec<bool>,
     /// Whether `shift::record_thwarting` has already logged *this* arc's win
     /// to `saves/campaign.ron`. Lives here rather than as a session-global
     /// resource so it resets naturally with every new `Campaign` — including
@@ -279,6 +284,8 @@ impl<'de> Deserialize<'de> for CampaignRoster {
             #[serde(default)]
             cult_incidents: Vec<bool>,
             #[serde(default)]
+            cult_reported: Vec<bool>,
+            #[serde(default)]
             thwarting_recorded: bool,
             #[serde(default)]
             history: Vec<(AntagId, Mode, ArcOutcome)>,
@@ -306,6 +313,7 @@ impl<'de> Deserialize<'de> for CampaignRoster {
                 outcome: compat.outcome,
                 mode: compat.mode,
                 cult_incidents: compat.cult_incidents,
+                cult_reported: compat.cult_reported,
                 thwarting_recorded: compat.thwarting_recorded,
                 history: compat.history,
             }],
@@ -348,6 +356,7 @@ impl CampaignRoster {
                 outcome: None,
                 mode,
                 cult_incidents: Vec::new(),
+                cult_reported: Vec::new(),
                 thwarting_recorded: false,
                 history: Vec::new(),
             }],
@@ -490,6 +499,11 @@ pub struct AntagDef {
     pub id: AntagId,
     /// What the station calls them once [`Reveal::Named`] is reached.
     pub display: String,
+    /// What completing this antagonist's department support track means.
+    /// Existing arcs retain their legacy order-only ending while active
+    /// antagonist loops migrate one at a time.
+    #[serde(default)]
+    pub counter_role: CounterTrackRole,
     pub showdown: ShowdownForm,
     /// Aired the moment the confrontation arms — immediately, not delayed.
     pub showdown_line: String,
@@ -508,6 +522,28 @@ pub struct AntagDef {
     pub victory_line: String,
     /// Aired when they are stopped, either way.
     pub thwarted_line: String,
+}
+
+/// Whether a completed department track is an ending or preparation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub enum CounterTrackRole {
+    /// Legacy behavior: every delivered step stops the antagonist.
+    #[default]
+    DepartmentVictory,
+    /// Deliveries remain useful support but cannot end the arc themselves.
+    SupportOnly,
+}
+
+/// A department support step landed for a specific campaign.
+///
+/// Active antagonist modules read this to turn generic deliveries into their
+/// own kind of help without teaching the arc spine what a ritual mark, witness
+/// or compromised machine is.
+#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CounterSupportApplied {
+    pub campaign: CampaignId,
+    pub antag: AntagId,
+    pub step: usize,
 }
 
 /// Which shape this antagonist's direct confrontation takes, and the content
@@ -537,6 +573,16 @@ pub enum ShowdownForm {
         /// Kept off `station.crew.ron`, same reason the Assailant form's own
         /// `name` is. Only meaningful when `guard_count > 0`.
         #[serde(default)]
+        guard_name: String,
+    },
+    /// A chemically sealed objective at an antagonist's exposed base. It
+    /// shares siege hazards but its defenders are preparation, never the win
+    /// condition, and it may be requested before the plot threshold.
+    Ritual {
+        spot: String,
+        gas_reagent: String,
+        cure_reagent: String,
+        guard_spots: Vec<String>,
         guard_name: String,
     },
     /// A body walks in and comes for you.
@@ -705,6 +751,7 @@ fn reroll_campaign(
 /// Deliberately mode-agnostic: an illicit delivery helps the antagonist and a
 /// counter step hurts them whichever side the player is on. Only
 /// [`Campaign::player_won`] reads the result differently.
+#[allow(clippy::too_many_arguments)]
 fn advance_plot(
     time: Res<Time>,
     script: Option<Res<Script>>,
@@ -712,6 +759,7 @@ fn advance_plot(
     mut drift: ResMut<DriftClock>,
     shift: Res<Shift>,
     mut resolved: MessageReader<OrderResolved>,
+    mut support: MessageWriter<CounterSupportApplied>,
     mut radio: ResMut<RadioLog>,
 ) {
     let (Some(script), Some(mut campaign)) = (script, campaign) else {
@@ -752,8 +800,10 @@ fn advance_plot(
         match report.kind {
             OrderKind::Illicit => delta += script.plot_per_aid,
             OrderKind::Counter => {
-                if let Some(line) = apply_counter_report(&script, &mut campaign, report) {
+                if let Some((line, applied)) = apply_counter_report(&script, &mut campaign, report)
+                {
                     delivered_lines.push(line);
+                    support.write(applied);
                 }
             }
             OrderKind::Normal | OrderKind::Crisis | OrderKind::Hostile => {}
@@ -776,7 +826,7 @@ fn apply_counter_report(
     script: &ArcScript,
     roster: &mut CampaignRoster,
     report: &OrderResolved,
-) -> Option<String> {
+) -> Option<(String, CounterSupportApplied)> {
     let target_id = report.campaign.unwrap_or(roster.id);
     let campaign = roster.active_by_id_mut(target_id)?;
     if campaign.outcome.is_some() {
@@ -803,8 +853,17 @@ fn apply_counter_report(
         }
     };
     *campaign.countered.get_mut(index)? = true;
-    campaign.plot = (campaign.plot + script.plot_per_counter_step).clamp(0, PLOT_MAX);
-    Some(def.counter_steps[index].delivered_line.clone())
+    if def.counter_role == CounterTrackRole::DepartmentVictory {
+        campaign.plot = (campaign.plot + script.plot_per_counter_step).clamp(0, PLOT_MAX);
+    }
+    Some((
+        def.counter_steps[index].delivered_line.clone(),
+        CounterSupportApplied {
+            campaign: campaign.id,
+            antag: campaign.antag,
+            step: index,
+        },
+    ))
 }
 
 /// Moves the plot from outside this module.
@@ -1072,9 +1131,13 @@ fn resolve_campaign(
         return;
     }
 
+    let Some(def) = script.antagonist(campaign.antag) else {
+        return;
+    };
     let outcome = if campaign.plot >= PLOT_MAX {
         ArcOutcome::PlotSucceeded
-    } else if campaign.fully_countered() {
+    } else if def.counter_role == CounterTrackRole::DepartmentVictory && campaign.fully_countered()
+    {
         ArcOutcome::StoppedByDepartments
     } else {
         return;
@@ -1237,6 +1300,7 @@ mod tests {
                 ..Default::default()
             })
             .add_message::<OrderResolved>()
+            .add_message::<CounterSupportApplied>()
             .add_systems(
                 Update,
                 (
@@ -1444,14 +1508,14 @@ mod tests {
 
     #[test]
     fn the_meter_clamps_at_both_ends() {
-        let mut app = arc_app(AntagId::Cult);
+        let mut app = arc_app(AntagId::Spy);
         app.world_mut().resource_mut::<Campaign>().plot = 2;
 
         // Down: a counter step is worth far more than 2 points.
         let role = app
             .world()
             .resource::<Script>()
-            .antagonist(AntagId::Cult)
+            .antagonist(AntagId::Spy)
             .unwrap()
             .counter_steps[0]
             .role
@@ -1582,7 +1646,7 @@ mod tests {
 
     #[test]
     fn delivering_a_step_marks_it_and_pushes_the_plot_back() {
-        let mut app = counter_app(AntagId::Cult);
+        let mut app = counter_app(AntagId::Spy);
         let before = {
             let suspected_at = app.world().resource::<Script>().suspected_at;
             app.world_mut().resource_mut::<Campaign>().plot = suspected_at;
@@ -1591,7 +1655,7 @@ mod tests {
         let role = app
             .world()
             .resource::<Script>()
-            .antagonist(AntagId::Cult)
+            .antagonist(AntagId::Spy)
             .unwrap()
             .counter_steps[0]
             .role
@@ -1718,7 +1782,7 @@ mod tests {
 
     #[test]
     fn completing_the_counter_track_ends_the_arc() {
-        let mut app = arc_app(AntagId::Cult);
+        let mut app = arc_app(AntagId::Spy);
         for flag in app
             .world_mut()
             .resource_mut::<Campaign>()
@@ -1733,6 +1797,26 @@ mod tests {
         let campaign = app.world().resource::<Campaign>();
         assert_eq!(campaign.outcome, Some(ArcOutcome::StoppedByDepartments));
         assert_eq!(campaign.player_won(), Some(true));
+    }
+
+    #[test]
+    fn completing_cult_support_neither_moves_plot_nor_ends_the_arc() {
+        let mut app = arc_app(AntagId::Cult);
+        app.world_mut().resource_mut::<Campaign>().plot = 40;
+        for flag in app
+            .world_mut()
+            .resource_mut::<Campaign>()
+            .countered
+            .iter_mut()
+        {
+            *flag = true;
+        }
+
+        app.update();
+
+        let campaign = app.world().resource::<Campaign>();
+        assert_eq!(campaign.plot, 40);
+        assert_eq!(campaign.outcome, None);
     }
 
     #[test]
