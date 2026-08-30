@@ -324,6 +324,10 @@ mod tests {
             category: None,
             outcome: Outcome::Success,
             kind: crate::orders::OrderKind::Normal,
+            quality: None,
+            development: false,
+            campaign: None,
+            counter_step: None,
         });
         app.update();
     }
@@ -381,23 +385,23 @@ mod tests {
             resolve(&mut app, &name);
         }
         assert_eq!(
-            app.world().resource::<crate::instability::Instability>().level,
-            0,
+            app.world().resource::<crate::instability::Instability>().value,
+            crate::instability::STABILITY_MAX,
             "every visit short of the last one must nudge nothing"
         );
 
         resolve(&mut app, &name);
         assert_eq!(
-            app.world().resource::<crate::instability::Instability>().level,
-            OBSESSED_FINALE_INSTABILITY,
+            app.world().resource::<crate::instability::Instability>().value,
+            crate::instability::STABILITY_MAX - OBSESSED_FINALE_INSTABILITY as f32,
             "the transition into the final visit nudges exactly once"
         );
 
         resolve(&mut app, &name);
         resolve(&mut app, &name);
         assert_eq!(
-            app.world().resource::<crate::instability::Instability>().level,
-            OBSESSED_FINALE_INSTABILITY,
+            app.world().resource::<crate::instability::Instability>().value,
+            crate::instability::STABILITY_MAX - OBSESSED_FINALE_INSTABILITY as f32,
             "repeating the final beat must not nudge again"
         );
     }

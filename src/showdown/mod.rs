@@ -164,6 +164,9 @@ impl Pursuit {
 /// The live showdown. Absent means none is running.
 #[derive(Resource)]
 pub struct Showdown {
+    /// Stable owner so a future second active campaign cannot resolve the
+    /// wrong confrontation.
+    campaign: crate::arc::CampaignId,
     /// Seconds left before the arc is lost.
     deadline: f32,
     /// Seconds until the next gas vent (siege only).
@@ -269,6 +272,7 @@ fn arm_showdown(
     let wards = campaign.cult_incidents.iter().filter(|done| **done).count() as f32;
     let cult_siege = campaign.antag == crate::arc::AntagId::Cult;
     commands.insert_resource(Showdown {
+        campaign: campaign.id,
         deadline: script.showdown.deadline_seconds + if cult_siege { wards * 8.0 } else { 0.0 },
         next_vent: script.showdown.gas_every_seconds + if cult_siege { wards * 1.5 } else { 0.0 },
         treated: Units::whole(0),
@@ -648,6 +652,10 @@ fn resolve_showdown(
     else {
         return;
     };
+    if campaign.active_by_id(showdown.campaign).is_none() || showdown.campaign != campaign.id {
+        commands.remove_resource::<Showdown>();
+        return;
+    }
 
     showdown.deadline -= time.delta_secs();
 

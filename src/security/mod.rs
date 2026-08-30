@@ -72,7 +72,7 @@ const FORGERY_PENALTY: i32 = -6;
 
 /// What a raid actually firing nudges `instability::Instability` by — see
 /// `instability::INCOMPETENCE_PER_IGNORED_SHENANIGAN` for the same scale.
-const RAID_INSTABILITY: i32 = 4;
+const RAID_INSTABILITY: i32 = 8;
 
 // ---------------------------------------------------------------------------
 // Data

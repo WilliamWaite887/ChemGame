@@ -25,6 +25,7 @@ use crate::containers::{HeldBy, InSlot, InSlotB};
 use crate::door::Door;
 use crate::ending::FinishedArc;
 use crate::hazards::ActiveHazard;
+use crate::instability::StabilityBand;
 use crate::machines::{AgitationRun, Machine, MachineKind, ReactionsFired, Thermostat};
 use crate::net::is_authority;
 use crate::orders::{CrisisOrder, Shift};
@@ -73,6 +74,7 @@ impl Plugin for SfxPlugin {
             .add_message::<EmitWorldSfx>()
             .add_server_message::<WorldSfx>(Channel::Ordered)
             .init_resource::<RadioCursor>()
+            .init_resource::<StabilityAudioCursor>()
             .init_resource::<AmbienceCooldown>()
             .init_resource::<VariantCursor>()
             .add_systems(Startup, load_sfx)
@@ -82,6 +84,7 @@ impl Plugin for SfxPlugin {
                 OnEnter(AppState::Playing),
                 (
                     reset_radio_cursor,
+                    |mut cursor: ResMut<StabilityAudioCursor>| cursor.0 = None,
                     |mut cooldown: ResMut<AmbienceCooldown>| {
                         cooldown.0 = None;
                     },
@@ -102,6 +105,7 @@ impl Plugin for SfxPlugin {
                     sync_radiation_alarm,
                     play_crisis_alarm_sfx,
                     play_evacuation_sfx,
+                    play_stability_sfx,
                     play_radio_sfx,
                     play_ui_click_sfx,
                     play_door_sfx.run_if(is_authority),
@@ -139,6 +143,9 @@ pub enum Sfx {
     Announce,
     RedAlert,
     ShuttleCalled,
+    StabilityNotice,
+    StabilityRumble,
+    StabilityCritical,
     RequisitionConfirm,
     UiClick,
     UiRefused,
@@ -208,6 +215,8 @@ impl Sfx {
             // card that explains it. The PA fanfare sits lowest of the three:
             // it fronts a joke, not an emergency.
             Sfx::RedAlert | Sfx::ShuttleCalled => 0.85,
+            Sfx::StabilityNotice => 0.65,
+            Sfx::StabilityRumble | Sfx::StabilityCritical => 0.7,
             Sfx::Announce => 0.6,
             _ => 1.0,
         }
@@ -293,6 +302,9 @@ struct SfxAssets {
     announce: Handle<AudioSource>,
     red_alert: Handle<AudioSource>,
     shuttle_called: Handle<AudioSource>,
+    stability_notice: Handle<AudioSource>,
+    stability_rumble: Handle<AudioSource>,
+    stability_critical: Handle<AudioSource>,
     /// One-shot alert, not looped — see [`sync_radiation_alarm`].
     radiation_alarm: Handle<AudioSource>,
     requisition_confirm: Handle<AudioSource>,
@@ -347,6 +359,9 @@ impl SfxAssets {
             Sfx::Announce => &self.announce,
             Sfx::RedAlert => &self.red_alert,
             Sfx::ShuttleCalled => &self.shuttle_called,
+            Sfx::StabilityNotice => &self.stability_notice,
+            Sfx::StabilityRumble => &self.stability_rumble,
+            Sfx::StabilityCritical => &self.stability_critical,
             Sfx::RequisitionConfirm => &self.requisition_confirm,
             Sfx::UiClick => &self.ui_click,
             Sfx::UiRefused => &self.ui_refused,
@@ -398,6 +413,9 @@ fn load_sfx(mut commands: Commands, assets: Res<AssetServer>) {
         announce: assets.load("sounds/announce_syndi.ogg"),
         red_alert: assets.load("sounds/redalert.ogg"),
         shuttle_called: assets.load("sounds/shuttlecalled.ogg"),
+        stability_notice: assets.load("sounds/stability_notice.ogg"),
+        stability_rumble: assets.load("sounds/stability_rumble.ogg"),
+        stability_critical: assets.load("sounds/stability_critical.ogg"),
         radiation_alarm: assets.load("sounds/radiation.ogg"),
         requisition_confirm: assets.load("sounds/requisition_confirm.ogg"),
         ui_click: assets.load("sounds/ui_click.ogg"),
@@ -846,6 +864,41 @@ fn play_evacuation_sfx(
     *announced = ending.is_some();
 }
 
+#[derive(Resource, Default)]
+struct StabilityAudioCursor(Option<StabilityBand>);
+
+/// Every qualitative condition transition receives the same neutral notice
+/// tone alongside its station-wide announcement. Worsening into Unstable adds
+/// a distant structural rumble; worsening into Critical adds the heavy hull
+/// creak. Recovery stays clean and reassuring with the notice alone. The
+/// evacuation sting owns the final transition, so zero never produces both.
+fn play_stability_sfx(
+    shift: Res<Shift>,
+    mut cursor: ResMut<StabilityAudioCursor>,
+    mut play: MessageWriter<PlaySfx>,
+) {
+    let Some(previous) = cursor.0.replace(shift.stability_band) else {
+        return;
+    };
+    if previous == shift.stability_band || shift.stability_band == StabilityBand::Evacuating {
+        return;
+    }
+    play.write(PlaySfx(Sfx::StabilityNotice));
+    if shift.stability_band > previous {
+        match shift.stability_band {
+            StabilityBand::Unstable => {
+                play.write(PlaySfx(Sfx::StabilityRumble));
+            }
+            StabilityBand::Critical => {
+                play.write(PlaySfx(Sfx::StabilityCritical));
+            }
+            StabilityBand::Stable
+            | StabilityBand::Strained
+            | StabilityBand::Evacuating => {}
+        }
+    }
+}
+
 /// Baseline for [`play_radio_sfx`] — `None` means "not seen a frame since
 /// entering the lab yet", which is what tells that system to baseline
 /// silently instead of replaying old history as fresh blips.
@@ -1102,6 +1155,48 @@ mod tests {
             app.update();
         }
         app.world().resource::<HeardRadio>().0.clone()
+    }
+
+    fn stability_sfx_for(transitions: &[StabilityBand]) -> Vec<Sfx> {
+        let mut app = App::new();
+        app.init_resource::<Shift>()
+            .init_resource::<StabilityAudioCursor>()
+            .init_resource::<HeardRadio>()
+            .add_message::<PlaySfx>()
+            .add_systems(Update, (play_stability_sfx, collect_radio_sfx).chain());
+        app.update();
+        for band in transitions {
+            app.world_mut().resource_mut::<Shift>().stability_band = *band;
+            app.update();
+        }
+        app.world().resource::<HeardRadio>().0.clone()
+    }
+
+    #[test]
+    fn stability_announcements_layer_damage_sounds_only_when_worsening() {
+        assert_eq!(
+            stability_sfx_for(&[
+                StabilityBand::Strained,
+                StabilityBand::Unstable,
+                StabilityBand::Critical,
+                StabilityBand::Unstable,
+                StabilityBand::Stable,
+            ]),
+            [
+                Sfx::StabilityNotice,
+                Sfx::StabilityNotice,
+                Sfx::StabilityRumble,
+                Sfx::StabilityNotice,
+                Sfx::StabilityCritical,
+                Sfx::StabilityNotice,
+                Sfx::StabilityNotice,
+            ]
+        );
+    }
+
+    #[test]
+    fn evacuation_keeps_its_dedicated_sting() {
+        assert!(stability_sfx_for(&[StabilityBand::Evacuating]).is_empty());
     }
 
     #[test]

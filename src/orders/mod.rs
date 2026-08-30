@@ -585,8 +585,17 @@ pub struct CrisisOrder;
 /// public by design (the whole point is that the departments have worked out
 /// what they need and are asking you for it), so it is replicated and free to
 /// be queried anywhere.
-#[derive(Component, Serialize, Deserialize)]
-pub struct CounterOrder;
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CounterOrder {
+    pub campaign: crate::arc::CampaignId,
+    pub step: usize,
+}
+
+/// A scripted request whose successful fulfilment advances a hostile plan.
+/// It is distinct from illicit dealing because it carries no underworld or
+/// secrecy behavior; the marker exists so station stability never rewards it.
+#[derive(Component)]
+pub struct HostileOrder;
 
 /// Which thread, if any, owns an order's consequences.
 ///
@@ -602,6 +611,7 @@ pub enum OrderKind {
     Illicit,
     Crisis,
     Counter,
+    Hostile,
 }
 
 impl OrderKind {
@@ -611,10 +621,15 @@ impl OrderKind {
     /// by exactly one spawner — so the order of these checks only decides what
     /// a content bug would degrade to, never ordinary behaviour.
     pub fn of(illicit: bool, crisis: bool, counter: bool) -> OrderKind {
-        match (illicit, crisis, counter) {
-            (true, _, _) => OrderKind::Illicit,
-            (_, true, _) => OrderKind::Crisis,
-            (_, _, true) => OrderKind::Counter,
+        Self::of_with_hostile(illicit, crisis, counter, false)
+    }
+
+    pub fn of_with_hostile(illicit: bool, crisis: bool, counter: bool, hostile: bool) -> OrderKind {
+        match (illicit, crisis, counter, hostile) {
+            (true, _, _, _) => OrderKind::Illicit,
+            (_, true, _, _) => OrderKind::Crisis,
+            (_, _, true, _) => OrderKind::Counter,
+            (_, _, _, true) => OrderKind::Hostile,
             _ => OrderKind::Normal,
         }
     }
@@ -733,6 +748,22 @@ pub struct OrderResolved {
     /// — that is what keeps the "no visible tell" guarantee intact downstream
     /// of grading. The other variants have nothing to hide.
     pub kind: OrderKind,
+    /// Chemistry quality used by the station-stability ledger. `None` for an
+    /// expiry because no batch was handed over.
+    pub quality: Option<DeliveryQuality>,
+    /// Optional development work has a deliberately lighter expiry cost.
+    pub development: bool,
+    /// Owner metadata for counter-track routing. `None` on every other order
+    /// and on synthetic legacy test messages.
+    pub campaign: Option<crate::arc::CampaignId>,
+    pub counter_step: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeliveryQuality {
+    pub purity: f32,
+    pub potency: u32,
+    pub remaining_fraction: f32,
 }
 
 /// A station department whose standing rises and falls with how you treat its
@@ -881,6 +912,10 @@ pub struct ShiftSnapshot {
     pub department_standing: HashMap<Department, i32>,
     pub research_points: u32,
     pub recipes_known: usize,
+    /// Qualitative station condition at opening. The exact hidden stability
+    /// value is never copied into shift state or debrief data.
+    #[serde(default)]
+    pub stability_band: crate::instability::StabilityBand,
 }
 
 #[derive(Resource, Clone, Serialize, Deserialize)]
@@ -933,6 +968,12 @@ pub struct Shift {
     /// chemist-count — every one of its ~12 call sites already takes `&shift`,
     /// so none of them need to change.
     pub defeated_count: u32,
+    /// Director inputs mirrored from authority-owned station stability. The
+    /// band is qualitative; the hidden exact value never rides `ShiftSync`.
+    #[serde(default)]
+    pub stability_band: crate::instability::StabilityBand,
+    #[serde(default)]
+    pub station_age_seconds: u32,
     /// How much standing this closure has already cost, in points per
     /// department. Zero whenever the lab is open — see `shift::impatience`.
     ///
@@ -977,6 +1018,8 @@ impl Default for Shift {
             opened_at: None,
             called: false,
             defeated_count: 0,
+            stability_band: crate::instability::StabilityBand::Stable,
+            station_age_seconds: 0,
             closure_pressure: 0,
             evacuated: false,
         }
@@ -1610,7 +1653,8 @@ fn expire_orders(
         &mut CrewRoute,
         Has<IllicitOrder>,
         Has<CrisisOrder>,
-        Has<CounterOrder>,
+        Option<&CounterOrder>,
+        Has<HostileOrder>,
         Option<&DevelopmentOrder>,
     )>,
 ) {
@@ -1620,8 +1664,10 @@ fn expire_orders(
     // were still up.
     let dt = time.delta_secs();
 
-    for (entity, mut order, crew, mut route, illicit, crisis, counter, development) in &mut orders {
-        let kind = OrderKind::of(illicit, crisis, counter);
+    for (entity, mut order, crew, mut route, illicit, crisis, counter, hostile, development) in
+        &mut orders
+    {
+        let kind = OrderKind::of_with_hostile(illicit, crisis, counter.is_some(), hostile);
         // Patience only runs down once they have actually arrived, so a slow
         // walk in never counts against the player.
         if route.phase != CrewPhase::Waiting {
@@ -1660,6 +1706,10 @@ fn expire_orders(
             category,
             outcome: Outcome::Expired,
             kind,
+            quality: None,
+            development: development.is_some(),
+            campaign: counter.map(|counter| counter.campaign),
+            counter_step: counter.map(|counter| counter.step),
         });
         if development.is_none() {
             shift.botched += 1;
@@ -1741,7 +1791,7 @@ fn misdelivered(outcome: Outcome, instability: Option<&crate::instability::Insta
     let Some(instability) = instability else {
         return outcome;
     };
-    if instability.tier < crate::instability::InstabilityTier::Fraying {
+    if instability.band < crate::instability::StabilityBand::Unstable {
         return outcome;
     }
     if rand::rng().random_bool(MISDELIVERY_CHANCE) {
@@ -1768,7 +1818,9 @@ fn handle_delivery(
         &mut CrewRoute,
         Has<IllicitOrder>,
         Has<CrisisOrder>,
-        Has<CounterOrder>,
+        Option<&CounterOrder>,
+        Has<HostileOrder>,
+        Has<DevelopmentOrder>,
     )>,
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
     containers: Query<(Entity, &Container, &HeldBy)>,
@@ -1783,7 +1835,8 @@ fn handle_delivery(
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
-        let Ok((member, order, mut route, illicit, crisis, counter)) = crew.get_mut(request.target)
+        let Ok((member, order, mut route, illicit, crisis, counter, hostile, development)) =
+            crew.get_mut(request.target)
         else {
             continue;
         };
@@ -1797,7 +1850,7 @@ fn handle_delivery(
             continue;
         };
 
-        let kind = OrderKind::of(illicit, crisis, counter);
+        let kind = OrderKind::of_with_hostile(illicit, crisis, counter.is_some(), hostile);
         let label = labels.get(container_entity).ok();
         let is_estranged = estranged
             .as_ref()
@@ -1846,6 +1899,8 @@ fn handle_delivery(
                 container_entity,
                 container,
                 kind,
+                counter: counter.copied(),
+                development,
                 body,
                 believed,
             },
@@ -1875,6 +1930,8 @@ struct Handover<'a> {
     container: &'a Container,
     /// Which thread owns this order — see [`OrderResolved::kind`].
     kind: OrderKind,
+    counter: Option<CounterOrder>,
+    development: bool,
     /// The recipient's body, so `complete_delivery` can route what was
     /// actually handed over into them — every crew member has had one since
     /// M12. `Option` because this struct already follows the "the caller
@@ -1916,6 +1973,8 @@ fn complete_delivery(
         kind,
         body,
         believed,
+        counter,
+        development,
     } = handover;
 
     let (mut outcome, mut matched) = grade(
@@ -1952,15 +2011,6 @@ fn complete_delivery(
             None => (None, reference_category(db, order.reagent)),
         }
     };
-    resolved.write(OrderResolved {
-        name: member.name.clone(),
-        role: member.role.clone(),
-        reagent: reported_reagent,
-        category,
-        outcome,
-        kind,
-    });
-
     // Whatever was actually handed over, not what the request was authored
     // around: a lenient order accepts any member of its category, and both
     // currencies below pay for the one the chemist chose to make.
@@ -1968,6 +2018,27 @@ fn complete_delivery(
     let delivered_purity = matched
         .map(|id| container.solution.purity_of(id))
         .unwrap_or(1.0);
+    let remaining_fraction = if order.patience > 0.0 {
+        (order.remaining() / order.patience).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    resolved.write(OrderResolved {
+        name: member.name.clone(),
+        role: member.role.clone(),
+        reagent: reported_reagent,
+        category,
+        outcome,
+        kind,
+        quality: Some(DeliveryQuality {
+            purity: delivered_purity,
+            potency,
+            remaining_fraction,
+        }),
+        development,
+        campaign: counter.map(|counter| counter.campaign),
+        counter_step: counter.map(|counter| counter.step),
+    });
 
     if outcome.is_good() {
         shift.succeeded += 1;
@@ -2266,7 +2337,9 @@ fn handle_window_delivery(
         &mut CrewRoute,
         Has<IllicitOrder>,
         Has<CrisisOrder>,
-        Has<CounterOrder>,
+        Option<&CounterOrder>,
+        Has<HostileOrder>,
+        Has<DevelopmentOrder>,
     )>,
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
     instability: Option<Res<crate::instability::Instability>>,
@@ -2297,12 +2370,12 @@ fn handle_window_delivery(
 
         let candidates = crew
             .iter()
-            .map(|(entity, _, order, route, illicit, crisis, counter)| {
+            .map(|(entity, _, order, route, illicit, crisis, counter, hostile, _)| {
                 (
                     entity,
                     order,
                     route,
-                    OrderKind::of(illicit, crisis, counter),
+                    OrderKind::of_with_hostile(illicit, crisis, counter.is_some(), hostile),
                 )
             });
         let lane = lane.copied().unwrap_or(DeliveryLane::Public);
@@ -2310,7 +2383,7 @@ fn handle_window_delivery(
             continue;
         };
 
-        let Ok((crew_entity, member, order, mut route, illicit, crisis, counter)) =
+        let Ok((crew_entity, member, order, mut route, illicit, crisis, counter, hostile, development)) =
             crew.get_mut(recipient)
         else {
             continue;
@@ -2335,7 +2408,9 @@ fn handle_window_delivery(
                 route: &mut route,
                 container_entity,
                 container,
-                kind: OrderKind::of(illicit, crisis, counter),
+                kind: OrderKind::of_with_hostile(illicit, crisis, counter.is_some(), hostile),
+                counter: counter.copied(),
+                development,
                 body,
                 // The delivery window is a drop box, not a conversation.
                 // Nobody is standing there to read the bottle, and
@@ -2532,8 +2607,9 @@ mod tests {
     #[test]
     fn misdelivery_never_touches_an_outcome_that_was_never_a_success() {
         let breaking = crate::instability::Instability {
-            level: crate::instability::INSTABILITY_MAX,
-            tier: crate::instability::InstabilityTier::Breaking,
+            value: 0.0,
+            band: crate::instability::StabilityBand::Critical,
+            ..default()
         };
         for outcome in [
             Outcome::Short,
@@ -2555,8 +2631,9 @@ mod tests {
     #[test]
     fn misdelivery_is_a_real_probabilistic_roll_once_the_crew_is_fraying() {
         let fraying = crate::instability::Instability {
-            level: 50,
-            tier: crate::instability::InstabilityTier::Fraying,
+            value: 50.0,
+            band: crate::instability::StabilityBand::Unstable,
+            ..default()
         };
         let downgraded = (0..500)
             .filter(|_| misdelivered(Outcome::Success, Some(&fraying)) != Outcome::Success)

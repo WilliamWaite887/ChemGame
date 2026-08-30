@@ -1056,6 +1056,10 @@ mod tests {
             category: None,
             outcome: crate::orders::Outcome::Success,
             kind: crate::orders::OrderKind::Illicit,
+            quality: None,
+            development: false,
+            campaign: None,
+            counter_step: None,
         });
         app.update();
     }

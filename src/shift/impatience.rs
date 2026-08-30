@@ -183,6 +183,7 @@ fn tick_impatience(
     mut shift: ResMut<Shift>,
     mut impatience: ResMut<Impatience>,
     mut radio: ResMut<RadioLog>,
+    mut stability: MessageWriter<crate::instability::StabilityEvent>,
     waiting: Query<(), (With<Order>, NotResident)>,
 ) {
     let mut rng = rand::rng();
@@ -238,6 +239,9 @@ fn tick_impatience(
     let due = points_due(impatience.shut_for);
     while impatience.taken < due {
         impatience.taken += 1;
+        stability.write(crate::instability::StabilityEvent::ClosureNeglect {
+            pressure: impatience.taken,
+        });
         for department in Department::ALL {
             shift.adjust(department, PER_POINT);
         }
@@ -280,6 +284,7 @@ mod tests {
             .insert_resource(threat::Authored(script()))
             .init_resource::<Impatience>()
             .init_resource::<RadioLog>()
+            .add_message::<crate::instability::StabilityEvent>()
             .insert_resource(Shift {
                 accepting_orders: true,
                 ..default()
@@ -362,6 +367,7 @@ mod tests {
             .insert_resource(threat::Authored(script()))
             .init_resource::<Impatience>()
             .init_resource::<RadioLog>()
+            .add_message::<crate::instability::StabilityEvent>()
             // Exactly `Shift::default()` — which is closed.
             .init_resource::<Shift>()
             .add_systems(Update, tick_impatience);

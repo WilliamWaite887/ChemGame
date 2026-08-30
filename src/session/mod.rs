@@ -67,6 +67,8 @@ fn clear_session_state(world: &mut World) {
     reset::<crate::shift::PendingRestock>(world);
     reset::<crate::crew::Departments>(world);
     reset::<crate::instability::Instability>(world);
+    reset::<crate::instability::StabilityClock>(world);
+    reset::<crate::instability::ArcImpactTracker>(world);
 
     // The authored-chain counters. Each is "how far into this thread's script
     // the career has reached", restored from `progress.ron` on load — so a new

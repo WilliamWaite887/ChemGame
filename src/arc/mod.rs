@@ -199,8 +199,10 @@ pub enum Mode {
 /// targeted send on connect that neither of those has and this needs: a guest
 /// joining mid-arc must not spend up to a minute believing there is no
 /// campaign at all.
-#[derive(Resource, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Campaign {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CampaignArc {
+    #[serde(default = "default_campaign_id")]
+    pub id: CampaignId,
     pub antag: AntagId,
     /// 0..=[`PLOT_MAX`]. Never shown as a number; its effects are the clue
     /// lines, the counter-track opening, and the showdown arming.
@@ -233,18 +235,121 @@ pub struct Campaign {
     pub history: Vec<(AntagId, Mode, ArcOutcome)>,
 }
 
-impl Campaign {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CampaignId(pub u64);
+
+fn default_campaign_id() -> CampaignId {
+    CampaignId(1)
+}
+
+/// Collection-shaped campaign state. Current content keeps `max_active` at
+/// one, while order/showdown identifiers and serialization no longer assume
+/// that one is the permanent ceiling.
+#[derive(Resource, Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CampaignRoster {
+    pub active: Vec<CampaignArc>,
+    pub max_active: usize,
+}
+
+impl<'de> Deserialize<'de> for CampaignRoster {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Compat {
+            #[serde(default)]
+            active: Vec<CampaignArc>,
+            #[serde(default = "one_campaign")]
+            max_active: usize,
+            #[serde(default = "default_campaign_id")]
+            id: CampaignId,
+            #[serde(default = "default_antag")]
+            antag: AntagId,
+            #[serde(default)]
+            plot: i32,
+            #[serde(default)]
+            countered: Vec<bool>,
+            #[serde(default)]
+            reveal: Reveal,
+            #[serde(default)]
+            outcome: Option<ArcOutcome>,
+            #[serde(default)]
+            mode: Mode,
+            #[serde(default)]
+            cult_incidents: Vec<bool>,
+            #[serde(default)]
+            thwarting_recorded: bool,
+            #[serde(default)]
+            history: Vec<(AntagId, Mode, ArcOutcome)>,
+        }
+        fn one_campaign() -> usize {
+            1
+        }
+        fn default_antag() -> AntagId {
+            AntagId::Cult
+        }
+        let compat = Compat::deserialize(deserializer)?;
+        if !compat.active.is_empty() {
+            return Ok(CampaignRoster {
+                active: compat.active,
+                max_active: compat.max_active.max(1),
+            });
+        }
+        Ok(CampaignRoster {
+            active: vec![CampaignArc {
+                id: compat.id,
+                antag: compat.antag,
+                plot: compat.plot,
+                countered: compat.countered,
+                reveal: compat.reveal,
+                outcome: compat.outcome,
+                mode: compat.mode,
+                cult_incidents: compat.cult_incidents,
+                thwarting_recorded: compat.thwarting_recorded,
+                history: compat.history,
+            }],
+            max_active: 1,
+        })
+    }
+}
+
+impl std::ops::Deref for CampaignRoster {
+    type Target = CampaignArc;
+
+    fn deref(&self) -> &Self::Target {
+        self.active.first().expect("campaign roster must not be empty")
+    }
+}
+
+impl std::ops::DerefMut for CampaignRoster {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.active
+            .first_mut()
+            .expect("campaign roster must not be empty")
+    }
+}
+
+/// Existing callers keep the concise name while the serialized/resource
+/// shape is now explicitly a roster.
+pub type Campaign = CampaignRoster;
+
+impl CampaignRoster {
     pub fn new(antag: AntagId, mode: Mode, counter_steps: usize) -> Campaign {
-        Campaign {
-            antag,
-            plot: 0,
-            countered: vec![false; counter_steps],
-            reveal: Reveal::Hidden,
-            outcome: None,
-            mode,
-            cult_incidents: Vec::new(),
-            thwarting_recorded: false,
-            history: Vec::new(),
+        CampaignRoster {
+            active: vec![CampaignArc {
+                id: default_campaign_id(),
+                antag,
+                plot: 0,
+                countered: vec![false; counter_steps],
+                reveal: Reveal::Hidden,
+                outcome: None,
+                mode,
+                cult_incidents: Vec::new(),
+                thwarting_recorded: false,
+                history: Vec::new(),
+            }],
+            max_active: 1,
         }
     }
 
@@ -259,6 +364,14 @@ impl Campaign {
             Mode::Chemist => outcome != ArcOutcome::PlotSucceeded,
             Mode::Antagonist => outcome == ArcOutcome::PlotSucceeded,
         })
+    }
+
+    pub fn active_by_id(&self, id: CampaignId) -> Option<&CampaignArc> {
+        self.active.iter().find(|campaign| campaign.id == id)
+    }
+
+    pub fn active_by_id_mut(&mut self, id: CampaignId) -> Option<&mut CampaignArc> {
+        self.active.iter_mut().find(|campaign| campaign.id == id)
     }
 
     /// Which antagonist, and how it went, *if the menu is allowed to say*.
@@ -568,6 +681,7 @@ fn reroll_campaign(
         .unwrap_or(0);
 
     let mut history = std::mem::take(&mut campaign.history);
+    let next_id = CampaignId(campaign.id.0.saturating_add(1));
     history.push((
         campaign.antag,
         campaign.mode,
@@ -575,6 +689,7 @@ fn reroll_campaign(
     ));
     let mode = campaign.mode; // same side the player is playing from, unchanged across re-arcs
     *campaign = Campaign::new(antag, mode, steps);
+    campaign.id = next_id;
     campaign.history = history;
     *cooldown = None;
 
@@ -628,13 +743,6 @@ fn advance_plot(
         }
     }
 
-    // Only the counter-track needs the authored definition. This used to be a
-    // `let ... else { return; }` sitting above the plot write, which meant a
-    // campaign whose antagonist had no entry in `station.arc.ron` silently
-    // froze the meter at zero forever — no drift, no aid, and therefore no way
-    // for the arc to ever resolve. A content bug should cost the counter-track,
-    // not the whole save.
-    let def = script.antagonist(campaign.antag);
     let mut delivered_lines: Vec<String> = Vec::new();
 
     for report in resolved.read() {
@@ -644,31 +752,11 @@ fn advance_plot(
         match report.kind {
             OrderKind::Illicit => delta += script.plot_per_aid,
             OrderKind::Counter => {
-                let Some(def) = def else {
-                    continue;
-                };
-                // Mark the first outstanding step this department was asking
-                // for. Matching by role rather than by an id threaded through
-                // the order keeps this on the same "react to `OrderResolved`"
-                // footing every other thread uses.
-                let step = def
-                    .counter_steps
-                    .iter()
-                    .enumerate()
-                    .find(|(index, step)| {
-                        step.role == report.role
-                            && campaign.countered.get(*index).copied() == Some(false)
-                    })
-                    .map(|(index, step)| (index, step.delivered_line.clone()));
-                if let Some((index, line)) = step {
-                    if let Some(flag) = campaign.countered.get_mut(index) {
-                        *flag = true;
-                    }
-                    delta += script.plot_per_counter_step;
+                if let Some(line) = apply_counter_report(&script, &mut campaign, report) {
                     delivered_lines.push(line);
                 }
             }
-            OrderKind::Normal | OrderKind::Crisis => {}
+            OrderKind::Normal | OrderKind::Crisis | OrderKind::Hostile => {}
         }
     }
 
@@ -679,6 +767,43 @@ fn advance_plot(
     if delta != 0 {
         campaign.plot = (campaign.plot + delta).clamp(0, PLOT_MAX);
     }
+}
+
+/// Applies one successful counter delivery to its owning arc. Old synthetic
+/// messages without identifiers retain the role-based primary-arc fallback,
+/// while live orders always carry both the campaign and authored step.
+fn apply_counter_report(
+    script: &ArcScript,
+    roster: &mut CampaignRoster,
+    report: &OrderResolved,
+) -> Option<String> {
+    let target_id = report.campaign.unwrap_or(roster.id);
+    let campaign = roster.active_by_id_mut(target_id)?;
+    if campaign.outcome.is_some() {
+        return None;
+    }
+    let def = script.antagonist(campaign.antag)?;
+    let index = match report.counter_step {
+        Some(index)
+            if def.counter_steps.get(index).is_some()
+                && campaign.countered.get(index).copied() == Some(false) =>
+        {
+            index
+        }
+        Some(_) => return None,
+        None => def
+            .counter_steps
+            .iter()
+            .enumerate()
+            .find(|(index, step)| {
+                step.role == report.role
+                    && campaign.countered.get(*index).copied() == Some(false)
+            })?
+            .0,
+    };
+    *campaign.countered.get_mut(index)? = true;
+    campaign.plot = (campaign.plot + script.plot_per_counter_step).clamp(0, PLOT_MAX);
+    Some(def.counter_steps[index].delivered_line.clone())
 }
 
 /// Moves the plot from outside this module.
@@ -782,12 +907,11 @@ fn generate_counter_orders(
     // by finding the lowest outstanding step with a matching role, so the two
     // agree by construction as long as only one is ever live at a time —
     // which the `active` check above is what guarantees.
-    let Some(step) = def
+    let Some((step_index, step)) = def
         .counter_steps
         .iter()
         .enumerate()
         .find(|(index, _)| campaign.countered.get(*index).copied() == Some(false))
-        .map(|(_, step)| step)
     else {
         return;
     };
@@ -830,7 +954,10 @@ fn generate_counter_orders(
             patience,
             waited: 0.0,
         },
-        CounterOrder,
+        CounterOrder {
+            campaign: campaign.id,
+            step: step_index,
+        },
         Interactable::new(format!(
             "{} — hand over {} {}",
             crew_def.name, amount, want_label
@@ -1141,6 +1268,10 @@ mod tests {
             category: None,
             outcome,
             kind,
+            quality: None,
+            development: false,
+            campaign: None,
+            counter_step: None,
         });
         app.update();
     }
@@ -1259,6 +1390,55 @@ mod tests {
         resolve(&mut app, "Medical", OrderKind::Crisis, Outcome::Success);
 
         assert_eq!(plot(&app), 0);
+    }
+
+    #[test]
+    fn identified_counter_deliveries_only_touch_their_own_arc() {
+        let script = script();
+        let mut first = Campaign::new(AntagId::Cult, Mode::Chemist, 2);
+        first.id = CampaignId(41);
+        first.plot = 30;
+        let mut second = Campaign::new(AntagId::Spy, Mode::Chemist, 2)
+            .active
+            .pop()
+            .unwrap();
+        second.id = CampaignId(42);
+        second.plot = 30;
+        first.active.push(second);
+        first.max_active = 2;
+
+        let report = OrderResolved {
+            name: "Engineer".to_string(),
+            role: "Engineering".to_string(),
+            reagent: None,
+            category: None,
+            outcome: Outcome::Success,
+            kind: OrderKind::Counter,
+            quality: None,
+            development: false,
+            campaign: Some(CampaignId(42)),
+            counter_step: Some(0),
+        };
+        assert!(apply_counter_report(&script, &mut first, &report).is_some());
+
+        let cult = first.active_by_id(CampaignId(41)).unwrap();
+        let spy = first.active_by_id(CampaignId(42)).unwrap();
+        assert_eq!(cult.countered, vec![false, false]);
+        assert_eq!(cult.plot, 30);
+        assert!(spy.countered[0]);
+        assert_eq!(spy.plot, (30 + script.plot_per_counter_step).max(0));
+    }
+
+    #[test]
+    fn a_legacy_singular_campaign_deserializes_as_a_one_entry_roster() {
+        let legacy = Campaign::new(AntagId::Blob, Mode::Chemist, 3)
+            .active
+            .pop()
+            .unwrap();
+        let text = ron::to_string(&legacy).unwrap();
+        let roster: CampaignRoster = ron::from_str(&text).unwrap();
+        assert_eq!(roster.active, vec![legacy]);
+        assert_eq!(roster.max_active, 1);
     }
 
     #[test]

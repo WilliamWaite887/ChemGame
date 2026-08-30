@@ -153,6 +153,19 @@ pub struct CrisisSchedule {
     /// keeps "which case was announced" and "which case actually arrives"
     /// from ever being two separate pieces of state that could disagree.
     clock: threat::Countdown,
+    /// Stability-driven time until the next warning. The existing `clock`
+    /// remains the short authored warning-to-arrival countdown.
+    next_in: Option<f32>,
+}
+
+fn crisis_gap(band: crate::instability::StabilityBand) -> Option<(f32, f32)> {
+    use crate::instability::StabilityBand::*;
+    match band {
+        Stable => None,
+        Strained => Some((6.0 * 60.0, 9.0 * 60.0)),
+        Unstable => Some((3.0 * 60.0, 5.0 * 60.0)),
+        Critical | Evacuating => Some((90.0, 180.0)),
+    }
 }
 
 /// Watches `UnderworldStanding`, warns, then afflicts a crew member.
@@ -200,8 +213,23 @@ fn schedule_crisis(
         threat::Ticked::Idle => {}
     }
 
-    if underworld.level() >= script.underworld_threshold {
-        let mut rng = rand::rng();
+    let forced = underworld.level() >= script.underworld_threshold;
+    let mut rng = rand::rng();
+    let due = if forced {
+        true
+    } else if let Some(range) = crisis_gap(shift.stability_band) {
+        let remaining = schedule
+            .next_in
+            .get_or_insert_with(|| rng.random_range(range.0..=range.1));
+        *remaining -= time.delta_secs();
+        *remaining <= 0.0
+    } else {
+        schedule.next_in = None;
+        false
+    };
+
+    if due {
+        schedule.next_in = None;
         let case_index = rng.random_range(0..script.cases.len().max(1));
         schedule.clock.arm(
             rng.random_range(script.warning_seconds.0..=script.warning_seconds.1),
@@ -453,10 +481,9 @@ fn colors_match(a: Color, b: Color) -> bool {
         && (a.blue - b.blue).abs() < ALERT_SETTLE_EPSILON
 }
 
-/// Pulls every `LabLight` toward red while a crisis is live, and back to its
-/// own room tint once it isn't. Reads `Has<CrisisOrder>` directly rather than
-/// a bespoke resource — see the plugin doc for why that is enough to stay in
-/// sync across a co-op session with no new replicated state.
+/// Pulls every `LabLight` toward red as station condition worsens, with a live
+/// crisis overriding the qualitative background all the way to full alarm.
+/// Both inputs already replicate, so co-op needs no presentation-only sync.
 ///
 /// Settles rather than lerping forever. This runs on every peer with no
 /// authority gate (it is presentation), and the overwhelmingly common state is
@@ -466,11 +493,23 @@ fn colors_match(a: Color, b: Color) -> bool {
 /// had.
 fn pulse_alert_lighting(
     time: Res<Time>,
+    shift: Res<Shift>,
     active: Query<(), With<CrisisOrder>>,
     mut lights: Query<(&LabLight, &mut PointLight)>,
     mut ambient: Option<ResMut<GlobalAmbientLight>>,
 ) {
-    let target_alert = if active.is_empty() { 0.0 } else { 1.0 };
+    let condition_alert = match shift.stability_band {
+        crate::instability::StabilityBand::Stable => 0.0,
+        crate::instability::StabilityBand::Strained => 0.08,
+        crate::instability::StabilityBand::Unstable => 0.20,
+        crate::instability::StabilityBand::Critical
+        | crate::instability::StabilityBand::Evacuating => 0.40,
+    };
+    let target_alert = if active.is_empty() {
+        condition_alert
+    } else {
+        1.0
+    };
     let t = (time.delta_secs() * ALERT_LERP_RATE).clamp(0.0, 1.0);
     let alarm = Color::srgb(0.85, 0.08, 0.08);
 
@@ -514,6 +553,17 @@ mod tests {
 
     fn script() -> CrisisScript {
         ron::from_str(include_str!("../../assets/data/station.crisis.ron")).unwrap()
+    }
+
+    #[test]
+    fn worsening_station_condition_monotonically_accelerates_crises() {
+        use crate::instability::StabilityBand;
+        assert_eq!(crisis_gap(StabilityBand::Stable), None);
+        let strained = crisis_gap(StabilityBand::Strained).unwrap();
+        let unstable = crisis_gap(StabilityBand::Unstable).unwrap();
+        let critical = crisis_gap(StabilityBand::Critical).unwrap();
+        assert!(unstable.0 < strained.0 && unstable.1 < strained.1);
+        assert!(critical.0 < unstable.0 && critical.1 < unstable.1);
     }
 
     /// Just enough world to drive `schedule_crisis` and `afflict_victim`: no
@@ -645,6 +695,10 @@ mod tests {
             category: None,
             outcome: crate::orders::Outcome::Success,
             kind: crate::orders::OrderKind::Crisis,
+            quality: None,
+            development: false,
+            campaign: None,
+            counter_step: None,
         });
         app.update();
 
@@ -675,6 +729,10 @@ mod tests {
             category: None,
             outcome: crate::orders::Outcome::Expired,
             kind: crate::orders::OrderKind::Crisis,
+            quality: None,
+            development: false,
+            campaign: None,
+            counter_step: None,
         });
         app.update();
 
@@ -705,6 +763,10 @@ mod tests {
             category: None,
             outcome: crate::orders::Outcome::Success,
             kind: crate::orders::OrderKind::Normal,
+            quality: None,
+            development: false,
+            campaign: None,
+            counter_step: None,
         });
         app.update();
 

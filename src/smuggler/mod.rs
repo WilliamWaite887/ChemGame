@@ -465,6 +465,10 @@ mod tests {
             category: None,
             outcome,
             kind: OrderKind::Normal,
+            quality: None,
+            development: false,
+            campaign: None,
+            counter_step: None,
         });
         app.update();
     }
@@ -483,8 +487,9 @@ mod tests {
         );
         assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
         assert_eq!(
-            app.world().resource::<crate::instability::Instability>().level,
-            crate::instability::INCOMPETENCE_PER_IGNORED_SHENANIGAN,
+            app.world().resource::<crate::instability::Instability>().value,
+            crate::instability::STABILITY_MAX
+                - crate::instability::INCOMPETENCE_PER_IGNORED_SHENANIGAN as f32,
             "an ignored shenanigan is exactly the signal the instability meter watches for"
         );
     }

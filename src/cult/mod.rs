@@ -393,7 +393,7 @@ fn generate_cult_visit(
         return;
     };
 
-    threat::spawn_scripted_visit(
+    let visitor = threat::spawn_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
@@ -407,6 +407,7 @@ fn generate_cult_visit(
             plea: stage.pretext.clone(),
         },
     );
+    commands.entity(visitor).insert(crate::orders::HostileOrder);
 
     radio.push(
         RadioEntry::new(channel_for(&script.role), stage.pretext.clone())
@@ -964,6 +965,10 @@ mod tests {
             category: None,
             outcome,
             kind: crate::orders::OrderKind::Normal,
+            quality: None,
+            development: false,
+            campaign: None,
+            counter_step: None,
         });
         app.update();
     }

@@ -213,22 +213,25 @@ impl ShiftRules {
     }
 }
 
-/// The live difficulty, computed fresh from how much of the career the chemist
-/// has actually *earned* — clean deliveries only — rather than a shift number
-/// nothing tracks any more.
-///
-/// Deliberately not `succeeded + botched`, which is what this counted first.
-/// Counting failures made the ramp a death spiral: a chemist who was already
-/// drowning got shorter gaps, less patience and more people at the counter for
-/// it, with no recovery valve anywhere in the game. Tying it to `succeeded`
-/// alone makes `orders_per_tier` mean what it reads as — "five *good*
-/// deliveries" — and means a bad run costs standing, which is recoverable,
-/// rather than difficulty, which was not.
+/// Live order pressure: capped station age supplies the baseline tier, co-op
+/// scales shared capacity, and the qualitative stability band compresses gaps
+/// and widens the queue. Stability never shortens patience on its own.
 pub fn current_rules(config: &OrderConfig, shift: &Shift, chemist_count: usize) -> ShiftRules {
-    let tier = shift.succeeded / config.ramp.orders_per_tier.max(1);
+    const AGE_TIER_SECONDS: u32 = 10 * 60;
+    const MAX_AGE_TIER: u32 = 6;
+    let tier = (shift.station_age_seconds / AGE_TIER_SECONDS).min(MAX_AGE_TIER);
     let base = ShiftRules::for_tier(config, &config.ramp, tier);
     let scaled = scale_for_chemists(base, chemist_count, &config.ramp);
-    let rules = scale_for_defeated(scaled, shift.defeated_count, chemist_count, &config.ramp);
+    let team_floor = config.ramp.gap_floor / chemist_count.max(1) as f32;
+    let multiplier = shift.stability_band.order_gap_multiplier();
+    let rules = ShiftRules {
+        gap_seconds: (
+            (scaled.gap_seconds.0 * multiplier).max(team_floor),
+            (scaled.gap_seconds.1 * multiplier).max(team_floor),
+        ),
+        max_active: scaled.max_active + shift.stability_band.active_order_bonus(),
+        ..scaled
+    };
     rush_patience(rules)
 }
 
@@ -1183,6 +1186,13 @@ pub struct ShiftReport {
     /// Only the departments that actually moved, in [`Department::ALL`] order.
     /// A debrief listing five unchanged zeroes is a debrief nobody reads.
     pub standing: Vec<(Department, i32)>,
+    pub condition_change: Option<ConditionChange>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConditionChange {
+    Improved,
+    Deteriorated,
 }
 
 impl ShiftReport {
@@ -1193,6 +1203,7 @@ impl ShiftReport {
             && self.research == 0
             && self.recipes == 0
             && self.standing.is_empty()
+            && self.condition_change.is_none()
     }
 }
 
@@ -1207,6 +1218,7 @@ fn snapshot(shift: &Shift, knowledge: &Knowledge) -> ShiftSnapshot {
             .collect(),
         research_points: knowledge.research_points,
         recipes_known: knowledge.known_count(),
+        stability_band: shift.stability_band,
     }
 }
 
@@ -1235,6 +1247,13 @@ pub fn shift_report(shift: &Shift, knowledge: &Knowledge) -> ShiftReport {
                 (delta != 0).then_some((department, delta))
             })
             .collect(),
+        condition_change: if shift.stability_band < opened.stability_band {
+            Some(ConditionChange::Improved)
+        } else if shift.stability_band > opened.stability_band {
+            Some(ConditionChange::Deteriorated)
+        } else {
+            None
+        },
     }
 }
 
@@ -1461,14 +1480,31 @@ struct ProgressSave {
     /// Antagonists thwarted this career. See `orders::Shift::defeated_count`.
     #[serde(default)]
     defeated_count: u32,
-    /// How close the crew are to falling apart on their own — a career fact
-    /// like `underworld_standing`, never replicated, never shown. See
-    /// `instability::Instability`.
+    /// Legacy danger-increasing meter, retained only to migrate older saves.
     #[serde(default)]
-    instability: crate::instability::Instability,
+    instability: LegacyInstability,
+    /// The authoritative hidden station health and its persistent age.
+    #[serde(default)]
+    station_stability: crate::instability::StationStability,
     /// See `orders::Shift::evacuated`.
     #[serde(default)]
     evacuated: bool,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
+struct LegacyInstability {
+    #[serde(default)]
+    level: i32,
+    #[serde(default)]
+    tier: LegacyInstabilityTier,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+enum LegacyInstabilityTier {
+    #[default]
+    Calm,
+    Fraying,
+    Breaking,
 }
 
 /// Whether the save at `path` has already evacuated — read straight off disk,
@@ -1478,6 +1514,26 @@ struct ProgressSave {
 /// defense-in-depth against a stale or forged click bypassing that dimming.
 pub fn is_evacuated(path: &std::path::Path) -> bool {
     read_progress(path).is_some_and(|save| save.evacuated)
+}
+
+fn restored_station_stability(save: &ProgressSave) -> crate::instability::StationStability {
+    let mut stability = save.station_stability.clone();
+    if stability == crate::instability::StationStability::default()
+        && (save.instability.level > 0
+            || save.instability.tier != LegacyInstabilityTier::Calm)
+    {
+        stability.value =
+            (crate::instability::STABILITY_MAX - save.instability.level as f32)
+                .clamp(0.0, crate::instability::STABILITY_MAX);
+        stability.band = match stability.value {
+            value if value <= 0.0 => crate::instability::StabilityBand::Evacuating,
+            value if value <= 25.0 => crate::instability::StabilityBand::Critical,
+            value if value <= 50.0 => crate::instability::StabilityBand::Unstable,
+            value if value <= 75.0 => crate::instability::StabilityBand::Strained,
+            _ => crate::instability::StabilityBand::Stable,
+        };
+    }
+    stability
 }
 
 /// Restores the career on launch.
@@ -1515,8 +1571,10 @@ fn load_progress(
     shift.botched = save.botched;
     shift.defeated_count = save.defeated_count;
     shift.evacuated = save.evacuated;
-    if let Some(mut instability) = instability {
-        *instability = save.instability.clone();
+    if let Some(mut stability) = instability {
+        *stability = restored_station_stability(&save);
+        shift.stability_band = stability.band;
+        shift.station_age_seconds = stability.station_age.max(0.0) as u32;
     }
     if !save.npc_standing.is_empty() {
         shift.npc_standing = save.npc_standing;
@@ -1658,7 +1716,8 @@ fn persist_progress(
         addictions: addictions.clone(),
         estranged: estranged.map(|e| e.0.clone()).unwrap_or_default(),
         defeated_count: shift.defeated_count,
-        instability: instability.map(|i| i.clone()).unwrap_or_default(),
+        instability: LegacyInstability::default(),
+        station_stability: instability.map(|i| i.clone()).unwrap_or_default(),
         evacuated: shift.evacuated,
     };
     if written.0.as_ref() == Some(&save) {
@@ -1726,6 +1785,7 @@ pub struct PersistedProgress(Option<ProgressSave>);
 mod tests {
     use super::*;
     use bevy::state::app::StatesPlugin;
+    use crate::instability::StabilityBand;
 
     fn config() -> OrderConfig {
         ron::from_str(include_str!("../../assets/data/station.orders.ron"))
@@ -1845,10 +1905,10 @@ mod tests {
     }
 
     #[test]
-    fn current_rules_reads_the_tier_off_clean_deliveries() {
+    fn current_rules_reads_the_tier_off_station_age() {
         let base = config();
         let shift = Shift {
-            succeeded: base.ramp.orders_per_tier * 2,
+            station_age_seconds: 20 * 60,
             ..Shift::default()
         };
 
@@ -1858,7 +1918,7 @@ mod tests {
     }
 
     #[test]
-    fn defeating_more_antagonists_tightens_gaps_but_never_below_the_team_floor() {
+    fn defeating_antagonists_no_longer_accelerates_station_difficulty() {
         let base = config();
         let solo_zero = current_rules(&base, &Shift::default(), 1);
         let solo_three = current_rules(
@@ -1869,15 +1929,47 @@ mod tests {
             },
             1,
         );
-        assert!(
-            solo_three.gap_seconds.0 <= solo_zero.gap_seconds.0
-                && solo_three.gap_seconds.1 <= solo_zero.gap_seconds.1,
-            "more defeats should never widen the gap"
+        assert_eq!(solo_three, solo_zero);
+    }
+
+    #[test]
+    fn critical_condition_has_more_traffic_but_not_less_patience() {
+        let base = config();
+        let stable = current_rules(&base, &Shift::default(), 1);
+        let critical = current_rules(
+            &base,
+            &Shift {
+                stability_band: StabilityBand::Critical,
+                ..Shift::default()
+            },
+            1,
         );
-        assert!(
-            solo_three.gap_seconds.0 >= base.ramp.gap_floor - 0.01,
-            "even a deep career must not dip under the solo floor"
+        assert!(critical.gap_seconds.0 < stable.gap_seconds.0);
+        assert!(critical.gap_seconds.1 < stable.gap_seconds.1);
+        assert_eq!(critical.max_active, stable.max_active + 3);
+        assert_eq!(critical.patience_seconds, stable.patience_seconds);
+    }
+
+    #[test]
+    fn station_age_pressure_caps_after_one_hour() {
+        let base = config();
+        let one_hour = current_rules(
+            &base,
+            &Shift {
+                station_age_seconds: 60 * 60,
+                ..Shift::default()
+            },
+            1,
         );
+        let one_day = current_rules(
+            &base,
+            &Shift {
+                station_age_seconds: 24 * 60 * 60,
+                ..Shift::default()
+            },
+            1,
+        );
+        assert_eq!(one_hour, one_day);
     }
 
     #[test]
@@ -2914,6 +3006,7 @@ mod tests {
                     .collect(),
                 research_points: 0,
                 recipes_known: knowledge,
+                stability_band: StabilityBand::Stable,
             }),
             "shift two starts from where shift one finished"
         );
@@ -2942,6 +3035,7 @@ mod tests {
             department_standing: [(Department::Medical, 4)].into_iter().collect(),
             research_points: 12,
             recipes_known: 5,
+            stability_band: StabilityBand::Stable,
         });
 
         let mut knowledge = Knowledge::new(&chemistry());
@@ -2958,6 +3052,29 @@ mod tests {
             vec![(Department::Medical, 2), (Department::Cargo, -3)]
         );
         assert!(!report.is_quiet());
+    }
+
+    #[test]
+    fn a_debrief_reports_qualitative_station_condition_change() {
+        let mut shift = Shift {
+            stability_band: StabilityBand::Stable,
+            ..default()
+        };
+        shift.opened_at = Some(ShiftSnapshot {
+            stability_band: StabilityBand::Unstable,
+            ..default()
+        });
+        let knowledge = Knowledge::new(&chemistry());
+        assert_eq!(
+            shift_report(&shift, &knowledge).condition_change,
+            Some(ConditionChange::Improved)
+        );
+
+        shift.stability_band = StabilityBand::Critical;
+        assert_eq!(
+            shift_report(&shift, &knowledge).condition_change,
+            Some(ConditionChange::Deteriorated)
+        );
     }
 
     #[test]
@@ -3139,6 +3256,40 @@ mod tests {
         let back: ProgressSave = ron::from_str(&text).unwrap();
 
         assert_eq!(back.campaign, Some(campaign));
+    }
+
+    #[test]
+    fn legacy_instability_migrates_to_inverse_station_stability() {
+        let save: ProgressSave = ron::from_str(
+            r#"(
+                instability: (level: 68, tier: Breaking),
+            )"#,
+        )
+        .unwrap();
+        let stability = restored_station_stability(&save);
+        assert_eq!(stability.value, 32.0);
+        assert_eq!(
+            stability.band,
+            crate::instability::StabilityBand::Unstable
+        );
+        assert_eq!(stability.station_age, 0.0);
+    }
+
+    #[test]
+    fn station_stability_and_age_survive_a_save_round_trip() {
+        let expected = crate::instability::StationStability {
+            value: 43.0,
+            band: crate::instability::StabilityBand::Unstable,
+            station_age: 7_200.0,
+            decay_accumulator: 0.75,
+        };
+        let save = ProgressSave {
+            station_stability: expected.clone(),
+            ..default()
+        };
+        let text = ron::ser::to_string(&save).unwrap();
+        let restored: ProgressSave = ron::from_str(&text).unwrap();
+        assert_eq!(restored_station_stability(&restored), expected);
     }
 
     #[test]

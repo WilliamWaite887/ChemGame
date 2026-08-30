@@ -117,7 +117,7 @@ impl Ending {
         match (self.mode, outcome) {
             (Mode::Chemist, ArcOutcome::StoppedDirectly) => "YOU STOPPED THEM".to_string(),
             (Mode::Chemist, ArcOutcome::StoppedByDepartments) => "THEY WERE STOPPED".to_string(),
-            (Mode::Chemist, ArcOutcome::PlotSucceeded) => "THE STATION IS LOST".to_string(),
+            (Mode::Chemist, ArcOutcome::PlotSucceeded) => "THEY GOT WHAT THEY WANTED".to_string(),
             (Mode::Antagonist, ArcOutcome::PlotSucceeded) => "IT WORKED".to_string(),
             (Mode::Antagonist, _) => "YOU WERE STOPPED".to_string(),
         }
@@ -140,7 +140,7 @@ impl Ending {
                 self.name
             ),
             (Mode::Chemist, ArcOutcome::PlotSucceeded) => format!(
-                "{} got everything they needed. Command has stopped answering.",
+                "{} got everything they needed. The station is reeling, but Chemistry is still operating.",
                 self.name
             ),
             (Mode::Antagonist, ArcOutcome::PlotSucceeded) => format!(
@@ -165,7 +165,7 @@ fn notice_the_ending(
     script: Option<Res<crate::arc::Script>>,
     db: Option<Res<ChemDb>>,
     knowledge: Option<Res<Knowledge>>,
-    mut shift: ResMut<Shift>,
+    shift: Res<Shift>,
     thwarted: Res<ThwartedAntags>,
     mut finished: ResMut<FinishedArc>,
     mut paused: ResMut<Paused>,
@@ -200,13 +200,9 @@ fn notice_the_ending(
     };
 
     let resolved_outcome = campaign.outcome.expect("checked above");
-    // Only a Chemist-mode loss to the plot meter is a real evacuation — a
-    // win (either side) or an Antagonist-mode loss both stay ordinary,
-    // dismissable endings a career can carry on past.
-    let evacuated = campaign.mode == Mode::Chemist && resolved_outcome == ArcOutcome::PlotSucceeded;
-    if evacuated {
-        shift.evacuated = true;
-    }
+    // Arc outcomes are incident reports now. Only station stability reaching
+    // zero is allowed to make a career unloadable.
+    let evacuated = false;
 
     finished.showing = Some(Ending {
         outcome: Some(resolved_outcome),
@@ -235,11 +231,9 @@ fn notice_the_ending(
     *screen = PauseScreen::Ending;
 }
 
-/// Raises the ending the moment the crew-instability meter reaches
-/// `Breaking` — the second, independent loss path alongside a resolved
-/// `Campaign::outcome` above. Its own system rather than a branch inside
-/// `notice_the_ending`: this one is not gated on `Campaign` resolving at
-/// all, and fires on an arc that may still be fully live.
+/// Raises the chemist-run ending the moment station stability reaches zero.
+/// Arc reports never evacuate the station; this is the authoritative loss
+/// path and therefore takes precedence over a report already on screen.
 fn watch_for_crew_collapse(
     instability: Option<Res<crate::instability::Instability>>,
     campaign: Option<Res<Campaign>>,
@@ -253,12 +247,18 @@ fn watch_for_crew_collapse(
     let Some(instability) = instability else {
         return;
     };
-    if instability.tier != crate::instability::InstabilityTier::Breaking {
+    if campaign
+        .as_deref()
+        .is_some_and(|campaign| campaign.mode == Mode::Antagonist)
+    {
         return;
     }
-    // One-shot, `arc::finish`-style: once any ending is showing, never
-    // overwrite it — including with a second frame of this same trigger.
-    if finished.showing.is_some() {
+    if instability.band != crate::instability::StabilityBand::Evacuating {
+        return;
+    }
+    // Evacuation has precedence over a dismissible arc report, including when
+    // an arc's climax penalty crosses zero one frame after that report opens.
+    if finished.showing.as_ref().is_some_and(|ending| ending.evacuated) {
         return;
     }
     let (Some(db), Some(knowledge)) = (db, knowledge) else {
@@ -524,17 +524,14 @@ mod tests {
     // -- evacuation ----------------------------------------------------
 
     #[test]
-    fn a_chemist_loss_to_the_plot_meter_evacuates() {
+    fn a_chemist_plot_loss_is_an_incident_report_not_an_evacuation() {
         let mut app = ending_app(live_campaign());
         app.world_mut().resource_mut::<Campaign>().outcome = Some(ArcOutcome::PlotSucceeded);
         app.update();
 
         let shown = app.world().resource::<FinishedArc>().showing().unwrap();
-        assert!(shown.evacuated, "the station being lost is a real evacuation");
-        assert!(
-            app.world().resource::<Shift>().evacuated,
-            "the save itself must become unloadable"
-        );
+        assert!(!shown.evacuated, "only zero station stability may evacuate");
+        assert!(!app.world().resource::<Shift>().evacuated);
     }
 
     #[test]
@@ -573,8 +570,9 @@ mod tests {
         // live, with no `outcome` of its own at all.
         let mut app = ending_app(live_campaign());
         app.insert_resource(crate::instability::Instability {
-            level: crate::instability::INSTABILITY_MAX,
-            tier: crate::instability::InstabilityTier::Breaking,
+            value: 0.0,
+            band: crate::instability::StabilityBand::Evacuating,
+            ..default()
         });
         app.update();
 
@@ -594,8 +592,9 @@ mod tests {
     fn a_crew_collapse_ending_never_gets_overwritten_by_the_arc_resolving_afterward() {
         let mut app = ending_app(live_campaign());
         app.insert_resource(crate::instability::Instability {
-            level: crate::instability::INSTABILITY_MAX,
-            tier: crate::instability::InstabilityTier::Breaking,
+            value: 0.0,
+            band: crate::instability::StabilityBand::Evacuating,
+            ..default()
         });
         app.update();
         let first = app.world().resource::<FinishedArc>().showing().cloned();
@@ -628,22 +627,12 @@ mod tests {
     }
 
     fn ending(mode: Mode, outcome: ArcOutcome) -> Ending {
+        let mut campaign = Campaign::new(AntagId::Cult, mode, 0);
+        campaign.outcome = Some(outcome);
         Ending {
             outcome: Some(outcome),
             name: "the Cult".to_string(),
-            won: Campaign {
-                antag: AntagId::Cult,
-                plot: 0,
-                countered: Vec::new(),
-                reveal: crate::arc::Reveal::Named,
-                outcome: Some(outcome),
-                mode,
-                cult_incidents: Vec::new(),
-                thwarting_recorded: false,
-                history: Vec::new(),
-            }
-            .player_won()
-            .unwrap(),
+            won: campaign.player_won().unwrap(),
             mode,
             countered: 0,
             counter_steps: 3,

@@ -169,8 +169,8 @@ mod tests {
         );
         assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
         assert_eq!(
-            app.world().resource::<crate::instability::Instability>().level,
-            ESTRANGEMENT_INSTABILITY,
+            app.world().resource::<crate::instability::Instability>().value,
+            crate::instability::STABILITY_MAX - ESTRANGEMENT_INSTABILITY as f32,
             "several frames below the floor must not stack this bump either"
         );
     }

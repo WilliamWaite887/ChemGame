@@ -44,7 +44,7 @@ use crate::radio::{RadioChannel, RadioEntry, RadioLog, RadioPriority, RadioTone}
 use crate::shift::{
     can_afford, can_call_it, npc_can_afford, shift_report, CallItAShift, CareerStage,
     NpcRequisitionKind, NpcRequisitionRequested, OpenUpAgain, RequisitionKind,
-    RequisitionRequested, ShiftReport, ToggleAcceptingOrders, OVERCLOCK_COST,
+    ConditionChange, RequisitionRequested, ShiftReport, ToggleAcceptingOrders, OVERCLOCK_COST,
     PRESSURE_SPRAYER_COST, SYRINGE_GUN_COST, WATER_GUN_COST,
 };
 use crate::AppState;
@@ -1521,6 +1521,20 @@ fn draw_debrief(panel: &mut ChildSpawnerCommands, report: &ShiftReport) {
             13.0,
             if report.research < 0 { TEXT_DIM } else { TEXT },
         ));
+    }
+
+    if let Some(change) = report.condition_change {
+        let (text, tone) = match change {
+            ConditionChange::Improved => (
+                "Station condition improved during this shift. Quality Chemistry support is making a difference.",
+                GOOD_TEXT,
+            ),
+            ConditionChange::Deteriorated => (
+                "Station condition deteriorated during this shift. Outstanding Chemistry support needs priority.",
+                ERROR_TEXT,
+            ),
+        };
+        panel.spawn(label(text, 13.0, tone));
     }
 
     panel.spawn(label("Standing", 15.0, TEXT));

@@ -339,6 +339,10 @@ mod tests {
             category: None,
             outcome,
             kind: OrderKind::Normal,
+            quality: None,
+            development: false,
+            campaign: None,
+            counter_step: None,
         });
         app.update();
     }

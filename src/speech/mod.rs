@@ -1099,8 +1099,8 @@ impl StationMood<'_, '_> {
             // not their own arm. `Withdrawing` below is the personal one.
             Knows::CrewGettingHooked => self.hooked_crew() > 0,
             Knows::CrisisActive => !self.crises.is_empty(),
-            Knows::StationFraying => self.tier() >= crate::instability::InstabilityTier::Fraying,
-            Knows::StationBreaking => self.tier() >= crate::instability::InstabilityTier::Breaking,
+            Knows::StationFraying => self.tier() >= crate::instability::StabilityBand::Strained,
+            Knows::StationBreaking => self.tier() >= crate::instability::StabilityBand::Critical,
             // Cargo's own minor is the smuggler, whose thefts are what
             // `UnderworldStanding` rising actually looks like from the dock.
             Knows::StockGoingMissing => underworld > 0,
@@ -1122,10 +1122,10 @@ impl StationMood<'_, '_> {
         }
     }
 
-    fn tier(&self) -> crate::instability::InstabilityTier {
+    fn tier(&self) -> crate::instability::StabilityBand {
         self.instability
             .as_ref()
-            .map_or(Default::default(), |meter| meter.tier)
+            .map_or(Default::default(), |meter| meter.band)
     }
 
     fn reveal(&self) -> crate::arc::Reveal {

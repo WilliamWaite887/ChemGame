@@ -1167,6 +1167,10 @@ mod tests {
             category: None,
             outcome: Outcome::Success,
             kind: OrderKind::Illicit,
+            quality: None,
+            development: false,
+            campaign: None,
+            counter_step: None,
         });
         app.update();
 
@@ -1198,6 +1202,10 @@ mod tests {
             category: None,
             outcome: Outcome::Success,
             kind: OrderKind::Illicit,
+            quality: None,
+            development: false,
+            campaign: None,
+            counter_step: None,
         });
         app.update();
 
