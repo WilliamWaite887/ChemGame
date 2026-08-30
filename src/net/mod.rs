@@ -10,6 +10,7 @@
 //! machine occupancy, and the crew at the counter. That is what two chemists
 //! need to see the same version of.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::SystemTime;
 
@@ -23,6 +24,8 @@ use bevy_replicon_renet::renet::{ConnectionConfig, DisconnectReason};
 // `RenetServer`/`RenetClient` come from bevy_renet's re-export, not raw renet:
 // only the bevy wrappers are resources.
 use bevy_replicon_renet::{RenetChannelsExt, RenetClient, RenetServer, RepliconRenetPlugins};
+use rand::RngExt;
+use serde::{Deserialize, Serialize};
 
 use crate::body::{Bloodstream, Body};
 use crate::character_lab::{LocomotionPreview, TestSubject};
@@ -40,7 +43,7 @@ use crate::machines::{
     Thermostat,
 };
 use crate::orders::{CounterOrder, CrisisOrder, DevelopmentOrder, Order};
-use crate::player::Player;
+use crate::player::{Player, PlayerAccount};
 use crate::produce::Produce;
 use crate::rogue_security::Deterrent;
 use crate::showdown::{Assailant, Breach};
@@ -52,7 +55,7 @@ pub mod steam;
 /// Explicit revision for replicated Rust types that are not represented by
 /// the authored chemistry catalogs below. Bump it when one of those wire
 /// shapes changes incompatibly.
-const PROTOCOL_REVISION: u64 = 10;
+const PROTOCOL_REVISION: u64 = 11;
 
 /// FNV-1a is deliberately small and `const`: the protocol id is derived at
 /// compile time from every catalog whose list position crosses the wire.
@@ -97,6 +100,127 @@ const DEFAULT_PORT: u16 = 5327;
 /// The host is a local chemist, leaving three network seats in a four-person
 /// lab. Both direct and Steam transports use this same value.
 const MAX_REMOTE_CLIENTS: usize = 3;
+
+const ACCOUNT_FILE_VERSION: u32 = 1;
+const ACCOUNT_FILE: &str = "account.ron";
+
+/// Stable identity for one local ChemGame installation/profile.
+///
+/// This is intentionally independent of a socket, Steam lobby, save slot, or
+/// player entity: all four are temporary. It is public information used to
+/// reconnect the right chemist and restore that chemist's inventory. LAN's
+/// unsecure transport means it is not a cryptographic login credential.
+#[derive(
+    Component,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+)]
+pub struct AccountId([u8; 16]);
+
+impl AccountId {
+    fn random() -> Self {
+        let mut bytes = [0; 16];
+        rand::rng().fill(&mut bytes);
+        // Reserve all-zero as the invalid/default value used by migrations.
+        if bytes == [0; 16] {
+            bytes[0] = 1;
+        }
+        Self(bytes)
+    }
+
+    #[cfg(test)]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    fn is_valid(self) -> bool {
+        self.0 != [0; 16]
+    }
+}
+
+impl std::fmt::Display for AccountId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+/// This process's persistent account identity.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct LocalAccount {
+    pub id: AccountId,
+}
+
+impl Default for LocalAccount {
+    fn default() -> Self {
+        // Tests and small plugin-only apps get a valid ephemeral identity but
+        // never touch the user's profile on disk.
+        Self {
+            id: AccountId::random(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct AccountFile {
+    version: u32,
+    id: AccountId,
+}
+
+impl LocalAccount {
+    /// Loads the cross-save account, creating it once on first launch.
+    pub fn load_or_create() -> Self {
+        let path = crate::saves::saves_root().join(ACCOUNT_FILE);
+        if let Some(text) = crate::saves::read_slot_text(&path) {
+            match ron::from_str::<AccountFile>(&text) {
+                Ok(file) if file.version <= ACCOUNT_FILE_VERSION && file.id.is_valid() => {
+                    return Self { id: file.id };
+                }
+                Ok(_) => warn!("ignoring invalid account identity in {}", path.display()),
+                Err(error) => warn!("ignoring unreadable {}: {error}", path.display()),
+            }
+        }
+
+        let account = Self::default();
+        let file = AccountFile {
+            version: ACCOUNT_FILE_VERSION,
+            id: account.id,
+        };
+        match ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default()) {
+            Ok(text) => crate::saves::write_slot_text(&path, &text),
+            Err(error) => warn!("could not serialize account identity: {error}"),
+        }
+        account
+    }
+}
+
+/// Server-side binding between an authorized connection and a persistent
+/// account. A connection is not allowed to spawn/control a chemist before this
+/// component exists.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConnectedAccount(pub AccountId);
+
+#[derive(Message, Clone, Copy, Debug, Serialize, Deserialize)]
+struct AccountHello {
+    account: AccountId,
+}
+
+#[derive(Message, Clone, Debug, Serialize, Deserialize)]
+enum AccountDecision {
+    Accepted { account: AccountId },
+    Rejected { reason: String },
+}
 
 /// How this process was launched.
 ///
@@ -371,57 +495,164 @@ impl Plugin for NetPlugin {
         // a Steam host open a lobby and then ignore every incoming
         // connection without a word.
         app.init_resource::<LaunchMode>()
+            .init_resource::<LocalAccount>()
             .add_plugins((RepliconPlugins, RepliconRenetPlugins))
+            .add_client_message::<AccountHello>(Channel::Ordered)
+            .add_server_message::<AccountDecision>(Channel::Ordered)
             .add_message::<ConnectFailed>();
 
         register_replication(app);
-        app.add_systems(Update, resync_on_join.run_if(is_authority))
-            // Backend-agnostic: whichever group above is live sets
-            // `ServerState`, so this line appearing is proof the transport is
-            // actually running. Its absence is what a silent host looks like.
-            .add_systems(OnEnter(ServerState::Running), announce_serving)
-            // Hangs up on the way out to the menu. Paired with
-            // `crate::session`, which unwinds everything the session put in
-            // the world; this is the half that unwinds what it put on a
-            // socket.
-            .add_systems(OnExit(AppState::Playing), close_session_transport)
-            // A host or singleplayer game owns the simulation immediately —
-            // there is nothing to wait for.
-            .add_systems(
-                OnEnter(AppState::Playing),
-                (
-                    start_hosting.run_if(hosting),
-                    warn_if_steam_unavailable.run_if(hosting_steam),
-                ),
-            )
-            // A joining process stops here — see `AppState::Connecting`'s doc
-            // comment — instead of building the lab and running the full
-            // simulation against a socket that may never answer.
-            .add_systems(
-                OnEnter(AppState::Connecting),
-                (
-                    start_joining.run_if(joining),
-                    warn_if_steam_unavailable.run_if(joining_steam),
-                ),
-            )
-            // `ClientState::Connected` is produced identically by both
-            // transports (see `steam`'s module doc), so one system here
-            // covers a LAN join and a Steam join alike.
-            .add_systems(
-                OnEnter(ClientState::Connected),
-                finish_joining.run_if(in_state(AppState::Connecting)),
-            )
-            .add_systems(
-                OnEnter(ClientState::Disconnected),
-                report_join_failure.run_if(in_state(AppState::Connecting).and_then(joining)),
-            );
+        app.add_systems(
+            Update,
+            (bind_accounts, resync_on_join).chain().run_if(is_authority),
+        )
+        // Backend-agnostic: whichever group above is live sets
+        // `ServerState`, so this line appearing is proof the transport is
+        // actually running. Its absence is what a silent host looks like.
+        .add_systems(OnEnter(ServerState::Running), announce_serving)
+        // Hangs up on the way out to the menu. Paired with
+        // `crate::session`, which unwinds everything the session put in
+        // the world; this is the half that unwinds what it put on a
+        // socket.
+        .add_systems(OnExit(AppState::Playing), close_session_transport)
+        // A host or singleplayer game owns the simulation immediately —
+        // there is nothing to wait for.
+        .add_systems(
+            OnEnter(AppState::Playing),
+            (
+                start_hosting.run_if(hosting),
+                warn_if_steam_unavailable.run_if(hosting_steam),
+            ),
+        )
+        // A joining process stops here — see `AppState::Connecting`'s doc
+        // comment — instead of building the lab and running the full
+        // simulation against a socket that may never answer.
+        .add_systems(
+            OnEnter(AppState::Connecting),
+            (
+                start_joining.run_if(joining),
+                warn_if_steam_unavailable.run_if(joining_steam),
+            ),
+        )
+        // `ClientState::Connected` is produced identically by both
+        // transports (see `steam`'s module doc), so one system here
+        // covers a LAN join and a Steam join alike.
+        .add_systems(
+            OnEnter(ClientState::Connected),
+            send_account_hello.run_if(in_state(AppState::Connecting)),
+        )
+        .add_systems(
+            Update,
+            finish_joining.run_if(in_state(AppState::Connecting)),
+        )
+        .add_systems(
+            OnEnter(ClientState::Disconnected),
+            report_join_failure.run_if(in_state(AppState::Connecting).and_then(joining)),
+        );
     }
 }
 
-/// The client's handshake finished — hand off from the waiting room to the
-/// lab.
-fn finish_joining(mut app_state: ResMut<NextState<AppState>>) {
-    app_state.set(AppState::Playing);
+/// Starts the game-level half of joining after the transport/protocol handshake.
+fn send_account_hello(account: Res<LocalAccount>, mut hello: MessageWriter<AccountHello>) {
+    hello.write(AccountHello {
+        account: account.id,
+    });
+}
+
+/// Accepts identities exactly once and prevents two live connections from
+/// claiming the same chemist/account.
+fn bind_accounts(
+    mut commands: Commands,
+    mut hello: MessageReader<FromClient<AccountHello>>,
+    clients: Query<(Entity, Option<&ConnectedAccount>), With<AuthorizedClient>>,
+    mut decisions: MessageWriter<ToClients<AccountDecision>>,
+    mut disconnects: MessageWriter<DisconnectRequest>,
+) {
+    // Commands are deferred, so this frame-local map is deliberately updated
+    // as hellos are accepted. Without it, two clients claiming the same ID in
+    // the same packet batch would both look unbound to the ECS query.
+    let mut bindings: HashMap<Entity, AccountId> = clients
+        .iter()
+        .filter_map(|(entity, bound)| bound.map(|bound| (entity, bound.0)))
+        .collect();
+    for incoming in hello.read() {
+        let ClientId::Client(client) = incoming.client_id else {
+            continue;
+        };
+        let Ok((_, bound)) = clients.get(client) else {
+            disconnects.write(DisconnectRequest { client });
+            continue;
+        };
+        let account = incoming.message.account;
+        let rejection = if !account.is_valid() {
+            Some("the client sent an invalid account identity")
+        } else if let Some(bound) = bound
+            .map(|bound| bound.0)
+            .or(bindings.get(&client).copied())
+        {
+            if bound == account {
+                decisions.write(ToClients {
+                    targets: SendTargets::Single(incoming.client_id),
+                    message: AccountDecision::Accepted { account },
+                });
+                continue;
+            }
+            Some("the connection tried to change account identity")
+        } else if bindings
+            .iter()
+            .any(|(entity, bound)| *entity != client && *bound == account)
+        {
+            Some("this chemist account is already connected to the lobby")
+        } else {
+            None
+        };
+
+        if let Some(reason) = rejection {
+            warn!("rejecting account handshake from {client:?}: {reason}");
+            decisions.write(ToClients {
+                targets: SendTargets::Single(incoming.client_id),
+                message: AccountDecision::Rejected {
+                    reason: reason.to_string(),
+                },
+            });
+            disconnects.write(DisconnectRequest { client });
+            continue;
+        }
+
+        commands.entity(client).insert(ConnectedAccount(account));
+        bindings.insert(client, account);
+        decisions.write(ToClients {
+            targets: SendTargets::Single(incoming.client_id),
+            message: AccountDecision::Accepted { account },
+        });
+        info!("bound connection to chemist account {account}");
+    }
+}
+
+/// The host accepted our persistent identity — only now build the lab.
+fn finish_joining(
+    account: Res<LocalAccount>,
+    mut decisions: MessageReader<AccountDecision>,
+    mut failed: MessageWriter<ConnectFailed>,
+    mut app_state: ResMut<NextState<AppState>>,
+) {
+    for decision in decisions.read() {
+        match decision {
+            AccountDecision::Accepted { account: accepted } if *accepted == account.id => {
+                app_state.set(AppState::Playing);
+            }
+            AccountDecision::Accepted { .. } => {
+                failed.write(ConnectFailed {
+                    reason: "the host accepted a different account identity".to_string(),
+                });
+            }
+            AccountDecision::Rejected { reason } => {
+                failed.write(ConnectFailed {
+                    reason: reason.clone(),
+                });
+            }
+        };
+    }
 }
 
 /// Says out loud that the transport is up and listening.
@@ -518,7 +749,7 @@ fn close_session_transport(mut commands: Commands, mode: Option<Res<LaunchMode>>
 /// Marking them changed rather than sending directly reuses the existing
 /// broadcasts, so there is one place that knows how to serialise each.
 fn resync_on_join(
-    joined: Query<(), Added<AuthorizedClient>>,
+    joined: Query<(), Added<ConnectedAccount>>,
     knowledge: Option<ResMut<crate::knowledge::Knowledge>>,
     shift: Option<ResMut<crate::orders::Shift>>,
     radio: Option<ResMut<crate::radio::RadioLog>>,
@@ -526,7 +757,7 @@ fn resync_on_join(
     if joined.is_empty() {
         return;
     }
-    // `AuthorizedClient` only ever appears on a real server, so singleplayer
+    // `ConnectedAccount` only ever appears on a real server, so singleplayer
     // stays quiet. See `announce_serving` for why the host saying anything at
     // all matters this much.
     info!("a chemist joined the lab");
@@ -619,6 +850,9 @@ fn register_replication(app: &mut App) {
         // The marker itself, so a client can tell a chemist from any other
         // replicated entity and give them a body to look at.
         .replicate::<Player>()
+        // Stable player identity is public lobby state. It is how reconnects
+        // and world saves find the right body without relying on join order.
+        .replicate::<PlayerAccount>()
         // What the chamber is set to. Without this the second chemist to walk
         // up cannot see it is running and cooks the batch.
         .replicate::<Thermostat>()
@@ -1201,7 +1435,8 @@ mod tests {
             "a quiet frame with nobody joining must not resend anything"
         );
 
-        app.world_mut().spawn(AuthorizedClient);
+        app.world_mut()
+            .spawn(ConnectedAccount(AccountId::from_bytes([1; 16])));
         app.update();
         assert!(
             app.world().resource::<SawChange>().0,
@@ -1329,26 +1564,16 @@ mod tests {
     }
 
     #[test]
-    fn a_connecting_client_only_reaches_playing_once_actually_connected() {
-        // The bug this pins: entering `Playing` — and with it building the lab
-        // and running the full simulation — before a connection exists, which
-        // is what made a stuck or slow handshake look exactly like a freeze.
-        // See `AppState::Connecting`'s doc comment.
-        let mut server = App::new();
+    fn a_connecting_client_only_reaches_playing_after_account_acceptance() {
+        let account = AccountId::from_bytes([7; 16]);
         let mut client = App::new();
-        for app in [&mut server, &mut client] {
-            app.add_plugins((
-                MinimalPlugins,
-                StatesPlugin,
-                RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
-            ));
-            register_replication(app);
-            app.finish();
-        }
-        client.init_state::<AppState>().add_systems(
-            OnEnter(ClientState::Connected),
-            finish_joining.run_if(in_state(AppState::Connecting)),
-        );
+        client
+            .add_plugins((MinimalPlugins, StatesPlugin))
+            .init_state::<AppState>()
+            .insert_resource(LocalAccount { id: account })
+            .add_message::<AccountDecision>()
+            .add_message::<ConnectFailed>()
+            .add_systems(Update, finish_joining);
         client
             .world_mut()
             .resource_mut::<NextState<AppState>>()
@@ -1357,16 +1582,92 @@ mod tests {
         assert_eq!(
             *client.world().resource::<State<AppState>>().get(),
             AppState::Connecting,
-            "must not jump to Playing before the handshake finishes"
+            "transport connectivity alone must not enter the lab"
         );
 
-        server.connect_client(&mut client);
+        client
+            .world_mut()
+            .write_message(AccountDecision::Accepted { account });
+        client.update();
         client.update();
 
         assert_eq!(
             *client.world().resource::<State<AppState>>().get(),
             AppState::Playing,
-            "must reach Playing once ClientState::Connected actually fires"
+            "the lab starts only after the host binds this exact account"
+        );
+    }
+
+    #[test]
+    fn account_binding_is_idempotent_but_rejects_duplicate_live_accounts() {
+        let account = AccountId::from_bytes([9; 16]);
+        let mut app = App::new();
+        app.add_message::<FromClient<AccountHello>>()
+            .add_message::<ToClients<AccountDecision>>()
+            .add_message::<DisconnectRequest>()
+            .add_systems(Update, bind_accounts);
+        let first = app.world_mut().spawn(AuthorizedClient).id();
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Client(first),
+            message: AccountHello { account },
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<ConnectedAccount>(first).unwrap().0,
+            account
+        );
+
+        // Repeating the same hello is harmless and does not disconnect.
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Client(first),
+            message: AccountHello { account },
+        });
+        app.update();
+        assert!(app
+            .world()
+            .resource::<Messages<DisconnectRequest>>()
+            .is_empty());
+
+        let second = app.world_mut().spawn(AuthorizedClient).id();
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Client(second),
+            message: AccountHello { account },
+        });
+        app.update();
+        assert!(app.world().get::<ConnectedAccount>(second).is_none());
+        assert_eq!(
+            app.world().resource::<Messages<DisconnectRequest>>().len(),
+            1,
+            "a second live connection cannot control the same saved chemist"
+        );
+    }
+
+    #[test]
+    fn simultaneous_account_claims_cannot_bypass_duplicate_detection() {
+        let account = AccountId::from_bytes([11; 16]);
+        let mut app = App::new();
+        app.add_message::<FromClient<AccountHello>>()
+            .add_message::<ToClients<AccountDecision>>()
+            .add_message::<DisconnectRequest>()
+            .add_systems(Update, bind_accounts);
+        let first = app.world_mut().spawn(AuthorizedClient).id();
+        let second = app.world_mut().spawn(AuthorizedClient).id();
+        for client in [first, second] {
+            app.world_mut().write_message(FromClient {
+                client_id: ClientId::Client(client),
+                message: AccountHello { account },
+            });
+        }
+        app.update();
+
+        let accepted = [first, second]
+            .into_iter()
+            .filter(|client| app.world().get::<ConnectedAccount>(*client).is_some())
+            .count();
+        assert_eq!(accepted, 1);
+        assert_eq!(
+            app.world().resource::<Messages<DisconnectRequest>>().len(),
+            1
         );
     }
 

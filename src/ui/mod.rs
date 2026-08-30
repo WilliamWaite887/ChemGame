@@ -1011,15 +1011,22 @@ fn sync_panel(
             screen
                 .spawn((
                     Node {
-                        width: px(760),
-                        max_height: percent(86),
+                        width: px(if machine.kind == MachineKind::ChemMaster5000 {
+                            1040
+                        } else {
+                            760
+                        }),
+                        max_width: percent(94),
+                        max_height: percent(90),
                         flex_direction: FlexDirection::Column,
                         padding: UiRect::all(px(18)),
                         row_gap: px(10),
+                        border: UiRect::all(px(2)),
                         border_radius: BorderRadius::all(px(8)),
                         ..default()
                     },
                     BackgroundColor(PANEL_BG),
+                    BorderColor::all(Color::srgb(0.24, 0.40, 0.50)),
                 ))
                 .with_children(|panel| {
                     panel.spawn(heading(machine.kind.label()));
@@ -1045,6 +1052,7 @@ fn sync_panel(
                                 loaded,
                                 marked,
                                 reacting,
+                                &views.icons,
                             );
                         }
                         MachineKind::MixingChamber => {
@@ -1710,51 +1718,327 @@ fn dispenser_body(
     loaded: Option<&Container>,
     marked: Option<&crate::labels::Label>,
     reacting: bool,
+    icons: &BookIconAssets,
 ) {
     let selected = amount.map(|a| a.0).unwrap_or(Units::whole(10));
 
-    card(panel, "Dispense amount", |section| {
-        section.spawn(row()).with_children(|row| {
-            for step in [1, 5, 10, 25, 50] {
-                let units = Units::whole(step);
-                let mut entity =
-                    row.spawn(button(format!("{step}u"), PanelAction::SetAmount(units)));
-                if units == selected {
-                    entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
-                }
-            }
-        });
-    });
-
-    // Renamed from "Reagents": this card is about the research balance and
-    // unlocking chemistry, not the reagent list — that is what "Base stock"
-    // below actually shows. The old shared heading between two unrelated
-    // things was itself part of what made the panel hard to scan.
-    card(panel, "Research", |section| {
-        // The balance, next to the thing it buys. Research is *spent* here, so
-        // reading it should not mean closing the dispenser and opening the book
-        // to check the header — by which point the tier cost is off screen.
-        section.spawn(label(
-            format!("{} research banked", knowledge.research_points),
-            14.0,
-            TEXT,
-        ));
-
-        if knowledge.known_count() < db.reactions.len() {
-            section.spawn(button(
-                "PLAYTEST: unlock all chemistry",
-                PanelAction::UnlockAll,
-            ));
+    panel.spawn(wrap_row()).with_children(|strip| {
+        fact_chip(
+            strip,
+            icons,
+            BookIcon::ChemMaster,
+            "CM-5000",
+            "ChemMaster compounder",
+            "Station reagent dispenser and live sample workstation.",
+            BOOK_ACCENT,
+        );
+        fact_chip(
+            strip,
+            icons,
+            BookIcon::Inputs,
+            selected.to_string(),
+            "Transfer volume",
+            "Each reagent control dispenses this exact amount into the loaded vessel.",
+            BOOK_ACCENT,
+        );
+        fact_chip(
+            strip,
+            icons,
+            BookIcon::Research,
+            knowledge.research_points.to_string(),
+            "Research bank",
+            "Research is retained here for chemistry method development.",
+            Color::srgb(0.76, 0.68, 0.96),
+        );
+        fact_chip(
+            strip,
+            icons,
+            BookIcon::Recorded,
+            format!("{}/{}", knowledge.known_count(), db.reactions.len()),
+            "Recorded methods",
+            "Methods currently documented in the chemistry field manual.",
+            GOOD_TEXT,
+        );
+        if let Some(container) = loaded {
+            fact_chip(
+                strip,
+                icons,
+                BookIcon::Purity,
+                format!("{:.0}%", container.solution.average_purity() * 100.0),
+                "Average purity",
+                "Volume-weighted purity of everything in the loaded vessel.",
+                HPLC_CLEAN,
+            );
+            fact_chip(
+                strip,
+                icons,
+                BookIcon::Temperature,
+                container.solution.temperature.to_string(),
+                "Sample temperature",
+                "Live temperature of the loaded vessel.",
+                Color::srgb(0.95, 0.55, 0.32),
+            );
         }
     });
 
-    // Every standard base reagent is available immediately. Complexity now
-    // comes from recipes, process control and sourced ingredients.
-    card(panel, "Base stock", |section| {
-        chip_grid(section, BASE_STOCK_CHIP_WIDTH, base_stock_groups(db));
-    });
+    panel
+        .spawn(Node {
+            width: percent(100),
+            align_items: AlignItems::FlexStart,
+            column_gap: px(12),
+            ..default()
+        })
+        .with_children(|workspace| {
+            workspace
+                .spawn(Node {
+                    flex_basis: percent(0),
+                    flex_grow: 1.0,
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(8),
+                    ..default()
+                })
+                .with_children(|controls| {
+                    instrument_card(
+                        controls,
+                        icons,
+                        BookIcon::Inputs,
+                        "METERED TRANSFER",
+                        "Choose the exact volume used by every stock control.",
+                        |section| {
+                            section.spawn(row()).with_children(|row| {
+                                for step in [1, 5, 10, 25, 50] {
+                                    let units = Units::whole(step);
+                                    let mut entity = row.spawn(button(
+                                        format!("{step}u"),
+                                        PanelAction::SetAmount(units),
+                                    ));
+                                    if units == selected {
+                                        entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
+                                    }
+                                }
+                            });
+                        },
+                    );
 
-    container_readout(panel, db, container_entity, loaded, marked, reacting, true);
+                    instrument_card(
+                        controls,
+                        icons,
+                        BookIcon::RawReagent,
+                        "BASE STOCK MANIFOLD",
+                        "Select a reagent by swatch and name; it enters the loaded vessel.",
+                        |section| {
+                            chip_grid(section, BASE_STOCK_CHIP_WIDTH, base_stock_groups(db));
+                        },
+                    );
+
+                    instrument_card(
+                        controls,
+                        icons,
+                        BookIcon::Research,
+                        "METHOD ARCHIVE",
+                        "Research controls remain secondary to live compounding.",
+                        |section| {
+                            section.spawn(label(
+                                format!("{} research banked", knowledge.research_points),
+                                13.0,
+                                TEXT,
+                            ));
+                            if knowledge.known_count() < db.reactions.len() {
+                                section.spawn(button(
+                                    "PLAYTEST: unlock all chemistry",
+                                    PanelAction::UnlockAll,
+                                ));
+                            }
+                        },
+                    );
+                });
+
+            workspace
+                .spawn(Node {
+                    width: px(318),
+                    flex_shrink: 0.0,
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                })
+                .with_children(|sample| {
+                    chemmaster_sample_card(
+                        sample,
+                        db,
+                        icons,
+                        container_entity,
+                        loaded,
+                        marked,
+                        reacting,
+                    );
+                });
+        });
+}
+
+fn instrument_card(
+    panel: &mut ChildSpawnerCommands,
+    icons: &BookIconAssets,
+    icon: BookIcon,
+    title: &'static str,
+    explanation: &'static str,
+    build: impl FnOnce(&mut ChildSpawnerCommands),
+) {
+    panel
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            flex_wrap: FlexWrap::Wrap,
+            align_items: AlignItems::Center,
+            column_gap: px(4),
+            row_gap: px(2),
+            ..default()
+        })
+        .with_children(|heading| {
+            heading
+                .spawn(icon_badge(title, explanation, 30.0))
+                .with_children(|badge| {
+                    badge.spawn(icon_image(icons, icon, 19.0, BOOK_ACCENT));
+                });
+            heading.spawn(label(title, 12.0, Color::srgb(0.66, 0.82, 0.94)));
+            heading.spawn(label(explanation, 10.0, TEXT_DIM));
+        });
+    panel
+        .spawn((
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(px(9)),
+                row_gap: px(5),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(BOOK_INSET),
+            BorderColor::all(Color::srgba(0.25, 0.34, 0.42, 0.80)),
+        ))
+        .with_children(build);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chemmaster_sample_card(
+    panel: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    icons: &BookIconAssets,
+    container_entity: Option<Entity>,
+    loaded: Option<&Container>,
+    marked: Option<&crate::labels::Label>,
+    reacting: bool,
+) {
+    instrument_card(
+        panel,
+        icons,
+        BookIcon::MixingChamber,
+        "LIVE SAMPLE",
+        "The vessel is the primary ChemMaster instrument.",
+        |section| {
+            section
+                .spawn(Node {
+                    width: percent(100),
+                    justify_content: JustifyContent::Center,
+                    padding: UiRect::vertical(px(8)),
+                    ..default()
+                })
+                .with_children(|center| {
+                    beaker_preview_sized(center, container_entity, 146.0, 214.0);
+                });
+
+            let Some(container) = loaded else {
+                section.spawn(label("NO VESSEL LOADED", 14.0, TEXT_DIM));
+                section.spawn(label(
+                    "Carry a beaker to the ChemMaster and press E.",
+                    11.0,
+                    TEXT_DIM,
+                ));
+                return;
+            };
+
+            section.spawn(label(
+                format!(
+                    "{}  |  {} / {}",
+                    container.kind.label(),
+                    container.solution.total_volume(),
+                    container.kind.capacity()
+                ),
+                15.0,
+                TEXT,
+            ));
+
+            if let Some(marked) = marked.filter(|marked| !marked.0.trim().is_empty()) {
+                section.spawn(label(format!("MARKED: \"{}\"", marked.0), 12.0, LABEL_INK));
+            }
+
+            section.spawn(wrap_row()).with_children(|facts| {
+                fact_chip(
+                    facts,
+                    icons,
+                    BookIcon::Ph,
+                    format!("{:.2}", container.solution.ph()),
+                    "Sample pH",
+                    "Live acidity or alkalinity of the full vessel.",
+                    Color::srgb(0.58, 0.72, 0.96),
+                );
+                fact_chip(
+                    facts,
+                    icons,
+                    BookIcon::Purity,
+                    format!("{:.0}%", container.solution.average_purity() * 100.0),
+                    "Average purity",
+                    "Volume-weighted purity across the loaded mixture.",
+                    HPLC_CLEAN,
+                );
+                fact_chip(
+                    facts,
+                    icons,
+                    BookIcon::Temperature,
+                    container.solution.temperature.to_string(),
+                    "Sample temperature",
+                    "Live vessel temperature; some reactions require an authored range.",
+                    Color::srgb(0.95, 0.55, 0.32),
+                );
+            });
+
+            if container.solution.is_empty() {
+                section.spawn(label("VESSEL EMPTY", 12.0, TEXT_DIM));
+            } else {
+                section.spawn(label("REAGENT PROFILE", 10.0, TEXT_DIM));
+                for (reagent, quantity) in container.solution.iter() {
+                    let definition = db.reagents.get(reagent);
+                    let [r, g, b] = definition.color;
+                    section.spawn(row()).with_children(|token| {
+                        token.spawn(swatch_chip(Color::srgb(r, g, b)));
+                        token.spawn(label(definition.name.clone(), 12.0, TEXT));
+                        token.spawn(label(quantity.to_string(), 12.0, BOOK_ACCENT));
+                        token.spawn(label(
+                            format!("{:.0}%", container.solution.purity_of(reagent) * 100.0),
+                            11.0,
+                            TEXT_DIM,
+                        ));
+                    });
+                }
+            }
+
+            if reacting {
+                section
+                    .spawn(icon_badge(
+                        "Reaction active",
+                        "The mixture is still processing; its composition remains live.",
+                        42.0,
+                    ))
+                    .with_children(|status| {
+                        status.spawn(icon_image(icons, BookIcon::DirectMix, 18.0, GOOD_TEXT));
+                        status.spawn(label("PROCESSING", 11.0, GOOD_TEXT));
+                    });
+            }
+
+            section.spawn(row()).with_children(|actions| {
+                actions.spawn(button("Eject vessel", PanelAction::Eject(MachineSlot::A)));
+                actions.spawn(button("Empty vessel", PanelAction::Empty(MachineSlot::A)));
+            });
+        },
+    );
 }
 
 /// The reaction chamber's target-temperature dial.
@@ -6935,18 +7219,39 @@ struct BeakerBubble {
 /// straight from a fresh container lookup, so nothing here can go stale
 /// between `sync_panel` rebuilds.
 fn beaker_preview(panel: &mut ChildSpawnerCommands, container: Option<Entity>) {
+    beaker_preview_sized(
+        panel,
+        container,
+        BEAKER_PREVIEW_WIDTH,
+        BEAKER_PREVIEW_HEIGHT,
+    );
+}
+
+/// Scaled form used when a machine treats the vessel as its main instrument
+/// instead of a supporting thumbnail. Dynamic fill and hazard behavior remain
+/// shared with every compact preview through the same marker components.
+fn beaker_preview_sized(
+    panel: &mut ChildSpawnerCommands,
+    container: Option<Entity>,
+    width: f32,
+    height: f32,
+) {
+    let scale = (width / BEAKER_PREVIEW_WIDTH).clamp(1.0, 2.5);
+    let top_radius = (BEAKER_TOP_RADIUS * scale).min(8.0);
+    let bottom_radius = (BEAKER_BOTTOM_RADIUS * scale).min(30.0);
+    let bubble_size = (6.0 * scale.sqrt()).min(9.0);
     let mut glass = panel.spawn((
         Node {
             position_type: PositionType::Relative,
-            width: px(BEAKER_PREVIEW_WIDTH),
-            height: px(BEAKER_PREVIEW_HEIGHT),
+            width: px(width),
+            height: px(height),
             flex_shrink: 0.0,
             border: UiRect::all(px(2)),
             border_radius: BorderRadius {
-                top_left: px(BEAKER_TOP_RADIUS),
-                top_right: px(BEAKER_TOP_RADIUS),
-                bottom_left: px(BEAKER_BOTTOM_RADIUS),
-                bottom_right: px(BEAKER_BOTTOM_RADIUS),
+                top_left: px(top_radius),
+                top_right: px(top_radius),
+                bottom_left: px(bottom_radius),
+                bottom_right: px(bottom_radius),
             },
             overflow: Overflow::clip(),
             ..default()
@@ -6973,8 +7278,8 @@ fn beaker_preview(panel: &mut ChildSpawnerCommands, container: Option<Entity>) {
                 border_radius: BorderRadius {
                     top_left: px(0.0),
                     top_right: px(0.0),
-                    bottom_left: px(BEAKER_BOTTOM_RADIUS),
-                    bottom_right: px(BEAKER_BOTTOM_RADIUS),
+                    bottom_left: px(bottom_radius),
+                    bottom_right: px(bottom_radius),
                 },
                 ..default()
             },
@@ -6986,8 +7291,8 @@ fn beaker_preview(panel: &mut ChildSpawnerCommands, container: Option<Entity>) {
             glass.spawn((
                 Node {
                     position_type: PositionType::Absolute,
-                    width: px(6),
-                    height: px(6),
+                    width: px(bubble_size),
+                    height: px(bubble_size),
                     left: percent(50.0),
                     bottom: px(0),
                     border_radius: BorderRadius::MAX,
@@ -7348,6 +7653,7 @@ fn chip_button<A: Component>(
     width: f32,
     action: A,
 ) -> impl Bundle {
+    let text = text.into();
     (
         Button,
         Node {
@@ -7360,11 +7666,16 @@ fn chip_button<A: Component>(
             ..default()
         },
         BackgroundColor(BUTTON_IDLE),
+        TooltipSource::new(
+            text.clone(),
+            "Dispense the selected transfer volume of this base reagent.",
+        ),
+        accessibility_label(text.clone(), Role::Button),
         action,
         children![
             swatch_chip(swatch),
             (
-                Text::new(text.into()),
+                Text::new(font_safe_text(text)),
                 TextFont::from_font_size(14.0),
                 TextColor(TEXT),
             ),
@@ -8026,12 +8337,18 @@ mod tests {
         let closed = accepting_banner_line(&shift);
         assert!(closed.contains("CLOSED"));
         assert!(!closed.contains("debrief"));
-        assert!(closed.is_ascii(), "the HUD font only supports ASCII punctuation");
+        assert!(
+            closed.is_ascii(),
+            "the HUD font only supports ASCII punctuation"
+        );
 
         shift.called = true;
         shift.shift_number = 6;
         let called = accepting_banner_line(&shift);
-        assert!(called.is_ascii(), "the HUD font only supports ASCII punctuation");
+        assert!(
+            called.is_ascii(),
+            "the HUD font only supports ASCII punctuation"
+        );
         assert!(called.contains("SHIFT 6"));
         assert!(
             called.contains("debrief"),
@@ -8054,7 +8371,10 @@ mod tests {
     fn font_safe_text_covers_every_typographic_symbol_authored_in_the_ui() {
         let authored = "—·–→…•≥‹°■≤−⚠▸⁻¹←○“”›◇▯±●≈◌×";
         let safe = font_safe_text(authored);
-        assert!(safe.is_ascii(), "normalization left a non-ASCII glyph: {safe}");
+        assert!(
+            safe.is_ascii(),
+            "normalization left a non-ASCII glyph: {safe}"
+        );
     }
 
     #[test]

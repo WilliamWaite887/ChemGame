@@ -45,7 +45,9 @@ impl Plugin for ContainerPlugin {
                     // Both ends need the glass material to draw with; only the
                     // authority decides what glassware exists.
                     load_container_assets,
-                    spawn_starting_glassware.run_if(is_authority),
+                    spawn_starting_glassware
+                        .in_set(crate::world_state::WorldLoadSet::SpawnDefaults)
+                        .run_if(is_authority),
                 )
                     .chain(),
             )
@@ -556,7 +558,15 @@ pub(crate) fn dress_containers(
     }
 }
 
-fn spawn_starting_glassware(mut commands: Commands) {
+fn spawn_starting_glassware(
+    mut commands: Commands,
+    restored: Option<Res<crate::world_state::PendingWorldState>>,
+) {
+    // A world snapshot owns the complete item population. Spawning the starter
+    // rack as well would duplicate every original beaker on every reload.
+    if restored.is_some_and(|restored| restored.loaded_from_disk()) {
+        return;
+    }
     // Glassware waiting on the benches at the start of a shift.
     let bench_top = 0.9 + 0.065;
     for (index, x) in [-1.6f32, -1.15, -0.7].into_iter().enumerate() {

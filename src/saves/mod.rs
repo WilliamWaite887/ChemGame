@@ -1,8 +1,8 @@
 //! Named save slots.
 //!
-//! One directory per save under `saves/`, each holding the two files the game
-//! already wrote to the project root: `save.ron` (the notebook) and
-//! `progress.ron` (the career). Keeping the *file* names is deliberate — it
+//! One directory per save under `saves/`, holding `save.ron` (the notebook),
+//! `progress.ron` (the career), and `world.ron` (the live lab). Keeping the
+//! original two file names is deliberate — it
 //! makes moving an existing single-save game into a slot a file move rather
 //! than a format change, and each module still owns its own format.
 //!
@@ -32,6 +32,7 @@ const SAVES_DIR: &str = "saves";
 const APP_DATA_DIR: &str = "ChemGame";
 const KNOWLEDGE_FILE: &str = "save.ron";
 const PROGRESS_FILE: &str = "progress.ron";
+const WORLD_FILE: &str = "world.ron";
 const ENVELOPE_MAGIC: &[u8; 8] = b"CHEMSV01";
 const TAG_BYTES: usize = 32;
 const INTEGRITY_KEY_FILE: &str = ".integrity-key";
@@ -74,6 +75,10 @@ impl SaveSlot {
         self.dir().join(PROGRESS_FILE)
     }
 
+    pub fn world_path(&self) -> PathBuf {
+        self.dir().join(WORLD_FILE)
+    }
+
     /// Writes the notebook as a signed, recoverable save envelope.
     pub fn write_knowledge(&self, text: &str) {
         self.write(&self.knowledge_path(), text);
@@ -82,6 +87,11 @@ impl SaveSlot {
     /// Writes the career.
     pub fn write_progress(&self, text: &str) {
         self.write(&self.progress_path(), text);
+    }
+
+    /// Writes the live lab snapshot.
+    pub fn write_world(&self, text: &str) {
+        self.write(&self.world_path(), text);
     }
 
     /// Creates the directory on the way past, signs the payload with this
@@ -526,7 +536,7 @@ pub fn migrate_legacy_saves() {
         }
         return;
     }
-    let legacy: Vec<&str> = [KNOWLEDGE_FILE, PROGRESS_FILE]
+    let legacy: Vec<&str> = [KNOWLEDGE_FILE, PROGRESS_FILE, WORLD_FILE]
         .into_iter()
         .filter(|file| Path::new(file).exists())
         .collect();
@@ -576,7 +586,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_slot_keeps_its_two_files_together() {
+    fn a_slot_keeps_its_files_together() {
         let slot = SaveSlot::new("Chemist 4");
         assert_eq!(
             slot.knowledge_path().parent(),
@@ -585,6 +595,8 @@ mod tests {
         );
         assert!(slot.knowledge_path().ends_with("Chemist 4/save.ron"));
         assert!(slot.progress_path().ends_with("Chemist 4/progress.ron"));
+        assert_eq!(slot.world_path().parent(), slot.progress_path().parent());
+        assert!(slot.world_path().ends_with("Chemist 4/world.ron"));
     }
 
     #[test]

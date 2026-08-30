@@ -21,7 +21,7 @@ use crate::character_lab::{
 };
 use crate::interaction::{Focus, InteractionMode};
 use crate::lab::{self, Solid};
-use crate::net::is_authority;
+use crate::net::{is_authority, AccountId, ConnectedAccount, LocalAccount};
 use crate::AppState;
 
 pub const EYE_HEIGHT: f32 = 1.7;
@@ -63,6 +63,7 @@ impl Plugin for PlayerPlugin {
                     (
                         spawn_joining_chemists,
                         despawn_leaving_chemists,
+                        expire_reconnect_grace,
                         (receive_move_input, apply_move_input).chain(),
                     )
                         .run_if(is_authority),
@@ -121,6 +122,13 @@ impl Plugin for PlayerPlugin {
 #[derive(Component, Serialize, Deserialize)]
 pub struct Player;
 
+/// Stable public identity of the account that owns this chemist.
+///
+/// Unlike [`Chemist::client`], this survives reconnects and is safe to persist
+/// in `world.ron`. It carries no secret and grants no authority by itself.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerAccount(pub AccountId);
+
 /// Server-side link from a chemist back to the client driving them.
 ///
 /// Not replicated: `ClientId` is not serialisable, and no client needs to know
@@ -155,6 +163,13 @@ struct MoveIntent {
     /// were told", not "stop sprinting until the next one lands".
     sprint: bool,
 }
+
+/// Briefly keeps a disconnected chemist and inventory intact so reconnecting
+/// does not manufacture a fresh body or lose whatever they were holding.
+#[derive(Component)]
+struct ReconnectGrace(Timer);
+
+const RECONNECT_GRACE_SECONDS: f32 = 60.0;
 
 /// The camera. Not parented to the body, so head movement stays local.
 #[derive(Component)]
@@ -212,8 +227,12 @@ pub struct MoveInput {
 
 /// Spawns the chemist for whoever is running the world: the singleplayer
 /// chemist, or the host of a listen server.
-fn spawn_host_chemist(mut commands: Commands, mut assign: MessageWriter<ToClients<YouAreChemist>>) {
-    let chemist = spawn_chemist(&mut commands, ClientId::Server, 0.0);
+fn spawn_host_chemist(
+    mut commands: Commands,
+    account: Res<LocalAccount>,
+    mut assign: MessageWriter<ToClients<YouAreChemist>>,
+) {
+    let chemist = spawn_chemist(&mut commands, ClientId::Server, account.id, 0.0);
     assign.write(ToClients {
         targets: SendTargets::Single(ClientId::Server),
         message: YouAreChemist { chemist },
@@ -222,25 +241,40 @@ fn spawn_host_chemist(mut commands: Commands, mut assign: MessageWriter<ToClient
 
 /// Gives every newly joined client a chemist of their own.
 ///
-/// Keyed on `AuthorizedClient`, not `ConnectedClient`. Replicon's default
-/// auth waits for the client's protocol hash to match, and drops targeted
-/// messages until it does — so spawning on connect means the chemist exists
-/// but the client is never told which one is theirs.
+/// Keyed on `ConnectedAccount`, not merely `AuthorizedClient`: the wire schema
+/// must match *and* the game-level account handshake must have succeeded.
 ///
 /// The protocol check is worth keeping: reagent ids are positions in the data
 /// files, so a client running different chemistry would silently mis-read
 /// every solution.
+type DormantChemists<'w, 's> =
+    Query<'w, 's, (Entity, &'static PlayerAccount), (With<Player>, Without<Chemist>)>;
+
 fn spawn_joining_chemists(
     mut commands: Commands,
-    joined: Query<Entity, Added<AuthorizedClient>>,
+    joined: Query<(Entity, &ConnectedAccount), Added<ConnectedAccount>>,
     existing: Query<(), With<Player>>,
+    dormant: DormantChemists,
     mut assign: MessageWriter<ToClients<YouAreChemist>>,
 ) {
-    for client in &joined {
+    for (client, account) in &joined {
+        let id = ClientId::Client(client);
+        if let Some((chemist, _)) = dormant.iter().find(|(_, owner)| owner.0 == account.0) {
+            commands
+                .entity(chemist)
+                .insert((Chemist { client: id }, MoveIntent::default()))
+                .remove::<ReconnectGrace>();
+            assign.write(ToClients {
+                targets: SendTargets::Single(id),
+                message: YouAreChemist { chemist },
+            });
+            info!("chemist {} reconnected to the lab", account.0);
+            continue;
+        }
+
         // Offset each arrival so two chemists never spawn inside each other.
         let lane = existing.iter().count() as f32 * 0.9;
-        let id = ClientId::Client(client);
-        let chemist = spawn_chemist(&mut commands, id, lane);
+        let chemist = spawn_chemist(&mut commands, id, account.0, lane);
         assign.write(ToClients {
             targets: SendTargets::Single(id),
             message: YouAreChemist { chemist },
@@ -249,14 +283,12 @@ fn spawn_joining_chemists(
     }
 }
 
-/// Removes a chemist whose client has disconnected.
+/// Detaches a chemist whose client has disconnected, preserving the body and
+/// inventory for a short identity-based reconnect window.
 ///
 /// `ConnectedClient` is despawned by the networking backend the instant a
 /// connection drops (see its own docs), so this is the mirror image of
 /// [`spawn_joining_chemists`] rather than a poll for anything. Nothing else
-/// ever removes a `Player` entity — without this, a chemist who quit stayed
-/// in the lab forever, and the one who stayed behind went on seeing a
-/// colleague who had gone home.
 fn despawn_leaving_chemists(
     mut commands: Commands,
     mut gone: RemovedComponents<ConnectedClient>,
@@ -266,16 +298,66 @@ fn despawn_leaving_chemists(
         let id = ClientId::Client(client);
         for (entity, chemist) in &chemists {
             if chemist.client == id {
-                commands.entity(entity).despawn();
+                commands
+                    .entity(entity)
+                    .remove::<(Chemist, MoveIntent)>()
+                    .insert(ReconnectGrace(Timer::from_seconds(
+                        RECONNECT_GRACE_SECONDS,
+                        TimerMode::Once,
+                    )));
             }
         }
     }
 }
 
-fn spawn_chemist(commands: &mut Commands, client: ClientId, lane: f32) -> Entity {
+/// Ends the reconnect window cleanly: inventory becomes loose world items at
+/// the last authoritative position before the body is removed.
+fn expire_reconnect_grace(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut waiting: Query<(Entity, &Transform, &mut ReconnectGrace)>,
+    mut items: Query<(
+        Entity,
+        &mut Transform,
+        Option<&crate::containers::InventorySlot>,
+        Option<&crate::containers::HeldBy>,
+    )>,
+) {
+    for (chemist, transform, mut grace) in &mut waiting {
+        grace.0.tick(time.delta());
+        if !grace.0.just_finished() {
+            continue;
+        }
+        let mut dropped = 0_u32;
+        for (item, mut item_transform, inventory, held) in &mut items {
+            let owned = inventory.is_some_and(|slot| slot.owner == chemist)
+                || held.is_some_and(|held| held.0 == chemist);
+            if !owned {
+                continue;
+            }
+            dropped += 1;
+            item_transform.translation = transform.translation
+                + Vec3::new((dropped as f32 - 1.0) * 0.22, -EYE_HEIGHT + 0.25, 0.0);
+            commands
+                .entity(item)
+                .remove::<crate::containers::InventorySlot>()
+                .remove::<crate::containers::HeldBy>();
+        }
+        commands.entity(chemist).despawn();
+        info!("a disconnected chemist's reconnect window expired");
+    }
+}
+
+fn spawn_chemist(
+    commands: &mut Commands,
+    client: ClientId,
+    account: AccountId,
+    lane: f32,
+) -> Entity {
     commands
         .spawn((
             Player,
+            PlayerAccount(account),
             Chemist { client },
             MoveIntent::default(),
             Look::default(),
@@ -1755,25 +1837,57 @@ mod tests {
     // -- disconnect --------------------------------------------------------
 
     #[test]
-    fn a_chemist_disappears_when_their_client_disconnects() {
-        // `ConnectedClient` is despawned by the networking backend the
-        // instant a connection drops. Nothing else ever removes a `Player`
-        // entity, so without this a chemist who quit stayed in the lab
-        // forever — the one who stayed behind went on seeing a colleague
-        // who had gone home.
+    fn a_disconnected_chemist_enters_reconnect_grace() {
         let mut app = App::new();
         app.add_systems(Update, despawn_leaving_chemists);
 
         let client_entity = app.world_mut().spawn(ConnectedClient { max_size: 0 }).id();
         let client = ClientId::Client(client_entity);
-        let chemist = app.world_mut().spawn((Player, Chemist { client })).id();
+        let chemist = app
+            .world_mut()
+            .spawn((
+                Player,
+                PlayerAccount(AccountId::from_bytes([3; 16])),
+                Chemist { client },
+                MoveIntent::default(),
+            ))
+            .id();
 
         app.world_mut().despawn(client_entity);
         app.update();
 
         assert!(
-            app.world().get_entity(chemist).is_err(),
-            "the chemist must leave when their client disconnects"
+            app.world().get_entity(chemist).is_ok(),
+            "the body and its inventory must survive a brief network drop"
         );
+        assert!(app.world().get::<Chemist>(chemist).is_none());
+        assert!(app.world().get::<ReconnectGrace>(chemist).is_some());
+    }
+
+    #[test]
+    fn the_same_account_reclaims_its_dormant_chemist() {
+        let account = AccountId::from_bytes([4; 16]);
+        let mut app = App::new();
+        app.add_message::<ToClients<YouAreChemist>>()
+            .add_systems(Update, spawn_joining_chemists);
+        let dormant = app
+            .world_mut()
+            .spawn((
+                Player,
+                PlayerAccount(account),
+                ReconnectGrace(Timer::from_seconds(30.0, TimerMode::Once)),
+            ))
+            .id();
+        let connection = app.world_mut().spawn(ConnectedAccount(account)).id();
+
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Chemist>(dormant).unwrap().client,
+            ClientId::Client(connection)
+        );
+        assert!(app.world().get::<ReconnectGrace>(dormant).is_none());
+        let mut players = app.world_mut().query_filtered::<Entity, With<Player>>();
+        assert_eq!(players.iter(app.world()).count(), 1);
     }
 }

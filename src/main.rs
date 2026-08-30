@@ -53,11 +53,15 @@ mod smuggler;
 mod speech;
 mod threat;
 mod ui;
+mod world_state;
 
 use bevy::prelude::*;
 
 fn main() {
     let mut app = App::new();
+    // A profile identity belongs to this installation, not to a save slot or
+    // one network connection. Load it before networking can begin.
+    app.insert_resource(net::LocalAccount::load_or_create());
 
     // Before `DefaultPlugins`: `bevy_steamworks` requires this, because it
     // must be up before the render plugin inside `DefaultPlugins` builds.
@@ -107,7 +111,13 @@ fn main() {
     net::apply_command_line(&mut app);
 
     app.add_plugins((
-        net::NetPlugin,
+        (
+            net::NetPlugin,
+            // The live lab snapshot is separate from career progress. It reads
+            // the slot before player/glassware OnEnter systems decide whether
+            // to spawn defaults, then preserves the authority-owned world.
+            world_state::WorldStatePlugin,
+        ),
         chem_data::ChemDataPlugin,
         lab::LabPlugin,
         // After the lab: it rebuilds off `WalkableAreas`, which the lab owns.

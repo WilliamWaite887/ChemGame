@@ -48,7 +48,7 @@ impl Plugin for SessionPlugin {
 ///   `arc::assign_campaign` specifically needs `Campaign` to be *absent* to
 ///   roll a new one, so resetting it to some default would silently keep every
 ///   later save on the first one's antagonist.
-fn clear_session_state(world: &mut World) {
+pub(crate) fn clear_session_state(world: &mut World) {
     // -- reset: read non-optionally somewhere ------------------------------
     reset::<crate::orders::Shift>(world);
     reset::<crate::radio::RadioLog>(world);
