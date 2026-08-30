@@ -263,7 +263,10 @@ impl NavGraph {
                 self.nodes[start].floor_at(entry) + body_offset,
                 entry.z,
             );
-            if waypoints.first().is_none_or(|first| first.distance(entry) > 0.01) {
+            if waypoints
+                .first()
+                .is_none_or(|first| first.distance(entry) > 0.01)
+            {
                 waypoints.insert(0, entry);
             }
         }
@@ -522,7 +525,10 @@ impl Trail {
         if self.path.is_empty() {
             return None;
         }
-        Some(floor_length(from, &self.path[self.waypoint.min(self.path.len())..]))
+        Some(floor_length(
+            from,
+            &self.path[self.waypoint.min(self.path.len())..],
+        ))
     }
 
     /// Walks up to `distance` along the route, kept on the walkable floor.

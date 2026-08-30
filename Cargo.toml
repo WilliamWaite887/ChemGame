@@ -9,6 +9,11 @@ edition = "2021"
 [dependencies]
 chem_sim = { path = "crates/chem_sim" }
 bevy = { version = "0.19", features = ["serialize"] }
+# Bevy's accessibility component intentionally does not re-export AccessKit's
+# node builder. This is the exact version Bevy already links; declaring it
+# directly lets icon-only controls carry real screen-reader labels without
+# adding another copy to the binary.
+accesskit = "0.24"
 bevy_common_assets = { version = "0.17.0", features = ["ron"] }
 serde = { version = "1.0.229", features = ["derive"] }
 rand = "0.10.2"

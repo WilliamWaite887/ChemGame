@@ -537,8 +537,8 @@ fn pace_locomotion_previews(
     }
 }
 
-    // Blender's -Y front becomes +Z in the exported glTF. Rotate that axis
-    // toward the lane velocity instead of assuming Bevy's conventional -Z.
+// Blender's -Y front becomes +Z in the exported glTF. Rotate that axis
+// toward the lane velocity instead of assuming Bevy's conventional -Z.
 fn locomotion_facing(direction: f32) -> Quat {
     Quat::from_rotation_y(if direction > 0.0 {
         std::f32::consts::FRAC_PI_2

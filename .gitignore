@@ -57,3 +57,6 @@ assets/3dassets/station_starter_kit/generate_service_modules.py
 docs/store/key-art-concepts.md
 docs/store/steam-store-page.md
 docs/npc-ai.md
+assets/ui/chemistry_book/README.md
+tools/capture-book-preview.ps1
+tools/export-book-icons.mjs

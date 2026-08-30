@@ -41,17 +41,17 @@ impl Plugin for QuackPlugin {
             "data/station.quack.ron",
             "quack.ron",
         ))
-            .init_resource::<QuackProgress>()
-            .add_systems(OnEnter(AppState::Playing), arm_spawner)
-            .add_systems(
-                Update,
-                (generate_quack_visit, handle_quack_resolution)
-                    .chain()
-                    .after(threat::PromoteScripts)
-                    .run_if(is_authority)
-                    // No `arc::is_active` gate, unlike a main antagonist.
-                    .run_if(in_state(AppState::Playing)),
-            );
+        .init_resource::<QuackProgress>()
+        .add_systems(OnEnter(AppState::Playing), arm_spawner)
+        .add_systems(
+            Update,
+            (generate_quack_visit, handle_quack_resolution)
+                .chain()
+                .after(threat::PromoteScripts)
+                .run_if(is_authority)
+                // No `arc::is_active` gate, unlike a main antagonist.
+                .run_if(in_state(AppState::Playing)),
+        );
     }
 }
 
@@ -99,8 +99,8 @@ struct QuackSpawner {
 /// `OnEnter(AppState::Playing)` every session rather than only once at
 /// process start.
 fn arm_spawner(mut commands: Commands) {
-    threat::arm_first_visit(&mut commands, threat::MINOR_FIRST_VISIT, |timer| QuackSpawner {
-        timer,
+    threat::arm_first_visit(&mut commands, threat::MINOR_FIRST_VISIT, |timer| {
+        QuackSpawner { timer }
     });
 }
 
@@ -286,8 +286,8 @@ fn handle_quack_resolution(
 mod tests {
     use super::*;
     use crate::crew::CrewDef;
-    use crate::orders::Outcome;
     use crate::orders::OrderKind;
+    use crate::orders::Outcome;
 
     fn data() -> chem_sim::ChemData {
         chem_sim::ChemData::from_ron(

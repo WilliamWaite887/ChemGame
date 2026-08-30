@@ -189,8 +189,6 @@ impl Default for Thermostat {
 pub const TEMPERATURE_MIN: f32 = 100.0;
 pub const TEMPERATURE_MAX: f32 = 1000.0;
 
-
-
 /// Fraction of the remaining gap a powered chamber closes per second.
 ///
 /// Deliberately unhurried. From room temperature this reaches phlogiston's
@@ -293,7 +291,11 @@ fn recover_from_emp(time: Res<Time>, mut machines: Query<&mut Machine>) {
 }
 
 /// Counts an active [`Overclocked`] boost down and removes it once spent.
-fn tick_overclock(mut commands: Commands, time: Res<Time>, mut chambers: Query<(Entity, &mut Overclocked)>) {
+fn tick_overclock(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut chambers: Query<(Entity, &mut Overclocked)>,
+) {
     for (entity, mut overclocked) in &mut chambers {
         overclocked.remaining -= time.delta_secs();
         if overclocked.remaining <= 0.0 {

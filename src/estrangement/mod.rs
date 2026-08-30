@@ -169,7 +169,9 @@ mod tests {
         );
         assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
         assert_eq!(
-            app.world().resource::<crate::instability::Instability>().value,
+            app.world()
+                .resource::<crate::instability::Instability>()
+                .value,
             crate::instability::STABILITY_MAX - ESTRANGEMENT_INSTABILITY as f32,
             "several frames below the floor must not stack this bump either"
         );
@@ -180,7 +182,10 @@ mod tests {
         let mut app = app();
         ivy(&mut app, ESTRANGED_BELOW - 1);
         app.update();
-        assert_eq!(app.world().resource::<SecuritySuspicion>().level(), ESTRANGEMENT_SUSPICION);
+        assert_eq!(
+            app.world().resource::<SecuritySuspicion>().level(),
+            ESTRANGEMENT_SUSPICION
+        );
 
         // Climbs back above `ESTRANGED_BELOW` but not past `RECONCILED_AT` —
         // must stay estranged, and must not fire a second bump.
@@ -192,7 +197,10 @@ mod tests {
             .resource::<Estranged>()
             .0
             .contains("Botanist Ivy"));
-        assert_eq!(app.world().resource::<SecuritySuspicion>().level(), ESTRANGEMENT_SUSPICION);
+        assert_eq!(
+            app.world().resource::<SecuritySuspicion>().level(),
+            ESTRANGEMENT_SUSPICION
+        );
     }
 
     #[test]

@@ -42,15 +42,15 @@ impl Plugin for SecurityPlugin {
             "data/station.security.ron",
             "security.ron",
         ))
-            .init_resource::<RaidSchedule>()
-            .add_systems(
-                Update,
-                (schedule_raid, run_sweep)
-                    .chain()
-                    .after(threat::PromoteScripts)
-                    .run_if(is_authority)
-                    .run_if(in_state(AppState::Playing)),
-            );
+        .init_resource::<RaidSchedule>()
+        .add_systems(
+            Update,
+            (schedule_raid, run_sweep)
+                .chain()
+                .after(threat::PromoteScripts)
+                .run_if(is_authority)
+                .run_if(in_state(AppState::Playing)),
+        );
     }
 }
 
@@ -94,7 +94,6 @@ pub struct SecurityScript {
 
 /// This thread's authored script, once loaded.
 type Script = threat::Authored<SecurityScript>;
-
 
 // ---------------------------------------------------------------------------
 // The warning, and the officer
@@ -239,7 +238,9 @@ fn schedule_raid(
 /// which is what stops "meth, marked as bath salts" from counting as cover.
 fn is_contraband(db: &ChemDb, id: ReagentId) -> bool {
     let reagent = db.reagents.get(id);
-    reagent.categories.contains(&Category::Illicit) || reagent.controlled || reagent.explosive.is_some()
+    reagent.categories.contains(&Category::Illicit)
+        || reagent.controlled
+        || reagent.explosive.is_some()
 }
 
 fn holds_contraband(db: &ChemDb, solution: &Solution) -> bool {
@@ -367,7 +368,11 @@ fn run_sweep(
         let forged = seized && suspect.iter().any(|(_, reads)| *reads == Reads::Covered);
 
         if seized {
-            let penalty = if forged { FORGERY_PENALTY } else { RAID_PENALTY };
+            let penalty = if forged {
+                FORGERY_PENALTY
+            } else {
+                RAID_PENALTY
+            };
             let line = if forged {
                 &script.forged_line
             } else {
@@ -471,7 +476,9 @@ mod tests {
     fn crossing_the_threshold_without_a_ward_arms_the_warning_as_before() {
         let mut app = schedule_app();
         let threshold = app.world().resource::<Script>().0.threshold;
-        app.world_mut().resource_mut::<SecuritySuspicion>().restore(threshold);
+        app.world_mut()
+            .resource_mut::<SecuritySuspicion>()
+            .restore(threshold);
 
         app.update();
 
@@ -491,7 +498,9 @@ mod tests {
     fn a_raid_ward_absorbs_the_warning_and_resets_suspicion() {
         let mut app = schedule_app();
         let threshold = app.world().resource::<Script>().0.threshold;
-        app.world_mut().resource_mut::<SecuritySuspicion>().restore(threshold);
+        app.world_mut()
+            .resource_mut::<SecuritySuspicion>()
+            .restore(threshold);
         app.world_mut()
             .resource_mut::<Shift>()
             .requisition
@@ -546,7 +555,9 @@ mod tests {
             .resource_mut::<Shift>()
             .adjust(Department::Security, standing);
         assert_eq!(
-            app.world().resource::<Shift>().standing(Department::Security),
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Security),
             standing,
             "test setup: Security's standing is the input to the whole sweep"
         );
@@ -741,7 +752,10 @@ mod tests {
 
         advance(&mut app, 1.0);
 
-        assert!(is_empty(&app, beaker), "unlabelled contraband is always seized");
+        assert!(
+            is_empty(&app, beaker),
+            "unlabelled contraband is always seized"
+        );
         assert_eq!(
             app.world()
                 .resource::<Shift>()

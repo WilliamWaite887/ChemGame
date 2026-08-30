@@ -156,7 +156,6 @@ pub struct RogueEncounterDef {
     pub physical: bool,
 }
 
-
 /// This thread's authored script, once loaded.
 type Script = threat::Authored<RogueSecurityScript>;
 
@@ -165,13 +164,12 @@ struct RogueSpawner {
     timer: Timer,
 }
 
-
 /// See `threat::arm_first_visit` for why this has to re-run on
 /// `OnEnter(AppState::Playing)` every session rather than only once at
 /// process start.
 fn arm_spawner(mut commands: Commands) {
-    threat::arm_first_visit(&mut commands, threat::ROGUE_FIRST_CHECK, |timer| RogueSpawner {
-        timer,
+    threat::arm_first_visit(&mut commands, threat::ROGUE_FIRST_CHECK, |timer| {
+        RogueSpawner { timer }
     });
 }
 

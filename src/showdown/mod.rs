@@ -733,9 +733,9 @@ fn dress_breach(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::threat;
     use crate::arc::{AntagId, ArcScript, Mode};
     use crate::lab::Bounds;
+    use crate::threat;
     use std::time::Duration;
 
     const TEST_BREACH_SPOT: Vec3 = Vec3::new(13.0, 1.0, -7.0);

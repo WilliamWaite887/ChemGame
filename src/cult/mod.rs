@@ -39,38 +39,38 @@ impl Plugin for CultPlugin {
             "data/station.cult.ron",
             "cult.ron",
         ))
-            .init_resource::<CultProgress>()
-            .init_resource::<CultIncidentsRestored>()
-            .add_systems(
-                OnEnter(AppState::Playing),
-                (arm_spawner, reset_incident_restore),
+        .init_resource::<CultProgress>()
+        .init_resource::<CultIncidentsRestored>()
+        .add_systems(
+            OnEnter(AppState::Playing),
+            (arm_spawner, reset_incident_restore),
+        )
+        .add_systems(
+            Update,
+            (
+                restore_incidents,
+                generate_cult_visit,
+                handle_cult_resolution,
+                handle_incident_delivery,
+                aggro_cultists,
+                credit_defeated_guards,
             )
-            .add_systems(
-                Update,
-                (
-                    restore_incidents,
-                    generate_cult_visit,
-                    handle_cult_resolution,
-                    handle_incident_delivery,
-                    aggro_cultists,
-                    credit_defeated_guards,
-                )
-                    .chain()
-                    .after(threat::PromoteScripts)
-                    .run_if(is_authority)
-                    // Only in a save that actually drew the Cult. This thread
-                    // was a standalone Cargo curiosity before the campaign
-                    // arc existed; it is now the Cult's on-station presence,
-                    // and a save fighting the Syndicate should never see an
-                    // acolyte at the counter. Department minors deliberately
-                    // carry no equivalent gate — they run in every save.
-                    .run_if(crate::arc::is_active(crate::arc::AntagId::Cult))
-                    // Crisis markers are collected from the loaded map. No
-                    // authored consequence may fall back to the old lab-local
-                    // coordinates while that registry is incomplete.
-                    .run_if(resource_exists::<MapReady>)
-                    .run_if(in_state(AppState::Playing)),
-            );
+                .chain()
+                .after(threat::PromoteScripts)
+                .run_if(is_authority)
+                // Only in a save that actually drew the Cult. This thread
+                // was a standalone Cargo curiosity before the campaign
+                // arc existed; it is now the Cult's on-station presence,
+                // and a save fighting the Syndicate should never see an
+                // acolyte at the counter. Department minors deliberately
+                // carry no equivalent gate — they run in every save.
+                .run_if(crate::arc::is_active(crate::arc::AntagId::Cult))
+                // Crisis markers are collected from the loaded map. No
+                // authored consequence may fall back to the old lab-local
+                // coordinates while that registry is incomplete.
+                .run_if(resource_exists::<MapReady>)
+                .run_if(in_state(AppState::Playing)),
+        );
         app.add_systems(Update, dress_incidents.run_if(in_state(AppState::Playing)));
     }
 }
@@ -353,9 +353,11 @@ fn restore_incidents(
 /// `OnEnter(AppState::Playing)` every session rather than only once at
 /// process start.
 fn arm_spawner(mut commands: Commands) {
-    threat::arm_first_visit(&mut commands, threat::MAIN_ANTAGONIST_FIRST_VISIT, |timer| CultSpawner {
-        timer,
-    });
+    threat::arm_first_visit(
+        &mut commands,
+        threat::MAIN_ANTAGONIST_FIRST_VISIT,
+        |timer| CultSpawner { timer },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

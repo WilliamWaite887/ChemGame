@@ -74,23 +74,23 @@ impl Plugin for AddictionPlugin {
             "data/station.addiction.ron",
             "addiction.ron",
         ))
-            .init_resource::<Addictions>()
-            .init_resource::<CarriedSuspicion>()
-            .add_systems(OnEnter(AppState::Playing), arm_spawner)
-            .add_systems(
-                Update,
-                (
-                    note_doses,
-                    treat_opioid_habits,
-                    notice_the_high,
-                    generate_addict_visits,
-                    handle_addict_resolutions,
-                    handle_withdrawal,
-                )
-                    .chain()
-                    .run_if(is_authority)
-                    .run_if(in_state(AppState::Playing)),
-            );
+        .init_resource::<Addictions>()
+        .init_resource::<CarriedSuspicion>()
+        .add_systems(OnEnter(AppState::Playing), arm_spawner)
+        .add_systems(
+            Update,
+            (
+                note_doses,
+                treat_opioid_habits,
+                notice_the_high,
+                generate_addict_visits,
+                handle_addict_resolutions,
+                handle_withdrawal,
+            )
+                .chain()
+                .run_if(is_authority)
+                .run_if(in_state(AppState::Playing)),
+        );
     }
 }
 
@@ -180,7 +180,6 @@ pub struct AddictionScript {
     pub withdrawal_lines: Vec<String>,
 }
 
-
 /// This thread's authored script, once loaded.
 pub type Script = threat::Authored<AddictionScript>;
 
@@ -193,18 +192,15 @@ struct AddictSpawner {
 #[derive(Resource)]
 struct DoseClock(Timer);
 
-
 /// See `threat::arm_first_visit` for why this has to re-run on
 /// `OnEnter(AppState::Playing)` every session rather than only once at
 /// process start. Not actually a range — every save's first return visit
 /// lands at exactly `threat::ADDICT_FIRST_RETURN`, unlike every other thread's
 /// randomised initial gap.
 fn arm_spawner(mut commands: Commands) {
-    threat::arm_first_visit(
-        &mut commands,
-        threat::ADDICT_FIRST_RETURN,
-        |timer| AddictSpawner { timer },
-    );
+    threat::arm_first_visit(&mut commands, threat::ADDICT_FIRST_RETURN, |timer| {
+        AddictSpawner { timer }
+    });
 }
 
 // ---------------------------------------------------------------------------

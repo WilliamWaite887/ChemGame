@@ -1285,10 +1285,7 @@ fn generate_orders(
     forecast: Option<Res<CurrentForecast>>,
     mut radio: ResMut<RadioLog>,
     active: Query<&CrewMember, crate::crew::NotResident>,
-    mut residents: Query<
-        (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
-        With<Ambient>,
-    >,
+    mut residents: Query<(Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute), With<Ambient>>,
     development_orders: Query<(), With<DevelopmentOrder>>,
     chemists: Query<(), With<Chemist>>,
     containers: Query<&Container>,
@@ -1493,10 +1490,7 @@ fn generate_specific_orders(
     forecast: Option<Res<CurrentForecast>>,
     mut radio: ResMut<RadioLog>,
     active: Query<&CrewMember, crate::crew::NotResident>,
-    mut residents: Query<
-        (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
-        With<Ambient>,
-    >,
+    mut residents: Query<(Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute), With<Ambient>>,
     chemists: Query<(), With<Chemist>>,
     containers: Query<&Container>,
     produce: Query<&Produce>,
@@ -1770,7 +1764,12 @@ fn adjust_for_role(
     };
     shift.adjust(
         department,
-        reputation_delta(misdelivered(outcome, instability), waited, patience, potency),
+        reputation_delta(
+            misdelivered(outcome, instability),
+            waited,
+            patience,
+            potency,
+        ),
     );
 }
 
@@ -1784,7 +1783,10 @@ fn adjust_for_role(
 /// `Calm`, so ordinary early-career play is untouched. A flat probability
 /// rather than one that keeps climbing with the raw meter: the *tier* is the
 /// dial here, not the level underneath it.
-fn misdelivered(outcome: Outcome, instability: Option<&crate::instability::Instability>) -> Outcome {
+fn misdelivered(
+    outcome: Outcome,
+    instability: Option<&crate::instability::Instability>,
+) -> Outcome {
     if outcome != Outcome::Success {
         return outcome;
     }
@@ -2368,23 +2370,32 @@ fn handle_window_delivery(
             continue;
         }
 
-        let candidates = crew
-            .iter()
-            .map(|(entity, _, order, route, illicit, crisis, counter, hostile, _)| {
+        let candidates = crew.iter().map(
+            |(entity, _, order, route, illicit, crisis, counter, hostile, _)| {
                 (
                     entity,
                     order,
                     route,
                     OrderKind::of_with_hostile(illicit, crisis, counter.is_some(), hostile),
                 )
-            });
+            },
+        );
         let lane = lane.copied().unwrap_or(DeliveryLane::Public);
         let Some(recipient) = window_recipient(&container.solution, candidates, lane, &db) else {
             continue;
         };
 
-        let Ok((crew_entity, member, order, mut route, illicit, crisis, counter, hostile, development)) =
-            crew.get_mut(recipient)
+        let Ok((
+            crew_entity,
+            member,
+            order,
+            mut route,
+            illicit,
+            crisis,
+            counter,
+            hostile,
+            development,
+        )) = crew.get_mut(recipient)
         else {
             continue;
         };
@@ -2599,7 +2610,10 @@ mod tests {
     fn misdelivery_is_inert_at_calm_and_with_no_meter_at_all() {
         let calm = crate::instability::Instability::default();
         for _ in 0..200 {
-            assert_eq!(misdelivered(Outcome::Success, Some(&calm)), Outcome::Success);
+            assert_eq!(
+                misdelivered(Outcome::Success, Some(&calm)),
+                Outcome::Success
+            );
             assert_eq!(misdelivered(Outcome::Success, None), Outcome::Success);
         }
     }

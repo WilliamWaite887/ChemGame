@@ -43,11 +43,20 @@ use crate::produce::{ProduceCatalog, ProduceId};
 use crate::radio::{RadioChannel, RadioEntry, RadioLog, RadioPriority, RadioTone};
 use crate::shift::{
     can_afford, can_call_it, npc_can_afford, shift_report, CallItAShift, CareerStage,
-    NpcRequisitionKind, NpcRequisitionRequested, OpenUpAgain, RequisitionKind,
-    ConditionChange, RequisitionRequested, ShiftReport, ToggleAcceptingOrders, OVERCLOCK_COST,
+    ConditionChange, NpcRequisitionKind, NpcRequisitionRequested, OpenUpAgain, RequisitionKind,
+    RequisitionRequested, ShiftReport, ToggleAcceptingOrders, OVERCLOCK_COST,
     PRESSURE_SPRAYER_COST, SYRINGE_GUN_COST, WATER_GUN_COST,
 };
 use crate::AppState;
+
+mod book;
+mod icons;
+mod tooltip;
+
+use accesskit::Role;
+use book::{ProfileCoverage, RecipePresentation};
+use icons::{icon_image, BookIcon, BookIconAssets};
+use tooltip::{accessibility_label, TooltipSource, TooltipState};
 
 /// How many orders the queue can show at once.
 ///
@@ -123,11 +132,18 @@ impl Plugin for UiPlugin {
                 announce_accepting_toggle,
                 show_toasts,
                 expire_toasts,
+                tooltip::update_tooltips,
             )
                 .chain()
                 .run_if(in_state(AppState::Playing)),
         )
+        // The bundled bitmap font intentionally has a compact glyph set.
+        // Normalize presentation text after every state-specific UI system so
+        // authored prose and live readouts cannot render missing-glyph boxes.
+        .add_systems(Last, normalize_changed_ui_text)
         .init_resource::<BookView>()
+        .init_resource::<BookIconAssets>()
+        .init_resource::<TooltipState>()
         .init_resource::<HplcView>()
         .init_resource::<BoardTab>()
         .init_resource::<LastPanel>()
@@ -248,6 +264,26 @@ impl BookFilter {
             Self::Locked => "Locked",
         }
     }
+
+    fn icon(self) -> BookIcon {
+        match self {
+            Self::All => BookIcon::All,
+            Self::Recorded => BookIcon::Recorded,
+            Self::Ready => BookIcon::Ready,
+            Self::Frontier => BookIcon::Frontier,
+            Self::Locked => BookIcon::Locked,
+        }
+    }
+
+    fn explanation(self) -> &'static str {
+        match self {
+            Self::All => "Every method in the selected chemistry category.",
+            Self::Recorded => "The complete formula and handling record is in your notebook.",
+            Self::Ready => "Every required material is obtainable with your current knowledge.",
+            Self::Frontier => "One nearby precursor discovery will bring this within reach.",
+            Self::Locked => "The dependency chain has not reached your research frontier.",
+        }
+    }
 }
 
 /// How close a recipe is to being usable. This is deliberately based on the
@@ -279,6 +315,28 @@ impl RecipeState {
             Self::Locked => TEXT_DIM,
         }
     }
+
+    fn icon(self) -> BookIcon {
+        match self {
+            Self::Recorded => BookIcon::Recorded,
+            Self::Ready => BookIcon::Ready,
+            Self::Frontier => BookIcon::Frontier,
+            Self::Locked => BookIcon::Locked,
+        }
+    }
+
+    fn explanation(self) -> &'static str {
+        match self {
+            Self::Recorded => {
+                "Complete method recorded. Formula, process and handling data are available."
+            }
+            Self::Ready => {
+                "All inputs can be obtained now. Experiment or spend research to reveal the method."
+            }
+            Self::Frontier => "Discover one nearby precursor to bring this method within reach.",
+            Self::Locked => "This method remains beyond the current dependency frontier.",
+        }
+    }
 }
 
 #[derive(Resource, Default)]
@@ -307,6 +365,7 @@ struct HplcView {
 struct PanelViews<'w> {
     book: Res<'w, BookView>,
     hplc: Res<'w, HplcView>,
+    icons: Res<'w, BookIconAssets>,
 }
 
 /// Everything the open panel displays, flattened for comparison.
@@ -921,6 +980,7 @@ fn sync_panel(
             at_machine.is_some(),
             career_stage,
             board.shift.succeeded,
+            &views.icons,
         );
         return;
     }
@@ -3422,11 +3482,7 @@ fn container_readout(
                     // everyone *else* will read, and seeing both at once is
                     // the point of showing it here at all.
                     if let Some(marked) = marked.filter(|marked| !marked.0.trim().is_empty()) {
-                        column.spawn(label(
-                            format!("Marked \"{}\"", marked.0),
-                            13.0,
-                            LABEL_INK,
-                        ));
+                        column.spawn(label(format!("Marked \"{}\"", marked.0), 13.0, LABEL_INK));
                     }
 
                     if container.solution.is_empty() {
@@ -3479,6 +3535,125 @@ fn container_readout(
 // Reference book
 // ---------------------------------------------------------------------------
 
+const BOOK_ACCENT: Color = Color::srgb(0.34, 0.66, 0.82);
+const BOOK_PAPER: Color = Color::srgba(0.10, 0.12, 0.14, 0.98);
+const BOOK_INSET: Color = Color::srgba(0.075, 0.085, 0.105, 0.96);
+
+fn icon_control<A: Component>(
+    action: A,
+    title: impl Into<String>,
+    body: impl Into<String>,
+    width: f32,
+    height: f32,
+) -> impl Bundle {
+    let title = title.into();
+    (
+        Button,
+        Node {
+            width: px(width),
+            min_height: px(height),
+            padding: UiRect::all(px(7)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(6)),
+            ..default()
+        },
+        BackgroundColor(BUTTON_IDLE),
+        BorderColor::all(Color::srgba(0.30, 0.36, 0.43, 0.75)),
+        TooltipSource::new(title.clone(), body),
+        accessibility_label(title, Role::Button),
+        action,
+    )
+}
+
+fn icon_badge(title: impl Into<String>, body: impl Into<String>, min_width: f32) -> impl Bundle {
+    let title = title.into();
+    (
+        Node {
+            min_width: px(min_width),
+            min_height: px(30),
+            padding: UiRect::axes(px(7), px(5)),
+            align_items: AlignItems::Center,
+            column_gap: px(5),
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(5)),
+            ..default()
+        },
+        BackgroundColor(BOOK_INSET),
+        BorderColor::all(Color::srgba(0.25, 0.31, 0.38, 0.75)),
+        Interaction::default(),
+        Pickable {
+            should_block_lower: false,
+            is_hoverable: true,
+        },
+        TooltipSource::new(title.clone(), body),
+        accessibility_label(title, Role::Image),
+    )
+}
+
+fn fact_chip(
+    parent: &mut ChildSpawnerCommands,
+    icons: &BookIconAssets,
+    icon: BookIcon,
+    value: impl Into<String>,
+    title: impl Into<String>,
+    body: impl Into<String>,
+    color: Color,
+) {
+    parent
+        .spawn(icon_badge(title, body, 42.0))
+        .with_children(|chip| {
+            chip.spawn(icon_image(icons, icon, 18.0, color));
+            chip.spawn(label(value.into(), 12.0, TEXT));
+        });
+}
+
+fn status_seal(parent: &mut ChildSpawnerCommands, icons: &BookIconAssets, state: RecipeState) {
+    parent
+        .spawn(icon_badge(state.label(), state.explanation(), 34.0))
+        .with_children(|seal| {
+            seal.spawn(icon_image(icons, state.icon(), 19.0, state.color()));
+            seal.spawn(label(state.label(), 10.0, state.color()));
+        });
+}
+
+fn reaction_process_icon(reaction: &chem_sim::Reaction) -> BookIcon {
+    match reaction.process {
+        chem_sim::ReactionProcess::Ambient => {
+            if reaction.min_temp.is_some() || reaction.max_temp.is_some() {
+                BookIcon::ReactionChamber
+            } else {
+                BookIcon::DirectMix
+            }
+        }
+        chem_sim::ReactionProcess::Agitated { .. } => BookIcon::MixingChamber,
+    }
+}
+
+fn reaction_process_label(reaction: &chem_sim::Reaction) -> &'static str {
+    match reaction.process {
+        chem_sim::ReactionProcess::Ambient => {
+            if reaction.min_temp.is_some() || reaction.max_temp.is_some() {
+                "Reaction Chamber"
+            } else {
+                "Direct mixture"
+            }
+        }
+        chem_sim::ReactionProcess::Agitated { .. } => "Mixing Chamber",
+    }
+}
+
+fn filter_color(filter: BookFilter) -> Color {
+    match filter {
+        BookFilter::All => BOOK_ACCENT,
+        BookFilter::Recorded => RecipeState::Recorded.color(),
+        BookFilter::Ready => RecipeState::Ready.color(),
+        BookFilter::Frontier => RecipeState::Frontier.color(),
+        BookFilter::Locked => RecipeState::Locked.color(),
+    }
+}
+
 /// The chemist's notes. Known recipes show the full method; locked ones show
 /// only what a chemist would plausibly remember — what it treats, how many
 /// ingredients, and whatever they have worked out so far.
@@ -3498,6 +3673,7 @@ fn spawn_reference_book(
     at_machine: bool,
     career_stage: CareerStage,
     successes: u32,
+    icons: &BookIconAssets,
 ) {
     commands
         .spawn((
@@ -3509,6 +3685,7 @@ fn spawn_reference_book(
                 align_items: AlignItems::Center,
                 ..default()
             },
+            BackgroundColor(Color::srgba(0.015, 0.02, 0.025, 0.72)),
             PanelRoot,
             crate::until_we_leave_the_lab(),
         ))
@@ -3516,16 +3693,18 @@ fn spawn_reference_book(
             screen
                 .spawn((
                     Node {
-                        width: percent(92),
-                        max_width: px(1180),
-                        height: vh(86),
+                        width: percent(95),
+                        max_width: px(1360),
+                        height: vh(92),
                         flex_direction: FlexDirection::Column,
-                        padding: UiRect::all(px(20)),
-                        row_gap: px(10),
-                        border_radius: BorderRadius::all(px(8)),
+                        padding: UiRect::all(px(16)),
+                        row_gap: px(8),
+                        border: UiRect::all(px(2)),
+                        border_radius: BorderRadius::all(px(10)),
                         ..default()
                     },
                     BackgroundColor(PANEL_BG),
+                    BorderColor::all(Color::srgb(0.24, 0.40, 0.50)),
                 ))
                 .with_children(|book| {
                     book.spawn(Node {
@@ -3536,7 +3715,11 @@ fn spawn_reference_book(
                         ..default()
                     })
                     .with_children(|header| {
-                        header.spawn(heading("Chemistry Research Book"));
+                        header.spawn(row()).with_children(|title| {
+                            title.spawn(icon_image(icons, BookIcon::Book, 30.0, BOOK_ACCENT));
+                            title.spawn(heading("CHEMISTRY FIELD MANUAL"));
+                            title.spawn(label("STATION ISSUE  /  LAB COPY", 10.0, TEXT_DIM));
+                        });
                         header.spawn(button(
                             if at_machine {
                                 "‹ Back to machine"
@@ -3546,34 +3729,81 @@ fn spawn_reference_book(
                             PanelAction::CloseBook,
                         ));
                     });
-                    book.spawn(label(
-                        format!(
-                            "{}  ·  {} successful orders  ·  {} of {} methods recorded  ·  \
-                             {} research  ·  B or Esc to {}",
+                    book.spawn((
+                        Node {
+                            width: percent(100),
+                            flex_direction: FlexDirection::Row,
+                            flex_wrap: FlexWrap::Wrap,
+                            align_items: AlignItems::Center,
+                            column_gap: px(6),
+                            row_gap: px(5),
+                            padding: UiRect::axes(px(8), px(6)),
+                            border_radius: BorderRadius::all(px(6)),
+                            ..default()
+                        },
+                        BackgroundColor(BOOK_PAPER),
+                    ))
+                    .with_children(|strip| {
+                        fact_chip(
+                            strip,
+                            icons,
+                            BookIcon::Book,
                             career_stage.label(),
-                            successes,
-                            knowledge.known_count(),
-                            db.reactions.len(),
-                            knowledge.research_points,
+                            "Career stage",
+                            career_stage.expectation(),
+                            BOOK_ACCENT,
+                        );
+                        fact_chip(
+                            strip,
+                            icons,
+                            BookIcon::Orders,
+                            successes.to_string(),
+                            "Successful orders",
+                            "Completed deliveries advance the lab's career expectations.",
+                            GOOD_TEXT,
+                        );
+                        fact_chip(
+                            strip,
+                            icons,
+                            BookIcon::Recorded,
+                            format!("{} / {}", knowledge.known_count(), db.reactions.len()),
+                            "Methods recorded",
+                            "Complete methods currently written in this career's notebook.",
+                            GOOD_TEXT,
+                        );
+                        fact_chip(
+                            strip,
+                            icons,
+                            BookIcon::Research,
+                            knowledge.research_points.to_string(),
+                            "Research",
+                            "Spend research on a locked method to reveal its next authored hint.",
+                            Color::srgb(0.76, 0.68, 0.96),
+                        );
+                        fact_chip(
+                            strip,
+                            icons,
+                            BookIcon::Key,
+                            "B / ESC",
+                            "Close manual",
                             if at_machine {
-                                "go back to the machine"
+                                "Return to the machine panel without releasing your claim."
                             } else {
-                                "close"
-                            }
-                        ),
-                        13.0,
-                        TEXT_DIM,
-                    ));
+                                "Close the manual and return to the lab."
+                            },
+                            TEXT_DIM,
+                        );
+                    });
                     let stage_progress = career_stage
                         .next_success_threshold()
                         .map(|next| format!(" Next stage at {next} successful orders."))
                         .unwrap_or_default();
                     book.spawn(label(
                         format!(
-                            "Current focus: {}.{stage_progress}",
+                            "CURRENT FOCUS  /  {}.{stage_progress}",
                             career_stage.expectation()
                         ),
-                        13.0,
+                        12.0,
                         Color::srgb(0.70, 0.81, 0.96),
                     ));
 
@@ -3591,10 +3821,11 @@ fn spawn_reference_book(
                             knowledge,
                             &progress,
                             db.reactions.get(id),
+                            icons,
                         ),
                         None => {
-                            book_sidebar(columns, db, knowledge, view.category);
-                            book_entries(columns, db, knowledge, &progress, view);
+                            book_sidebar(columns, db, knowledge, view.category, icons);
+                            book_entries(columns, db, knowledge, &progress, view, icons);
                         }
                     });
                 });
@@ -3607,15 +3838,24 @@ fn book_sidebar(
     db: &ChemDb,
     knowledge: &Knowledge,
     selected: Option<Category>,
+    icons: &BookIconAssets,
 ) {
     columns
-        .spawn(Node {
-            width: px(210),
-            flex_direction: FlexDirection::Column,
-            row_gap: px(4),
-            flex_shrink: 0.0,
-            ..default()
-        })
+        .spawn((
+            Node {
+                width: px(154),
+                flex_direction: FlexDirection::Row,
+                flex_wrap: FlexWrap::Wrap,
+                align_content: AlignContent::FlexStart,
+                column_gap: px(4),
+                row_gap: px(4),
+                padding: UiRect::all(px(3)),
+                flex_shrink: 0.0,
+                border_radius: BorderRadius::all(px(7)),
+                ..default()
+            },
+            BackgroundColor(BOOK_INSET),
+        ))
         .with_children(|sidebar| {
             // "All" first, and it is what a fresh book opens on.
             let tabs = std::iter::once(None).chain(Category::ALL.map(Some));
@@ -3625,10 +3865,29 @@ fn book_sidebar(
                     Some(category) => category.label(),
                     None => "All recipes",
                 };
-                let mut entity = sidebar.spawn(button(
-                    format!("{name}   {known}/{total}"),
+                let description = tab
+                    .map(Category::blurb)
+                    .unwrap_or("Every recorded and discoverable method in the manual.");
+                let mut entity = sidebar.spawn(icon_control(
                     PanelAction::ShowCategory(tab),
+                    name,
+                    description,
+                    72.0,
+                    52.0,
                 ));
+                entity.with_children(|control| {
+                    control.spawn(icon_image(
+                        icons,
+                        BookIcon::category(tab),
+                        25.0,
+                        if tab == selected {
+                            BOOK_ACCENT
+                        } else {
+                            TEXT_DIM
+                        },
+                    ));
+                    control.spawn(label(format!("{known}/{total}"), 10.0, TEXT));
+                });
                 // Same marker the dispense-amount row uses, so `button_feedback`
                 // colours the open tab with no extra code.
                 if tab == selected {
@@ -3734,6 +3993,7 @@ fn book_entries(
     knowledge: &Knowledge,
     progress: &RecipeProgress,
     view: &BookView,
+    icons: &BookIconAssets,
 ) {
     let (title, blurb) = view
         .category
@@ -3771,7 +4031,7 @@ fn book_entries(
                 flex_grow: 1.0,
                 flex_direction: FlexDirection::Column,
                 row_gap: px(8),
-                max_height: vh(68),
+                max_height: vh(69),
                 overflow: Overflow::scroll_y(),
                 ..default()
             },
@@ -3779,7 +4039,19 @@ fn book_entries(
             ScrollPane,
         ))
         .with_children(|pane| {
-            pane.spawn(label(title, 20.0, TEXT));
+            pane.spawn(row()).with_children(|heading_row| {
+                heading_row
+                    .spawn(icon_badge(title, blurb, 36.0))
+                    .with_children(|badge| {
+                        badge.spawn(icon_image(
+                            icons,
+                            BookIcon::category(view.category),
+                            23.0,
+                            BOOK_ACCENT,
+                        ));
+                    });
+                heading_row.spawn(label(title, 20.0, TEXT));
+            });
             pane.spawn(label(blurb, 14.0, TEXT_DIM));
 
             if let Some((state, reaction)) = progress.recommendation(db, knowledge) {
@@ -3788,17 +4060,28 @@ fn book_entries(
                     RecipeState::Frontier => "one precursor discovery away",
                     _ => unreachable!("recommendations only use actionable states"),
                 };
-                pane.spawn(label(
-                    format!(
-                        "Recommended next method: {} — {guidance}.",
-                        product_name(db, reaction.id)
-                    ),
-                    14.0,
-                    Color::srgb(0.70, 0.81, 0.96),
-                ));
+                pane.spawn((
+                    Node {
+                        width: percent(100),
+                        padding: UiRect::axes(px(10), px(7)),
+                        align_items: AlignItems::Center,
+                        column_gap: px(8),
+                        border: UiRect::left(px(3)),
+                        border_radius: BorderRadius::all(px(5)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.11, 0.20, 0.27, 0.88)),
+                    BorderColor::from(state.color()),
+                ))
+                .with_children(|next| {
+                    next.spawn(icon_image(icons, state.icon(), 24.0, state.color()));
+                    next.spawn(label("NEXT EXPERIMENT", 10.0, state.color()));
+                    next.spawn(label(product_name(db, reaction.id), 15.0, TEXT));
+                    next.spawn(label(guidance, 12.0, TEXT_DIM));
+                });
             }
 
-            pane.spawn(wrap_row()).with_children(|filters| {
+            pane.spawn(row()).with_children(|filters| {
                 for filter in BookFilter::ALL {
                     let count = match filter {
                         BookFilter::All => recorded + ready + frontier + locked,
@@ -3807,20 +4090,31 @@ fn book_entries(
                         BookFilter::Frontier => frontier,
                         BookFilter::Locked => locked,
                     };
-                    let mut entity = filters.spawn(button(
-                        format!("{}  {count}", filter.label()),
+                    let mut entity = filters.spawn(icon_control(
                         PanelAction::ShowBookFilter(filter),
+                        filter.label(),
+                        filter.explanation(),
+                        62.0,
+                        62.0,
                     ));
+                    entity.with_children(|control| {
+                        control.spawn(icon_image(
+                            icons,
+                            filter.icon(),
+                            22.0,
+                            if filter == view.filter {
+                                filter_color(filter)
+                            } else {
+                                TEXT_DIM
+                            },
+                        ));
+                        control.spawn(label(count.to_string(), 11.0, TEXT));
+                    });
                     if filter == view.filter {
                         entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
                     }
                 }
             });
-            pane.spawn(label(
-                "Recorded: full method   ·   Ready: materials obtainable   ·   Frontier: one precursor away",
-                13.0,
-                TEXT_DIM,
-            ));
 
             if visible.is_empty() {
                 pane.spawn(label(
@@ -3841,7 +4135,7 @@ fn book_entries(
             })
             .with_children(|cards| {
                 for reaction in &visible[first..last] {
-                    book_entry(cards, db, knowledge, progress, reaction);
+                    book_entry(cards, db, knowledge, progress, reaction, icons);
                 }
             });
 
@@ -3865,10 +4159,7 @@ fn book_entries(
                     TEXT_DIM,
                 ));
                 if page + 1 < page_count {
-                    pager.spawn(button(
-                        "Next page ›",
-                        PanelAction::SetBookPage(page + 1),
-                    ));
+                    pager.spawn(button("Next page ›", PanelAction::SetBookPage(page + 1)));
                 }
             });
         });
@@ -3890,6 +4181,7 @@ fn book_entry(
     knowledge: &Knowledge,
     progress: &RecipeProgress,
     reaction: &chem_sim::Reaction,
+    icons: &BookIconAssets,
 ) {
     let state = progress.state(knowledge, reaction);
     let title = product_name(db, reaction.id);
@@ -3897,26 +4189,184 @@ fn book_entry(
         .products
         .first()
         .map(|(id, _)| db.reagents.get(*id));
+    let presentation = RecipePresentation::new(reaction, product);
     let mut card = section();
     card.width = percent(48.5);
-    card.min_height = px(116);
+    card.min_height = px(148);
+    card.border = UiRect::all(px(1));
 
     pane.spawn((
         Button,
         card,
         BackgroundColor(SECTION_BG),
+        BorderColor::all(Color::srgba(0.25, 0.31, 0.38, 0.78)),
+        accessibility_label(format!("Open {title}"), Role::Button),
         PanelAction::OpenRecipe(reaction.id),
     ))
     .with_children(|entry| {
-        entry.spawn(label(state.label(), 11.0, state.color()));
-        entry.spawn(label(title, 18.0, TEXT));
+        entry.spawn(row()).with_children(|top| {
+            status_seal(top, icons, state);
+            if let Some(product) = product {
+                let [r, g, b] = product.color;
+                top.spawn(swatch_chip(Color::srgb(r, g, b)));
+            }
+            top.spawn(label(title, 18.0, TEXT));
+        });
+
+        entry.spawn(wrap_row()).with_children(|categories| {
+            for category in reaction_categories(db, reaction.id) {
+                categories
+                    .spawn(icon_badge(category.label(), category.blurb(), 30.0))
+                    .with_children(|badge| {
+                        badge.spawn(icon_image(
+                            icons,
+                            BookIcon::category(Some(*category)),
+                            17.0,
+                            BOOK_ACCENT,
+                        ));
+                    });
+            }
+        });
 
         if let Some(treats) = product.and_then(|p| p.treats.as_ref()) {
-            entry.spawn(label(treats.clone(), 14.0, TEXT_DIM));
+            entry.spawn(label(treats.clone(), 13.0, TEXT_DIM));
         }
 
-        entry.spawn(label(recipe_complexity_line(reaction), 13.0, TEXT_DIM));
+        entry.spawn(wrap_row()).with_children(|facts| {
+            fact_chip(
+                facts,
+                icons,
+                BookIcon::Inputs,
+                presentation.input_count.to_string(),
+                "Inputs",
+                "Number of reactants and catalysts required by this method.",
+                TEXT_DIM,
+            );
+            fact_chip(
+                facts,
+                icons,
+                reaction_process_icon(reaction),
+                reaction_process_label(reaction),
+                "Workstation",
+                preparation_line(db, reaction),
+                BOOK_ACCENT,
+            );
+            if presentation.catalyst_count > 0 {
+                fact_chip(
+                    facts,
+                    icons,
+                    BookIcon::Catalyst,
+                    presentation.catalyst_count.to_string(),
+                    "Catalyst",
+                    "Required for the reaction but not consumed by it.",
+                    Color::srgb(0.82, 0.70, 0.38),
+                );
+            }
+            if reaction.min_temp.is_some() || reaction.max_temp.is_some() {
+                fact_chip(
+                    facts,
+                    icons,
+                    BookIcon::Temperature,
+                    presentation.temperature.clone(),
+                    "Temperature",
+                    "The valid reaction temperature envelope. Exact limits remain printed here.",
+                    Color::srgb(0.92, 0.52, 0.34),
+                );
+            }
+            if let Some(ph) = &presentation.ph {
+                fact_chip(
+                    facts,
+                    icons,
+                    BookIcon::Ph,
+                    ph.clone(),
+                    "pH window",
+                    "The batch must remain inside this acidity range.",
+                    Color::srgb(0.64, 0.76, 0.96),
+                );
+            }
+            if let Some(minimum) = &presentation.minimum_purity {
+                fact_chip(
+                    facts,
+                    icons,
+                    BookIcon::Purity,
+                    minimum.clone(),
+                    "Minimum purity",
+                    "Consumed inputs below this purity prevent the method from starting.",
+                    GOOD_TEXT,
+                );
+            }
+            if let (Some(threshold), Some(overheat)) =
+                (reaction.overheat_temp, presentation.overheat.as_ref())
+            {
+                fact_chip(
+                    facts,
+                    icons,
+                    BookIcon::Explosive,
+                    format!(">{threshold}"),
+                    "Overheat hazard",
+                    overheat.clone(),
+                    Color::srgb(0.94, 0.38, 0.28),
+                );
+            }
+            if let Some(profile) = &presentation.profile {
+                if profile.controlled {
+                    fact_chip(
+                        facts,
+                        icons,
+                        BookIcon::Controlled,
+                        "controlled",
+                        "Controlled substance",
+                        "Station policy treats this product as controlled material.",
+                        Color::srgb(0.86, 0.60, 0.38),
+                    );
+                }
+                if profile.explosive {
+                    fact_chip(
+                        facts,
+                        icons,
+                        BookIcon::Explosive,
+                        "energetic",
+                        "Energetic product",
+                        "The product carries its own temperature-triggered explosive profile.",
+                        Color::srgb(0.94, 0.38, 0.28),
+                    );
+                }
+            }
+        });
     });
+}
+
+fn temperature_value(reaction: &chem_sim::Reaction) -> String {
+    match (reaction.min_temp, reaction.max_temp) {
+        (Some(min), Some(max)) => format!("{min}–{max}"),
+        (Some(min), None) => format!("≥{min}"),
+        (None, Some(max)) => format!("≤{max}"),
+        (None, None) => "ambient".to_string(),
+    }
+}
+
+fn ph_value(reaction: &chem_sim::Reaction) -> String {
+    match (reaction.min_ph, reaction.optimal_ph, reaction.max_ph) {
+        (Some(min), Some(optimum), Some(max)) => {
+            format!("{min:.1}–{max:.1}  ◇{optimum:.1}")
+        }
+        (Some(min), _, Some(max)) => format!("{min:.1}–{max:.1}"),
+        _ => "unrestricted".to_string(),
+    }
+}
+
+fn overheat_explanation(reaction: &chem_sim::Reaction) -> String {
+    match reaction.overheat {
+        chem_sim::Overheat::ReducedYield { .. } => {
+            "Crossing the printed threshold reduces output yield.".to_string()
+        }
+        chem_sim::Overheat::Detonate { power } => {
+            format!("Crossing the printed threshold detonates the batch at power {power:.1}.")
+        }
+        chem_sim::Overheat::Ruin => {
+            "Crossing the printed threshold ruins the entire batch.".to_string()
+        }
+    }
 }
 
 fn recipe_complexity_line(reaction: &chem_sim::Reaction) -> String {
@@ -3958,6 +4408,495 @@ const MAX_TREE_DEPTH: usize = 8;
 /// Horizontal shift per nesting level.
 const TREE_INDENT: f32 = 22.0;
 
+fn section_header(
+    parent: &mut ChildSpawnerCommands,
+    icons: &BookIconAssets,
+    icon: BookIcon,
+    title: &'static str,
+    body: &'static str,
+) {
+    parent.spawn(row()).with_children(|header| {
+        header
+            .spawn(icon_badge(title, body, 34.0))
+            .with_children(|badge| {
+                badge.spawn(icon_image(icons, icon, 20.0, BOOK_ACCENT));
+            });
+        header.spawn(label(title, 11.0, Color::srgb(0.60, 0.74, 0.92)));
+    });
+}
+
+fn reagent_token(
+    parent: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    reagent: ReagentId,
+    amount: Units,
+) {
+    let definition = db.reagents.get(reagent);
+    let [r, g, b] = definition.color;
+    parent
+        .spawn((
+            Node {
+                min_height: px(36),
+                padding: UiRect::axes(px(8), px(5)),
+                align_items: AlignItems::Center,
+                column_gap: px(6),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(5)),
+                ..default()
+            },
+            BackgroundColor(BOOK_INSET),
+            BorderColor::all(Color::srgb(
+                0.28 + r * 0.42,
+                0.28 + g * 0.42,
+                0.28 + b * 0.42,
+            )),
+        ))
+        .with_children(|token| {
+            token.spawn(swatch_chip(Color::srgb(r, g, b)));
+            token.spawn(label(amount.to_string(), 16.0, TEXT));
+            token.spawn(label(definition.name.clone(), 13.0, TEXT));
+        });
+}
+
+fn formula_strip(
+    parent: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    reaction: &chem_sim::Reaction,
+    icons: &BookIconAssets,
+) {
+    card(parent, "FORMULA", |formula| {
+        formula.spawn(wrap_row()).with_children(|line| {
+            for (index, &(reagent, amount)) in reaction.reactants.iter().enumerate() {
+                if index > 0 {
+                    line.spawn(label("+", 18.0, TEXT_DIM));
+                }
+                reagent_token(line, db, reagent, amount);
+            }
+            line.spawn(label("→", 24.0, BOOK_ACCENT));
+            for (index, &(reagent, amount)) in reaction.products.iter().enumerate() {
+                if index > 0 {
+                    line.spawn(label("+", 18.0, TEXT_DIM));
+                }
+                reagent_token(line, db, reagent, amount);
+            }
+        });
+        if !reaction.catalysts.is_empty() {
+            formula.spawn(row()).with_children(|catalysts| {
+                catalysts
+                    .spawn(icon_badge(
+                        "Catalyst",
+                        "Required for the reaction but not consumed by it.",
+                        34.0,
+                    ))
+                    .with_children(|badge| {
+                        badge.spawn(icon_image(
+                            icons,
+                            BookIcon::Catalyst,
+                            19.0,
+                            Color::srgb(0.82, 0.70, 0.38),
+                        ));
+                    });
+                catalysts.spawn(label("NOT CONSUMED", 10.0, Color::srgb(0.82, 0.70, 0.38)));
+                for &(reagent, amount) in &reaction.catalysts {
+                    reagent_token(catalysts, db, reagent, amount);
+                }
+            });
+        }
+    });
+}
+
+fn process_dashboard(
+    parent: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    reaction: &chem_sim::Reaction,
+    icons: &BookIconAssets,
+) {
+    let presentation = RecipePresentation::new(reaction, None);
+    card(parent, "PROCESS & LIMITS", |process| {
+        process.spawn(wrap_row()).with_children(|facts| {
+            fact_chip(
+                facts,
+                icons,
+                reaction_process_icon(reaction),
+                reaction_process_label(reaction),
+                "Workstation",
+                preparation_line(db, reaction),
+                BOOK_ACCENT,
+            );
+            fact_chip(
+                facts,
+                icons,
+                match reaction.process {
+                    chem_sim::ReactionProcess::Agitated { .. } => BookIcon::Agitate,
+                    chem_sim::ReactionProcess::Ambient => BookIcon::DirectMix,
+                },
+                match reaction.process {
+                    chem_sim::ReactionProcess::Agitated { .. } => "staged agitation",
+                    chem_sim::ReactionProcess::Ambient => "combine",
+                },
+                "Procedure",
+                preparation_line(db, reaction),
+                Color::srgb(0.66, 0.80, 0.93),
+            );
+            fact_chip(
+                facts,
+                icons,
+                BookIcon::Duration,
+                presentation.processing.clone(),
+                "Processing time",
+                "Instant methods resolve on contact; timed methods consume reaction units each second.",
+                Color::srgb(0.76, 0.68, 0.96),
+            );
+            fact_chip(
+                facts,
+                icons,
+                BookIcon::Temperature,
+                presentation.temperature.clone(),
+                "Temperature",
+                "Valid reaction temperature. Overheat limits are shown separately.",
+                Color::srgb(0.92, 0.52, 0.34),
+            );
+            if let Some(ph) = &presentation.ph {
+                fact_chip(
+                    facts,
+                    icons,
+                    BookIcon::Ph,
+                    ph.clone(),
+                    "pH window",
+                    "Range and optimum acidity for this method.",
+                    Color::srgb(0.64, 0.76, 0.96),
+                );
+            }
+            if let Some(minimum) = &presentation.minimum_purity {
+                fact_chip(
+                    facts,
+                    icons,
+                    BookIcon::Purity,
+                    minimum.clone(),
+                    "Minimum purity",
+                    "Consumed inputs must meet this purity before the reaction begins.",
+                    GOOD_TEXT,
+                );
+            }
+            if let (Some(threshold), Some(overheat)) =
+                (reaction.overheat_temp, presentation.overheat.as_ref())
+            {
+                fact_chip(
+                    facts,
+                    icons,
+                    BookIcon::Explosive,
+                    format!(">{threshold}"),
+                    "Overheat consequence",
+                    overheat.clone(),
+                    Color::srgb(0.94, 0.38, 0.28),
+                );
+            }
+        });
+
+        if let chem_sim::ReactionProcess::Agitated { side_a, side_b } = &reaction.process {
+            process.spawn(label("PREPARE SEPARATELY", 10.0, TEXT_DIM));
+            process.spawn(wrap_row()).with_children(|sides| {
+                sides.spawn(label("A", 13.0, BOOK_ACCENT));
+                for &(reagent, amount) in side_a {
+                    reagent_token(sides, db, reagent, amount);
+                }
+                sides.spawn(label("/  B", 13.0, BOOK_ACCENT));
+                for &(reagent, amount) in side_b {
+                    reagent_token(sides, db, reagent, amount);
+                }
+            });
+        }
+    });
+}
+
+fn processing_value(reaction: &chem_sim::Reaction) -> String {
+    match (&reaction.process, reaction.rate) {
+        (chem_sim::ReactionProcess::Agitated { .. }, Some(rate)) => {
+            format!("4–8s  /  {rate}u·s⁻¹")
+        }
+        (_, Some(rate)) => format!("{rate}u·s⁻¹"),
+        (_, None) => "instant".to_string(),
+    }
+}
+
+fn profile_fact(
+    parent: &mut ChildSpawnerCommands,
+    icons: &BookIconAssets,
+    icon: BookIcon,
+    title: &'static str,
+    value: String,
+    body: &'static str,
+    color: Color,
+) {
+    parent
+        .spawn(icon_badge(title, body, 210.0))
+        .with_children(|fact| {
+            fact.spawn(icon_image(icons, icon, 22.0, color));
+            fact.spawn(Node {
+                flex_direction: FlexDirection::Column,
+                flex_grow: 1.0,
+                ..default()
+            })
+            .with_children(|text| {
+                text.spawn(label(title, 10.0, color));
+                text.spawn(label(value, 12.0, TEXT));
+            });
+        });
+}
+
+fn effects_dashboard(
+    parent: &mut ChildSpawnerCommands,
+    product: &chem_sim::Reagent,
+    icons: &BookIconAssets,
+) {
+    let coverage = ProfileCoverage::new(product);
+    card(parent, "EFFECTS & HANDLING", |effects| {
+        effects.spawn(wrap_row()).with_children(|facts| {
+            profile_fact(
+                facts,
+                icons,
+                BookIcon::Ph,
+                "CHEMICAL PROFILE",
+                format!(
+                    "pH {:.1}  /  {}",
+                    coverage.ph,
+                    if coverage.controlled {
+                        "controlled"
+                    } else {
+                        "unrestricted"
+                    }
+                ),
+                "Intrinsic acidity and station control classification.",
+                BOOK_ACCENT,
+            );
+            if coverage.explosive {
+                let explosive = product
+                    .explosive
+                    .expect("coverage tracks explosive profile");
+                profile_fact(
+                    facts,
+                    icons,
+                    BookIcon::Explosive,
+                    "ENERGETIC HAZARD",
+                    format!(
+                        "{:.0} K  /  strength {:.1}  /  modifier {:.1}",
+                        explosive.activation_temp.0, explosive.strength, explosive.modifier
+                    ),
+                    "Activation temperature, explosive strength and reagent modifier.",
+                    Color::srgb(0.94, 0.38, 0.28),
+                );
+            }
+            profile_fact(
+                facts,
+                icons,
+                if product.effects.iter().any(|effect| {
+                    matches!(
+                        effect,
+                        chem_sim::ReagentEffect::Heal(..)
+                            | chem_sim::ReagentEffect::TopicalHeal(..)
+                            | chem_sim::ReagentEffect::ConditionalHeal { .. }
+                            | chem_sim::ReagentEffect::CriticalHeal(..)
+                    )
+                }) {
+                    BookIcon::Heal
+                } else {
+                    BookIcon::Status
+                },
+                "BODILY EFFECTS",
+                if coverage.bodily_effects == 0 {
+                    if product.intentionally_inert {
+                        "intentionally inert".to_string()
+                    } else {
+                        "no direct bloodstream effect".to_string()
+                    }
+                } else {
+                    effect_list(&product.effects)
+                },
+                "Effects applied during each bloodstream tick.",
+                GOOD_TEXT,
+            );
+            if coverage.targeted_purges > 0 {
+                profile_fact(
+                    facts,
+                    icons,
+                    BookIcon::Purge,
+                    "TARGETED PURGE",
+                    product
+                        .targeted_purges
+                        .iter()
+                        .map(|(target, amount)| {
+                            format!("{} {amount}/tick", target.replace('_', " "))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    "Specific bloodstream reagents removed on each tick.",
+                    Color::srgb(0.55, 0.82, 0.90),
+                );
+            }
+            profile_fact(
+                facts,
+                icons,
+                BookIcon::Overdose,
+                "OVERDOSE EFFECTS",
+                if coverage.overdose_effects == 0 {
+                    "none".to_string()
+                } else {
+                    effect_list(&product.overdose_effects)
+                },
+                "Effects applied while the bloodstream quantity exceeds its overdose threshold.",
+                Color::srgb(0.93, 0.58, 0.36),
+            );
+            if coverage.critical_effects > 0 {
+                profile_fact(
+                    facts,
+                    icons,
+                    BookIcon::Critical,
+                    "CRITICAL OVERDOSE",
+                    effect_list(&product.critical_effects),
+                    "Additional effects at the critical overdose boundary.",
+                    Color::srgb(0.96, 0.34, 0.31),
+                );
+            }
+            profile_fact(
+                facts,
+                icons,
+                BookIcon::Aftereffect,
+                "AFTEREFFECTS",
+                if coverage.after_effects == 0 {
+                    "none".to_string()
+                } else {
+                    effect_list(&product.after_effects)
+                },
+                "Effects applied when the reagent finally clears from the body.",
+                Color::srgb(0.78, 0.68, 0.92),
+            );
+        });
+
+        effects.spawn(label(
+            "APPLICATION ROUTES",
+            10.0,
+            Color::srgb(0.60, 0.74, 0.92),
+        ));
+        effects.spawn(wrap_row()).with_children(|routes| {
+            if !coverage.has_body_routes {
+                fact_chip(
+                    routes,
+                    icons,
+                    BookIcon::Contact,
+                    "environment only",
+                    "Application route",
+                    "No therapeutic body route is available.",
+                    TEXT_DIM,
+                );
+            } else {
+                for (icon, value, title, body) in [
+                    (
+                        BookIcon::Inject,
+                        "100% fast",
+                        "Inject",
+                        "Full dose delivered quickly.",
+                    ),
+                    (
+                        BookIcon::Ingest,
+                        "60% slow",
+                        "Ingest",
+                        "Reduced dose absorbed slowly.",
+                    ),
+                    (
+                        BookIcon::Patch,
+                        "100% topical",
+                        "Patch",
+                        "Full topical dose through a patch.",
+                    ),
+                    (
+                        BookIcon::Spray,
+                        "35% topical",
+                        "Aimed spray",
+                        "Partial topical dose from a directed spray.",
+                    ),
+                    (
+                        BookIcon::Contact,
+                        "15% contact",
+                        "Splash / puddle",
+                        "Small dose transferred by surface contact.",
+                    ),
+                    (
+                        BookIcon::Smoke,
+                        "40% direct",
+                        "Smoke",
+                        "Direct dose received by inhalation.",
+                    ),
+                ] {
+                    fact_chip(routes, icons, icon, value, title, body, BOOK_ACCENT);
+                }
+            }
+        });
+
+        effects.spawn(label("WORLD BEHAVIOR", 10.0, Color::srgb(0.60, 0.74, 0.92)));
+        effects.spawn(wrap_row()).with_children(|world| {
+            if coverage.world_effects == 0 {
+                fact_chip(
+                    world,
+                    icons,
+                    BookIcon::Utility,
+                    "none",
+                    "World behavior",
+                    "No direct environmental effect.",
+                    TEXT_DIM,
+                );
+            } else {
+                for effect in &product.world_effects {
+                    let (icon, title, color) = world_effect_icon(effect);
+                    fact_chip(
+                        world,
+                        icons,
+                        icon,
+                        world_effect_text(effect),
+                        title,
+                        "Environmental behavior when released into the station.",
+                        color,
+                    );
+                }
+            }
+        });
+    });
+}
+
+fn world_effect_icon(effect: &chem_sim::WorldEffect) -> (BookIcon, &'static str, Color) {
+    match effect {
+        chem_sim::WorldEffect::Clean { .. } => (BookIcon::Clean, "Clean", GOOD_TEXT),
+        chem_sim::WorldEffect::Corrode { .. } => {
+            (BookIcon::Corrode, "Corrode", Color::srgb(0.64, 0.82, 0.35))
+        }
+        chem_sim::WorldEffect::Ignite { .. } => {
+            (BookIcon::Ignite, "Ignite", Color::srgb(0.94, 0.42, 0.25))
+        }
+        chem_sim::WorldEffect::ReleaseSmoke { .. } => (BookIcon::Smoke, "Release smoke", TEXT_DIM),
+        chem_sim::WorldEffect::Slippery { .. } => (
+            BookIcon::Slippery,
+            "Slippery",
+            Color::srgb(0.47, 0.76, 0.90),
+        ),
+        chem_sim::WorldEffect::Flammable { .. } => (
+            BookIcon::Flammable,
+            "Flammable",
+            Color::srgb(0.94, 0.50, 0.24),
+        ),
+        chem_sim::WorldEffect::Chill { .. } => {
+            (BookIcon::Chill, "Chill", Color::srgb(0.50, 0.76, 0.98))
+        }
+        chem_sim::WorldEffect::Flash { .. } => {
+            (BookIcon::Flash, "Flash", Color::srgb(0.95, 0.90, 0.58))
+        }
+        chem_sim::WorldEffect::ExpandFoam { .. } => (BookIcon::Foam, "Expand foam", TEXT),
+        chem_sim::WorldEffect::Extinguish { .. } => (
+            BookIcon::Extinguish,
+            "Extinguish",
+            Color::srgb(0.44, 0.72, 0.96),
+        ),
+    }
+}
+
 /// The formula screen for one recipe: itself, then — only while known, so a
 /// locked step's own ingredients stay the same spoiler the hint system
 /// already withholds everywhere else — everything that feeds it, one level
@@ -3968,6 +4907,7 @@ fn spawn_recipe_tree(
     knowledge: &Knowledge,
     progress: &RecipeProgress,
     root: &chem_sim::Reaction,
+    icons: &BookIconAssets,
 ) {
     columns
         .spawn(Node {
@@ -3985,7 +4925,7 @@ fn spawn_recipe_tree(
                     Node {
                         flex_direction: FlexDirection::Column,
                         row_gap: px(6),
-                        max_height: vh(60),
+                        max_height: vh(67),
                         overflow: Overflow::scroll_y(),
                         ..default()
                     },
@@ -3994,7 +4934,7 @@ fn spawn_recipe_tree(
                 ))
                 .with_children(|pane| {
                     let mut visited = HashSet::new();
-                    render_recipe_node(pane, db, knowledge, progress, root, 0, &mut visited);
+                    render_recipe_node(pane, db, knowledge, progress, root, 0, &mut visited, icons);
                 });
         });
 }
@@ -4016,6 +4956,7 @@ fn render_recipe_node(
     reaction: &chem_sim::Reaction,
     depth: usize,
     visited: &mut HashSet<ReactionId>,
+    icons: &BookIconAssets,
 ) {
     if depth > MAX_TREE_DEPTH {
         pane.spawn(label("…chain too deep to show.", 12.0, TEXT_DIM));
@@ -4048,8 +4989,34 @@ fn render_recipe_node(
         BorderColor::from(TEXT_DIM),
     ))
     .with_children(|entry| {
-        entry.spawn(label(state.label(), 11.0, state.color()));
-        entry.spawn(label(title.clone(), if depth == 0 { 22.0 } else { 16.0 }, TEXT));
+        entry.spawn(row()).with_children(|heading| {
+            status_seal(heading, icons, state);
+            if let Some(product) = product {
+                let [r, g, b] = product.color;
+                heading.spawn(swatch_chip(Color::srgb(r, g, b)));
+            }
+            heading.spawn(label(
+                title.clone(),
+                if depth == 0 { 22.0 } else { 16.0 },
+                TEXT,
+            ));
+            if depth > 0 {
+                heading
+                    .spawn(icon_badge(
+                        "Dependency",
+                        "This recorded method produces an ingredient required further up the chain.",
+                        30.0,
+                    ))
+                    .with_children(|badge| {
+                        badge.spawn(icon_image(
+                            icons,
+                            BookIcon::Dependency,
+                            17.0,
+                            BOOK_ACCENT,
+                        ));
+                    });
+            }
+        });
 
         if depth == 0 {
             if let Some(treats) = product.and_then(|p| p.treats.as_ref()) {
@@ -4059,58 +5026,58 @@ fn render_recipe_node(
 
         if known {
             if depth == 0 {
-                entry.spawn(label("FORMULA", 11.0, Color::srgb(0.60, 0.74, 0.92)));
-                entry.spawn(label(recipe_line(db, reaction), 16.0, TEXT));
-                entry.spawn(label("PROCESS", 11.0, Color::srgb(0.60, 0.74, 0.92)));
-                entry.spawn(label(
-                    preparation_line(db, reaction),
-                    14.0,
-                    Color::srgb(0.70, 0.81, 0.96),
-                ));
-                entry.spawn(label(condition_line(reaction), 13.0, TEXT_DIM));
+                formula_strip(entry, db, reaction, icons);
+                process_dashboard(entry, db, reaction, icons);
                 if let Some(overdose) = product.and_then(|p| p.overdose) {
-                    entry.spawn(label(
-                        format!("Overdoses above {overdose} in a single dose."),
-                        14.0,
-                        Color::srgb(0.90, 0.62, 0.45),
-                    ));
+                    entry.spawn(wrap_row()).with_children(|warning| {
+                        fact_chip(
+                            warning,
+                            icons,
+                            BookIcon::Overdose,
+                            format!(">{overdose} / dose"),
+                            "Overdose threshold",
+                            "A single administered dose above this quantity activates overdose effects.",
+                            Color::srgb(0.90, 0.62, 0.45),
+                        );
+                    });
                 }
                 if let Some(product) = product {
-                    entry.spawn(label(
-                        "EFFECTS & HANDLING",
-                        11.0,
-                        Color::srgb(0.60, 0.74, 0.92),
-                    ));
-                    for line in reagent_profile_lines(product) {
-                        entry.spawn(label(line, 13.0, TEXT_DIM));
-                    }
+                    effects_dashboard(entry, product, icons);
                 }
             } else {
                 // Dependencies remain useful as a tree, but do not repeat the
                 // full workstation, overdose and material profile at every
                 // level. Their own detail screen is one click away from the
                 // browse view when that information is needed.
-                entry.spawn(label(recipe_line(db, reaction), 13.0, TEXT_DIM));
+                entry.spawn(label(recipe_line(db, reaction), 13.0, TEXT));
+                entry.spawn(wrap_row()).with_children(|facts| {
+                    fact_chip(
+                        facts,
+                        icons,
+                        reaction_process_icon(reaction),
+                        reaction_process_label(reaction),
+                        "Dependency process",
+                        preparation_line(db, reaction),
+                        BOOK_ACCENT,
+                    );
+                    if !reaction.catalysts.is_empty() {
+                        fact_chip(
+                            facts,
+                            icons,
+                            BookIcon::Catalyst,
+                            reaction.catalysts.len().to_string(),
+                            "Catalyst",
+                            "Required but not consumed.",
+                            Color::srgb(0.82, 0.70, 0.38),
+                        );
+                    }
+                });
             }
             return;
         }
 
         entry.spawn(label(
-            match state {
-                RecipeState::Ready => {
-                    "All required materials are obtainable. Experiment or spend research to reveal the method."
-                        .to_string()
-                }
-                RecipeState::Frontier => {
-                    "One nearby precursor discovery will bring this method within reach."
-                        .to_string()
-                }
-                RecipeState::Locked => {
-                    "Its dependency chain has not reached the current research frontier."
-                        .to_string()
-                }
-                RecipeState::Recorded => unreachable!("recorded recipes are known"),
-            },
+            state.explanation(),
             14.0,
             TEXT_DIM,
         ));
@@ -4147,7 +5114,13 @@ fn render_recipe_node(
     // discipline the hint system already enforces everywhere else.
     if known {
         if depth == 0 {
-            pane.spawn(label("DEPENDENCIES", 12.0, Color::srgb(0.60, 0.74, 0.92)));
+            section_header(
+                pane,
+                icons,
+                BookIcon::Dependency,
+                "DEPENDENCY MAP",
+                "Recorded precursor methods and raw materials feeding the selected formula.",
+            );
         }
         for &(reagent_id, amount) in &reaction.reactants {
             render_ingredient_node(
@@ -4160,6 +5133,7 @@ fn render_recipe_node(
                 false,
                 depth + 1,
                 visited,
+                icons,
             );
         }
         for &(reagent_id, amount) in &reaction.catalysts {
@@ -4173,6 +5147,7 @@ fn render_recipe_node(
                 true,
                 depth + 1,
                 visited,
+                icons,
             );
         }
     }
@@ -4195,6 +5170,7 @@ fn render_ingredient_node(
     catalyst: bool,
     depth: usize,
     visited: &mut HashSet<ReactionId>,
+    icons: &BookIconAssets,
 ) {
     if let Some(producer) = db.reactions.producer_of(reagent) {
         if catalyst {
@@ -4204,7 +5180,9 @@ fn render_ingredient_node(
                 entry.spawn(label("catalyst, not consumed:", 11.0, TEXT_DIM));
             });
         }
-        render_recipe_node(pane, db, knowledge, progress, producer, depth, visited);
+        render_recipe_node(
+            pane, db, knowledge, progress, producer, depth, visited, icons,
+        );
         return;
     }
 
@@ -4224,13 +5202,53 @@ fn render_ingredient_node(
         BorderColor::from(TEXT_DIM),
     ))
     .with_children(|entry| {
-        entry.spawn(label(line, 14.0, TEXT_DIM));
+        entry.spawn(row()).with_children(|ingredient| {
+            ingredient
+                .spawn(icon_badge(
+                    if catalyst {
+                        "Raw catalyst"
+                    } else {
+                        "Raw reagent"
+                    },
+                    if catalyst {
+                        "A base material required by this dependency chain and not consumed."
+                    } else {
+                        "A base material with no recorded precursor method."
+                    },
+                    32.0,
+                ))
+                .with_children(|badge| {
+                    badge.spawn(icon_image(
+                        icons,
+                        if catalyst {
+                            BookIcon::Catalyst
+                        } else {
+                            BookIcon::RawReagent
+                        },
+                        18.0,
+                        if catalyst {
+                            Color::srgb(0.82, 0.70, 0.38)
+                        } else {
+                            TEXT_DIM
+                        },
+                    ));
+                });
+            ingredient.spawn(label(line, 14.0, TEXT));
+        });
         if definition.dispensable && !knowledge.is_reagent_unlocked(db, reagent) {
-            entry.spawn(label(
-                format!("locked at dispenser  (tier {})", definition.tier),
-                12.0,
-                Color::srgb(0.80, 0.60, 0.45),
-            ));
+            entry.spawn(row()).with_children(|locked| {
+                locked.spawn(icon_image(
+                    icons,
+                    BookIcon::Locked,
+                    16.0,
+                    Color::srgb(0.80, 0.60, 0.45),
+                ));
+                locked.spawn(label(
+                    format!("locked at dispenser  /  tier {}", definition.tier),
+                    12.0,
+                    Color::srgb(0.80, 0.60, 0.45),
+                ));
+            });
         }
     });
 }
@@ -4341,6 +5359,7 @@ fn preparation_line(db: &ChemDb, reaction: &chem_sim::Reaction) -> String {
 }
 
 /// Temperature envelope and player-facing duration for a known recipe.
+#[cfg(test)]
 fn condition_line(reaction: &chem_sim::Reaction) -> String {
     let temperature = match (reaction.min_temp, reaction.max_temp) {
         (Some(min), Some(max)) => format!("Temperature: {min} to {max}"),
@@ -4382,6 +5401,7 @@ fn condition_line(reaction: &chem_sim::Reaction) -> String {
 }
 
 /// Body, crash, route and station behavior for the product of a known recipe.
+#[cfg(test)]
 fn reagent_profile_lines(reagent: &chem_sim::Reagent) -> Vec<String> {
     let body = effect_list(&reagent.effects);
     let overdose = effect_list(&reagent.overdose_effects);
@@ -4740,11 +5760,11 @@ fn spawn_order_queue(mut commands: Commands) {
 /// "shift six", which is the whole reason shifts came back.
 fn accepting_banner_line(shift: &Shift) -> String {
     let state = if shift.called {
-        "CLOSED OUT — debrief at the board"
+        "CLOSED OUT - debrief at the board"
     } else if shift.accepting_orders {
-        "OPEN — crew are coming in"
+        "OPEN - crew are coming in"
     } else {
-        "CLOSED — not accepting requests"
+        "CLOSED - not accepting requests"
     };
     // A drain nobody can see is indistinguishable from a bug, and this is the
     // one line already on screen saying the lab is shut. `closure_pressure` is
@@ -4754,9 +5774,9 @@ fn accepting_banner_line(shift: &Shift) -> String {
     // `shift::impatience`.
     let souring = match shift.closure_pressure {
         0 => String::new(),
-        points => format!("  ·  departments souring (−{points})"),
+        points => format!("  |  departments souring (-{points})"),
     };
-    format!("SHIFT {}  ·  {state}{souring}", shift.shift_number)
+    format!("SHIFT {}  |  {state}{souring}", shift.shift_number)
 }
 
 fn update_phase_banner(shift: Res<Shift>, banner: BannerText) {
@@ -4801,19 +5821,19 @@ fn update_order_queue(
                 };
                 let reagent = &want;
                 let quality = if order.minimum_purity > 0.0 {
-                    format!("  ·  ≥{:.0}% purity", order.minimum_purity * 100.0)
+                    format!("  |  >={:.0}% purity", order.minimum_purity * 100.0)
                 } else {
                     String::new()
                 };
                 let heading = if *development {
-                    format!("OPTIONAL R&D \u{2014} {}", member.name)
+                    format!("OPTIONAL R&D - {}", member.name)
                 } else {
                     member.name.clone()
                 };
                 if *at_counter {
                     let remaining = order.remaining() as u32;
                     format!(
-                        "{}\n  {} {}{}  ·  {}:{:02}",
+                        "{}\n  {} {}{}  |  {}:{:02}",
                         heading,
                         order.amount,
                         reagent,
@@ -4823,7 +5843,7 @@ fn update_order_queue(
                     )
                 } else {
                     format!(
-                        "{}\n  {} {}{}  ·  on the way",
+                        "{}\n  {} {}{}  |  on the way",
                         heading, order.amount, reagent, quality
                     )
                 }
@@ -4860,12 +5880,9 @@ fn update_order_queue(
         .first()
         .map(|(_, order, _, development)| {
             if *development {
-                format!(
-                    "Optional development request \u{2014} \u{201c}{}\u{201d}",
-                    order.plea
-                )
+                format!("Optional development request - \"{}\"", order.plea)
             } else {
-                format!("\u{201c}{}\u{201d}", order.plea)
+                format!("\"{}\"", order.plea)
             }
         })
         .unwrap_or_default();
@@ -6148,9 +7165,58 @@ fn heat_glow(temperature: Kelvin) -> ShadowStyle {
 // Widgets
 // ---------------------------------------------------------------------------
 
+/// Converts the handful of typographic Unicode characters used by authored
+/// copy into equivalents supported by the bundled UI font.
+///
+/// Keeping this at the presentation boundary preserves readable source prose
+/// and accessibility labels while guaranteeing that dynamic strings from data
+/// files receive the same treatment as hard-coded HUD readouts.
+fn font_safe_text(text: impl AsRef<str>) -> String {
+    let mut safe = String::with_capacity(text.as_ref().len());
+    for character in text.as_ref().chars() {
+        safe.push_str(match character {
+            '\u{2014}' | '\u{2013}' | '\u{2212}' => "-",
+            '\u{00b7}' => "|",
+            '\u{2192}' => "->",
+            '\u{2190}' => "<-",
+            '\u{2026}' => "...",
+            '\u{2022}' | '\u{25a0}' | '\u{25cf}' => "*",
+            '\u{2265}' => ">=",
+            '\u{2264}' => "<=",
+            '\u{2039}' | '\u{25c2}' => "<",
+            '\u{203a}' | '\u{25b8}' => ">",
+            '\u{00b0}' => " deg",
+            '\u{26a0}' => "!",
+            '\u{207b}' => "^-",
+            '\u{00b9}' => "1",
+            '\u{201c}' | '\u{201d}' => "\"",
+            '\u{25c7}' => "OPT ",
+            '\u{25af}' => "-",
+            '\u{00b1}' => "+/-",
+            '\u{25cb}' | '\u{25cc}' => "o",
+            '\u{2248}' => "~",
+            '\u{00d7}' => "x",
+            _ => {
+                safe.push(character);
+                continue;
+            }
+        });
+    }
+    safe
+}
+
+fn normalize_changed_ui_text(mut text: Query<&mut Text, Changed<Text>>) {
+    for mut text in &mut text {
+        let safe = font_safe_text(&text.0);
+        if safe != text.0 {
+            text.0 = safe;
+        }
+    }
+}
+
 pub(crate) fn heading(text: impl Into<String>) -> impl Bundle {
     (
-        Text::new(text.into()),
+        Text::new(font_safe_text(text.into())),
         TextFont::from_font_size(22.0),
         TextColor(TEXT),
     )
@@ -6158,7 +7224,7 @@ pub(crate) fn heading(text: impl Into<String>) -> impl Bundle {
 
 pub(crate) fn label(text: impl Into<String>, size: f32, color: Color) -> impl Bundle {
     (
-        Text::new(text.into()),
+        Text::new(font_safe_text(text.into())),
         TextFont::from_font_size(size),
         TextColor(color),
     )
@@ -6233,7 +7299,7 @@ pub(crate) fn button<A: Component>(text: impl Into<String>, action: A) -> impl B
         BackgroundColor(BUTTON_IDLE),
         action,
         children![(
-            Text::new(text.into()),
+            Text::new(font_safe_text(text.into())),
             TextFont::from_font_size(14.0),
             TextColor(TEXT),
         )],
@@ -6668,7 +7734,10 @@ mod tests {
         // name that wrapped would move the key number and the volume with it.
         let marked = crate::labels::Label("x".repeat(crate::labels::MAX_LABEL));
         let shown = hotbar_label(&marked);
-        assert!(shown.ends_with("…\""), "a cut label has to look cut: {shown}");
+        assert!(
+            shown.ends_with("…\""),
+            "a cut label has to look cut: {shown}"
+        );
         assert!(
             shown.chars().count() < crate::labels::MAX_LABEL,
             "the whole point was not to print all {} characters: {shown}",
@@ -6873,7 +7942,6 @@ mod tests {
         assert_ne!(panel_profiles(&first), panel_profiles(&second));
     }
 
-
     #[test]
     fn chamber_forecast_explains_a_known_blocked_temperature_without_leaking_methods() {
         let (db, mut knowledge) = book_fixture();
@@ -6955,17 +8023,38 @@ mod tests {
         assert!(accepting_banner_line(&shift).contains("SHIFT 1"));
 
         shift.accepting_orders = false;
-        assert!(accepting_banner_line(&shift).contains("CLOSED"));
-        assert!(!accepting_banner_line(&shift).contains("debrief"));
+        let closed = accepting_banner_line(&shift);
+        assert!(closed.contains("CLOSED"));
+        assert!(!closed.contains("debrief"));
+        assert!(closed.is_ascii(), "the HUD font only supports ASCII punctuation");
 
         shift.called = true;
         shift.shift_number = 6;
         let called = accepting_banner_line(&shift);
+        assert!(called.is_ascii(), "the HUD font only supports ASCII punctuation");
         assert!(called.contains("SHIFT 6"));
         assert!(
             called.contains("debrief"),
             "a called shift has somewhere to go, and the banner has to say where"
         );
+    }
+
+    #[test]
+    fn font_safe_text_replaces_the_missing_glyphs_seen_in_instrument_readouts() {
+        assert_eq!(font_safe_text("400.0K–473.0K"), "400.0K-473.0K");
+        assert_eq!(font_safe_text("pH 4.0–10.0  ◇7.2"), "pH 4.0-10.0  OPT 7.2");
+        assert_eq!(font_safe_text("≥60%"), ">=60%");
+        assert_eq!(
+            font_safe_text("SHIFT 4  ·  CLOSED — not accepting requests"),
+            "SHIFT 4  |  CLOSED - not accepting requests"
+        );
+    }
+
+    #[test]
+    fn font_safe_text_covers_every_typographic_symbol_authored_in_the_ui() {
+        let authored = "—·–→…•≥‹°■≤−⚠▸⁻¹←○“”›◇▯±●≈◌×";
+        let safe = font_safe_text(authored);
+        assert!(safe.is_ascii(), "normalization left a non-ASCII glyph: {safe}");
     }
 
     #[test]
@@ -7215,6 +8304,50 @@ mod tests {
                         reagent.key
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn every_authored_recipe_reaches_the_visual_presentation_model() {
+        let (db, _) = book_fixture();
+        assert_eq!(
+            db.reactions.len(),
+            162,
+            "update the visual audit when recipe breadth changes"
+        );
+
+        for reaction in db.reactions.iter() {
+            let product = reaction
+                .products
+                .first()
+                .map(|(id, _)| db.reagents.get(*id));
+            let view = RecipePresentation::new(reaction, product);
+
+            assert_eq!(
+                view.input_count,
+                reaction.reactants.len() + reaction.catalysts.len()
+            );
+            assert_eq!(view.catalyst_count, reaction.catalysts.len());
+            assert_eq!(
+                view.ph.is_some(),
+                reaction.min_ph.is_some() || reaction.max_ph.is_some()
+            );
+            assert_eq!(view.minimum_purity.is_some(), reaction.min_purity.is_some());
+            assert_eq!(view.overheat.is_some(), reaction.overheat_temp.is_some());
+            assert!(!view.temperature.is_empty());
+            assert!(!view.processing.is_empty());
+
+            if let (Some(reagent), Some(profile)) = (product, view.profile.as_ref()) {
+                assert_eq!(profile.ph, reagent.ph);
+                assert_eq!(profile.controlled, reagent.controlled);
+                assert_eq!(profile.explosive, reagent.explosive.is_some());
+                assert_eq!(profile.bodily_effects, reagent.effects.len());
+                assert_eq!(profile.targeted_purges, reagent.targeted_purges.len());
+                assert_eq!(profile.overdose_effects, reagent.overdose_effects.len());
+                assert_eq!(profile.critical_effects, reagent.critical_effects.len());
+                assert_eq!(profile.after_effects, reagent.after_effects.len());
+                assert_eq!(profile.world_effects, reagent.world_effects.len());
             }
         }
     }

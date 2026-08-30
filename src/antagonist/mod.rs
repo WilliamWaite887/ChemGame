@@ -81,21 +81,21 @@ impl Plugin for AntagonistPlugin {
             "data/station.antagonist.ron",
             "antagonist.ron",
         ))
-            .init_resource::<UnderworldStanding>()
-            .init_resource::<SecuritySuspicion>()
-            .add_systems(OnEnter(AppState::Playing), arm_spawner)
-            .add_systems(
-                Update,
-                (
-                    generate_antagonist_orders,
-                    handle_illicit_resolutions,
-                    handle_illicit_offer_pickup,
-                    expire_illicit_offers,
-                )
-                    .chain()
-                    .run_if(is_authority)
-                    .run_if(in_state(AppState::Playing)),
-            );
+        .init_resource::<UnderworldStanding>()
+        .init_resource::<SecuritySuspicion>()
+        .add_systems(OnEnter(AppState::Playing), arm_spawner)
+        .add_systems(
+            Update,
+            (
+                generate_antagonist_orders,
+                handle_illicit_resolutions,
+                handle_illicit_offer_pickup,
+                expire_illicit_offers,
+            )
+                .chain()
+                .run_if(is_authority)
+                .run_if(in_state(AppState::Playing)),
+        );
     }
 }
 
@@ -322,7 +322,6 @@ struct IllicitOffer {
     waited: f32,
 }
 
-
 /// This thread's authored script, once loaded.
 type Script = threat::Authored<AntagonistScript>;
 
@@ -332,7 +331,6 @@ type Script = threat::Authored<AntagonistScript>;
 struct AntagonistSpawner {
     timer: Timer,
 }
-
 
 /// See `threat::arm_first_visit` for why this has to re-run on
 /// `OnEnter(AppState::Playing)` every session rather than only once at
@@ -415,7 +413,15 @@ fn generate_antagonist_orders(
         let offer = *in_standing_offers
             .choose(&mut rng)
             .expect("checked non-empty above");
-        spawn_illicit_offer(&mut commands, &db, &mut rng, &station, offer, lane, patience);
+        spawn_illicit_offer(
+            &mut commands,
+            &db,
+            &mut rng,
+            &station,
+            offer,
+            lane,
+            patience,
+        );
         return;
     }
 
@@ -694,8 +700,9 @@ fn handle_illicit_offer_pickup(
         let amount = offer.amount;
         let cost = offer.cost;
         let ph = db.reagents.get(reagent).ph;
-        let (overflow, report) =
-            container.mutate(&db, |solution| solution.add_profiled(reagent, amount, 1.0, ph));
+        let (overflow, report) = container.mutate(&db, |solution| {
+            solution.add_profiled(reagent, amount, 1.0, ph)
+        });
         if overflow >= amount {
             // A full container accepted nothing — the same silent no-op
             // fumbling any other delivery already produces.
@@ -1147,7 +1154,9 @@ mod tests {
 
     fn forced_offer_app(underworld: i32) -> App {
         let mut app = antagonist_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().restore(underworld);
+        app.world_mut()
+            .resource_mut::<UnderworldStanding>()
+            .restore(underworld);
         // Deterministic: guarantees the offer branch is taken whenever at
         // least one offer clears its own `min_standing`, rather than
         // depending on a probabilistic roll.
@@ -1265,7 +1274,8 @@ mod tests {
                 client: ClientId::Server,
             })
             .id();
-        app.world_mut().spawn((Container::new(kind), HeldBy(player)));
+        app.world_mut()
+            .spawn((Container::new(kind), HeldBy(player)));
         player
     }
 
@@ -1280,7 +1290,9 @@ mod tests {
     #[test]
     fn a_successful_pickup_drains_underworld_standing_by_the_offers_cost() {
         let mut app = offer_pickup_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().restore(10);
+        app.world_mut()
+            .resource_mut::<UnderworldStanding>()
+            .restore(10);
         let offer = waiting_offer(&mut app, "space_drugs", 5, 4);
         player_holding(&mut app, ContainerKind::Beaker);
 
@@ -1296,7 +1308,9 @@ mod tests {
     #[test]
     fn an_unaffordable_pickup_is_a_true_no_op() {
         let mut app = offer_pickup_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().restore(2);
+        app.world_mut()
+            .resource_mut::<UnderworldStanding>()
+            .restore(2);
         let offer = waiting_offer(&mut app, "space_drugs", 5, 4);
         player_holding(&mut app, ContainerKind::Beaker);
 
@@ -1316,7 +1330,9 @@ mod tests {
     #[test]
     fn a_full_container_accepts_nothing_and_spends_nothing() {
         let mut app = offer_pickup_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().restore(10);
+        app.world_mut()
+            .resource_mut::<UnderworldStanding>()
+            .restore(10);
         let offer = waiting_offer(&mut app, "space_drugs", 5, 4);
         let player = player_holding(&mut app, ContainerKind::Beaker);
         let filler = app
@@ -1330,9 +1346,7 @@ mod tests {
             for (mut container, holder) in containers.iter_mut(app.world_mut()) {
                 if holder.0 == player {
                     let capacity = container.solution.max_volume();
-                    let _ = container
-                        .solution
-                        .add_profiled(filler, capacity, 1.0, 7.0);
+                    let _ = container.solution.add_profiled(filler, capacity, 1.0, 7.0);
                 }
             }
         }

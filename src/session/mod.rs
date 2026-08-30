@@ -223,7 +223,9 @@ mod tests {
         clear(&mut world);
 
         assert_eq!(
-            world.resource::<crate::antagonist::UnderworldStanding>().level(),
+            world
+                .resource::<crate::antagonist::UnderworldStanding>()
+                .level(),
             0
         );
         assert_eq!(world.resource::<crate::obsessed::ObsessedProgress>().0, 0);

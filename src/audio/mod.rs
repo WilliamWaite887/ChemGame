@@ -892,9 +892,7 @@ fn play_stability_sfx(
             StabilityBand::Critical => {
                 play.write(PlaySfx(Sfx::StabilityCritical));
             }
-            StabilityBand::Stable
-            | StabilityBand::Strained
-            | StabilityBand::Evacuating => {}
+            StabilityBand::Stable | StabilityBand::Strained | StabilityBand::Evacuating => {}
         }
     }
 }

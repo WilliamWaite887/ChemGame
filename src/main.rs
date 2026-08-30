@@ -4,6 +4,7 @@ mod addiction;
 mod antagonist;
 mod arc;
 mod audio;
+mod bent_guard;
 mod body;
 /// Screenshot-capture dev tool: HUD hide + free camera. See its own doc
 /// comment for why this is safe to toggle mid-session.
@@ -48,7 +49,6 @@ mod session;
 mod settings;
 mod shift;
 mod showdown;
-mod bent_guard;
 mod smuggler;
 mod speech;
 mod threat;

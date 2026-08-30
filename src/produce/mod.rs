@@ -413,7 +413,10 @@ fn balanced_delivery_items(
 /// mid-delivery, or otherwise present. She is in the ordinary crew roster
 /// too, so without this check a second purchase landing while she is
 /// already at the counter would put two of her in the room at once.
-pub fn courier_present(name: &str, present_crew: &Query<&CrewMember, crate::crew::NotResident>) -> bool {
+pub fn courier_present(
+    name: &str,
+    present_crew: &Query<&CrewMember, crate::crew::NotResident>,
+) -> bool {
     present_crew.iter().any(|member| member.name == name)
 }
 
@@ -576,7 +579,10 @@ mod tests {
         let config = config();
         let known: std::collections::HashSet<&str> =
             config.kinds.iter().map(|def| def.id.as_str()).collect();
-        assert!(!config.packs.is_empty(), "station.produce.ron sells no packs");
+        assert!(
+            !config.packs.is_empty(),
+            "station.produce.ron sells no packs"
+        );
         for pack in &config.packs {
             assert!(!pack.items.is_empty(), "pack '{}' is empty", pack.id);
             assert!(pack.cost > 0, "pack '{}' costs nothing", pack.id);

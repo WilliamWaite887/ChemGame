@@ -259,7 +259,8 @@ fn show_save_screen(mut commands: Commands, pending: Res<PendingMode>) {
                 for slot in slots {
                     let evacuated = slot.evacuated;
                     let action = MenuAction::LoadSave(slot.name.clone());
-                    let mut spawned = panel.spawn(choice(slot.name.clone(), &slot.detail(), action));
+                    let mut spawned =
+                        panel.spawn(choice(slot.name.clone(), &slot.detail(), action));
                     // Dimmed, not removed: the row still names the save and
                     // says why it stopped (`SlotSummary::detail`'s "Evacuated
                     // — " prefix), it just cannot be clicked back into. The

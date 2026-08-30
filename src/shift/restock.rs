@@ -350,8 +350,10 @@ mod tests {
             .next()
             .expect("a courier should have been dispatched carrying both halves");
         let supply = &station().config.supply;
-        let (deficit_beakers, deficit_large) =
-            crate_contents(restock_order(0, supply.glassware_target, supply.crate_max), supply.large_every);
+        let (deficit_beakers, deficit_large) = crate_contents(
+            restock_order(0, supply.glassware_target, supply.crate_max),
+            supply.large_every,
+        );
         assert_eq!(delivered.beakers, deficit_beakers + 2);
         assert_eq!(delivered.large, deficit_large + 1);
     }

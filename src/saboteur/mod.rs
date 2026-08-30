@@ -222,12 +222,8 @@ type LooseGlassware<'w, 's> = Query<
 /// The same set, writable — for the splash itself. Separate only because
 /// arrival needs `&mut Container` and no position, while choosing a target
 /// needs the position and no write.
-type GettableGlassware<'w, 's> = Query<
-    'w,
-    's,
-    &'static mut Container,
-    (Without<HeldBy>, Without<InSlot>, Without<Stored>),
->;
+type GettableGlassware<'w, 's> =
+    Query<'w, 's, &'static mut Container, (Without<HeldBy>, Without<InSlot>, Without<Stored>)>;
 
 /// Advances the chain — and, on an expired visit, sets them walking.
 ///
@@ -488,10 +484,7 @@ mod tests {
         let name = app.world().resource::<Script>().0.name.clone();
         let role = app.world().resource::<Script>().0.role.clone();
         app.world_mut()
-            .spawn((
-                CrewMember { name, role },
-                Transform::from_translation(at),
-            ))
+            .spawn((CrewMember { name, role }, Transform::from_translation(at)))
             .id()
     }
 
@@ -692,8 +685,7 @@ mod tests {
         let from = in_the_bay();
         let walker = tech(&mut app, from);
         let lobby = ROOMS[crate::lab::LOBBY].center();
-        let far_but_reachable =
-            loose_batch(&mut app, Vec3::new(lobby.x, from.y - 0.9, lobby.z));
+        let far_but_reachable = loose_batch(&mut app, Vec3::new(lobby.x, from.y - 0.9, lobby.z));
 
         ignored(&mut app);
 
@@ -837,7 +829,11 @@ mod tests {
                 app.world().get::<Meddling>(walker).is_none(),
                 "{guard}: they should not have set out at all",
             );
-            assert_eq!(volume(&app, beaker), before, "{guard}: it was got at anyway");
+            assert_eq!(
+                volume(&app, beaker),
+                before,
+                "{guard}: it was got at anyway"
+            );
         }
     }
 
@@ -866,7 +862,9 @@ mod tests {
         ignored(&mut app);
 
         assert_eq!(
-            app.world().resource::<crate::instability::Instability>().value,
+            app.world()
+                .resource::<crate::instability::Instability>()
+                .value,
             crate::instability::STABILITY_MAX
                 - crate::instability::INCOMPETENCE_PER_IGNORED_SHENANIGAN as f32,
             "an ignored shenanigan is exactly the signal the instability meter watches for",

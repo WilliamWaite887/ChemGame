@@ -62,36 +62,36 @@ impl Plugin for ArcPlugin {
             "data/station.arc.ron",
             "arc.ron",
         ))
-            .init_resource::<ThwartedAntags>()
-            .init_resource::<DriftClock>()
-            .add_server_message::<CampaignSync>(Channel::Ordered)
-            .add_systems(
-                Update,
+        .init_resource::<ThwartedAntags>()
+        .init_resource::<DriftClock>()
+        .add_server_message::<CampaignSync>(Channel::Ordered)
+        .add_systems(
+            Update,
+            (
                 (
-                    (
-                            assign_campaign,
-                        advance_plot,
-                        update_reveal,
-                        // After the reveal, so the frame the track opens is
-                        // the frame its clock arms.
-                        generate_counter_orders,
-                        resolve_campaign,
-                        // After resolve_campaign, so a campaign that just
-                        // resolved this very frame starts its cooldown timer
-                        // from zero rather than being re-rolled a frame late.
-                        reroll_campaign,
-                        broadcast_campaign,
-                        // After the broadcast, so a client that joined this
-                        // frame is not also caught by the change-detection
-                        // send and told twice.
-                        sync_campaign_to_new_clients,
-                    )
-                        .chain()
-                        .run_if(is_authority),
-                    apply_campaign.run_if(in_state(ClientState::Connected)),
+                    assign_campaign,
+                    advance_plot,
+                    update_reveal,
+                    // After the reveal, so the frame the track opens is
+                    // the frame its clock arms.
+                    generate_counter_orders,
+                    resolve_campaign,
+                    // After resolve_campaign, so a campaign that just
+                    // resolved this very frame starts its cooldown timer
+                    // from zero rather than being re-rolled a frame late.
+                    reroll_campaign,
+                    broadcast_campaign,
+                    // After the broadcast, so a client that joined this
+                    // frame is not also caught by the change-detection
+                    // send and told twice.
+                    sync_campaign_to_new_clients,
                 )
-                    .run_if(in_state(AppState::Playing)),
-            );
+                    .chain()
+                    .run_if(is_authority),
+                apply_campaign.run_if(in_state(ClientState::Connected)),
+            )
+                .run_if(in_state(AppState::Playing)),
+        );
     }
 }
 
@@ -318,7 +318,9 @@ impl std::ops::Deref for CampaignRoster {
     type Target = CampaignArc;
 
     fn deref(&self) -> &Self::Target {
-        self.active.first().expect("campaign roster must not be empty")
+        self.active
+            .first()
+            .expect("campaign roster must not be empty")
     }
 }
 
@@ -561,10 +563,8 @@ pub struct CounterStepDef {
     pub delivered_line: String,
 }
 
-
 /// This thread's authored script, once loaded.
 pub type Script = threat::Authored<ArcScript>;
-
 
 // ---------------------------------------------------------------------------
 // Assignment
@@ -791,15 +791,16 @@ fn apply_counter_report(
             index
         }
         Some(_) => return None,
-        None => def
-            .counter_steps
-            .iter()
-            .enumerate()
-            .find(|(index, step)| {
-                step.role == report.role
-                    && campaign.countered.get(*index).copied() == Some(false)
-            })?
-            .0,
+        None => {
+            def.counter_steps
+                .iter()
+                .enumerate()
+                .find(|(index, step)| {
+                    step.role == report.role
+                        && campaign.countered.get(*index).copied() == Some(false)
+                })?
+                .0
+        }
     };
     *campaign.countered.get_mut(index)? = true;
     campaign.plot = (campaign.plot + script.plot_per_counter_step).clamp(0, PLOT_MAX);

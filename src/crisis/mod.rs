@@ -62,24 +62,24 @@ impl Plugin for CrisisPlugin {
             "data/station.crisis.ron",
             "crisis.ron",
         ))
-            .init_resource::<CrisisSchedule>()
-            .add_systems(
-                Update,
-                (schedule_crisis, handle_crisis_resolutions)
-                    .chain()
-                    .after(threat::PromoteScripts)
-                    .run_if(is_authority)
-                    .run_if(in_state(AppState::Playing)),
-            )
-            // Presentation, not state — runs on every peer. Whether a crisis
-            // is live is read straight off `CrisisOrder`, which replicates
-            // (unlike `IllicitOrder`, a crisis has nothing to hide), so a
-            // joining client sees the same alert lighting the host does
-            // without a bespoke sync message.
-            .add_systems(
-                Update,
-                pulse_alert_lighting.run_if(in_state(AppState::Playing)),
-            );
+        .init_resource::<CrisisSchedule>()
+        .add_systems(
+            Update,
+            (schedule_crisis, handle_crisis_resolutions)
+                .chain()
+                .after(threat::PromoteScripts)
+                .run_if(is_authority)
+                .run_if(in_state(AppState::Playing)),
+        )
+        // Presentation, not state — runs on every peer. Whether a crisis
+        // is live is read straight off `CrisisOrder`, which replicates
+        // (unlike `IllicitOrder`, a crisis has nothing to hide), so a
+        // joining client sees the same alert lighting the host does
+        // without a bespoke sync message.
+        .add_systems(
+            Update,
+            pulse_alert_lighting.run_if(in_state(AppState::Playing)),
+        );
     }
 }
 
@@ -137,7 +137,6 @@ pub struct CrisisResponse {
 
 /// This thread's authored script, once loaded.
 type Script = threat::Authored<CrisisScript>;
-
 
 // ---------------------------------------------------------------------------
 // The warning, and the affliction
@@ -578,7 +577,11 @@ mod tests {
         app.insert_resource(ChemDb(data()))
             .insert_resource(StationData { crew, config })
             .insert_resource(threat::Authored(script()))
-            .insert_resource({ let mut m = UnderworldStanding::default(); m.restore(0); m })
+            .insert_resource({
+                let mut m = UnderworldStanding::default();
+                m.restore(0);
+                m
+            })
             .init_resource::<CrisisSchedule>()
             .insert_resource(Shift {
                 accepting_orders: true,
@@ -600,7 +603,11 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(ChemDb(data()))
             .insert_resource(threat::Authored(script()))
-            .insert_resource({ let mut m = UnderworldStanding::default(); m.restore(0); m })
+            .insert_resource({
+                let mut m = UnderworldStanding::default();
+                m.restore(0);
+                m
+            })
             .init_resource::<Shift>()
             .init_resource::<RadioLog>()
             .add_message::<OrderResolved>()
@@ -618,7 +625,9 @@ mod tests {
     #[test]
     fn nothing_happens_below_the_threshold() {
         let mut app = crisis_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().restore(4);
+        app.world_mut()
+            .resource_mut::<UnderworldStanding>()
+            .restore(4);
 
         advance(&mut app, 1.0);
 
@@ -632,22 +641,22 @@ mod tests {
         // Unlike ordinary chatter, the alarm is not delayed — it should be on
         // the log the same frame the threshold is crossed.
         let mut app = crisis_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().restore(8);
+        app.world_mut()
+            .resource_mut::<UnderworldStanding>()
+            .restore(8);
 
         advance(&mut app, 0.1);
 
-        assert!(app
-            .world()
-            .resource::<CrisisSchedule>()
-            .clock
-            .is_armed());
+        assert!(app.world().resource::<CrisisSchedule>().clock.is_armed());
         assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
     }
 
     #[test]
     fn the_warning_elapsing_afflicts_a_real_victim() {
         let mut app = crisis_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().restore(8);
+        app.world_mut()
+            .resource_mut::<UnderworldStanding>()
+            .restore(8);
         advance(&mut app, 0.1);
         let warning = app
             .world()
@@ -685,7 +694,9 @@ mod tests {
     #[test]
     fn a_cured_crisis_drains_underworld_standing() {
         let mut app = resolution_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().restore(12);
+        app.world_mut()
+            .resource_mut::<UnderworldStanding>()
+            .restore(12);
         let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
 
         app.world_mut().write_message(OrderResolved {
@@ -720,7 +731,9 @@ mod tests {
     #[test]
     fn an_unresolved_crisis_leaves_the_standing_where_it_was() {
         let mut app = resolution_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().restore(12);
+        app.world_mut()
+            .resource_mut::<UnderworldStanding>()
+            .restore(12);
 
         app.world_mut().write_message(OrderResolved {
             name: "Dr. Vance".to_string(),
@@ -753,7 +766,9 @@ mod tests {
     #[test]
     fn a_non_crisis_resolution_is_ignored() {
         let mut app = resolution_app();
-        app.world_mut().resource_mut::<UnderworldStanding>().restore(12);
+        app.world_mut()
+            .resource_mut::<UnderworldStanding>()
+            .restore(12);
         let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
 
         app.world_mut().write_message(OrderResolved {

@@ -794,9 +794,10 @@ fn drive_crew_animation(
         // marker positions. No new network state: both peers already have
         // everything this needs.
         if desired == CharacterAnimation::Idle {
-            if let (Ok(member), Ok(transform)) =
-                (members.get(controller.crew), transforms.get(controller.crew))
-            {
+            if let (Ok(member), Ok(transform)) = (
+                members.get(controller.crew),
+                transforms.get(controller.crew),
+            ) {
                 if let Some(post_animation) =
                     post_presentation_animation(&crew_posts, member, transform.translation)
                 {
@@ -1005,7 +1006,9 @@ fn populate_departments(
     for def in &station.crew {
         // Their own post if the station has authored one, otherwise the
         // shared department point exactly as before posts existed.
-        let Some(home) = crew_posts.work(&def.name).or_else(|| departments.home(&def.role))
+        let Some(home) = crew_posts
+            .work(&def.name)
+            .or_else(|| departments.home(&def.role))
         else {
             continue;
         };
@@ -1867,9 +1870,10 @@ pub(crate) fn run_errands(
         }
 
         let step = errand.speed * dt;
-        if let Some(heading) = errand
-            .trail
-            .walk(&mut transform, areas.as_deref(), step, BODY_OFFSET)
+        if let Some(heading) =
+            errand
+                .trail
+                .walk(&mut transform, areas.as_deref(), step, BODY_OFFSET)
         {
             // Face the way they are going, the same as `walk_route` — an
             // errand-runner is a person crossing the room, and the whole point
@@ -1955,7 +1959,10 @@ mod tests {
     #[test]
     fn standing_at_a_work_post_selects_working() {
         let mut posts = CrewPosts::default();
-        posts.set_work("Tech Lindqvist".to_string(), Vec3::new(-1040.0, 0.0, 3120.0));
+        posts.set_work(
+            "Tech Lindqvist".to_string(),
+            Vec3::new(-1040.0, 0.0, 3120.0),
+        );
         let member = CrewMember {
             name: "Tech Lindqvist".to_string(),
             role: "Engineering".to_string(),
@@ -1970,7 +1977,10 @@ mod tests {
     #[test]
     fn standing_near_someone_elses_work_post_stays_idle() {
         let mut posts = CrewPosts::default();
-        posts.set_work("Tech Lindqvist".to_string(), Vec3::new(-1040.0, 0.0, 3120.0));
+        posts.set_work(
+            "Tech Lindqvist".to_string(),
+            Vec3::new(-1040.0, 0.0, 3120.0),
+        );
         let visitor = CrewMember {
             name: "Miner Sato".to_string(),
             role: "Cargo".to_string(),
@@ -1985,7 +1995,10 @@ mod tests {
     #[test]
     fn walking_toward_a_work_post_stays_idle_until_close() {
         let mut posts = CrewPosts::default();
-        posts.set_work("Tech Lindqvist".to_string(), Vec3::new(-1040.0, 0.0, 3120.0));
+        posts.set_work(
+            "Tech Lindqvist".to_string(),
+            Vec3::new(-1040.0, 0.0, 3120.0),
+        );
         let member = CrewMember {
             name: "Tech Lindqvist".to_string(),
             role: "Engineering".to_string(),
@@ -2204,9 +2217,12 @@ mod tests {
             .collect();
 
         for def in &roster {
-            let label = by_name
-                .get(&def.name)
-                .unwrap_or_else(|| panic!("{} has no Interactable — cannot be focused at all", def.name));
+            let label = by_name.get(&def.name).unwrap_or_else(|| {
+                panic!(
+                    "{} has no Interactable — cannot be focused at all",
+                    def.name
+                )
+            });
             assert_eq!(label, &format!("{} — {}", def.name, def.role));
         }
     }
@@ -2882,13 +2898,23 @@ mod tests {
         use crate::lab::{Bounds, FloorProfile};
         let mut areas = crate::lab::WalkableAreas::default();
         areas.push_surface(
-            Bounds { min_x: -6.0, max_x: 0.5, min_z: -3.0, max_z: 3.0 },
+            Bounds {
+                min_x: -6.0,
+                max_x: 0.5,
+                min_z: -3.0,
+                max_z: 3.0,
+            },
             Some("Lower".to_string()),
             None,
             FloorProfile::Flat(0.0),
         );
         areas.push_surface(
-            Bounds { min_x: -0.5, max_x: 6.0, min_z: -3.0, max_z: 3.0 },
+            Bounds {
+                min_x: -0.5,
+                max_x: 6.0,
+                min_z: -3.0,
+                max_z: 3.0,
+            },
             Some("Upper".to_string()),
             None,
             FloorProfile::Flat(step_height),
@@ -2919,7 +2945,10 @@ mod tests {
         // The step here is larger than `ARRIVE_EPSILON` and smaller than
         // `MAX_PORTAL_STEP`, which is exactly the band the real map lands in.
         let step_height = 0.24;
-        assert!(step_height > ARRIVE_EPSILON, "a smaller step would not bite");
+        assert!(
+            step_height > ARRIVE_EPSILON,
+            "a smaller step would not bite"
+        );
 
         let mut app = stepped_floor_app(step_height);
         let start = Vec3::new(-4.0, BODY_OFFSET, 0.0);
@@ -3762,13 +3791,18 @@ mod tests {
         let walker = errand_runner(&mut app, start);
         let beaker = app
             .world_mut()
-            .spawn(Transform::from_translation(start + Vec3::new(3.0, 0.0, 0.0)))
+            .spawn(Transform::from_translation(
+                start + Vec3::new(3.0, 0.0, 0.0),
+            ))
             .id();
         send(&mut app, walker, ErrandGoal::Target(beaker));
 
         tick(&mut app, 0.05);
         let moved = start + Vec3::new(0.0, 0.0, 2.0);
-        app.world_mut().get_mut::<Transform>(beaker).unwrap().translation = moved;
+        app.world_mut()
+            .get_mut::<Transform>(beaker)
+            .unwrap()
+            .translation = moved;
 
         walk_errand(&mut app, walker, 400);
 
@@ -3794,7 +3828,9 @@ mod tests {
         let walker = errand_runner(&mut app, start);
         let beaker = app
             .world_mut()
-            .spawn(Transform::from_translation(start + Vec3::new(4.0, 0.0, 0.0)))
+            .spawn(Transform::from_translation(
+                start + Vec3::new(4.0, 0.0, 0.0),
+            ))
             .id();
         send(&mut app, walker, ErrandGoal::Target(beaker));
 
@@ -3853,7 +3889,11 @@ mod tests {
         );
 
         // Past `ERRAND_DEADLINE_SECONDS`, at the tick rate the others use.
-        walk_errand(&mut app, walker, (ERRAND_DEADLINE_SECONDS / 0.05) as usize + 20);
+        walk_errand(
+            &mut app,
+            walker,
+            (ERRAND_DEADLINE_SECONDS / 0.05) as usize + 20,
+        );
 
         assert!(
             app.world().get::<Errand>(walker).is_none(),

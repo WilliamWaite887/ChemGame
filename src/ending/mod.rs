@@ -258,7 +258,11 @@ fn watch_for_crew_collapse(
     }
     // Evacuation has precedence over a dismissible arc report, including when
     // an arc's climax penalty crosses zero one frame after that report opens.
-    if finished.showing.as_ref().is_some_and(|ending| ending.evacuated) {
+    if finished
+        .showing
+        .as_ref()
+        .is_some_and(|ending| ending.evacuated)
+    {
         return;
     }
     let (Some(db), Some(knowledge)) = (db, knowledge) else {
@@ -388,8 +392,8 @@ impl FinishedArc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::threat;
     use crate::arc::{AntagId, Reveal};
+    use crate::threat;
     use bevy::state::app::StatesPlugin;
 
     fn chemistry() -> chem_sim::ChemData {
@@ -538,7 +542,10 @@ mod tests {
     fn a_chemist_win_never_evacuates_even_at_the_meters_own_ceiling() {
         // Guards against a false positive keyed off the numeric threshold
         // alone rather than the actual outcome variant.
-        for outcome in [ArcOutcome::StoppedDirectly, ArcOutcome::StoppedByDepartments] {
+        for outcome in [
+            ArcOutcome::StoppedDirectly,
+            ArcOutcome::StoppedByDepartments,
+        ] {
             let mut app = ending_app(live_campaign());
             app.world_mut().resource_mut::<Campaign>().outcome = Some(outcome);
             app.update();

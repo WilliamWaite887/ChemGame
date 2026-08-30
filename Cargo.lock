@@ -2284,6 +2284,7 @@ dependencies = [
 name = "chemgame"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
  "bevy",
  "bevy-steamworks",
  "bevy_common_assets",

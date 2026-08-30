@@ -246,7 +246,11 @@ fn tick_impatience(
             shift.adjust(department, PER_POINT);
         }
         if impatience.taken % COMPLAIN_EVERY == 1 {
-            complain(script.as_ref().map(|script| &script.0), &mut radio, &mut rng);
+            complain(
+                script.as_ref().map(|script| &script.0),
+                &mut radio,
+                &mut rng,
+            );
         }
     }
     if shift.closure_pressure != impatience.taken {
@@ -308,7 +312,9 @@ mod tests {
     }
 
     fn standing(app: &App) -> i32 {
-        app.world().resource::<Shift>().standing(Department::Medical)
+        app.world()
+            .resource::<Shift>()
+            .standing(Department::Medical)
     }
 
     #[test]

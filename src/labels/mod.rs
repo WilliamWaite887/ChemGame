@@ -327,8 +327,8 @@ fn handle_label_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::input::keyboard::{Key, NativeKey};
     use crate::containers::{Container, ContainerKind};
+    use bevy::input::keyboard::{Key, NativeKey};
 
     // -----------------------------------------------------------------------
     // The field itself

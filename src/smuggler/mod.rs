@@ -22,7 +22,9 @@ use serde::Deserialize;
 
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, HeldBy, InSlot, Stored};
-use crate::crew::{spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewPosts, CrewRoute, NotResident};
+use crate::crew::{
+    spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewPosts, CrewRoute, NotResident,
+};
 use crate::interaction::Interactable;
 use crate::net::is_authority;
 use crate::orders::{OrderResolved, Shift, StationData};
@@ -49,26 +51,26 @@ impl Plugin for SmugglerPlugin {
             "data/station.smuggler.ron",
             "smuggler.ron",
         ))
-            .init_resource::<SmugglerProgress>()
-            .add_systems(
-                OnEnter(AppState::Playing),
-                (arm_spawner, arm_loiter_spawner),
+        .init_resource::<SmugglerProgress>()
+        .add_systems(
+            OnEnter(AppState::Playing),
+            (arm_spawner, arm_loiter_spawner),
+        )
+        .add_systems(
+            Update,
+            (
+                generate_smuggler_visit,
+                handle_smuggler_resolution,
+                loiter_smuggler,
+                expire_smuggler_loitering,
             )
-            .add_systems(
-                Update,
-                (
-                    generate_smuggler_visit,
-                    handle_smuggler_resolution,
-                    loiter_smuggler,
-                    expire_smuggler_loitering,
-                )
-                    .chain()
-                    .after(threat::PromoteScripts)
-                    .run_if(is_authority)
-                    // No `arc::is_active` gate, unlike a main antagonist —
-                    // see the module doc.
-                    .run_if(in_state(AppState::Playing)),
-            );
+                .chain()
+                .after(threat::PromoteScripts)
+                .run_if(is_authority)
+                // No `arc::is_active` gate, unlike a main antagonist —
+                // see the module doc.
+                .run_if(in_state(AppState::Playing)),
+        );
     }
 }
 
@@ -198,7 +200,10 @@ fn loiter_smuggler(
 
 /// Ticks the loiter dwell down once they've actually arrived, and sends them
 /// off once it runs out.
-fn expire_smuggler_loitering(time: Res<Time>, mut loitering: Query<(&mut Loitering, &mut CrewRoute)>) {
+fn expire_smuggler_loitering(
+    time: Res<Time>,
+    mut loitering: Query<(&mut Loitering, &mut CrewRoute)>,
+) {
     let dt = time.delta_secs();
     for (mut loiter, mut route) in &mut loitering {
         if route.phase != CrewPhase::Waiting {
@@ -372,8 +377,8 @@ fn handle_smuggler_resolution(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orders::Outcome;
     use crate::containers::ContainerKind;
+    use crate::orders::Outcome;
     use crate::orders::{Department, OrderKind};
 
     fn script() -> SmugglerScript {
@@ -487,7 +492,9 @@ mod tests {
         );
         assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
         assert_eq!(
-            app.world().resource::<crate::instability::Instability>().value,
+            app.world()
+                .resource::<crate::instability::Instability>()
+                .value,
             crate::instability::STABILITY_MAX
                 - crate::instability::INCOMPETENCE_PER_IGNORED_SHENANIGAN as f32,
             "an ignored shenanigan is exactly the signal the instability meter watches for"

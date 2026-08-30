@@ -150,7 +150,12 @@ pub(crate) fn bodies_in_cone(
         })
         .filter(|(_, position)| {
             !solids.iter().any(|(transform, solid)| {
-                authority_segment_blocked(actor, *position, transform.translation, solid.half_extents)
+                authority_segment_blocked(
+                    actor,
+                    *position,
+                    transform.translation,
+                    solid.half_extents,
+                )
             })
         })
         .map(|(entity, _)| entity)
@@ -802,14 +807,26 @@ mod tests {
     #[test]
     fn authority_reach_rejects_remote_and_non_finite_requests() {
         let actor = Vec3::new(0.0, 1.7, 0.0);
-        assert!(authority_target_in_reach(actor, Vec3::new(3.0, 1.0, 0.0), REACH));
+        assert!(authority_target_in_reach(
+            actor,
+            Vec3::new(3.0, 1.0, 0.0),
+            REACH
+        ));
         assert!(!authority_target_in_reach(
             actor,
             Vec3::new(8.0, 1.0, 0.0),
             REACH
         ));
-        assert!(authority_point_in_reach(actor, Vec3::new(1.0, 0.0, 0.0), REACH));
-        assert!(!authority_point_in_reach(actor, Vec3::new(4.0, 0.0, 0.0), REACH));
+        assert!(authority_point_in_reach(
+            actor,
+            Vec3::new(1.0, 0.0, 0.0),
+            REACH
+        ));
+        assert!(!authority_point_in_reach(
+            actor,
+            Vec3::new(4.0, 0.0, 0.0),
+            REACH
+        ));
         assert!(!authority_point_in_reach(
             actor,
             Vec3::new(f32::NAN, 0.0, 0.0),

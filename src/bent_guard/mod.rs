@@ -400,7 +400,10 @@ mod tests {
         // apparently nothing happened.
         let mut app = resolution_app();
         let name = app.world().resource::<Script>().0.name.clone();
-        app.world_mut().resource_mut::<Shift>().requisition.raid_wards = MAX_BANKED_WARDS;
+        app.world_mut()
+            .resource_mut::<Shift>()
+            .requisition
+            .raid_wards = MAX_BANKED_WARDS;
 
         resolve(&mut app, &name, Outcome::Success);
 
@@ -437,7 +440,10 @@ mod tests {
         // snub is somebody's opinion, and there is nothing to requisition.
         let mut app = resolution_app();
         let name = app.world().resource::<Script>().0.name.clone();
-        app.world_mut().resource_mut::<Shift>().requisition.raid_wards = 1;
+        app.world_mut()
+            .resource_mut::<Shift>()
+            .requisition
+            .raid_wards = 1;
 
         resolve(&mut app, &name, Outcome::Expired);
 
@@ -457,7 +463,11 @@ mod tests {
         resolve(&mut app, &name, Outcome::Wrong);
 
         assert_eq!(wards(&app), 0, "he did not get what he asked for");
-        assert_eq!(suspicion(&app), 0, "and he has no grievance either — he is still standing there");
+        assert_eq!(
+            suspicion(&app),
+            0,
+            "and he has no grievance either — he is still standing there"
+        );
         assert_eq!(
             app.world().resource::<RadioLog>().entries.len(),
             0,
@@ -523,7 +533,9 @@ mod tests {
             script.name
         );
         assert!(
-            !Department::Security.members().contains(&script.name.as_str()),
+            !Department::Security
+                .members()
+                .contains(&script.name.as_str()),
             "'{}' must stay out of Security's standing average — a department minor is \
              not one of the two officers whose opinion that number reports",
             script.name

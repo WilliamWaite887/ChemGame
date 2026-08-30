@@ -383,8 +383,7 @@ fn handle_apply_held(
                         let moved_volume = moved.total_volume().as_f32();
                         let combined = destination_volume + moved_volume;
                         if combined > 0.0 {
-                            solution.temperature.0 = (solution.temperature.0
-                                * destination_volume
+                            solution.temperature.0 = (solution.temperature.0 * destination_volume
                                 + moved.temperature.0 * moved_volume)
                                 / combined;
                         }
@@ -1796,7 +1795,10 @@ mod tests {
 
         let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
         assert!(
-            blood_of(&app, target).blood.volume_of(dylovene).is_positive(),
+            blood_of(&app, target)
+                .blood
+                .volume_of(dylovene)
+                .is_positive(),
             "5m is within a Syringe Gun's own reach"
         );
     }
@@ -1887,8 +1889,14 @@ mod tests {
         app.update();
 
         let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
-        assert!(blood_of(&app, in_cone_a).blood.volume_of(dylovene).is_positive());
-        assert!(blood_of(&app, in_cone_b).blood.volume_of(dylovene).is_positive());
+        assert!(blood_of(&app, in_cone_a)
+            .blood
+            .volume_of(dylovene)
+            .is_positive());
+        assert!(blood_of(&app, in_cone_b)
+            .blood
+            .volume_of(dylovene)
+            .is_positive());
         assert!(
             blood_of(&app, outside_cone).is_empty(),
             "a body outside the cone's half-angle is untouched — a cone weapon has no ally/hostile filter, only geometry"
@@ -1955,8 +1963,8 @@ mod tests {
             "the second hit drew from an empty tank and wrote no exposure"
         );
         let dylovene = app.world().resource::<ChemDb>().reagent("dylovene");
-        let hit_total =
-            blood_of(&app, a).blood.volume_of(dylovene) + blood_of(&app, b).blood.volume_of(dylovene);
+        let hit_total = blood_of(&app, a).blood.volume_of(dylovene)
+            + blood_of(&app, b).blood.volume_of(dylovene);
         assert!(hit_total.is_positive(), "exactly one of the two got dosed");
     }
 

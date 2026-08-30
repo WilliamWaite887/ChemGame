@@ -599,12 +599,7 @@ fn notice_arrivals(
         ) else {
             continue;
         };
-        say(
-            &mut commands,
-            entity,
-            fill(&line.text, member),
-            line.tone,
-        );
+        say(&mut commands, entity, fill(&line.text, member), line.tone);
         commands.entity(entity).insert(SpeechCooldown(
             rng.random_range(script.cooldown_seconds.0..=script.cooldown_seconds.1),
         ));
@@ -830,7 +825,9 @@ fn place_bubbles(
 
     for (mut bubble, mut node, mut visibility, children) in &mut bubbles {
         bubble.elapsed += time.delta_secs();
-        let shown = candidates.iter().any(|(entity, _)| *entity == bubble.speaker);
+        let shown = candidates
+            .iter()
+            .any(|(entity, _)| *entity == bubble.speaker);
         let projected = shown
             .then(|| speakers.get(bubble.speaker).ok())
             .flatten()
@@ -1088,13 +1085,9 @@ impl StationMood<'_, '_> {
                 .as_ref()
                 .is_some_and(|estranged| estranged.0.contains(&member.name)),
             Knows::DepartmentPleased => department >= WARM,
-            Knows::SuspicionStirring => {
-                suspicion >= crate::antagonist::SUSPICION_MAX / STIRRING
-            }
+            Knows::SuspicionStirring => suspicion >= crate::antagonist::SUSPICION_MAX / STIRRING,
             Knows::SuspicionHigh => suspicion >= crate::antagonist::SUSPICION_MAX / LOUD,
-            Knows::UnderworldActive => {
-                underworld >= crate::antagonist::UNDERWORLD_MAX / STIRRING
-            }
+            Knows::UnderworldActive => underworld >= crate::antagonist::UNDERWORLD_MAX / STIRRING,
             // Anyone hooked at all, not this speaker — Medical sees the ward,
             // not their own arm. `Withdrawing` below is the personal one.
             Knows::CrewGettingHooked => self.hooked_crew() > 0,
@@ -1214,13 +1207,17 @@ fn handle_talk(
             continue;
         }
 
-        let spoken = remarks.map(|remarks| remarks.spoken.as_slice()).unwrap_or(&[]);
+        let spoken = remarks
+            .map(|remarks| remarks.spoken.as_slice())
+            .unwrap_or(&[]);
         let (line, index) = next_remark(&script, &mood, member, spoken);
         say(&mut commands, request.target, fill(&line.0, member), line.1);
         if let Some(index) = index {
             let mut updated = spoken.to_vec();
             updated.push(index);
-            commands.entity(request.target).insert(Remarks { spoken: updated });
+            commands
+                .entity(request.target)
+                .insert(Remarks { spoken: updated });
         }
     }
 }
@@ -1398,7 +1395,10 @@ fn start_exchanges(
             break None;
         };
         let exchange = &script.exchanges[index];
-        if exchange.role.as_deref().is_none_or(|role| role == first.1.role)
+        if exchange
+            .role
+            .as_deref()
+            .is_none_or(|role| role == first.1.role)
             && exchange.when.iter().all(|what| mood.holds(*what, first.1))
             && exchange.lines.len() >= 2
         {
@@ -1418,9 +1418,12 @@ fn start_exchanges(
             if delay == 0.0 {
                 say(&mut commands, speaker, text, line.tone);
             } else {
-                pending
-                    .0
-                    .push((Timer::from_seconds(delay, TimerMode::Once), speaker, text, line.tone));
+                pending.0.push((
+                    Timer::from_seconds(delay, TimerMode::Once),
+                    speaker,
+                    text,
+                    line.tone,
+                ));
             }
             delay += rng.random_range(EXCHANGE_BEAT_SECONDS.0..=EXCHANGE_BEAT_SECONDS.1);
         }
@@ -1689,7 +1692,10 @@ mod tests {
             .filter(|line| line.situation == Situation::Waiting)
             .map(|line| line.text.as_str())
             .collect();
-        for (who, label) in [(honest, "a legitimate visitor"), (illicit, "an illicit one")] {
+        for (who, label) in [
+            (honest, "a legitimate visitor"),
+            (illicit, "an illicit one"),
+        ] {
             let said = app
                 .world()
                 .get::<Speech>(who)
@@ -2234,7 +2240,10 @@ mod tests {
         ];
 
         let (index, line) = best_unspoken(&pool, &[], |_| true).expect("something to say");
-        assert_eq!(line.text, "a raid is coming", "the heaviest line did not win");
+        assert_eq!(
+            line.text, "a raid is coming",
+            "the heaviest line did not win"
+        );
         assert_eq!(index, 1);
 
         // Having said it, they move down the ladder rather than repeating.
@@ -2261,7 +2270,9 @@ mod tests {
         // about it. One answer to "has this gone on too long", not two that
         // could drift apart.
         let (mut app, _) = talking_app();
-        app.world_mut().resource_mut::<crate::orders::Shift>().closure_pressure = 4;
+        app.world_mut()
+            .resource_mut::<crate::orders::Shift>()
+            .closure_pressure = 4;
         let member = someone(&mut app, "Miner Sato", "Cargo");
 
         let said = ask(&mut app, member);
@@ -2362,7 +2373,10 @@ mod tests {
                 exchange.lines.len() >= 2,
                 "exchanges[{index}] has nobody to answer it"
             );
-            assert!(exchange.lines.iter().all(|line| !line.text.trim().is_empty()));
+            assert!(exchange
+                .lines
+                .iter()
+                .all(|line| !line.text.trim().is_empty()));
             for line in &exchange.lines {
                 assert!(
                     speech_seconds(&line.text) < DWELL_SECONDS.1,
@@ -2444,7 +2458,9 @@ mod tests {
         // the halls and listen. Silencing it then would turn the feature off
         // at the only moment there is room to use it.
         let (mut app, _, _) = exchange_app();
-        app.world_mut().resource_mut::<crate::orders::Shift>().accepting_orders = false;
+        app.world_mut()
+            .resource_mut::<crate::orders::Shift>()
+            .accepting_orders = false;
 
         assert!(
             wait_for_chatter(&mut app),

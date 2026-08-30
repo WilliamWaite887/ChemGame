@@ -26,6 +26,7 @@ use crate::addiction::CarriedSuspicion;
 use crate::antagonist::SecuritySuspicion;
 use crate::chem_data::ChemDb;
 use crate::containers::{spawn_container, Container, ContainerKind};
+use crate::crew::{CrewMember, NotResident};
 use crate::knowledge::Knowledge;
 use crate::lab::{DeliveryLane, DeliveryStation, DeliveryStations, COUNTER_DROP_Z, COUNTER_TOP};
 use crate::machines::{self, Machine, MachineKind, Overclock};
@@ -34,7 +35,6 @@ use crate::orders::{
     Department, ForecastDef, GlasswarePackId, OrderConfig, RampDef, RequestDef, Requisition, Shift,
     ShiftSnapshot, StationData,
 };
-use crate::crew::{CrewMember, NotResident};
 use crate::produce::{self, Produce, ProduceCatalog};
 use crate::radio::channel_for;
 use crate::radio::RadioEntry;
@@ -900,7 +900,12 @@ pub fn apply_npc_requisition(
                 return false;
             }
             shift.adjust_npc(owner, -PRESSURE_SPRAYER_COST);
-            spawn_purchased_item(commands, ContainerKind::PressureSprayer, delivery_station, 0.9);
+            spawn_purchased_item(
+                commands,
+                ContainerKind::PressureSprayer,
+                delivery_station,
+                0.9,
+            );
             true
         }
         NpcRequisitionKind::SatoWaterGun => {
@@ -1519,12 +1524,10 @@ pub fn is_evacuated(path: &std::path::Path) -> bool {
 fn restored_station_stability(save: &ProgressSave) -> crate::instability::StationStability {
     let mut stability = save.station_stability.clone();
     if stability == crate::instability::StationStability::default()
-        && (save.instability.level > 0
-            || save.instability.tier != LegacyInstabilityTier::Calm)
+        && (save.instability.level > 0 || save.instability.tier != LegacyInstabilityTier::Calm)
     {
-        stability.value =
-            (crate::instability::STABILITY_MAX - save.instability.level as f32)
-                .clamp(0.0, crate::instability::STABILITY_MAX);
+        stability.value = (crate::instability::STABILITY_MAX - save.instability.level as f32)
+            .clamp(0.0, crate::instability::STABILITY_MAX);
         stability.band = match stability.value {
             value if value <= 0.0 => crate::instability::StabilityBand::Evacuating,
             value if value <= 25.0 => crate::instability::StabilityBand::Critical,
@@ -1784,8 +1787,8 @@ pub struct PersistedProgress(Option<ProgressSave>);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::state::app::StatesPlugin;
     use crate::instability::StabilityBand;
+    use bevy::state::app::StatesPlugin;
 
     fn config() -> OrderConfig {
         ron::from_str(include_str!("../../assets/data/station.orders.ron"))
@@ -1983,19 +1986,11 @@ mod tests {
         let shift = Shift::default();
         assert_eq!(
             current_rules(&base, &shift, 1),
-            scale_for_chemists(
-                ShiftRules::for_tier(&base, &base.ramp, 0),
-                1,
-                &base.ramp
-            )
+            scale_for_chemists(ShiftRules::for_tier(&base, &base.ramp, 0), 1, &base.ramp)
         );
         assert_eq!(
             current_rules(&base, &shift, 4),
-            scale_for_chemists(
-                ShiftRules::for_tier(&base, &base.ramp, 0),
-                4,
-                &base.ramp
-            )
+            scale_for_chemists(ShiftRules::for_tier(&base, &base.ramp, 0), 4, &base.ramp)
         );
     }
 
@@ -2615,7 +2610,9 @@ mod tests {
             let world = app.world_mut();
             let mut query = world.query::<&Container>();
             assert!(
-                query.iter(world).any(|container| container.kind == spawned_kind),
+                query
+                    .iter(world)
+                    .any(|container| container.kind == spawned_kind),
                 "buying {spawned_kind:?} from {seller} should spawn one"
             );
         }
@@ -2623,12 +2620,13 @@ mod tests {
 
     #[test]
     fn a_confrontation_item_refuses_without_enough_standing_and_spends_nothing() {
-        let (mut app, board) =
-            with_npc_standing("Tech Lindqvist", SYRINGE_GUN_COST - 1);
+        let (mut app, board) = with_npc_standing("Tech Lindqvist", SYRINGE_GUN_COST - 1);
         npc_requisition(&mut app, board, NpcRequisitionKind::LindqvistSyringeGun);
 
         assert_eq!(
-            app.world().resource::<Shift>().npc_standing("Tech Lindqvist"),
+            app.world()
+                .resource::<Shift>()
+                .npc_standing("Tech Lindqvist"),
             SYRINGE_GUN_COST - 1,
             "a refused purchase must not spend even a partial amount"
         );
@@ -2786,7 +2784,11 @@ mod tests {
     #[test]
     fn quiet_word_zeroes_both_suspicion_meters() {
         let (mut app, board) = with_standing(Department::Security, 10);
-        app.insert_resource({ let mut m = SecuritySuspicion::default(); m.restore(7); m });
+        app.insert_resource({
+            let mut m = SecuritySuspicion::default();
+            m.restore(7);
+            m
+        });
         app.insert_resource(CarriedSuspicion(0.5));
 
         requisition(&mut app, board, RequisitionKind::QuietWord);
@@ -3268,10 +3270,7 @@ mod tests {
         .unwrap();
         let stability = restored_station_stability(&save);
         assert_eq!(stability.value, 32.0);
-        assert_eq!(
-            stability.band,
-            crate::instability::StabilityBand::Unstable
-        );
+        assert_eq!(stability.band, crate::instability::StabilityBand::Unstable);
         assert_eq!(stability.station_age, 0.0);
     }
 

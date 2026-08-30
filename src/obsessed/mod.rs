@@ -40,16 +40,16 @@ impl Plugin for ObsessedPlugin {
             "data/station.obsessed.ron",
             "obsessed.ron",
         ))
-            .init_resource::<ObsessedProgress>()
-            .add_systems(OnEnter(AppState::Playing), arm_spawner)
-            .add_systems(
-                Update,
-                (generate_obsessed_visit, handle_obsessed_resolution)
-                    .chain()
-                    .after(threat::PromoteScripts)
-                    .run_if(is_authority)
-                    .run_if(in_state(AppState::Playing)),
-            );
+        .init_resource::<ObsessedProgress>()
+        .add_systems(OnEnter(AppState::Playing), arm_spawner)
+        .add_systems(
+            Update,
+            (generate_obsessed_visit, handle_obsessed_resolution)
+                .chain()
+                .after(threat::PromoteScripts)
+                .run_if(is_authority)
+                .run_if(in_state(AppState::Playing)),
+        );
     }
 }
 
@@ -385,14 +385,18 @@ mod tests {
             resolve(&mut app, &name);
         }
         assert_eq!(
-            app.world().resource::<crate::instability::Instability>().value,
+            app.world()
+                .resource::<crate::instability::Instability>()
+                .value,
             crate::instability::STABILITY_MAX,
             "every visit short of the last one must nudge nothing"
         );
 
         resolve(&mut app, &name);
         assert_eq!(
-            app.world().resource::<crate::instability::Instability>().value,
+            app.world()
+                .resource::<crate::instability::Instability>()
+                .value,
             crate::instability::STABILITY_MAX - OBSESSED_FINALE_INSTABILITY as f32,
             "the transition into the final visit nudges exactly once"
         );
@@ -400,7 +404,9 @@ mod tests {
         resolve(&mut app, &name);
         resolve(&mut app, &name);
         assert_eq!(
-            app.world().resource::<crate::instability::Instability>().value,
+            app.world()
+                .resource::<crate::instability::Instability>()
+                .value,
             crate::instability::STABILITY_MAX - OBSESSED_FINALE_INSTABILITY as f32,
             "repeating the final beat must not nudge again"
         );
