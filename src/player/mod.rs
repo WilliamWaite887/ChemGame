@@ -316,12 +316,20 @@ fn expire_reconnect_grace(
     mut commands: Commands,
     time: Res<Time>,
     mut waiting: Query<(Entity, &Transform, &mut ReconnectGrace)>,
-    mut items: Query<(
-        Entity,
-        &mut Transform,
-        Option<&crate::containers::InventorySlot>,
-        Option<&crate::containers::HeldBy>,
-    )>,
+    mut items: Query<
+        (
+            Entity,
+            &mut Transform,
+            Option<&crate::containers::InventorySlot>,
+            Option<&crate::containers::HeldBy>,
+        ),
+        // A chemist's own body is never one of its held items — `InventorySlot`
+        // and `HeldBy` are both `Option` here (an item can be owned by inventory
+        // slot *or* held-by, or briefly neither), so without this the query would
+        // otherwise match every `Transform` in the world, including the very
+        // waiting chemist `waiting` already borrows `Transform` from above.
+        Without<ReconnectGrace>,
+    >,
 ) {
     for (chemist, transform, mut grace) in &mut waiting {
         grace.0.tick(time.delta());
@@ -1084,6 +1092,20 @@ mod tests {
     use bevy_replicon::test_app::{ServerTestAppExt, TestClientEntity};
 
     use super::*;
+
+    /// Bevy validates query aliasing while a system is initialized — the same
+    /// technique `audio::machine_loop_queries_are_disjoint_at_runtime` already
+    /// uses. This caught a real runtime B0001: `items` had no filter excluding
+    /// the very chemist `waiting` already borrows `Transform` from, so without
+    /// `Without<ReconnectGrace>` the two queries could alias on any waiting
+    /// chemist's own body.
+    #[test]
+    fn reconnect_grace_queries_are_disjoint_at_runtime() {
+        let mut world = World::new();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(expire_reconnect_grace);
+        schedule.initialize(&mut world).unwrap();
+    }
 
     #[test]
     fn collision_ignores_structure_on_the_other_station_level() {

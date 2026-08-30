@@ -106,6 +106,21 @@ impl SaveSlot {
     fn write(&self, path: &Path, text: &str) {
         write_slot_text(path, text);
     }
+
+    /// Removes this slot and everything in it — notebook, career, live lab
+    /// snapshot, and any `.bak` recovery copies — permanently. A no-op if the
+    /// slot was never written to disk (picking "New save" and never playing).
+    ///
+    /// Never touches [`saves_root`]'s own `.integrity-key` or `campaign.ron`:
+    /// both live one level up and are shared across every slot on this
+    /// machine, not owned by this one.
+    pub fn delete(&self) -> std::io::Result<()> {
+        let dir = self.dir();
+        if !dir.exists() {
+            return Ok(());
+        }
+        std::fs::remove_dir_all(dir)
+    }
 }
 
 /// Writes a signed save payload. Shared by slot-local files and the small

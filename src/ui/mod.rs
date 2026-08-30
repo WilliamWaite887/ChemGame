@@ -137,6 +137,15 @@ impl Plugin for UiPlugin {
                 .chain()
                 .run_if(in_state(AppState::Playing)),
         )
+        // Reuses the one scroll idiom above for the main menu's own
+        // Settings/Controls screens — see `ScrollPane`'s doc comment. A
+        // separate registration rather than widening the chain above's
+        // `run_if`: everything else in that chain is Playing-only gameplay
+        // presentation with no business running in the menu at all.
+        .add_systems(
+            Update,
+            scroll_active_pane.run_if(in_state(AppState::MainMenu)),
+        )
         // The bundled bitmap font intentionally has a compact glyph set.
         // Normalize presentation text after every state-specific UI system so
         // authored prose and live readouts cannot render missing-glyph boxes.
@@ -5585,8 +5594,16 @@ fn category_counts(
 /// and only ever shows the book *or* one machine panel at a time, so there is
 /// never more than one scrollable region alive at once for this to be
 /// ambiguous about.
+///
+/// `pub(crate)`: `settings::settings_body`/`controls_body` reuse it for the
+/// same reason a machine panel does — the pre-game Settings/Controls screens
+/// and the pause-reached ones both got dense enough to outgrow a bare window,
+/// and this is the one scroll idiom the UI already has. Still never more than
+/// one alive at once: the pause overlay only exists while `Paused` is true,
+/// which requires roaming to be false, so it can never coexist with a machine
+/// panel's own pane; nothing spawns one during `AppState::MainMenu` otherwise.
 #[derive(Component)]
-struct ScrollPane;
+pub(crate) struct ScrollPane;
 
 /// Mouse wheel scrolls whichever panel is open.
 ///

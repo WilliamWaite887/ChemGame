@@ -18,6 +18,7 @@ use bevy::prelude::*;
 use crate::arc::{AntagId, CampaignChoice, Mode};
 use crate::net::{self, parse_address, parse_literal_address, ConnectFailed, LaunchMode};
 use crate::saves::{self, SaveSlot};
+use crate::settings::{self, Rebinding, Settings};
 use crate::ui::{
     button, button_feedback, heading, label, row, BUTTON_IDLE, ERROR_TEXT, PANEL_BG, SECTION_BG,
     TEXT, TEXT_DIM,
@@ -45,6 +46,17 @@ pub enum MenuScreen {
     Join,
     /// Waiting on `AppState::Connecting` to resolve — see its doc comment.
     Connecting,
+    /// Sensitivity, FOV, volume, display, and a link to `Controls`. Reached
+    /// from `Mode` so a player can tune these before ever opening a save —
+    /// previously the pause menu was the only way in. Mirrors
+    /// `settings::PauseScreen::Settings`; the two screens share their content
+    /// via `settings::settings_body` and only differ in how they're framed
+    /// and left.
+    Settings,
+    /// Key bindings, reached from `Settings` rather than a sibling of it off
+    /// `Mode` directly — `Mode`'s job is the one primary decision, and the
+    /// pause root already has room to spare that this screen does not.
+    Controls,
 }
 
 pub struct MenuPlugin;
@@ -55,6 +67,7 @@ impl Plugin for MenuPlugin {
             .init_resource::<AddressInput>()
             .init_resource::<PendingMode>()
             .init_resource::<ConnectError>()
+            .init_resource::<PendingDelete>()
             .add_systems(OnEnter(AppState::MainMenu), open_menu)
             .add_systems(OnExit(AppState::MainMenu), close_menu)
             .add_systems(OnEnter(AppState::Connecting), open_connecting)
@@ -64,17 +77,26 @@ impl Plugin for MenuPlugin {
             .add_systems(OnEnter(MenuScreen::Campaign), show_campaign_screen)
             .add_systems(OnEnter(MenuScreen::Join), show_join_screen)
             .add_systems(OnEnter(MenuScreen::Connecting), show_connecting_screen)
+            .add_systems(OnEnter(MenuScreen::Settings), show_settings_screen)
+            .add_systems(OnEnter(MenuScreen::Controls), show_controls_screen)
             .add_systems(OnExit(MenuScreen::Mode), clear_screen)
-            .add_systems(OnExit(MenuScreen::Save), clear_screen)
+            // A stale confirmation must not reappear if the player leaves the
+            // save list and comes back — cleared here rather than trusted to
+            // reset itself, the same defensive footing `open_connecting`
+            // already gives `ConnectError`.
+            .add_systems(OnExit(MenuScreen::Save), (clear_screen, reset_pending_delete))
             .add_systems(OnExit(MenuScreen::Campaign), clear_screen)
             .add_systems(OnExit(MenuScreen::Join), clear_screen)
             .add_systems(OnExit(MenuScreen::Connecting), clear_screen)
+            .add_systems(OnExit(MenuScreen::Settings), clear_screen)
+            .add_systems(OnExit(MenuScreen::Controls), clear_screen)
             .add_systems(
                 Update,
                 (
                     type_address.run_if(in_state(MenuScreen::Join)),
                     show_typed_address.run_if(in_state(MenuScreen::Join)),
                     handle_menu_clicks,
+                    refresh_save_screen.run_if(in_state(MenuScreen::Save)),
                     handle_connect_failure.run_if(in_state(AppState::Connecting)),
                     button_feedback,
                 )
@@ -117,6 +139,19 @@ struct AddressInput {
     submitted: bool,
 }
 
+/// The save awaiting a delete confirmation on the Save screen, if any.
+///
+/// Its row is swapped for an inline "delete forever / cancel" card instead of
+/// its usual load button — a destructive action must never share a hitbox
+/// with the everyday one. Plain resource rather than a screen: `MenuScreen`
+/// stays `Save` throughout, only this one row's rendering changes.
+#[derive(Resource, Default)]
+struct PendingDelete(Option<String>);
+
+fn reset_pending_delete(mut pending: ResMut<PendingDelete>) {
+    pending.0 = None;
+}
+
 /// Marks the text node showing what has been typed.
 #[derive(Component)]
 struct AddressField;
@@ -145,6 +180,23 @@ enum MenuAction {
     Cancel,
     Back,
     Quit,
+    OpenSettings,
+    OpenControls,
+    /// Puts every dial and display option back where it shipped. Deliberately
+    /// leaves `bindings` untouched — see [`MenuAction::RestoreBindings`].
+    RestoreDefaults,
+    /// Puts every key on the Controls screen back where it shipped. Split
+    /// from [`MenuAction::RestoreDefaults`] for the same reason
+    /// `settings::PauseAction` splits the two: bindings are a different
+    /// category of preference from the perceptual dials, and neither reset
+    /// should be able to silently undo the other.
+    RestoreBindings,
+    /// Arms the inline "delete forever / cancel" card for one save row.
+    RequestDeleteSave(String),
+    /// Actually removes the save — only ever sent from that card, never
+    /// directly from a load row.
+    ConfirmDeleteSave(String),
+    CancelDeleteSave,
 }
 
 fn open_menu(mut commands: Commands, mut screen: ResMut<NextState<MenuScreen>>) {
@@ -227,6 +279,11 @@ fn show_mode_screen(mut commands: Commands, error: Res<ConnectError>) {
                  instead — you don't need this screen.",
                 MenuAction::ChooseJoin,
             ));
+            panel.spawn(choice(
+                "Settings",
+                "Look sensitivity, field of view, volume, display, and key bindings.",
+                MenuAction::OpenSettings,
+            ));
             panel.spawn(row()).with_children(|row| {
                 row.spawn(button("Quit", MenuAction::Quit));
             });
@@ -234,15 +291,72 @@ fn show_mode_screen(mut commands: Commands, error: Res<ConnectError>) {
     );
 }
 
-fn show_save_screen(mut commands: Commands, pending: Res<PendingMode>) {
-    let subtitle = match pending.0 {
+fn show_settings_screen(mut commands: Commands, settings: Res<Settings>) {
+    menu_shell(
+        &mut commands,
+        MenuRoot,
+        "Settings",
+        settings::SETTINGS_SUBTITLE,
+        |panel| {
+            settings::settings_body(panel, &settings);
+            panel.spawn(choice(
+                "Controls",
+                "What every key does, and how to change it.",
+                MenuAction::OpenControls,
+            ));
+            panel.spawn(choice(
+                "Restore defaults",
+                "Puts every dial and display option on this screen back where it shipped.",
+                MenuAction::RestoreDefaults,
+            ));
+            panel.spawn(choice("Back", "", MenuAction::Back));
+        },
+    );
+}
+
+fn show_controls_screen(
+    mut commands: Commands,
+    settings: Res<Settings>,
+    rebinding: Res<Rebinding>,
+) {
+    menu_shell(
+        &mut commands,
+        MenuRoot,
+        "Controls",
+        settings::CONTROLS_SUBTITLE,
+        |panel| {
+            settings::controls_body(panel, &settings, &rebinding);
+            panel.spawn(choice(
+                "Restore bindings",
+                "Puts every key on this screen back where it shipped.",
+                MenuAction::RestoreBindings,
+            ));
+            panel.spawn(choice("Back", "", MenuAction::Back));
+        },
+    );
+}
+
+fn show_save_screen(
+    mut commands: Commands,
+    pending_mode: Res<PendingMode>,
+    pending_delete: Res<PendingDelete>,
+) {
+    render_save_screen(&mut commands, pending_mode.0, &pending_delete);
+}
+
+/// The Save screen's content, factored out of the `OnEnter` system above so
+/// `handle_menu_clicks` can rebuild it in place after a delete-flow click —
+/// arming or clearing a confirmation is not a `MenuScreen` transition, so
+/// there is no `OnEnter` to re-run.
+fn render_save_screen(commands: &mut Commands, mode: LaunchMode, pending_delete: &PendingDelete) {
+    let subtitle = match mode {
         LaunchMode::HostSteam => "Hosting — the save you pick is the lab you both work.",
         _ => "Playing alone.",
     };
     let slots = saves::list_slots();
 
     menu_shell(
-        &mut commands,
+        commands,
         MenuRoot,
         "Choose a save",
         subtitle,
@@ -257,6 +371,11 @@ fn show_save_screen(mut commands: Commands, pending: Res<PendingMode>) {
                 panel.spawn(label("No saved games yet.", 14.0, TEXT_DIM));
             } else {
                 for slot in slots {
+                    if pending_delete.0.as_deref() == Some(slot.name.as_str()) {
+                        delete_confirmation_card(panel, &slot.name);
+                        continue;
+                    }
+
                     let evacuated = slot.evacuated;
                     let action = MenuAction::LoadSave(slot.name.clone());
                     let mut spawned =
@@ -271,6 +390,12 @@ fn show_save_screen(mut commands: Commands, pending: Res<PendingMode>) {
                     if evacuated {
                         spawned.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
                     }
+                    panel.spawn(row()).with_children(|row| {
+                        row.spawn(button(
+                            "Delete save",
+                            MenuAction::RequestDeleteSave(slot.name.clone()),
+                        ));
+                    });
                 }
             }
 
@@ -279,6 +404,63 @@ fn show_save_screen(mut commands: Commands, pending: Res<PendingMode>) {
             });
         },
     );
+}
+
+/// Rebuilds the Save screen when a delete confirmation is armed or cleared.
+///
+/// Arming/clearing `PendingDelete` is not a `MenuScreen` transition, so there
+/// is no `OnEnter` to redraw the list — the same "rebuild on structure
+/// change" idiom `settings::sync_pause_overlay` already documents for its own
+/// screen. Gated to `MenuScreen::Save` in `MenuPlugin::build`, so this never
+/// runs (and never touches `saves::list_slots()`'s real disk read) anywhere
+/// `PendingDelete` cannot possibly be relevant.
+fn refresh_save_screen(
+    mut commands: Commands,
+    pending_mode: Res<PendingMode>,
+    pending_delete: Res<PendingDelete>,
+    roots: Query<Entity, With<MenuRoot>>,
+) {
+    if !pending_delete.is_changed() {
+        return;
+    }
+    for root in &roots {
+        commands.entity(root).try_despawn();
+    }
+    render_save_screen(&mut commands, pending_mode.0, &pending_delete);
+}
+
+/// Replaces one slot's row while its deletion awaits confirmation. A separate
+/// card rather than a repurposed load button: a destructive action must never
+/// share a hitbox with the everyday one.
+fn delete_confirmation_card(panel: &mut ChildSpawnerCommands, name: &str) {
+    panel
+        .spawn((
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(6),
+                padding: UiRect::all(px(10)),
+                margin: UiRect::vertical(px(3)),
+                border_radius: BorderRadius::all(px(5)),
+                ..default()
+            },
+            BackgroundColor(SECTION_BG),
+        ))
+        .with_children(|card| {
+            card.spawn(label(format!("Delete '{name}'?"), 15.0, ERROR_TEXT));
+            card.spawn(label(
+                "Its notebook, career, and live lab are gone for good.",
+                12.0,
+                TEXT_DIM,
+            ));
+            card.spawn(row()).with_children(|row| {
+                row.spawn(button(
+                    "Delete forever",
+                    MenuAction::ConfirmDeleteSave(name.to_string()),
+                ));
+                row.spawn(button("Cancel", MenuAction::CancelDeleteSave));
+            });
+        });
 }
 
 /// Which side to play a new save from.
@@ -490,7 +672,9 @@ fn handle_menu_clicks(
     mut app_state: ResMut<NextState<AppState>>,
     mut mode: ResMut<LaunchMode>,
     mut pending: ResMut<PendingMode>,
+    mut pending_delete: ResMut<PendingDelete>,
     mut input: ResMut<AddressInput>,
+    mut settings: ResMut<Settings>,
     mut quit: MessageWriter<AppExit>,
 ) {
     // Enter on the join screen is the same action as clicking Connect, so it
@@ -614,15 +798,38 @@ fn handle_menu_clicks(
                 net::abandon_connection_attempt(&mut commands, *mode);
                 app_state.set(AppState::MainMenu);
             }
-            // Back goes up one level, not all the way out: the campaign screen
-            // is reached *through* the save list, so leaving it should land
-            // back on the save list.
+            // Back goes up one level, not all the way out: the campaign
+            // screen is reached *through* the save list and Controls
+            // *through* Settings, so leaving either should land one level up
+            // rather than all the way back at Mode.
             MenuAction::Back => screen.set(match current.get() {
                 MenuScreen::Campaign => MenuScreen::Save,
+                MenuScreen::Controls => MenuScreen::Settings,
                 _ => MenuScreen::Mode,
             }),
             MenuAction::Quit => {
                 quit.write(AppExit::Success);
+            }
+            MenuAction::OpenSettings => screen.set(MenuScreen::Settings),
+            MenuAction::OpenControls => screen.set(MenuScreen::Controls),
+            MenuAction::RestoreDefaults => settings::restore_settings_defaults(&mut settings),
+            MenuAction::RestoreBindings => settings::restore_bindings_defaults(&mut settings),
+            // These three only mutate `PendingDelete`; `refresh_save_screen`
+            // (its own system, gated to `MenuScreen::Save`) is what actually
+            // redraws the list to match — the same split `settings_body`'s
+            // sliders use between the system that decides a value and the one
+            // that patches the screen onto it.
+            MenuAction::RequestDeleteSave(name) => {
+                pending_delete.0 = Some(name);
+            }
+            MenuAction::CancelDeleteSave => {
+                pending_delete.0 = None;
+            }
+            MenuAction::ConfirmDeleteSave(name) => {
+                if let Err(error) = SaveSlot::new(name.clone()).delete() {
+                    warn!("could not delete save '{name}': {error}");
+                }
+                pending_delete.0 = None;
             }
         }
     }
@@ -709,12 +916,24 @@ pub(crate) fn menu_shell(
                     width: px(520),
                     flex_direction: FlexDirection::Column,
                     padding: UiRect::all(px(24)),
-                    row_gap: px(8),
+                    row_gap: px(10),
                     ..default()
                 })
                 .with_children(|panel| {
                     panel.spawn(heading(title));
                     panel.spawn(label(subtitle, 14.0, TEXT_DIM));
+                    // A thin rule between the subtitle and the body, so the
+                    // title block reads as its own group rather than just the
+                    // first two rows of the same list as everything under it.
+                    panel.spawn((
+                        Node {
+                            width: percent(100),
+                            height: px(1),
+                            margin: UiRect::vertical(px(2)),
+                            ..default()
+                        },
+                        BackgroundColor(SECTION_BG),
+                    ));
                     body(panel);
                 });
         });
@@ -782,8 +1001,10 @@ mod tests {
             .init_state::<MenuScreen>()
             .init_resource::<AddressInput>()
             .init_resource::<PendingMode>()
+            .init_resource::<PendingDelete>()
             .init_resource::<LaunchMode>()
             .init_resource::<ConnectError>()
+            .init_resource::<Settings>()
             .add_message::<AppExit>()
             .add_message::<KeyboardInput>()
             .add_message::<ConnectFailed>()
@@ -1080,5 +1301,96 @@ mod tests {
         );
         assert_eq!(hint_for("nonsense"), "not an address yet");
         assert_eq!(hint_for("  "), "for example 192.168.1.40");
+    }
+
+    // -- settings, reached before a save is ever chosen --------------------
+
+    #[test]
+    fn settings_is_reachable_from_the_mode_screen() {
+        let mut app = menu_app();
+        app.world_mut()
+            .resource_mut::<NextState<MenuScreen>>()
+            .set(MenuScreen::Mode);
+        app.update();
+
+        click(&mut app, MenuAction::OpenSettings);
+        assert_eq!(screen(&app), MenuScreen::Settings);
+    }
+
+    #[test]
+    fn controls_is_reachable_from_the_settings_screen() {
+        let mut app = menu_app();
+        click(&mut app, MenuAction::OpenSettings);
+        assert_eq!(screen(&app), MenuScreen::Settings);
+
+        click(&mut app, MenuAction::OpenControls);
+        assert_eq!(screen(&app), MenuScreen::Controls);
+    }
+
+    #[test]
+    fn back_from_controls_returns_to_settings_not_all_the_way_out() {
+        let mut app = menu_app();
+        click(&mut app, MenuAction::OpenSettings);
+        click(&mut app, MenuAction::OpenControls);
+
+        click(&mut app, MenuAction::Back);
+        assert_eq!(screen(&app), MenuScreen::Settings);
+    }
+
+    #[test]
+    fn back_from_settings_returns_to_mode() {
+        let mut app = menu_app();
+        click(&mut app, MenuAction::OpenSettings);
+
+        click(&mut app, MenuAction::Back);
+        assert_eq!(screen(&app), MenuScreen::Mode);
+    }
+
+    #[test]
+    fn restoring_defaults_and_restoring_bindings_leave_each_other_untouched() {
+        let mut app = menu_app();
+        app.world_mut().resource_mut::<Settings>().fov_degrees = 90.0;
+        app.world_mut().resource_mut::<Settings>().bindings.forward = KeyCode::ArrowUp;
+
+        click(&mut app, MenuAction::RestoreDefaults);
+        let settings = app.world().resource::<Settings>();
+        assert_eq!(settings.fov_degrees, Settings::default().fov_degrees);
+        assert_eq!(
+            settings.bindings.forward,
+            KeyCode::ArrowUp,
+            "restoring the dials must not touch bindings"
+        );
+
+        click(&mut app, MenuAction::RestoreBindings);
+        assert_eq!(
+            app.world().resource::<Settings>().bindings.forward,
+            Settings::default().bindings.forward
+        );
+    }
+
+    // -- deleting a save -----------------------------------------------------
+    //
+    // Deliberately never exercises `MenuAction::ConfirmDeleteSave`: that arm
+    // calls `SaveSlot::delete()` against the real `saves_root()`, exactly the
+    // disk-touching trap `menu_app`'s own doc comment above says this harness
+    // stays clear of. Only the pure `PendingDelete` state transitions are
+    // covered here.
+
+    #[test]
+    fn requesting_a_delete_arms_the_confirmation() {
+        let mut app = menu_app();
+        click(&mut app, MenuAction::RequestDeleteSave("Chemist".into()));
+        assert_eq!(
+            app.world().resource::<PendingDelete>().0.as_deref(),
+            Some("Chemist")
+        );
+    }
+
+    #[test]
+    fn cancelling_a_delete_request_clears_it() {
+        let mut app = menu_app();
+        click(&mut app, MenuAction::RequestDeleteSave("Chemist".into()));
+        click(&mut app, MenuAction::CancelDeleteSave);
+        assert_eq!(app.world().resource::<PendingDelete>().0, None);
     }
 }

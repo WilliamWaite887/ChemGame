@@ -306,7 +306,8 @@ fn panel_input(
     cursor: Single<&mut CursorOptions>,
     settings: Res<crate::settings::Settings>,
     mut paused: ResMut<crate::settings::Paused>,
-    screen: Res<crate::settings::PauseScreen>,
+    mut screen: ResMut<crate::settings::PauseScreen>,
+    rebinding: Res<crate::settings::Rebinding>,
     finished: Option<Res<crate::ending::FinishedArc>>,
     mut released: ResMut<CursorReleased>,
     mut players: Query<(Entity, &mut InteractionMode), With<LocalPlayer>>,
@@ -321,8 +322,17 @@ fn panel_input(
     // should run underneath it — a keypress meant to close the menu must not
     // also toggle the book behind it.
     if paused.0 {
-        if escape && !blocks_escape {
-            paused.0 = false;
+        // A single Escape steps back one screen, matching what the on-screen
+        // "Back" button already does on Settings/Controls — it used to close
+        // the whole overlay outright from any sub-screen instead. Suppressed
+        // while a binding row is armed: that Escape belongs to
+        // `settings::capture_rebind_key` alone, cancelling the capture, and
+        // must not *also* step the pause screen back in the same frame.
+        if escape && !blocks_escape && !rebinding.is_armed() {
+            match crate::settings::escape_steps_pause_screen_back_to(*screen) {
+                Some(next) => *screen = next,
+                None => paused.0 = false,
+            }
         }
         free_the_cursor(cursor, true);
         return;

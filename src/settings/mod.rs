@@ -24,18 +24,22 @@
 //! walks forward is a property of the person playing, not of the career they
 //! happen to have open.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use bevy::input::keyboard::KeyboardInput;
+use bevy::input::ButtonState;
 use bevy::prelude::*;
+use bevy::window::{MonitorSelection, PrimaryWindow, WindowMode, WindowResolution};
 use serde::{Deserialize, Serialize};
 
 use crate::menu::{choice, menu_shell};
 use crate::net::LaunchMode;
-use crate::ui::{button_feedback, label, SECTION_BG, TEXT, TEXT_DIM};
+use crate::saves;
+use crate::ui::{
+    button, button_feedback, label, row, ScrollPane, Selected, BUTTON_ACTIVE, BUTTON_IDLE,
+    SECTION_BG, TEXT, TEXT_DIM,
+};
 use crate::AppState;
-
-/// Where the settings file lives — beside `saves/`, not inside a slot.
-const SETTINGS_FILE: &str = "saves/settings.ron";
 
 pub struct SettingsPlugin;
 
@@ -44,27 +48,45 @@ impl Plugin for SettingsPlugin {
         app.insert_resource(Settings::load())
             .init_resource::<Paused>()
             .init_resource::<PauseScreen>()
+            .init_resource::<Rebinding>()
             .add_systems(
                 Update,
                 (
                     // Ordered: the clock has to follow whatever the click
                     // handler just did to `Paused`, and the overlay has to
                     // follow both or it lags a frame behind the state it is
-                    // drawing.
-                    handle_pause_clicks,
+                    // drawing. Everything below that has no business
+                    // touching `Paused`/the clock/the overlay at all — the
+                    // sliders, the binding capture, and the display buttons
+                    // — is left ungated by `AppState::Playing` individually
+                    // so it also runs pre-game, on the main menu's own
+                    // Settings/Controls screens; only the outer `run_if`
+                    // below decides *whether this whole chain runs at all*.
+                    handle_pause_clicks.run_if(in_state(AppState::Playing)),
+                    disarm_rebind_off_screen,
+                    handle_binding_clicks,
+                    capture_rebind_key,
                     drag_sliders,
-                    apply_pause_to_the_clock,
-                    sync_pause_overlay,
+                    handle_display_clicks,
+                    apply_pause_to_the_clock.run_if(in_state(AppState::Playing)),
+                    sync_pause_overlay.run_if(in_state(AppState::Playing)),
                     // After the rebuild, so a dial drawn this frame is filled
                     // in this frame rather than sitting empty until the next
                     // time the value happens to move.
                     sync_sliders,
+                    sync_binding_rows,
+                    sync_display_buttons,
                     apply_fov,
+                    apply_display_settings,
                     persist_settings,
-                    button_feedback,
+                    // The main menu's own screens get this from `MenuPlugin`,
+                    // which runs it generically over every `Button` regardless
+                    // of which plugin spawned it — registering it again here
+                    // for `MainMenu` would just run the same system twice.
+                    button_feedback.run_if(in_state(AppState::Playing)),
                 )
                     .chain()
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(in_state(AppState::Playing).or_else(in_state(AppState::MainMenu))),
             )
             // Leaving the lab has to clear this, or quitting to the menu while
             // paused would leave the next session frozen with no overlay on
@@ -149,7 +171,7 @@ struct PauseRoot;
 ///
 /// A field on [`Paused`]'s neighbour rather than a `States`, because it only
 /// ever exists while the overlay does and nothing outside this module cares.
-#[derive(Resource, Default, PartialEq, Eq, Clone, Copy)]
+#[derive(Resource, Default, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PauseScreen {
     #[default]
     Root,
@@ -162,6 +184,19 @@ pub enum PauseScreen {
     Ending,
 }
 
+/// Where a single Escape press lands, one level up from `screen` — mirroring
+/// what the on-screen "Back" button already does on Settings/Controls, rather
+/// than the whole overlay closing outright from any sub-screen the way it used
+/// to. `None` means Escape should close the overlay entirely instead (`Root`
+/// already does; `Ending` is dismissed the same way since there is nowhere
+/// under it to step back to).
+pub(crate) fn escape_steps_pause_screen_back_to(screen: PauseScreen) -> Option<PauseScreen> {
+    match screen {
+        PauseScreen::Settings | PauseScreen::Controls => Some(PauseScreen::Root),
+        PauseScreen::Root | PauseScreen::Ending => None,
+    }
+}
+
 #[derive(Component, Clone, Copy)]
 pub enum PauseAction {
     Resume,
@@ -172,8 +207,15 @@ pub enum PauseAction {
     /// and `crate::net::close_session_transport` hangs up the socket.
     QuitToMenu,
     QuitToDesktop,
-    /// Puts every dial back where it shipped.
+    /// Puts every dial and display option back where it shipped. Deliberately
+    /// leaves `bindings` untouched — see [`PauseAction::RestoreBindings`].
     RestoreDefaults,
+    /// Puts every key on the Controls screen back where it shipped. Split from
+    /// [`PauseAction::RestoreDefaults`] because bindings are a different
+    /// category of preference (muscle memory/accessibility) from the
+    /// perceptual dials, and now that both are independently reachable,
+    /// neither should be able to silently reset the other.
+    RestoreBindings,
 }
 
 /// Draws and tears down the overlay to match [`Paused`].
@@ -181,11 +223,13 @@ pub enum PauseAction {
 /// One system rather than `OnEnter`/`OnExit` because `Paused` is a resource,
 /// not a state — and rebuilding on a signature change is the same shape
 /// `ui::sync_panel` already uses for machine panels.
+#[allow(clippy::too_many_arguments)]
 fn sync_pause_overlay(
     mut commands: Commands,
     paused: Res<Paused>,
     mut screen: ResMut<PauseScreen>,
     settings: Res<Settings>,
+    rebinding: Res<Rebinding>,
     mode: Option<Res<LaunchMode>>,
     ending: Res<crate::ending::FinishedArc>,
     roots: Query<Entity, With<PauseRoot>>,
@@ -221,7 +265,7 @@ fn sync_pause_overlay(
     match *screen {
         PauseScreen::Root => draw_root(&mut commands, co_op),
         PauseScreen::Settings => draw_settings(&mut commands, &settings),
-        PauseScreen::Controls => draw_controls(&mut commands, &settings),
+        PauseScreen::Controls => draw_controls(&mut commands, &settings, &rebinding),
         PauseScreen::Ending => match ending.showing() {
             Some(ending) => crate::ending::draw(
                 &mut commands,
@@ -353,20 +397,121 @@ struct SliderReadout(Knob);
 
 const SLIDER_TRACK_HEIGHT: f32 = 18.0;
 
+/// How the window is displayed. A small owned enum rather than
+/// `bevy::window::WindowMode` itself, so `Settings`'s serialized shape stays
+/// decoupled from window-internals types (`MonitorSelection`,
+/// `VideoModeSelection`) — the same reason every other `Settings` field is a
+/// plain domain value rather than a bevy type. Doubles as its own button
+/// component, the same way [`Knob`] doubles as a slider identifier.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DisplayMode {
+    #[default]
+    Windowed,
+    Fullscreen,
+}
+
+impl DisplayMode {
+    fn label(self) -> &'static str {
+        match self {
+            DisplayMode::Windowed => "Windowed",
+            DisplayMode::Fullscreen => "Fullscreen",
+        }
+    }
+
+    /// Mapped at apply time only — see the type's own doc comment for why
+    /// `Settings` never stores this directly. `BorderlessFullscreen` over
+    /// exclusive `Fullscreen`: it needs no display-mode switch, so alt-tabbing
+    /// out of the game does not do the thing exclusive fullscreen is known
+    /// for on Windows.
+    fn to_window_mode(self) -> WindowMode {
+        match self {
+            DisplayMode::Windowed => WindowMode::Windowed,
+            DisplayMode::Fullscreen => WindowMode::BorderlessFullscreen(MonitorSelection::Current),
+        }
+    }
+}
+
+/// A resolution preset button. Not `(u32, u32)` directly — a bare tuple can't
+/// implement `Component` under Rust's orphan rules.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+struct ResolutionChoice(u32, u32);
+
+/// The only resolutions offered on screen. There is no dropdown or free-form
+/// numeric entry widget anywhere in this UI — every discrete choice here is a
+/// button row, same as the dispense-amount buttons in `ui::dispenser_body`.
+const RESOLUTION_PRESETS: [(u32, u32); 4] = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)];
+
+/// Shared by both ways of reaching Settings — the pause-reached screen and the
+/// main menu's own — so the copy on the two can't drift apart.
+pub(crate) const SETTINGS_SUBTITLE: &str =
+    "Drag a dial, or click anywhere along it. Kept beside your saves, shared by every career.";
+
+/// The content of the Settings screen, shared by both callers. Spawns no
+/// action buttons of its own: each caller owns its `menu_shell` call, its root
+/// marker, and its own trailing choices, in its own action enum — the same
+/// split `choice`/`menu_shell` already draw between what is shared and what
+/// is screen-specific.
+pub(crate) fn settings_body(panel: &mut ChildSpawnerCommands, settings: &Settings) {
+    panel
+        .spawn((
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                max_height: vh(60),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+            ScrollPosition::default(),
+            ScrollPane,
+        ))
+        .with_children(|pane| {
+            for knob in [Knob::Sensitivity, Knob::Fov, Knob::Volume] {
+                slider_row(pane, knob, settings);
+            }
+            display_section(pane, settings);
+        });
+}
+
+/// "Windowed"/"Fullscreen" and the resolution presets. A section of
+/// [`settings_body`] rather than a screen of its own — there is little enough
+/// here that a whole extra screen and Back click would cost more than it buys.
+fn display_section(panel: &mut ChildSpawnerCommands, settings: &Settings) {
+    panel.spawn((
+        label("Display", 14.0, TEXT),
+        Node {
+            margin: UiRect::top(px(10)),
+            ..default()
+        },
+    ));
+    panel.spawn(row()).with_children(|row| {
+        for mode in [DisplayMode::Windowed, DisplayMode::Fullscreen] {
+            let mut entity = row.spawn(button(mode.label(), mode));
+            if mode == settings.display_mode {
+                entity.insert((Selected, BackgroundColor(crate::ui::BUTTON_ACTIVE)));
+            }
+        }
+    });
+    panel.spawn(row()).with_children(|row| {
+        for (w, h) in RESOLUTION_PRESETS {
+            let mut entity = row.spawn(button(format!("{w}x{h}"), ResolutionChoice(w, h)));
+            if (w, h) == settings.resolution {
+                entity.insert((Selected, BackgroundColor(crate::ui::BUTTON_ACTIVE)));
+            }
+        }
+    });
+}
+
 fn draw_settings(commands: &mut Commands, settings: &Settings) {
     menu_shell(
         commands,
         (PauseRoot, crate::until_we_leave_the_lab()),
         "Settings",
-        "Drag a dial, or click anywhere along it. Kept in saves/settings.ron, \
-         shared by every career.",
+        SETTINGS_SUBTITLE,
         |panel| {
-            for knob in [Knob::Sensitivity, Knob::Fov, Knob::Volume] {
-                slider_row(panel, knob, settings);
-            }
+            settings_body(panel, settings);
             panel.spawn(choice(
                 "Restore defaults",
-                "Puts every dial on this screen back where it shipped.",
+                "Puts every dial and display option on this screen back where it shipped.",
                 PauseAction::RestoreDefaults,
             ));
             panel.spawn(choice("Back", "", PauseAction::Back));
@@ -518,24 +663,100 @@ fn sync_sliders(
     }
 }
 
-fn draw_controls(commands: &mut Commands, settings: &Settings) {
+/// Shared by both ways of reaching Controls.
+pub(crate) const CONTROLS_SUBTITLE: &str = "Click a key, then press whatever should do it. Esc cancels.";
+
+/// The content of the Controls screen, shared by both callers — see
+/// [`settings_body`]'s doc comment for the split this follows.
+pub(crate) fn controls_body(
+    panel: &mut ChildSpawnerCommands,
+    settings: &Settings,
+    rebinding: &Rebinding,
+) {
+    panel
+        .spawn((
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                max_height: vh(60),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+            ScrollPosition::default(),
+            ScrollPane,
+        ))
+        .with_children(|pane| {
+            for slot in BindingSlot::ALL {
+                binding_row(pane, slot, settings, rebinding);
+            }
+            pane.spawn(label(
+                "Mouse                 look\nEsc                   pause, or step back out of a panel",
+                15.0,
+                TEXT_DIM,
+            ));
+        });
+}
+
+/// One rebindable row: the action's name, and a button showing its key (or
+/// "press a key..." while armed) that arms/disarms [`Rebinding`] on click.
+fn binding_row(
+    panel: &mut ChildSpawnerCommands,
+    slot: BindingSlot,
+    settings: &Settings,
+    rebinding: &Rebinding,
+) {
+    let armed = rebinding.0 == Some(slot);
+    let text = if armed {
+        "press a key...".to_string()
+    } else {
+        key_label(slot.read(&settings.bindings))
+    };
+    panel
+        .spawn(Node {
+            width: percent(100),
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Center,
+            margin: UiRect::vertical(px(2)),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn(label(slot.title(), 14.0, TEXT));
+            let mut key_button = row.spawn((
+                Button,
+                Node {
+                    padding: UiRect::axes(px(11), px(6)),
+                    min_width: px(130),
+                    justify_content: JustifyContent::Center,
+                    border_radius: BorderRadius::all(px(4)),
+                    ..default()
+                },
+                BackgroundColor(if armed { BUTTON_ACTIVE } else { BUTTON_IDLE }),
+                BindingButton(slot),
+                children![(
+                    Text::new(text),
+                    TextFont::from_font_size(14.0),
+                    TextColor(TEXT),
+                    BindingReadout(slot),
+                )],
+            ));
+            if armed {
+                key_button.insert(Selected);
+            }
+        });
+}
+
+fn draw_controls(commands: &mut Commands, settings: &Settings, rebinding: &Rebinding) {
     menu_shell(
         commands,
         (PauseRoot, crate::until_we_leave_the_lab()),
         "Controls",
-        "Rebinding is not wired to a key-capture yet — this is what they do today.",
+        CONTROLS_SUBTITLE,
         |panel| {
-            for (name, key) in settings.bindings.described() {
-                panel.spawn(label(
-                    format!("{name:<22}{}", key_label(key)),
-                    15.0,
-                    TEXT_DIM,
-                ));
-            }
-            panel.spawn(label(
-                "Mouse                 look\nEsc                   pause, or step back out of a panel",
-                15.0,
-                TEXT_DIM,
+            controls_body(panel, settings, rebinding);
+            panel.spawn(choice(
+                "Restore bindings",
+                "Puts every key on this screen back where it shipped.",
+                PauseAction::RestoreBindings,
             ));
             panel.spawn(choice("Back", "", PauseAction::Back));
         },
@@ -572,17 +793,27 @@ fn handle_pause_clicks(
             PauseAction::QuitToDesktop => {
                 quit.write(AppExit::Success);
             }
-            PauseAction::RestoreDefaults => {
-                let bindings = settings.bindings;
-                *settings = Settings {
-                    // Rebinding is not reachable from this screen, so
-                    // "restore defaults" here must not silently undo it.
-                    bindings,
-                    ..Settings::default()
-                };
-            }
+            PauseAction::RestoreDefaults => restore_settings_defaults(&mut settings),
+            PauseAction::RestoreBindings => restore_bindings_defaults(&mut settings),
         }
     }
+}
+
+/// Puts every dial and display option back where it shipped, preserving
+/// `bindings` — shared by the pause-reached and menu-reached Settings
+/// screens' "Restore defaults" buttons so the two can't drift.
+pub(crate) fn restore_settings_defaults(settings: &mut Settings) {
+    let bindings = settings.bindings;
+    *settings = Settings {
+        bindings,
+        ..Settings::default()
+    };
+}
+
+/// Puts every key back where it shipped — shared by the pause-reached and
+/// menu-reached Controls screens' "Restore bindings" buttons.
+pub(crate) fn restore_bindings_defaults(settings: &mut Settings) {
+    settings.bindings = Bindings::default();
 }
 
 /// Keeps the chemist's camera on the dialled-in field of view.
@@ -610,6 +841,104 @@ fn apply_fov(
     }
 }
 
+/// Writes straight to [`Settings`] on click — the same shape [`drag_sliders`]
+/// already uses for the continuous dials, minus the drag: a display button is
+/// a discrete choice, not a range. Skips the write entirely when the clicked
+/// option already matches, so re-clicking the current mode/resolution does not
+/// mark `Settings` changed for nothing (which would otherwise trigger an
+/// unnecessary disk write via `persist_settings`).
+fn handle_display_clicks(
+    modes: Query<(&Interaction, &DisplayMode), Changed<Interaction>>,
+    resolutions: Query<(&Interaction, &ResolutionChoice), Changed<Interaction>>,
+    mut settings: ResMut<Settings>,
+) {
+    for (interaction, mode) in &modes {
+        if *interaction == Interaction::Pressed && settings.display_mode != *mode {
+            settings.display_mode = *mode;
+        }
+    }
+    for (interaction, resolution) in &resolutions {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let wanted = (resolution.0, resolution.1);
+        if settings.resolution != wanted {
+            settings.resolution = wanted;
+        }
+    }
+}
+
+/// Patches each display button's background/[`Selected`] in place — the same
+/// "rebuild on structure, patch on value" split [`sync_binding_rows`] and the
+/// sliders already follow, so "Restore defaults" or a hand-edited settings
+/// file redraws these buttons exactly the same way a click does.
+fn sync_display_buttons(
+    settings: Res<Settings>,
+    mut commands: Commands,
+    mut modes: Query<
+        (Entity, &DisplayMode, Has<Selected>, &mut BackgroundColor),
+        Without<ResolutionChoice>,
+    >,
+    mut resolutions: Query<
+        (Entity, &ResolutionChoice, Has<Selected>, &mut BackgroundColor),
+        Without<DisplayMode>,
+    >,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    for (entity, mode, was_selected, mut background) in &mut modes {
+        let selected = *mode == settings.display_mode;
+        if selected != was_selected {
+            let mut entity = commands.entity(entity);
+            if selected {
+                entity.insert(Selected);
+            } else {
+                entity.remove::<Selected>();
+            }
+        }
+        background.0 = if selected { BUTTON_ACTIVE } else { BUTTON_IDLE };
+    }
+    for (entity, resolution, was_selected, mut background) in &mut resolutions {
+        let selected = (resolution.0, resolution.1) == settings.resolution;
+        if selected != was_selected {
+            let mut entity = commands.entity(entity);
+            if selected {
+                entity.insert(Selected);
+            } else {
+                entity.remove::<Selected>();
+            }
+        }
+        background.0 = if selected { BUTTON_ACTIVE } else { BUTTON_IDLE };
+    }
+}
+
+/// Keeps the real window on the dialled-in display mode and resolution.
+///
+/// Mirrors [`apply_fov`]'s exact shape: bail unless [`Settings`] actually
+/// changed, then write only whichever of `mode`/`resolution` differs, so
+/// neither wakes the window backend every frame it happens to run.
+fn apply_display_settings(settings: Res<Settings>, mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+    if !settings.is_changed() {
+        return;
+    }
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+    let wanted_mode = settings.display_mode.to_window_mode();
+    if window.mode != wanted_mode {
+        window.mode = wanted_mode;
+    }
+    let wanted_resolution = settings.resolution;
+    let current_resolution = (
+        window.resolution.physical_width(),
+        window.resolution.physical_height(),
+    );
+    if current_resolution != wanted_resolution {
+        window.resolution = WindowResolution::new(wanted_resolution.0, wanted_resolution.1);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The settings themselves
 // ---------------------------------------------------------------------------
@@ -621,10 +950,15 @@ pub struct Settings {
     /// `player`.
     pub mouse_sensitivity: f32,
     pub fov_degrees: f32,
-    /// Nothing reads this yet. Carried anyway so the audio pass has somewhere
-    /// to land that is already persisted and already on a screen.
+    /// Applied to `GlobalVolume` by `audio::sync_master_volume`.
     pub master_volume: f32,
     pub bindings: Bindings,
+    pub display_mode: DisplayMode,
+    /// Physical pixels. Only one of [`RESOLUTION_PRESETS`] is ever offered on
+    /// screen, but nothing here enforces that a hand-edited file stays on the
+    /// list — an off-list value still applies, just with no preset shown as
+    /// selected.
+    pub resolution: (u32, u32),
 }
 
 impl Default for Settings {
@@ -639,13 +973,24 @@ impl Default for Settings {
             fov_degrees: 45.0,
             master_volume: 0.8,
             bindings: Bindings::default(),
+            // Both exactly `WindowResolution`/`WindowMode`'s own bare Bevy
+            // defaults, so adding this setting changes nothing for a player
+            // who never opens the screen.
+            display_mode: DisplayMode::default(),
+            resolution: (1280, 720),
         }
     }
 }
 
 impl Settings {
+    /// Beside the real save slots, not a literal relative path — so a
+    /// packaged build's settings land under `%LOCALAPPDATA%\ChemGame\saves`
+    /// alongside the saves themselves (and under Steam Cloud) instead of
+    /// wherever the executable's current directory happens to be. In a dev or
+    /// test build this resolves to the same relative `saves/` it always has,
+    /// since `saves::saves_root()`'s own fallback is that literal path.
     fn path() -> PathBuf {
-        Path::new(SETTINGS_FILE).to_path_buf()
+        saves::saves_root().join("settings.ron")
     }
 
     /// Reads the file, falling back to defaults for anything missing.
@@ -735,21 +1080,250 @@ impl Default for Bindings {
 }
 
 impl Bindings {
-    /// Every binding with the name the controls screen shows it under, in the
-    /// order it reads best — movement, then the hands, then the book.
-    pub fn described(&self) -> [(&'static str, KeyCode); 10] {
-        [
-            ("Walk forward", self.forward),
-            ("Walk back", self.back),
-            ("Step left", self.left),
-            ("Step right", self.right),
-            ("Sprint", self.sprint),
-            ("Use / hand over", self.interact),
-            ("Drop what you hold", self.drop),
-            ("Drink or swallow", self.drink),
-            ("Apply held item", self.apply),
-            ("Reference book", self.book),
-        ]
+    /// Assigns `key` to `slot`, swapping rather than refusing if another slot
+    /// already holds it. With 11 bindings, forcing every key to stay distinct
+    /// avoids two actions silently firing off one keypress, and a swap lets a
+    /// player freely reorganise a whole layout (WASD for the arrow keys, say)
+    /// without hitting a "that key is already taken" dead end.
+    fn rebind(&mut self, slot: BindingSlot, key: KeyCode) {
+        let previous = slot.read(self);
+        if let Some(displaced) = BindingSlot::ALL
+            .into_iter()
+            .find(|&other| other != slot && other.read(self) == key)
+        {
+            displaced.write(self, previous);
+        }
+        slot.write(self, key);
+    }
+}
+
+/// Which field of [`Bindings`] a row on the Controls screen drives. A small
+/// enum mirroring [`Knob`]'s own shape: the click system matches on it to read
+/// and rebind, the row builder matches on it to title and format.
+///
+/// Replaces the former `Bindings::described()`, which returned only 10 of the
+/// 11 fields — `label` (see `crate::labels`) had no row on the Controls
+/// screen and so no way for a player to ever discover it existed.
+/// [`BindingSlot::ALL`] enumerating every field fixes that by construction.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+enum BindingSlot {
+    Forward,
+    Back,
+    Left,
+    Right,
+    Sprint,
+    Interact,
+    Drop,
+    Drink,
+    Apply,
+    Book,
+    Label,
+}
+
+impl BindingSlot {
+    /// In the order the Controls screen reads best — movement, then the
+    /// hands, then the book.
+    const ALL: [BindingSlot; 11] = [
+        BindingSlot::Forward,
+        BindingSlot::Back,
+        BindingSlot::Left,
+        BindingSlot::Right,
+        BindingSlot::Sprint,
+        BindingSlot::Interact,
+        BindingSlot::Drop,
+        BindingSlot::Drink,
+        BindingSlot::Apply,
+        BindingSlot::Book,
+        BindingSlot::Label,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            BindingSlot::Forward => "Walk forward",
+            BindingSlot::Back => "Walk back",
+            BindingSlot::Left => "Step left",
+            BindingSlot::Right => "Step right",
+            BindingSlot::Sprint => "Sprint",
+            BindingSlot::Interact => "Use / hand over",
+            BindingSlot::Drop => "Drop what you hold",
+            BindingSlot::Drink => "Drink or swallow",
+            BindingSlot::Apply => "Apply held item",
+            BindingSlot::Book => "Reference book",
+            BindingSlot::Label => "Write on what you hold",
+        }
+    }
+
+    fn read(self, bindings: &Bindings) -> KeyCode {
+        match self {
+            BindingSlot::Forward => bindings.forward,
+            BindingSlot::Back => bindings.back,
+            BindingSlot::Left => bindings.left,
+            BindingSlot::Right => bindings.right,
+            BindingSlot::Sprint => bindings.sprint,
+            BindingSlot::Interact => bindings.interact,
+            BindingSlot::Drop => bindings.drop,
+            BindingSlot::Drink => bindings.drink,
+            BindingSlot::Apply => bindings.apply,
+            BindingSlot::Book => bindings.book,
+            BindingSlot::Label => bindings.label,
+        }
+    }
+
+    fn write(self, bindings: &mut Bindings, key: KeyCode) {
+        match self {
+            BindingSlot::Forward => bindings.forward = key,
+            BindingSlot::Back => bindings.back = key,
+            BindingSlot::Left => bindings.left = key,
+            BindingSlot::Right => bindings.right = key,
+            BindingSlot::Sprint => bindings.sprint = key,
+            BindingSlot::Interact => bindings.interact = key,
+            BindingSlot::Drop => bindings.drop = key,
+            BindingSlot::Drink => bindings.drink = key,
+            BindingSlot::Apply => bindings.apply = key,
+            BindingSlot::Book => bindings.book = key,
+            BindingSlot::Label => bindings.label = key,
+        }
+    }
+}
+
+/// Which binding row is waiting for a keypress, if any.
+///
+/// Local UI state on the same footing as [`Paused`]/[`PauseScreen`] — never
+/// replicated, never saved.
+#[derive(Resource, Default)]
+pub(crate) struct Rebinding(Option<BindingSlot>);
+
+impl Rebinding {
+    pub(crate) fn is_armed(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+/// A clickable row on the Controls screen. Hand-rolled rather than
+/// `ui::button()`: the row's text has to be patched in place while armed (see
+/// [`BindingReadout`]) — the same reason `SliderReadout` is a separate marker
+/// from `Slider` rather than reusing `ui::button()`'s opaque bundle, which
+/// gives no handle to the text child underneath.
+#[derive(Component, Clone, Copy)]
+struct BindingButton(BindingSlot);
+
+/// The text child of one [`BindingButton`], patched in place by
+/// [`sync_binding_rows`].
+#[derive(Component, Clone, Copy)]
+struct BindingReadout(BindingSlot);
+
+/// Arms, re-arms, or cancels a binding capture on click.
+///
+/// Clicking the already-armed row cancels it (a toggle); clicking a different
+/// row replaces whichever was armed — no explicit cancel-first step required.
+fn handle_binding_clicks(
+    buttons: Query<(&Interaction, &BindingButton), Changed<Interaction>>,
+    mut rebinding: ResMut<Rebinding>,
+) {
+    for (interaction, button) in &buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        rebinding.0 = if rebinding.0 == Some(button.0) {
+            None
+        } else {
+            Some(button.0)
+        };
+    }
+}
+
+/// Consumes the next key press while a row is armed.
+///
+/// The same raw-`KeyboardInput`-reading idiom `menu::type_address` already
+/// uses for the join screen's text field: arm on click, consume the next
+/// relevant key event, disarm.
+fn capture_rebind_key(
+    mut keys: MessageReader<KeyboardInput>,
+    mut rebinding: ResMut<Rebinding>,
+    mut settings: ResMut<Settings>,
+) {
+    let Some(slot) = rebinding.0 else {
+        // Still has to drain the reader, or an unarmed frame leaves keys
+        // queued up to be misread as the *next* arming's capture.
+        keys.clear();
+        return;
+    };
+    for key in keys.read() {
+        if key.state != ButtonState::Pressed {
+            continue;
+        }
+        // A key already held down before the row was clicked must not be
+        // silently captured — only a fresh press counts.
+        if key.repeat {
+            continue;
+        }
+        if key.key_code == KeyCode::Escape {
+            rebinding.0 = None;
+            return;
+        }
+        // Modifiers are valid targets, not excluded — `Sprint`'s own default
+        // is `ShiftLeft`.
+        settings.bindings.rebind(slot, key.key_code);
+        rebinding.0 = None;
+        return;
+    }
+}
+
+/// Clears an armed row the instant Controls is no longer the screen showing,
+/// regardless of *how* it was left — Back, Escape, quitting to the main menu.
+/// Centralised here so every navigation path gets this for free instead of
+/// each one having to remember to clear it.
+fn disarm_rebind_off_screen(
+    menu_screen: Res<State<crate::menu::MenuScreen>>,
+    pause_screen: Res<PauseScreen>,
+    mut rebinding: ResMut<Rebinding>,
+) {
+    if !rebinding.is_armed() {
+        return;
+    }
+    let showing_controls = *menu_screen.get() == crate::menu::MenuScreen::Controls
+        || *pause_screen == PauseScreen::Controls;
+    if !showing_controls {
+        rebinding.0 = None;
+    }
+}
+
+/// Patches each row's background, [`Selected`] and text in place — the same
+/// "rebuild on structure, patch on value" split [`sync_pause_overlay`] already
+/// documents for its own sliders, so an armed row's own button is never
+/// despawned out from under a keypress it is waiting on.
+fn sync_binding_rows(
+    settings: Res<Settings>,
+    rebinding: Res<Rebinding>,
+    mut commands: Commands,
+    mut buttons: Query<(Entity, &BindingButton, Has<Selected>, &mut BackgroundColor)>,
+    mut readouts: Query<(&BindingReadout, &mut Text)>,
+) {
+    if !settings.is_changed() && !rebinding.is_changed() {
+        return;
+    }
+    for (entity, button, was_selected, mut background) in &mut buttons {
+        let armed = rebinding.0 == Some(button.0);
+        if armed != was_selected {
+            let mut entity = commands.entity(entity);
+            if armed {
+                entity.insert(Selected);
+            } else {
+                entity.remove::<Selected>();
+            }
+        }
+        background.0 = if armed { BUTTON_ACTIVE } else { BUTTON_IDLE };
+    }
+    for (readout, mut text) in &mut readouts {
+        let armed = rebinding.0 == Some(readout.0);
+        let wanted = if armed {
+            "press a key...".to_string()
+        } else {
+            key_label(readout.0.read(&settings.bindings))
+        };
+        if text.0 != wanted {
+            text.0 = wanted;
+        }
     }
 }
 
@@ -779,6 +1353,8 @@ fn key_label(key: KeyCode) -> String {
 
 #[cfg(test)]
 mod tests {
+    use bevy::input::keyboard::{Key, NativeKey};
+
     use super::*;
 
     #[test]
@@ -878,11 +1454,298 @@ mod tests {
     }
 
     #[test]
-    fn every_binding_is_named_on_the_controls_screen() {
-        // A binding with no row is one the player cannot discover exists.
-        let described = Bindings::default().described();
-        assert_eq!(described.len(), 10);
-        assert!(described.iter().all(|(name, _)| !name.is_empty()));
+    fn every_binding_including_the_label_key_has_a_slot() {
+        // `label` had no row on the old `described()`-based Controls screen —
+        // no way for a player to ever discover it existed. `BindingSlot::ALL`
+        // enumerating every field of `Bindings` fixes that by construction.
+        assert_eq!(BindingSlot::ALL.len(), 11);
+        assert!(BindingSlot::ALL.iter().all(|slot| !slot.title().is_empty()));
+        assert!(
+            BindingSlot::ALL.contains(&BindingSlot::Label),
+            "the label-writing key must be discoverable on the Controls screen"
+        );
+    }
+
+    #[test]
+    fn rebind_swaps_rather_than_duplicates() {
+        let mut bindings = Bindings::default();
+        // `Forward` is `KeyW`; `Back`'s own key is what we ask `Forward` to
+        // take, so the swap has something to displace.
+        let backs_key = bindings.back;
+        bindings.rebind(BindingSlot::Forward, backs_key);
+
+        assert_eq!(bindings.forward, backs_key);
+        assert_eq!(
+            bindings.back,
+            KeyCode::KeyW,
+            "the displaced slot must receive the other's old key, not go unbound"
+        );
+
+        // No two slots ever share a key after a rebind.
+        for a in BindingSlot::ALL {
+            for b in BindingSlot::ALL {
+                if a != b {
+                    assert_ne!(a.read(&bindings), b.read(&bindings), "{a:?}/{b:?} collide");
+                }
+            }
+        }
+    }
+
+    /// Builds the one `KeyboardInput` field that actually matters to
+    /// [`capture_rebind_key`] — it only ever reads `key_code`/`state`/
+    /// `repeat` — with a throwaway window entity and logical key, the same
+    /// shape `menu`'s own `backspace_deletes_and_the_field_has_a_limit` test
+    /// uses for a non-character key.
+    fn key_press(app: &mut App, key_code: KeyCode, repeat: bool) -> KeyboardInput {
+        let window = app.world_mut().spawn_empty().id();
+        KeyboardInput {
+            key_code,
+            logical_key: Key::Unidentified(NativeKey::Unidentified),
+            state: ButtonState::Pressed,
+            text: None,
+            repeat,
+            window,
+        }
+    }
+
+    #[test]
+    fn escape_cancels_an_armed_rebind_without_writing_anything() {
+        let mut app = App::new();
+        app.add_message::<KeyboardInput>()
+            .init_resource::<Settings>()
+            .insert_resource(Rebinding(Some(BindingSlot::Forward)))
+            .add_systems(Update, capture_rebind_key);
+        let key = key_press(&mut app, KeyCode::Escape, false);
+        app.world_mut().write_message(key);
+        app.update();
+
+        assert!(!app.world().resource::<Rebinding>().is_armed());
+        assert_eq!(
+            app.world().resource::<Settings>().bindings,
+            Bindings::default(),
+            "cancelling must not write anything"
+        );
+    }
+
+    #[test]
+    fn a_repeat_of_an_already_held_key_is_not_captured() {
+        let mut app = App::new();
+        app.add_message::<KeyboardInput>()
+            .init_resource::<Settings>()
+            .insert_resource(Rebinding(Some(BindingSlot::Forward)))
+            .add_systems(Update, capture_rebind_key);
+        let key = key_press(&mut app, KeyCode::KeyP, true);
+        app.world_mut().write_message(key);
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<Rebinding>().0,
+            Some(BindingSlot::Forward),
+            "a key already held before the row was clicked must stay unconsumed"
+        );
+        assert_eq!(
+            app.world().resource::<Settings>().bindings.forward,
+            KeyCode::KeyW
+        );
+    }
+
+    #[test]
+    fn a_fresh_key_press_rebinds_and_disarms() {
+        let mut app = App::new();
+        app.add_message::<KeyboardInput>()
+            .init_resource::<Settings>()
+            .insert_resource(Rebinding(Some(BindingSlot::Forward)))
+            .add_systems(Update, capture_rebind_key);
+        let key = key_press(&mut app, KeyCode::KeyP, false);
+        app.world_mut().write_message(key);
+        app.update();
+
+        assert!(!app.world().resource::<Rebinding>().is_armed());
+        assert_eq!(
+            app.world().resource::<Settings>().bindings.forward,
+            KeyCode::KeyP
+        );
+    }
+
+    #[test]
+    fn leaving_controls_disarms_whatever_was_armed() {
+        // Exercises the pause-screen half; the menu-screen half is the same
+        // check against `crate::menu::MenuScreen` and is covered by
+        // `menu`'s own tests reaching Settings/Controls.
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<crate::menu::MenuScreen>()
+            .insert_resource(PauseScreen::Root)
+            .insert_resource(Rebinding(Some(BindingSlot::Forward)))
+            .add_systems(Update, disarm_rebind_off_screen);
+        app.update();
+
+        assert!(
+            !app.world().resource::<Rebinding>().is_armed(),
+            "leaving Controls for Root must disarm"
+        );
+    }
+
+    #[test]
+    fn staying_on_controls_keeps_the_capture_armed() {
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<crate::menu::MenuScreen>()
+            .insert_resource(PauseScreen::Controls)
+            .insert_resource(Rebinding(Some(BindingSlot::Forward)))
+            .add_systems(Update, disarm_rebind_off_screen);
+        app.update();
+
+        assert!(app.world().resource::<Rebinding>().is_armed());
+    }
+
+    #[test]
+    fn escape_steps_back_from_settings_and_controls_to_root() {
+        assert_eq!(
+            escape_steps_pause_screen_back_to(PauseScreen::Settings),
+            Some(PauseScreen::Root)
+        );
+        assert_eq!(
+            escape_steps_pause_screen_back_to(PauseScreen::Controls),
+            Some(PauseScreen::Root)
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_overlay_entirely_from_root_and_ending() {
+        assert_eq!(escape_steps_pause_screen_back_to(PauseScreen::Root), None);
+        assert_eq!(escape_steps_pause_screen_back_to(PauseScreen::Ending), None);
+    }
+
+    #[test]
+    fn restoring_settings_defaults_leaves_bindings_untouched() {
+        let mut settings = Settings {
+            fov_degrees: 90.0,
+            ..Settings::default()
+        };
+        settings.bindings.forward = KeyCode::ArrowUp;
+
+        restore_settings_defaults(&mut settings);
+
+        assert_eq!(settings.fov_degrees, Settings::default().fov_degrees);
+        assert_eq!(settings.bindings.forward, KeyCode::ArrowUp);
+    }
+
+    #[test]
+    fn restoring_bindings_leaves_everything_else_untouched() {
+        let mut settings = Settings {
+            fov_degrees: 90.0,
+            ..Settings::default()
+        };
+        settings.bindings.forward = KeyCode::ArrowUp;
+
+        restore_bindings_defaults(&mut settings);
+
+        assert_eq!(settings.fov_degrees, 90.0);
+        assert_eq!(settings.bindings.forward, Settings::default().bindings.forward);
+    }
+
+    #[test]
+    fn applying_display_settings_writes_the_dialled_in_mode_and_resolution() {
+        let mut app = App::new();
+        app.insert_resource(Settings {
+            display_mode: DisplayMode::Fullscreen,
+            resolution: (1920, 1080),
+            ..Settings::default()
+        });
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
+        app.add_systems(Update, apply_display_settings);
+        app.update();
+
+        let window = app.world().entity(window).get::<Window>().unwrap();
+        assert_eq!(
+            window.mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+        );
+        assert_eq!(window.resolution.physical_width(), 1920);
+        assert_eq!(window.resolution.physical_height(), 1080);
+    }
+
+    #[test]
+    fn applying_display_settings_leaves_the_window_alone_once_it_matches() {
+        // Same shape `apply_fov` already relies on: a redundant write every
+        // frame would wake the window backend for nothing once the two
+        // already agree — exercised by marking `Settings` changed again with
+        // no value actually different, the same as a slider drag or a
+        // hand-edited file that happens to resolve to the identical number.
+        // `Ref<Window>::is_changed()`, read by a system chained right after
+        // `apply_display_settings`, is the standard way to ask "did the
+        // previous system in this frame actually write to it" without
+        // reaching into raw `ComponentTicks` arithmetic by hand.
+        #[derive(Resource, Default)]
+        struct WasChanged(bool);
+
+        fn observe(mut was_changed: ResMut<WasChanged>, windows: Query<Ref<Window>>) {
+            was_changed.0 = windows.single().is_ok_and(|window| window.is_changed());
+        }
+
+        let mut app = App::new();
+        app.insert_resource(Settings::default())
+            .init_resource::<WasChanged>();
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
+        app.add_systems(Update, (apply_display_settings, observe).chain());
+
+        // First run: `Settings` was just inserted, so it reads as changed
+        // regardless of value — spend that one before the assertion.
+        app.update();
+
+        app.world_mut().resource_mut::<Settings>().set_changed();
+        app.update();
+
+        assert!(
+            !app.world().resource::<WasChanged>().0,
+            "Window already matched Settings, so a same-valued change must not touch it"
+        );
+    }
+
+    #[test]
+    fn fullscreen_maps_to_borderless_fullscreen_on_the_current_monitor() {
+        assert_eq!(
+            DisplayMode::Fullscreen.to_window_mode(),
+            WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+        );
+        assert_eq!(DisplayMode::Windowed.to_window_mode(), WindowMode::Windowed);
+    }
+
+    // Bevy validates query aliasing while a system is initialized — the same
+    // technique `audio::machine_loop_queries_are_disjoint_at_runtime` already
+    // uses, and the one that would have caught the B0001
+    // `sync_display_buttons` shipped with before its `modes` query gained its
+    // own `Without<ResolutionChoice>`: both it and `resolutions` mutate
+    // `BackgroundColor`, and only one side carried a disjointing filter.
+    #[test]
+    fn display_button_queries_are_disjoint_at_runtime() {
+        let mut world = World::new();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(sync_display_buttons);
+        schedule.initialize(&mut world).unwrap();
+    }
+
+    #[test]
+    fn binding_row_queries_are_disjoint_at_runtime() {
+        let mut world = World::new();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(sync_binding_rows);
+        schedule.initialize(&mut world).unwrap();
+    }
+
+    #[test]
+    fn settings_live_beside_the_real_save_slots() {
+        assert_eq!(Settings::path(), saves::saves_root().join("settings.ron"));
+    }
+
+    #[test]
+    fn defaults_ship_at_the_same_window_bevy_would() {
+        assert_eq!(Settings::default().display_mode, DisplayMode::Windowed);
+        assert_eq!(Settings::default().resolution, (1280, 720));
     }
 
     #[test]
