@@ -50,6 +50,9 @@ use crate::showdown::{Assailant, Breach};
 use crate::speech::Speech;
 use crate::AppState;
 
+/// Plain-text co-op debug logging, for handing a session's networking
+/// activity to whoever (or whatever AI) is diagnosing a problem.
+pub mod diagnostics;
 pub mod steam;
 
 /// Explicit revision for replicated Rust types that are not represented by
@@ -496,7 +499,11 @@ impl Plugin for NetPlugin {
         // connection without a word.
         app.init_resource::<LaunchMode>()
             .init_resource::<LocalAccount>()
-            .add_plugins((RepliconPlugins, RepliconRenetPlugins))
+            .add_plugins((
+                RepliconPlugins,
+                RepliconRenetPlugins,
+                diagnostics::NetDiagnosticsPlugin,
+            ))
             .add_client_message::<AccountHello>(Channel::Ordered)
             .add_server_message::<AccountDecision>(Channel::Ordered)
             .add_message::<ConnectFailed>();

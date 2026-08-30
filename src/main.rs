@@ -102,6 +102,15 @@ fn main() {
                     ..default()
                 }),
                 ..default()
+            })
+            // Mirrors every warn!/error! onto the co-op debug log
+            // (net::diagnostics), so a networking bug report carries the
+            // actual failure line, not just "a client disconnected". Has to
+            // be set here, not in `NetPlugin`: by the time any plugin
+            // builds, `LogPlugin`'s global subscriber already exists.
+            .set(bevy::log::LogPlugin {
+                custom_layer: net::diagnostics::tracing_layer,
+                ..default()
             }),
     )
     .init_state::<AppState>();

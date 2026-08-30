@@ -128,6 +128,13 @@ impl Plugin for KnowledgePlugin {
 #[derive(Message, Serialize, Deserialize)]
 pub struct UnlockAllRequested;
 
+/// Debug-only, deliberately: the message itself carries no per-client check
+/// (there is nothing to check — it is a career-wide playtest shortcut, not a
+/// purchase), so the guard has to sit here rather than on the button that
+/// sends it. Without this a release build's host still ran the handler for
+/// *any* connected guest who sent the message, button or no button — free,
+/// permanent, career-wide unlock of every recipe for the price of one click.
+#[cfg(debug_assertions)]
 fn handle_unlock_all(
     db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<UnlockAllRequested>>,
@@ -135,6 +142,15 @@ fn handle_unlock_all(
 ) {
     for _ in requests.read() {
         knowledge.unlock_all(&db);
+    }
+}
+
+/// Release build's half of the guard above: drains the message queue so a
+/// guest's request does not pile up unread, but never touches `Knowledge`.
+#[cfg(not(debug_assertions))]
+fn handle_unlock_all(mut requests: MessageReader<FromClient<UnlockAllRequested>>) {
+    for _ in requests.read() {
+        warn!("ignoring UnlockAllRequested: playtest-only, disabled in this build");
     }
 }
 

@@ -1862,6 +1862,13 @@ fn dispenser_body(
                                 13.0,
                                 TEXT,
                             ));
+                            // Debug-only: the handler on the other end
+                            // (`knowledge::handle_unlock_all`) is compiled
+                            // out of release builds too, so this would be a
+                            // button that silently did nothing in a shipped
+                            // game rather than the playtest shortcut it looks
+                            // like.
+                            #[cfg(debug_assertions)]
                             if knowledge.known_count() < db.reactions.len() {
                                 section.spawn(button(
                                     "PLAYTEST: unlock all chemistry",

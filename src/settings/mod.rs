@@ -664,7 +664,8 @@ fn sync_sliders(
 }
 
 /// Shared by both ways of reaching Controls.
-pub(crate) const CONTROLS_SUBTITLE: &str = "Click a key, then press whatever should do it. Esc cancels.";
+pub(crate) const CONTROLS_SUBTITLE: &str =
+    "Click a key, then press whatever should do it. Esc cancels.";
 
 /// The content of the Controls screen, shared by both callers — see
 /// [`settings_body`]'s doc comment for the split this follows.
@@ -880,7 +881,12 @@ fn sync_display_buttons(
         Without<ResolutionChoice>,
     >,
     mut resolutions: Query<
-        (Entity, &ResolutionChoice, Has<Selected>, &mut BackgroundColor),
+        (
+            Entity,
+            &ResolutionChoice,
+            Has<Selected>,
+            &mut BackgroundColor,
+        ),
         Without<DisplayMode>,
     >,
 ) {
@@ -918,7 +924,10 @@ fn sync_display_buttons(
 /// Mirrors [`apply_fov`]'s exact shape: bail unless [`Settings`] actually
 /// changed, then write only whichever of `mode`/`resolution` differs, so
 /// neither wakes the window backend every frame it happens to run.
-fn apply_display_settings(settings: Res<Settings>, mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+fn apply_display_settings(
+    settings: Res<Settings>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+) {
     if !settings.is_changed() {
         return;
     }
@@ -1642,7 +1651,10 @@ mod tests {
         restore_bindings_defaults(&mut settings);
 
         assert_eq!(settings.fov_degrees, 90.0);
-        assert_eq!(settings.bindings.forward, Settings::default().bindings.forward);
+        assert_eq!(
+            settings.bindings.forward,
+            Settings::default().bindings.forward
+        );
     }
 
     #[test]
