@@ -26,11 +26,14 @@ use crate::hazards::{HazardFelt, HazardKind};
 use crate::player::{ChemistBody, ChemistSurface, LocalPlayer, PlayerCamera};
 use crate::AppState;
 
+mod chem_particles;
+
 pub struct FxPlugin;
 
 impl Plugin for FxPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ScreenFx>()
+        app.add_plugins(chem_particles::ChemicalParticlePlugin)
+            .init_resource::<ScreenFx>()
             .add_systems(OnEnter(AppState::Playing), build_overlay)
             .add_systems(
                 Update,
