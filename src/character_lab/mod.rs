@@ -718,6 +718,10 @@ mod tests {
             ("engineering", "EngineeringBeltBuckle"),
             ("cargo", "CargoHarnessBuckle"),
             ("service", "ServiceApron"),
+            ("corwin", "Corwin.Signet"),
+            ("cult_watching", "CultWatching.FaceCloth"),
+            ("cult_silent", "CultSilent.MaskJaw"),
+            ("cult_blooded", "CultBlooded.MaskJaw"),
         ];
         for (department, role_marker) in variants {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -757,6 +761,12 @@ mod tests {
                 !nodes.contains(&"VisorGeometry"),
                 "{department} brought the removed visor back"
             );
+            for obsolete_block_mask in ["CultSilent.AngularMask", "CultBlooded.ReinforcedMask"] {
+                assert!(
+                    !nodes.contains(&obsolete_block_mask),
+                    "{department} brought obsolete block mask {obsolete_block_mask} back"
+                );
+            }
         }
     }
 

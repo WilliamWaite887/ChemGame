@@ -1669,6 +1669,12 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         min_z: 15.0,
         max_z: 28.6,
     };
+    const CHAPEL: Bounds = Bounds {
+        min_x: -38.7,
+        max_x: -23.5,
+        min_z: 44.0,
+        max_z: 51.0,
+    };
     // Bridge's two halves. The wall that used to divide them is gone, so
     // these are names for the north and south ends of one 42 x 19 m floor
     // rather than separate rooms -- and the mission-control pass's third
@@ -2847,6 +2853,114 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             depth: 0.42,
         },
         Placement {
+            kind: "chapel.plinth",
+            origin: "-1900 970 0",
+            angles: "0 -90 0",
+            mount: Mount::Floor,
+            room: CHAPEL,
+            width: 1.35,
+            depth: 0.65,
+        },
+        Placement {
+            kind: "chapel.runner",
+            origin: "-1900 1072 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: CHAPEL,
+            width: 1.20,
+            depth: 3.40,
+        },
+        Placement {
+            kind: "chapel.runner",
+            origin: "-1900 1208 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: CHAPEL,
+            width: 1.20,
+            depth: 3.40,
+        },
+        Placement {
+            kind: "chapel.pew",
+            origin: "-1975 1088 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: CHAPEL,
+            width: 1.45,
+            depth: 0.55,
+        },
+        Placement {
+            kind: "chapel.pew",
+            origin: "-1825 1088 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: CHAPEL,
+            width: 1.45,
+            depth: 0.55,
+        },
+        Placement {
+            kind: "chapel.pew",
+            origin: "-1975 1152 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: CHAPEL,
+            width: 1.45,
+            depth: 0.55,
+        },
+        Placement {
+            kind: "chapel.pew",
+            origin: "-1825 1152 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: CHAPEL,
+            width: 1.45,
+            depth: 0.55,
+        },
+        Placement {
+            kind: "chapel.pew",
+            origin: "-1975 1216 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: CHAPEL,
+            width: 1.45,
+            depth: 0.55,
+        },
+        Placement {
+            kind: "chapel.pew",
+            origin: "-1825 1216 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: CHAPEL,
+            width: 1.45,
+            depth: 0.55,
+        },
+        Placement {
+            kind: "chapel.pew",
+            origin: "-1975 1280 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: CHAPEL,
+            width: 1.45,
+            depth: 0.55,
+        },
+        Placement {
+            kind: "chapel.pew",
+            origin: "-1825 1280 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: CHAPEL,
+            width: 1.45,
+            depth: 0.55,
+        },
+        Placement {
+            kind: "chapel.memorial_panel",
+            origin: "-1900 942 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: CHAPEL,
+            width: 1.60,
+            depth: 0.12,
+        },
+        Placement {
             kind: "svc.bench",
             origin: "-900 1350 0",
             angles: "0 0 0",
@@ -2949,6 +3063,9 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
                 | "sec.brig_bunk"
                 | "sec.interrogation_table"
                 | "svc.bench"
+                | "chapel.pew"
+                | "chapel.plinth"
+                | "chapel.runner"
         );
         if placement.mount == Mount::Floor && !collider_backed_walkable_fixture {
             let walkable: Vec<Bounds> = map
@@ -3419,8 +3536,8 @@ fn every_station_kit_glb_parses_with_bevys_gltf_parser() {
         });
     }
     assert_eq!(
-        count, 110,
-        "the station starter kit should contain 110 GLBs"
+        count, 122,
+        "the station starter kit should contain 122 GLBs, including the Chapel and Cult set"
     );
 }
 

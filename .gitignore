@@ -63,3 +63,5 @@ tools/export-book-icons.mjs
 tools/gen_item_textures.py
 tools/gen_produce_textures.py
 assets/textures/items/README.md
+assets/3dassets/station_starter_kit/generate_cult_modules.py
+.gitignore

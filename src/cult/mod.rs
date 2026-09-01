@@ -9,6 +9,7 @@
 //! flash through the same authority-owned world-effect path as every other
 //! spill. Nothing here reaches into hazards or special-cases the ritual ask.
 
+use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use chem_sim::Units;
@@ -48,6 +49,7 @@ impl Plugin for CultPlugin {
         ))
         .init_resource::<CultProgress>()
         .init_resource::<CultIncidentsRestored>()
+        .add_systems(Startup, load_cult_visuals)
         .add_systems(
             OnEnter(AppState::Playing),
             (arm_spawner, reset_incident_restore),
@@ -197,6 +199,7 @@ pub struct CultStageDef {
 #[derive(Clone, Debug, Deserialize)]
 pub struct CultIncidentDef {
     pub name: String,
+    pub visual: CultVisualId,
     pub clue: String,
     /// Semantic marker authored into the map. Keeping this in content rather
     /// than deriving it from the incident index makes saves stable when the
@@ -212,6 +215,7 @@ pub struct CultIncidentDef {
 #[derive(Clone, Debug, Deserialize)]
 pub struct CultGuardDef {
     pub name: String,
+    pub tier: CultistTier,
     /// Aired the moment the guard is placed — the same discovery convention
     /// as [`CultIncidentDef::clue`].
     pub clue: String,
@@ -228,10 +232,88 @@ pub struct RitualAnchor {
     amount: Units,
 }
 
+/// Stable authored visual identity shared over the network. The GLB handle is
+/// local presentation; this small enum is the replicated gameplay contract.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CultVisual(pub CultVisualId);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CultVisualId {
+    OuterAltarWard,
+    WetChalkSigil,
+    WhisperingResidue,
+    BleedingOfferingBowl,
+    ScorchedInvocation,
+    AirlessCandle,
+    RiftSealScar,
+    FinaleFocus,
+}
+
+impl CultVisualId {
+    const ALL: [Self; 8] = [
+        Self::OuterAltarWard,
+        Self::WetChalkSigil,
+        Self::WhisperingResidue,
+        Self::BleedingOfferingBowl,
+        Self::ScorchedInvocation,
+        Self::AirlessCandle,
+        Self::RiftSealScar,
+        Self::FinaleFocus,
+    ];
+
+    fn path(self) -> &'static str {
+        match self {
+            Self::OuterAltarWard => "3dassets/station_starter_kit/glb/cult_outer_altar_ward.glb",
+            Self::WetChalkSigil => "3dassets/station_starter_kit/glb/cult_wet_chalk_sigil.glb",
+            Self::WhisperingResidue => {
+                "3dassets/station_starter_kit/glb/cult_whispering_residue.glb"
+            }
+            Self::BleedingOfferingBowl => {
+                "3dassets/station_starter_kit/glb/cult_bleeding_offering_bowl.glb"
+            }
+            Self::ScorchedInvocation => {
+                "3dassets/station_starter_kit/glb/cult_scorched_invocation.glb"
+            }
+            Self::AirlessCandle => "3dassets/station_starter_kit/glb/cult_airless_candle.glb",
+            Self::RiftSealScar => "3dassets/station_starter_kit/glb/cult_rift_seal_scar.glb",
+            Self::FinaleFocus => "3dassets/station_starter_kit/glb/cult_finale_focus.glb",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Resource)]
+struct CultVisualAssets {
+    scenes: [Handle<WorldAsset>; 8],
+}
+
+fn load_cult_visuals(mut commands: Commands, assets: Res<AssetServer>) {
+    commands.insert_resource(CultVisualAssets {
+        scenes: CultVisualId::ALL
+            .map(|visual| assets.load(GltfAssetLabel::Scene(0).from_asset(visual.path()))),
+    });
+}
+
 /// The exposed outer focus. Interacting starts the Chapel confrontation; it
 /// is not itself the seal target, so the first interaction consumes nothing.
 #[derive(Component, Serialize, Deserialize)]
 pub struct RitualFocus;
+
+/// Marks the recurring visitor whose ordinary Cargo model has the campaign's
+/// deliberately subtle Corwin variation.
+#[derive(Component, Serialize, Deserialize)]
+pub struct CultHerald;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CultistTier {
+    #[default]
+    Watching,
+    Silent,
+    Blooded,
+}
 
 /// A hostile cult member. Reuses `showdown::Pursuit` wholesale for
 /// movement/combat — there is nothing cult-specific to duplicate there, so
@@ -243,6 +325,8 @@ pub struct Cultist {
     /// collapse — a base guard defending Chapel/Quiet Room. `None` marks
     /// finale muscle, scored directly by `showdown::resolve_showdown` instead.
     pub wards_incident: Option<usize>,
+    #[serde(default)]
+    pub tier: CultistTier,
 }
 
 /// This thread's authored script, once loaded.
@@ -309,6 +393,7 @@ fn restore_incidents(
                     treatment: incident.treatment.clone(),
                     amount: Units::whole(incident.amount as i32),
                 },
+                CultVisual(incident.visual),
                 transform,
                 Visibility::default(),
                 Interactable::new(format!("{} — examine and treat", incident.name)),
@@ -384,6 +469,7 @@ fn restore_incidents(
                     treatment: script.altar.treatment.clone(),
                     amount: Units::whole(script.altar.amount as i32),
                 },
+                CultVisual(script.altar.visual),
                 transform,
                 Visibility::default(),
                 Interactable::new(format!("{} — examine and treat", script.altar.name)),
@@ -564,7 +650,9 @@ fn generate_cult_visit(
             plea: stage.pretext.clone(),
         },
     );
-    commands.entity(visitor).insert(crate::orders::HostileOrder);
+    commands
+        .entity(visitor)
+        .insert((crate::orders::HostileOrder, CultHerald));
     progress.offered_stage = Some(progress.next_stage);
 
     radio.push(
@@ -707,6 +795,7 @@ fn spawn_stage_consequences(
                 treatment: incident.treatment.clone(),
                 amount: Units::whole(incident.amount as i32),
             },
+            CultVisual(incident.visual),
             transform,
             Visibility::default(),
             Interactable::new(format!("{} — examine and treat", incident.name)),
@@ -899,6 +988,7 @@ fn place_guard(
         transform,
         Cultist {
             wards_incident: Some(ward_index),
+            tier: guard.tier,
         },
         Ambient::new(0.0),
     ));
@@ -1028,6 +1118,7 @@ fn expose_finale(
     };
     commands.spawn((
         RitualFocus,
+        CultVisual(CultVisualId::FinaleFocus),
         transform,
         Visibility::default(),
         Interactable::new("Break the exposed outer ward — this starts the final rite"),
@@ -1189,33 +1280,25 @@ fn incident_units(
         .sum()
 }
 
-/// A deliberately simple, hostile-looking presentation; the clue and the
-/// chemistry are the puzzle, not hunting for a tiny prop in the room.
+/// Attach the authored GLB as a child so the replicated gameplay transform
+/// stays authoritative and presentation can later pulse/dissolve locally.
 fn dress_incidents(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    new: Query<Entity, Added<RitualAnchor>>,
-    new_focus: Query<Entity, Added<RitualFocus>>,
+    assets: Option<Res<CultVisualAssets>>,
+    new: Query<(Entity, &CultVisual), Added<CultVisual>>,
 ) {
-    for entity in &new {
-        commands.entity(entity).insert((
-            Mesh3d(meshes.add(Cylinder::new(0.42, 0.08))),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgb(0.28, 0.03, 0.07),
-                emissive: LinearRgba::new(0.5, 0.02, 0.08, 1.0),
-                ..default()
-            })),
-        ));
-    }
-    for entity in &new_focus {
-        commands.entity(entity).insert((
-            Mesh3d(meshes.add(Cylinder::new(0.62, 0.14))),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgb(0.42, 0.02, 0.06),
-                emissive: LinearRgba::new(1.4, 0.03, 0.10, 1.0),
-                ..default()
-            })),
+    let Some(assets) = assets else { return };
+    for (entity, visual) in &new {
+        commands.entity(entity).insert_if_new(Visibility::default());
+        commands.spawn((
+            Name::new(format!("Cult {:?} visual", visual.0)),
+            WorldAssetRoot(assets.scenes[visual.0.index()].clone()),
+            // Crisis spots use the same one-metre body-origin convention as
+            // guards. Props are authored from the floor, so only their visual
+            // child moves down; the replicated interaction root stays put.
+            Transform::from_xyz(0.0, -1.0, 0.0),
+            Visibility::default(),
+            ChildOf(entity),
         ));
     }
 }
@@ -1306,6 +1389,53 @@ mod tests {
         );
         assert!(data.reagents.id_of(&script.altar.treatment).is_some());
         assert!(script.altar.amount > 0);
+
+        let expected_visuals = [
+            CultVisualId::WetChalkSigil,
+            CultVisualId::WhisperingResidue,
+            CultVisualId::BleedingOfferingBowl,
+            CultVisualId::ScorchedInvocation,
+            CultVisualId::AirlessCandle,
+            CultVisualId::RiftSealScar,
+        ];
+        let authored_visuals: Vec<_> = script
+            .stages
+            .iter()
+            .flat_map(|stage| stage.incidents.iter().map(|incident| incident.visual))
+            .collect();
+        assert_eq!(authored_visuals, expected_visuals);
+        assert_eq!(script.altar.visual, CultVisualId::OuterAltarWard);
+        assert_eq!(
+            script
+                .stages
+                .iter()
+                .map(|stage| stage.guard.tier)
+                .collect::<Vec<_>>(),
+            [
+                CultistTier::Watching,
+                CultistTier::Silent,
+                CultistTier::Blooded
+            ]
+        );
+    }
+
+    #[test]
+    fn every_cult_visual_is_a_valid_game_asset() {
+        for visual in CultVisualId::ALL {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets")
+                .join(visual.path());
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
+            let gltf = bevy::gltf::gltf::Gltf::from_slice(&bytes)
+                .unwrap_or_else(|error| panic!("{} is not valid glTF: {error}", path.display()));
+            assert_eq!(
+                gltf.scenes().count(),
+                1,
+                "{} needs one runtime scene",
+                path.display()
+            );
+        }
     }
 
     #[test]
@@ -1787,6 +1917,7 @@ mod tests {
             .spawn((
                 Cultist {
                     wards_incident: Some(index),
+                    tier: CultistTier::Watching,
                 },
                 Body::default(),
             ))
@@ -1819,6 +1950,7 @@ mod tests {
             .spawn((
                 Cultist {
                     wards_incident: Some(3),
+                    tier: CultistTier::Watching,
                 },
                 Transform::from_xyz(0.0, 0.0, 0.0),
             ))
@@ -1828,6 +1960,7 @@ mod tests {
             .spawn((
                 Cultist {
                     wards_incident: Some(6),
+                    tier: CultistTier::Silent,
                 },
                 Transform::from_xyz(0.0, 0.0, GUARD_AGGRO_RADIUS * 10.0),
             ))
@@ -1861,6 +1994,7 @@ mod tests {
             .spawn((
                 Cultist {
                     wards_incident: Some(3),
+                    tier: CultistTier::Watching,
                 },
                 Transform::from_xyz(0.0, 0.0, 0.0),
             ))

@@ -1647,6 +1647,25 @@ const DECORATION_KINDS: &[(&str, &str)] = &[
         "bot.irrigation_panel",
         "3dassets/station_starter_kit/glb/decor_bot_irrigation_panel.glb",
     ),
+    // Campaign-neutral Chapel foundation. Cult manifestations are spawned by
+    // `cult` as overlays; these four remain ordinary station scenery in every
+    // campaign so the room never advertises which antagonist was selected.
+    (
+        "chapel.pew",
+        "3dassets/station_starter_kit/glb/decor_chapel_pew.glb",
+    ),
+    (
+        "chapel.memorial_panel",
+        "3dassets/station_starter_kit/glb/decor_chapel_memorial_panel.glb",
+    ),
+    (
+        "chapel.runner",
+        "3dassets/station_starter_kit/glb/decor_chapel_runner.glb",
+    ),
+    (
+        "chapel.plinth",
+        "3dassets/station_starter_kit/glb/decor_chapel_plinth.glb",
+    ),
 ];
 
 #[derive(Resource)]
@@ -1787,6 +1806,8 @@ const FLOOR_COLLIDER_ENVELOPES: &[(&str, Vec3)] = &[
     // their_rooms` already carves out for Security's own walk-up fixtures.
     // Real top is 0.47 m, nowhere near `SET_DOWN_REACH` (1.4 m), so no bump.
     ("svc.bench", Vec3::new(0.21, 0.47, 0.21)),
+    ("chapel.pew", Vec3::new(0.725, 0.90, 0.275)),
+    ("chapel.plinth", Vec3::new(0.675, 1.05, 0.325)),
 ];
 
 fn floor_collider_envelope(kind: &str) -> Option<Vec3> {

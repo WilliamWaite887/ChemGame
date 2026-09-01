@@ -20,6 +20,7 @@
             incidents: [
                 (
                     name: "Wet chalk sigil",
+                    visual: WetChalkSigil,
                     clue: "MAINT: A dark chalk mark has appeared at the primary maintenance junction. It smears into a caustic film; ordinary water only spreads it.",
                     spot: "cult.wet_chalk_sigil",
                     treatment: "space_cleaner",
@@ -27,6 +28,7 @@
                 ),
                 (
                     name: "Whispering residue",
+                    visual: WhisperingResidue,
                     clue: "QUARANTINE: A sweet chemical residue is making the sealed room swim. Someone needs to neutralise it.",
                     spot: "cult.whispering_residue",
                     treatment: "dylovene",
@@ -35,6 +37,7 @@
             ],
             guard: (
                 name: "A Watching Acolyte",
+                tier: Watching,
                 clue: "CHAPEL: Someone is standing very still in the nave, facing the wall. They do not turn around when the door opens.",
                 spot: "cult.base_guard_1",
             ),
@@ -50,6 +53,7 @@
             incidents: [
                 (
                     name: "Bleeding offering bowl",
+                    visual: BleedingOfferingBowl,
                     clue: "CHAPEL: A bowl that was not there a moment ago is overflowing at the altar with something too dark to be blood. It pulses when anyone gets close.",
                     spot: "cult.bleeding_offering_bowl",
                     treatment: "bicaridine",
@@ -57,6 +61,7 @@
                 ),
                 (
                     name: "Scorched invocation",
+                    visual: ScorchedInvocation,
                     clue: "CHAPEL: The rear floor is blistering hot. The markings are burning outward through the grout toward the public nave.",
                     spot: "cult.scorched_invocation",
                     treatment: "kelotane",
@@ -65,6 +70,7 @@
             ],
             guard: (
                 name: "A Silent Acolyte",
+                tier: Silent,
                 clue: "QUIET ROOM: A masked figure has taken up post beside the inner door. It has not moved in an hour, and it is watching the corridor.",
                 spot: "cult.base_guard_2",
             ),
@@ -79,6 +85,7 @@
             incidents: [
                 (
                     name: "Airless candle",
+                    visual: AirlessCandle,
                     clue: "ATMOS/UTILITY: A candle is burning beside the life-support plant without consuming air. Every breath near it feels thin and shallow.",
                     spot: "cult.airless_candle",
                     treatment: "inaprovaline",
@@ -86,6 +93,7 @@
                 ),
                 (
                     name: "Rift-seal scar",
+                    visual: RiftSealScar,
                     clue: "REAR MAINT: The wall is sweating pale vapour around a cut in reality. The fumes sting the lungs and won't settle.",
                     spot: "cult.rift_seal_scar",
                     treatment: "dylovene",
@@ -94,6 +102,7 @@
             ],
             guard: (
                 name: "A Blooded Acolyte",
+                tier: Blooded,
                 clue: "CHAPEL: The one guarding the altar now carries something sharp. It stopped pretending to be a parishioner some time ago.",
                 spot: "cult.base_guard_3",
             ),
@@ -101,7 +110,8 @@
     ],
     altar: (
         name: "The Chapel altar",
-        clue: "CHAPEL: Something has been rebuilt back where the nave meets the wall. It was not there when the station shipped, and it is already stained.",
+        visual: OuterAltarWard,
+        clue: "CHAPEL: The memorial plinth has been wrapped in dark bindings and wet chalk. Fluid is climbing its front against gravity.",
         spot: "cult.altar",
         treatment: "space_cleaner",
         amount: 15,

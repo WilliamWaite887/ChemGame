@@ -465,11 +465,11 @@ fn spawn_z() -> f32 {
     crate::lab::ROOMS[crate::lab::LOBBY].max_z + 2.5
 }
 
-/// The five department variants share geometry, skeleton and animations; only
-/// their authored palette and small role accessories differ.
+/// Department and Cult campaign variants share one geometry/rig/animation
+/// contract; only authored palette and small role accessories differ.
 #[derive(Resource)]
 pub struct CrewAssets {
-    models: [CrewModelAsset; 5],
+    models: [CrewModelAsset; 9],
 }
 
 impl CrewAssets {
@@ -483,8 +483,23 @@ impl CrewAssets {
         }
     }
 
-    fn model_for(&self, role: &str) -> (usize, &CrewModelAsset) {
-        let theme = Self::theme_for(role);
+    fn model_for(
+        &self,
+        role: &str,
+        herald: bool,
+        cultist: Option<&crate::cult::Cultist>,
+    ) -> (usize, &CrewModelAsset) {
+        let theme = if herald {
+            5
+        } else if let Some(cultist) = cultist {
+            match cultist.tier {
+                crate::cult::CultistTier::Watching => 6,
+                crate::cult::CultistTier::Silent => 7,
+                crate::cult::CultistTier::Blooded => 8,
+            }
+        } else {
+            Self::theme_for(role)
+        };
         (theme, &self.models[theme])
     }
 }
@@ -554,6 +569,26 @@ fn load_crew_assets(
             ),
             load_crew_model(
                 "3dassets/glb/first_char_service.glb",
+                &asset_server,
+                &mut animation_graphs,
+            ),
+            load_crew_model(
+                "3dassets/glb/first_char_corwin.glb",
+                &asset_server,
+                &mut animation_graphs,
+            ),
+            load_crew_model(
+                "3dassets/glb/first_char_cult_watching.glb",
+                &asset_server,
+                &mut animation_graphs,
+            ),
+            load_crew_model(
+                "3dassets/glb/first_char_cult_silent.glb",
+                &asset_server,
+                &mut animation_graphs,
+            ),
+            load_crew_model(
+                "3dassets/glb/first_char_cult_blooded.glb",
                 &asset_server,
                 &mut animation_graphs,
             ),
@@ -655,20 +690,29 @@ fn assign_crew_appearances(
 fn dress_crew(
     mut commands: Commands,
     assets: Option<Res<CrewAssets>>,
-    crew: Query<(Entity, &CrewMember, &CrewAppearance), Added<CrewAppearance>>,
+    crew: Query<
+        (
+            Entity,
+            &CrewMember,
+            &CrewAppearance,
+            Has<crate::cult::CultHerald>,
+            Option<&crate::cult::Cultist>,
+        ),
+        Added<CrewAppearance>,
+    >,
 ) {
     let Some(assets) = assets else {
         return;
     };
 
-    for (entity, member, appearance) in &crew {
+    for (entity, member, appearance, herald, cultist) in &crew {
         // A replicated crew member arrives without `Visibility` — presentation
         // is not on the wire — and a parent with none cannot propagate it to
         // the children below. Mirrors `player::dress_chemists`'s identical fix.
         commands.entity(entity).insert_if_new(Visibility::default());
 
         let body_rest = Vec3::ZERO;
-        let (theme, model) = assets.model_for(&member.role);
+        let (theme, model) = assets.model_for(&member.role, herald, cultist);
         commands.spawn((
             Name::new(format!("{} department character", member.role)),
             WorldAssetRoot(model.scene.clone()),

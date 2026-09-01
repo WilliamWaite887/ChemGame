@@ -265,6 +265,7 @@ fn arm_showdown(
                     commands.entity(entity).insert((
                         crate::cult::Cultist {
                             wards_incident: None,
+                            tier: crate::cult::CultistTier::Blooded,
                         },
                         Replicated,
                     ));
@@ -287,6 +288,7 @@ fn arm_showdown(
             };
             commands.spawn((
                 Breach,
+                crate::cult::CultVisual(crate::cult::CultVisualId::FinaleFocus),
                 transform,
                 Visibility::default(),
                 Interactable::new(format!(
@@ -314,6 +316,7 @@ fn arm_showdown(
                     guard_transform,
                     crate::cult::Cultist {
                         wards_incident: None,
+                        tier: crate::cult::CultistTier::Blooded,
                     },
                     Pursuit::new(
                         script.showdown.speed,
@@ -798,7 +801,7 @@ fn dress_breach(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    new: Query<Entity, Added<Breach>>,
+    new: Query<Entity, (Added<Breach>, Without<crate::cult::CultVisual>)>,
 ) {
     for entity in &new {
         commands.entity(entity).insert((
