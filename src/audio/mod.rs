@@ -163,6 +163,12 @@ pub enum Sfx {
     RadiationPulse,
     Cough,
     AssaultImpact,
+    /// Filing or amending a personal request.
+    PaperScribble,
+    /// A Cargo parcel entering or completing its handoff.
+    CargoBeep,
+    /// Security checking a retained sample against its record.
+    EvidenceScan,
     /// Someone in the room said something (`crate::speech`). A tick, not a
     /// voice: its whole job is to make a chemist facing a machine panel look
     /// up, which the bubble on its own cannot do.
@@ -189,6 +195,9 @@ impl Sfx {
             | Sfx::GlassClunk
             | Sfx::Cough => 0.55,
             Sfx::AnalyzerFinish
+            | Sfx::PaperScribble
+            | Sfx::CargoBeep
+            | Sfx::EvidenceScan
             | Sfx::PackagePop
             | Sfx::RadioMedical
             | Sfx::RadioSecurity
@@ -324,6 +333,9 @@ struct SfxAssets {
     radiation_pulses: [Handle<AudioSource>; 12],
     coughs: [Handle<AudioSource>; 4],
     assault_impact: Handle<AudioSource>,
+    paper_scribble: Handle<AudioSource>,
+    cargo_beep: Handle<AudioSource>,
+    evidence_scan: Handle<AudioSource>,
     agitation_loop: Handle<AudioSource>,
     heater_loop: Handle<AudioSource>,
     conveyor_loop: Handle<AudioSource>,
@@ -386,6 +398,9 @@ impl SfxAssets {
             // (see `CREDITS.md`). A dedicated sample would be better and is
             // worth doing before launch.
             Sfx::Speak => &self.package_pop,
+            Sfx::PaperScribble => &self.paper_scribble,
+            Sfx::CargoBeep => &self.cargo_beep,
+            Sfx::EvidenceScan => &self.evidence_scan,
         }
         .clone()
     }
@@ -455,6 +470,9 @@ fn load_sfx(mut commands: Commands, assets: Res<AssetServer>) {
             assets.load("sounds/ss14/male_cough_2.ogg"),
         ],
         assault_impact: assets.load("sounds/ss14/soft_thump.ogg"),
+        paper_scribble: assets.load("sounds/starlight/paper_scribble.ogg"),
+        cargo_beep: assets.load("sounds/starlight/cargo_beep.ogg"),
+        evidence_scan: assets.load("sounds/starlight/evidence_scan.ogg"),
         agitation_loop: assets.load("sounds/ss14/bubbles.ogg"),
         heater_loop: assets.load("sounds/ss14/buzz_loop.ogg"),
         // The same loop the heaters use, deliberately: it is the right
@@ -1331,6 +1349,9 @@ mod tests {
         "sounds/ui_refused.ogg",
     ];
 
+    const STARLIGHT_CC0_FILES: [&str; 3] =
+        ["paper_scribble.ogg", "cargo_beep.ogg", "evidence_scan.ogg"];
+
     #[test]
     fn every_registered_sound_path_exists() {
         let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
@@ -1348,6 +1369,26 @@ mod tests {
             assert!(
                 assets.join("sounds/ss14").join(file).is_file(),
                 "missing registered sound sounds/ss14/{file}"
+            );
+        }
+        for file in STARLIGHT_CC0_FILES {
+            assert!(
+                assets.join("sounds/starlight").join(file).is_file(),
+                "missing registered sound sounds/starlight/{file}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_imported_starlight_sound_has_a_cc0_credit_row() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let credits = fs::read_to_string(root.join("CREDITS.md")).expect("CREDITS.md");
+        for file in STARLIGHT_CC0_FILES {
+            assert!(
+                credits.lines().any(|row| {
+                    row.contains(&format!("`starlight/{file}`")) && row.contains("CC0 1.0")
+                }),
+                "{file} needs an explicit CC0 credit row"
             );
         }
     }

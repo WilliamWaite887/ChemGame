@@ -155,10 +155,19 @@ fn loiter_smuggler(
     crew_posts: Res<CrewPosts>,
     shift: Res<Shift>,
     present: Query<&CrewMember, NotResident>,
+    social: Option<Res<crate::social::SocialState>>,
 ) {
     let (Some(script), Some(spawner)) = (script, spawner.as_mut()) else {
         return;
     };
+    // A selected resident is already visibly present on station between
+    // visits; spawning an outsider-style duplicate would erase that benefit.
+    if social
+        .as_deref()
+        .is_some_and(|social| social.selected(crate::social::ResidentAntagonist::SatoSmuggler))
+    {
+        return;
+    }
     if !shift.accepting_orders {
         return;
     }
@@ -228,11 +237,50 @@ fn generate_smuggler_visit(
     shift: Res<Shift>,
     mut radio: ResMut<RadioLog>,
     chemists: Query<(), With<Chemist>>,
+    social: Option<Res<crate::social::SocialState>>,
+    mut residents: Query<
+        (
+            Entity,
+            &crate::crew::CrewMember,
+            &crate::body::Body,
+            &crate::body::Bloodstream,
+            &mut crate::crew::CrewRoute,
+        ),
+        (
+            With<crate::crew::Ambient>,
+            Without<crate::social::NpcCommitment>,
+        ),
+    >,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
     };
     let mut rng = rand::rng();
+    if social
+        .as_deref()
+        .is_some_and(|social| !social.threat_runs(crate::social::ResidentAntagonist::SatoSmuggler))
+    {
+        return;
+    }
+    let identity = social
+        .as_deref()
+        .map_or(script.name.as_str(), |social| {
+            social.threat_identity(
+                crate::social::ResidentAntagonist::SatoSmuggler,
+                &script.name,
+            )
+        })
+        .to_string();
+    let resident_bound = social
+        .as_deref()
+        .is_some_and(|social| social.selected(crate::social::ResidentAntagonist::SatoSmuggler));
+    if resident_bound
+        && !residents.iter_mut().any(|(_, member, body, blood, _)| {
+            member.name == identity && !body.0.collapsed && !blood.0.incapacitated()
+        })
+    {
+        return;
+    }
     let rules = current_rules(&station.config, &shift, chemists.iter().count());
     let Some(visit) = threat::due_visit(
         &time,
@@ -251,13 +299,14 @@ fn generate_smuggler_visit(
         return;
     };
 
-    threat::spawn_scripted_visit(
+    threat::dispatch_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
         &rules,
+        &mut residents,
         threat::ScriptedVisit {
-            name: &script.name,
+            name: &identity,
             role: &script.role,
             color: script.color,
             reagent,
@@ -268,7 +317,7 @@ fn generate_smuggler_visit(
 
     radio.push(
         RadioEntry::new(channel_for(&script.role), visit.plea.clone())
-            .speaker(&script.name)
+            .speaker(&identity)
             .negative(),
     );
 }
@@ -308,6 +357,7 @@ fn handle_smuggler_resolution(
     mut shift: ResMut<Shift>,
     mut radio: ResMut<RadioLog>,
     loose: LooseGlassware,
+    social: Option<Res<crate::social::SocialState>>,
 ) {
     let Some(script) = script else {
         resolved.clear();
@@ -315,13 +365,22 @@ fn handle_smuggler_resolution(
     };
     let mut campaign = campaign;
     let mut instability = instability;
+    let identity = social
+        .as_deref()
+        .map_or(script.name.as_str(), |social| {
+            social.threat_identity(
+                crate::social::ResidentAntagonist::SatoSmuggler,
+                &script.name,
+            )
+        })
+        .to_string();
 
     // Ignored fires it, and a spent visit is spent however it graded.
     let mut chain = threat::ChainProgress(progress.0);
     let steps = threat::step_chain(
         &mut resolved,
         &mut chain,
-        &script.name,
+        &identity,
         script.visits.len(),
         threat::Trigger::Ignored,
         threat::Advance::EveryVisit,
@@ -355,8 +414,14 @@ fn handle_smuggler_resolution(
                 .choose(&mut rng)
                 .cloned()
                 .unwrap_or_else(|| "Something has gone missing off the counter.".to_string());
-            radio.push(RadioEntry::new(channel_for(&script.role), line).negative());
-            info!("smuggler: {} lifted a container", script.name);
+            radio.push(
+                RadioEntry::new(
+                    channel_for(&script.role),
+                    line.replace(&script.name, &identity),
+                )
+                .negative(),
+            );
+            info!("smuggler: {} lifted a container", identity);
         }
 
         // A minor left to get on with it is a small gift to whoever the save

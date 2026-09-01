@@ -116,11 +116,50 @@ fn generate_quack_visit(
     shift: Res<Shift>,
     mut radio: ResMut<RadioLog>,
     chemists: Query<(), With<Chemist>>,
+    social: Option<Res<crate::social::SocialState>>,
+    mut residents: Query<
+        (
+            Entity,
+            &crate::crew::CrewMember,
+            &crate::body::Body,
+            &crate::body::Bloodstream,
+            &mut crate::crew::CrewRoute,
+        ),
+        (
+            With<crate::crew::Ambient>,
+            Without<crate::social::NpcCommitment>,
+        ),
+    >,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
     };
     let mut rng = rand::rng();
+    if social
+        .as_deref()
+        .is_some_and(|social| !social.threat_runs(crate::social::ResidentAntagonist::OkonkwoQuack))
+    {
+        return;
+    }
+    let identity = social
+        .as_deref()
+        .map_or(script.name.as_str(), |social| {
+            social.threat_identity(
+                crate::social::ResidentAntagonist::OkonkwoQuack,
+                &script.name,
+            )
+        })
+        .to_string();
+    let resident_bound = social
+        .as_deref()
+        .is_some_and(|social| social.selected(crate::social::ResidentAntagonist::OkonkwoQuack));
+    if resident_bound
+        && !residents.iter_mut().any(|(_, member, body, blood, _)| {
+            member.name == identity && !body.0.collapsed && !blood.0.incapacitated()
+        })
+    {
+        return;
+    }
     let rules = current_rules(&station.config, &shift, chemists.iter().count());
     let Some(visit) = threat::due_visit(
         &time,
@@ -139,13 +178,14 @@ fn generate_quack_visit(
         return;
     };
 
-    threat::spawn_scripted_visit(
+    threat::dispatch_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
         &rules,
+        &mut residents,
         threat::ScriptedVisit {
-            name: &script.name,
+            name: &identity,
             role: &script.role,
             color: script.color,
             reagent,
@@ -156,7 +196,7 @@ fn generate_quack_visit(
 
     radio.push(
         RadioEntry::new(channel_for(&script.role), visit.plea.clone())
-            .speaker(&script.name)
+            .speaker(&identity)
             .negative(),
     );
 }
@@ -185,6 +225,7 @@ fn handle_quack_resolution(
         (&CrewMember, &CrewRoute, &mut Body, &mut Bloodstream),
         Without<crate::crew::Ambient>,
     >,
+    social: Option<Res<crate::social::SocialState>>,
 ) {
     let Some(script) = script else {
         resolved.clear();
@@ -192,13 +233,22 @@ fn handle_quack_resolution(
     };
     let mut campaign = campaign;
     let mut instability = instability;
+    let identity = social
+        .as_deref()
+        .map_or(script.name.as_str(), |social| {
+            social.threat_identity(
+                crate::social::ResidentAntagonist::OkonkwoQuack,
+                &script.name,
+            )
+        })
+        .to_string();
 
     // Ignored fires it, and a spent visit is spent however it graded.
     let mut chain = threat::ChainProgress(progress.0);
     let steps = threat::step_chain(
         &mut resolved,
         &mut chain,
-        &script.name,
+        &identity,
         script.visits.len(),
         threat::Trigger::Ignored,
         threat::Advance::EveryVisit,
@@ -219,7 +269,7 @@ fn handle_quack_resolution(
             threat::Ward::Quack,
             RadioEntry::new(
                 channel_for(&script.role),
-                format!("{}'s last patient turned out fine after all.", script.name),
+                format!("{}'s last patient turned out fine after all.", identity),
             )
             .positive(),
         ) {
@@ -240,7 +290,7 @@ fn handle_quack_resolution(
         let victim = patients
             .iter_mut()
             .filter(|(member, route, _, _)| {
-                member.name != script.name && route.phase == CrewPhase::Waiting
+                member.name != identity && route.phase == CrewPhase::Waiting
             })
             .choose(&mut rng);
         let Some((member, _, mut body, mut blood)) = victim else {
@@ -267,8 +317,11 @@ fn handle_quack_resolution(
             .choose(&mut rng)
             .cloned()
             .unwrap_or_else(|| "{name} was treated by someone who should not have.".to_string());
-        radio.push(RadioEntry::new(channel_for(&role), line.replace("{name}", &name)).negative());
-        info!("quack: {} treated {name} without asking", script.name);
+        let line = line
+            .replace("{name}", &name)
+            .replace(&script.name, &identity);
+        radio.push(RadioEntry::new(channel_for(&role), line).negative());
+        info!("quack: {} treated {name} without asking", identity);
 
         if let (Some(arc_script), Some(campaign)) = (arc_script.as_deref(), campaign.as_mut()) {
             crate::arc::note_ignored_shenanigan(arc_script, campaign);

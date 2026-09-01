@@ -69,6 +69,7 @@ pub(crate) fn clear_session_state(world: &mut World) {
     reset::<crate::instability::Instability>(world);
     reset::<crate::instability::StabilityClock>(world);
     reset::<crate::instability::ArcImpactTracker>(world);
+    reset::<crate::social::SocialState>(world);
 
     // The authored-chain counters. Each is "how far into this thread's script
     // the career has reached", restored from `progress.ron` on load — so a new
@@ -154,6 +155,19 @@ mod tests {
         world.insert_resource(Campaign::new(AntagId::Blob, Mode::Chemist, 3));
         world.insert_resource(crate::saves::SaveSlot::new("Somebody Else"));
         world.insert_resource(crate::obsessed::ObsessedProgress(4));
+        let mut social = crate::social::SocialState::fresh();
+        let okonkwo = social.relationship_mut(crate::social::OKONKWO);
+        okonkwo.tier = crate::social::RelationshipTier::Burned;
+        okonkwo.helpful = 2;
+        okonkwo.dishonest = 3;
+        social.dialogue_history.insert(
+            crate::social::OKONKWO.into(),
+            vec![crate::social::DialogueLine {
+                speaker: crate::social::OKONKWO.into(),
+                text: "Dialogue from the last save.".into(),
+            }],
+        );
+        world.insert_resource(social);
 
         std::mem::take(world)
     }
@@ -229,6 +243,39 @@ mod tests {
             0
         );
         assert_eq!(world.resource::<crate::obsessed::ObsessedProgress>().0, 0);
+    }
+
+    #[test]
+    fn npc_opinions_never_cross_from_one_save_to_another() {
+        let mut world = dirty_world();
+        assert_eq!(
+            world
+                .resource::<crate::social::SocialState>()
+                .relationships
+                .get(crate::social::OKONKWO)
+                .unwrap()
+                .tier,
+            crate::social::RelationshipTier::Burned,
+        );
+
+        clear(&mut world);
+
+        let cleared = world.resource::<crate::social::SocialState>();
+        assert!(
+            !cleared.initialized
+                && cleared.relationships.is_empty()
+                && cleared.dialogue_history.is_empty(),
+            "leaving a save must erase its relationship state before another slot loads"
+        );
+
+        let next_save = crate::social::SocialState::fresh();
+        assert!(next_save.relationships.values().all(|relationship| {
+            relationship.tier == crate::social::RelationshipTier::Neutral
+                && relationship.helpful == 0
+                && relationship.reckless == 0
+                && relationship.dishonest == 0
+        }));
+        assert!(next_save.dialogue_history.is_empty());
     }
 
     // -- entity teardown ---------------------------------------------------

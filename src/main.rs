@@ -50,6 +50,7 @@ mod settings;
 mod shift;
 mod showdown;
 mod smuggler;
+mod social;
 mod speech;
 mod threat;
 mod ui;
@@ -165,7 +166,12 @@ fn main() {
             // `security`, `rogue_security`, `smuggler`, `saboteur`, `quack`,
             // `obsessed`) and the `Instability` resource has to exist before
             // any of them can nudge it.
-            instability::InstabilityPlugin,
+            (
+                instability::InstabilityPlugin,
+                // Career-persistent personalities, favors, and the one
+                // resident who may replace a department minor's outsider.
+                social::SocialPlugin,
+            ),
             // The hidden antagonist thread. After orders/shift/radio,
             // since it leans on `Order`, `current_rules` and
             // `PendingBroadcasts`.

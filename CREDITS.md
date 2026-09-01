@@ -99,6 +99,16 @@ Most of these live in [assets/sounds/ss14/](assets/sounds/ss14/). Five announcem
 - No CC-BY-NC, custom-license, or attribution-conflicted SS14 candidate was copied. In particular, `alien_spitacid.ogg`, `pill_insert.ogg`, `pill_remove.ogg`, `ice_crit.ogg`, and `jet_injector.ogg` were excluded.
 - CC BY-SA files remain available as their original, unmodified `.ogg` assets under CC BY-SA 3.0. This share-alike requirement applies to those assets, not to ChemGame's Rust source code.
 
+## Sound effects — sourced from Starlight SS14
+
+These three unmodified sounds come from the Starlight SS14 fork at pinned revision [`bf48131`](https://github.com/fskx/starlight-ss14/tree/bf48131094244ae917a24653c5741fb9165e741b/Resources/Audio). Each upstream attribution manifest explicitly marks the selected file CC0 1.0; the rows remain here for traceability.
+
+| File | Starlight source | License | Original author / credit | Original source |
+|---|---|---|---|---|
+| `starlight/paper_scribble.ogg` | [`Items/Paper/paper_scribble1.ogg`](https://github.com/fskx/starlight-ss14/blob/bf48131094244ae917a24653c5741fb9165e741b/Resources/Audio/Items/Paper/paper_scribble1.ogg) | **CC0 1.0** | PDaefaul; cut, spliced, and converted by Krunklehorn | [Freesound 631971](https://freesound.org/people/PDaefaul/sounds/631971/) |
+| `starlight/cargo_beep.ogg` | [`Effects/Cargo/beep.ogg`](https://github.com/fskx/starlight-ss14/blob/bf48131094244ae917a24653c5741fb9165e741b/Resources/Audio/Effects/Cargo/beep.ogg) | **CC0 1.0** | zerolagtime, “Store Scanner Beep” | [Freesound 144418](https://freesound.org/people/zerolagtime/sounds/144418/) |
+| `starlight/evidence_scan.ogg` | [`_Starlight/Effects/ScanGate/scan1.ogg`](https://github.com/fskx/starlight-ss14/blob/bf48131094244ae917a24653c5741fb9165e741b/Resources/Audio/_Starlight/Effects/ScanGate/scan1.ogg) | **CC0 1.0** | bolkmar, “Radio Interference” | [Freesound 511890](https://freesound.org/s/511890/) |
+
 ## Artwork and models — original work
 
 Nothing in [assets/textures/](assets/textures/) or [assets/3dassets/](assets/3dassets/) is third-party and none of it needs crediting here. The surface sprites and the station starter kit are original, SS13-*inspired* work: no SS13 sprite or model was copied or converted. The conventions each set is authored to are recorded in their own READMEs — [assets/textures/README.md](assets/textures/README.md) and [assets/3dassets/station_starter_kit/README.md](assets/3dassets/station_starter_kit/README.md) — which are build documentation, not attribution.
@@ -109,4 +119,4 @@ Nothing in [assets/textures/](assets/textures/) or [assets/3dassets/](assets/3da
 
 ## Scope of this file
 
-This is the single place third-party asset credits live. Everything shipped in [assets/sounds/](assets/sounds/) is accounted for above — 65 `.ogg` files, all of them either tgstation or Space Station 14 in origin — so a reader looking for the provenance of any audio asset needs only this document. Adding a sound means adding a row here, in the table matching its upstream project.
+This is the single place third-party asset credits live. Everything shipped in [assets/sounds/](assets/sounds/) is accounted for above — 68 `.ogg` files, all of them from tgstation, Space Station 14, or Starlight SS14 — so a reader looking for the provenance of any audio asset needs only this document. Adding a sound means adding a row here, in the table matching its upstream project.

@@ -47,6 +47,10 @@ use crate::player::{Player, PlayerAccount};
 use crate::produce::Produce;
 use crate::rogue_security::Deterrent;
 use crate::showdown::{Assailant, Breach};
+use crate::social::{
+    ConversationHistory, EvidenceItem, EvidenceLockbox, PersonalFavor, PublicRelationship,
+    SocialParcel,
+};
 use crate::speech::Speech;
 use crate::AppState;
 
@@ -58,7 +62,7 @@ pub mod steam;
 /// Explicit revision for replicated Rust types that are not represented by
 /// the authored chemistry catalogs below. Bump it when one of those wire
 /// shapes changes incompatibly.
-const PROTOCOL_REVISION: u64 = 11;
+const PROTOCOL_REVISION: u64 = 13;
 
 /// FNV-1a is deliberately small and `const`: the protocol id is derived at
 /// compile time from every catalog whose list position crosses the wire.
@@ -843,6 +847,15 @@ fn register_replication(app: &mut App) {
         // never ticked: its countdown lives in an unreplicated `SpeechTimer`
         // so a line does not re-send its own string every frame it is up.
         .replicate::<Speech>()
+        .replicate::<PersonalFavor>()
+        // Qualitative relationship state and lines already heard are public
+        // presentation. The authority-only SocialState still carries every
+        // secret assignment and exact impression, and is not registered.
+        .replicate::<PublicRelationship>()
+        .replicate::<ConversationHistory>()
+        .replicate::<SocialParcel>()
+        .replicate::<EvidenceItem>()
+        .replicate::<EvidenceLockbox>()
         // What is written on a bottle. The entire point is that *other*
         // people read it, so a label only the host could see would deceive
         // nobody — and it is what a guest's own Security sweep and delivery
@@ -1067,6 +1080,7 @@ mod tests {
                             crate::lab::dress_machines,
                             crate::containers::dress_containers,
                             crate::player::dress_chemists,
+                            crate::social::dress_social_parcels,
                         ),
                     );
             }
@@ -1206,6 +1220,105 @@ mod tests {
             Units::from_f64(15.25),
             "fractional units must not be rounded in transit"
         );
+    }
+
+    #[test]
+    fn parcel_wire_shape_exposes_the_envelope_but_not_its_secret_payload() {
+        let (mut server, mut client) = connected_pair();
+        server.world_mut().spawn((
+            Replicated,
+            SocialParcel {
+                recipient: crate::social::BEX.into(),
+                priority: true,
+                seal: crate::social::ParcelSeal::Sealed,
+            },
+            crate::social::ParcelPayload {
+                incident_id: 91,
+                sender: crate::social::SATO.into(),
+                evidence_for: Some(crate::social::SATO.into()),
+                reagent: Some("space_drugs".into()),
+            },
+        ));
+
+        settle(&mut server, &mut client);
+
+        let mut parcels = client
+            .world_mut()
+            .query::<(&SocialParcel, Option<&crate::social::ParcelPayload>)>();
+        let received: Vec<_> = parcels.iter(client.world()).collect();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].0.recipient, crate::social::BEX);
+        assert!(received[0].0.priority);
+        assert_eq!(received[0].0.seal, crate::social::ParcelSeal::Sealed);
+        assert!(
+            received[0].1.is_none(),
+            "payload, evidence grading, incident identity, and sender must remain authority-only"
+        );
+    }
+
+    #[test]
+    fn the_shared_save_transcript_is_available_to_every_peer_without_secret_state() {
+        let (mut server, mut client) = connected_pair();
+        let relationship = PublicRelationship {
+            tier: crate::social::RelationshipTier::Trusted,
+            last_outcome: crate::social::FavorOutcome::Helped,
+            personal_history: crate::social::PersonalHistory::InProgress,
+        };
+        let history = ConversationHistory {
+            lines: vec![crate::social::DialogueLine {
+                speaker: crate::social::OKONKWO.into(),
+                text: "Both chemists should remember this line.".into(),
+            }],
+        };
+        server.world_mut().spawn((
+            Replicated,
+            CrewMember {
+                name: crate::social::OKONKWO.into(),
+                role: "Medical".into(),
+            },
+            relationship.clone(),
+            history.clone(),
+        ));
+
+        settle(&mut server, &mut client);
+
+        let mut visible = client
+            .world_mut()
+            .query::<(&PublicRelationship, &ConversationHistory)>();
+        let received: Vec<_> = visible.iter(client.world()).collect();
+        assert_eq!(received, vec![(&relationship, &history)]);
+        assert_eq!(received[0].1.lines.len(), 1);
+        assert_eq!(received[0].1.lines[0].speaker, crate::social::OKONKWO);
+    }
+
+    #[test]
+    fn a_guest_builds_a_visible_interactable_parcel_from_public_state() {
+        let (mut server, mut client) = connected_pair_with_visuals();
+        server.world_mut().spawn((
+            Replicated,
+            Transform::from_xyz(1.0, 1.0, 1.0),
+            SocialParcel {
+                recipient: crate::social::BEX.into(),
+                priority: true,
+                seal: crate::social::ParcelSeal::Sealed,
+            },
+            crate::social::ParcelPayload {
+                incident_id: 92,
+                sender: crate::social::SATO.into(),
+                evidence_for: Some(crate::social::SATO.into()),
+                reagent: Some("space_drugs".into()),
+            },
+        ));
+
+        settle(&mut server, &mut client);
+
+        let mut visible = client
+            .world_mut()
+            .query::<(&SocialParcel, &WorldAssetRoot, &Interactable)>();
+        let received: Vec<_> = visible.iter(client.world()).collect();
+        assert_eq!(received.len(), 1);
+        assert!(received[0].2.label.contains(crate::social::BEX));
+        assert!(received[0].2.label.contains("seal intact"));
     }
 
     #[test]

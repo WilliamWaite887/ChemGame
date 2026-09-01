@@ -316,6 +316,7 @@ fn panel_input(
 ) {
     let escape = keys.just_pressed(KeyCode::Escape);
     let book = keys.just_pressed(settings.bindings.book);
+    let social = keys.just_pressed(settings.bindings.social);
     let blocks_escape = escape_blocked_by_evacuation(*screen, finished.as_deref());
 
     // The pause menu owns Escape whenever it is up, and nothing else here
@@ -351,7 +352,9 @@ fn panel_input(
         // gate itself on `is_roaming`. Every other action key — move, look,
         // sprint, drop, drink, apply, use — is disabled for free by
         // `Labelling` simply not being `Roaming`.
-        if book && !matches!(*mode, InteractionMode::Labelling(_)) {
+        if social && !matches!(*mode, InteractionMode::Labelling(_)) {
+            *mode = mode.toggled_social();
+        } else if book && !matches!(*mode, InteractionMode::Labelling(_)) {
             *mode = mode.toggled_book();
         }
 
@@ -362,10 +365,18 @@ fn panel_input(
             // out of the book onto the panel it was opened over, and only then
             // out of the machine. Closing both at once would silently drop a
             // claim the player only meant to stop reading over.
-            if let InteractionMode::ReadingBook(Some(machine)) = *mode {
-                *mode = InteractionMode::UsingMachine(machine);
-                panel_open = true;
-                continue;
+            match *mode {
+                InteractionMode::ReadingBook(Some(machine)) => {
+                    *mode = InteractionMode::UsingMachine(machine);
+                    panel_open = true;
+                    continue;
+                }
+                InteractionMode::Social { .. } => {
+                    *mode = mode.toggled_social();
+                    panel_open = !mode.is_roaming();
+                    continue;
+                }
+                _ => {}
             }
             leave_machine(player, &mut mode, &mut machines, &mut leaving);
             released.0 = false;
@@ -423,6 +434,14 @@ pub enum InteractionMode {
     /// so the claim is deliberately kept while they read and the book closes
     /// back onto the panel they came from.
     ReadingBook(Option<Entity>),
+    /// Reviewing crew relationships, remembered conversations, and the
+    /// department shops. Tab can lay this screen over either the lab, a
+    /// machine, or the reference book; both the machine claim and the exact
+    /// screen underneath are restored when it closes.
+    Social {
+        machine: Option<Entity>,
+        return_to_book: bool,
+    },
     /// Writing on the container they are holding — see [`crate::labels`].
     ///
     /// A mode rather than a flag for exactly the reason `ReadingBook` is one:
@@ -449,10 +468,41 @@ impl InteractionMode {
             InteractionMode::ReadingBook(from) => {
                 from.map_or(InteractionMode::Roaming, InteractionMode::UsingMachine)
             }
+            InteractionMode::Social { .. } => self,
             // Unreachable in practice — `panel_input` does not offer the book
             // key while the label field is open, because a `b` belongs in the
             // word being typed. Answering "no change" rather than panicking
             // keeps that a presentation decision rather than an invariant.
+            InteractionMode::Labelling(container) => InteractionMode::Labelling(container),
+        }
+    }
+
+    /// Where Tab takes this chemist next. Like [`Self::toggled_book`], this
+    /// keeps any machine claim alive and restores the exact screen underneath.
+    pub fn toggled_social(self) -> Self {
+        match self {
+            InteractionMode::Roaming => InteractionMode::Social {
+                machine: None,
+                return_to_book: false,
+            },
+            InteractionMode::UsingMachine(machine) => InteractionMode::Social {
+                machine: Some(machine),
+                return_to_book: false,
+            },
+            InteractionMode::ReadingBook(machine) => InteractionMode::Social {
+                machine,
+                return_to_book: true,
+            },
+            InteractionMode::Social {
+                machine,
+                return_to_book,
+            } => {
+                if return_to_book {
+                    InteractionMode::ReadingBook(machine)
+                } else {
+                    machine.map_or(InteractionMode::Roaming, InteractionMode::UsingMachine)
+                }
+            }
             InteractionMode::Labelling(container) => InteractionMode::Labelling(container),
         }
     }
@@ -468,6 +518,7 @@ impl InteractionMode {
         match *self {
             InteractionMode::UsingMachine(machine) => Some(machine),
             InteractionMode::ReadingBook(machine) => machine,
+            InteractionMode::Social { machine, .. } => machine,
             // A container, not a machine, and nothing to release.
             InteractionMode::Roaming | InteractionMode::Labelling(_) => None,
         }
@@ -1049,6 +1100,29 @@ mod tests {
         assert_eq!(
             InteractionMode::UsingMachine(dispenser).claimed_machine(),
             Some(dispenser)
+        );
+    }
+
+    #[test]
+    fn the_social_screen_returns_to_the_exact_screen_underneath() {
+        let machine = Entity::from_raw_u32(11).unwrap();
+
+        let from_floor = InteractionMode::Roaming.toggled_social();
+        assert_eq!(from_floor.claimed_machine(), None);
+        assert_eq!(from_floor.toggled_social(), InteractionMode::Roaming);
+
+        let from_machine = InteractionMode::UsingMachine(machine).toggled_social();
+        assert_eq!(from_machine.claimed_machine(), Some(machine));
+        assert_eq!(
+            from_machine.toggled_social(),
+            InteractionMode::UsingMachine(machine)
+        );
+
+        let from_book = InteractionMode::ReadingBook(Some(machine)).toggled_social();
+        assert_eq!(from_book.claimed_machine(), Some(machine));
+        assert_eq!(
+            from_book.toggled_social(),
+            InteractionMode::ReadingBook(Some(machine))
         );
     }
 }

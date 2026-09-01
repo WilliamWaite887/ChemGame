@@ -1074,7 +1074,7 @@ pub fn recall_resident_for_order(
     commands: &mut Commands,
     residents: &mut Query<
         (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
-        With<Ambient>,
+        (With<Ambient>, Without<crate::social::NpcCommitment>),
     >,
     name: &str,
     role: &str,
@@ -1093,7 +1093,7 @@ pub fn recall_resident_for_order(
         commands
             .entity(entity)
             .remove::<Ambient>()
-            .insert(ReturnsToDuty);
+            .insert((ReturnsToDuty, crate::social::NpcCommitment));
         return Some(entity);
     }
     None
@@ -1493,6 +1493,7 @@ pub(crate) fn walk_route(
                     commands
                         .entity(entity)
                         .remove::<ReturnsToDuty>()
+                        .remove::<crate::social::NpcCommitment>()
                         .insert(Ambient::new(rand::random_range(
                             DWELL_SECONDS.0..=DWELL_SECONDS.1,
                         )));
@@ -2319,7 +2320,7 @@ mod tests {
             mut commands: Commands,
             mut residents: Query<
                 (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
-                With<Ambient>,
+                (With<Ambient>, Without<crate::social::NpcCommitment>),
             >,
         ) -> Option<Entity> {
             recall_resident_for_order(&mut commands, &mut residents, "Dr. Vance", "Medical", 0.0)
@@ -2374,7 +2375,7 @@ mod tests {
             mut commands: Commands,
             mut residents: Query<
                 (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
-                With<Ambient>,
+                (With<Ambient>, Without<crate::social::NpcCommitment>),
             >,
         ) {
             recall_resident_for_order(&mut commands, &mut residents, "Dr. Vance", "Medical", 0.0);

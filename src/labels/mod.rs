@@ -294,6 +294,9 @@ fn handle_label_request(
     mut requests: MessageReader<FromClient<LabelRequested>>,
     chemists: Query<(Entity, &Chemist)>,
     held: Query<&HeldBy>,
+    evidence: Query<(), With<crate::social::EvidenceItem>>,
+    transforms: Query<&Transform>,
+    mut observed: Option<ResMut<Messages<crate::social::ObservedAction>>>,
 ) {
     for request in requests.read() {
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
@@ -320,6 +323,18 @@ fn handle_label_request(
             commands
                 .entity(request.container)
                 .insert(Label(text.to_string()));
+        }
+        if evidence.contains(request.container) {
+            if let Some(observed) = observed.as_deref_mut() {
+                observed.write(crate::social::ObservedAction {
+                    actor: player,
+                    target: Some(request.container),
+                    position: transforms
+                        .get(player)
+                        .map_or(Vec3::ZERO, |transform| transform.translation),
+                    kind: crate::social::ObservationKind::RelabelEvidence,
+                });
+            }
         }
     }
 }

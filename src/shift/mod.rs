@@ -1504,6 +1504,10 @@ struct ProgressSave {
     /// See `orders::Shift::evacuated`.
     #[serde(default)]
     evacuated: bool,
+    /// Hidden personalities, personal favor progress, and the optional
+    /// resident who replaced one department minor's outsider identity.
+    #[serde(default)]
+    social: crate::social::SocialState,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
@@ -1566,6 +1570,7 @@ fn load_progress(
     mut addictions: ResMut<crate::addiction::Addictions>,
     estranged: Option<ResMut<crate::estrangement::Estranged>>,
     instability: Option<ResMut<crate::instability::Instability>>,
+    social: Option<ResMut<crate::social::SocialState>>,
     slot: Option<Res<SaveSlot>>,
 ) {
     // Cross-save, so it is read whether or not this session has a slot at all
@@ -1576,7 +1581,15 @@ fn load_progress(
 
     // No slot means a new game with nothing to restore, or a guest whose career
     // is the host's and arrives replicated.
-    let Some(save) = slot.and_then(|slot| read_progress(&slot.progress_path())) else {
+    let Some(slot) = slot else {
+        return;
+    };
+    let Some(save) = read_progress(&slot.progress_path()) else {
+        // A selected slot with no progress file is a genuinely fresh career.
+        // Guests have no SaveSlot and returned above.
+        if let Some(mut social) = social {
+            *social = crate::social::SocialState::fresh();
+        }
         return;
     };
 
@@ -1647,6 +1660,13 @@ fn load_progress(
     if let Some(mut estranged) = estranged {
         estranged.0 = save.estranged;
     }
+    if let Some(mut social) = social {
+        *social = if save.social.initialized {
+            save.social
+        } else {
+            crate::social::SocialState::migrate_legacy()
+        };
+    }
     info!(
         "resuming with {} delivered, {} botched",
         shift.succeeded, shift.botched
@@ -1703,6 +1723,7 @@ fn persist_progress(
     addictions: Res<crate::addiction::Addictions>,
     estranged: Option<Res<crate::estrangement::Estranged>>,
     instability: Option<Res<crate::instability::Instability>>,
+    social: Option<Res<crate::social::SocialState>>,
     slot: Option<Res<SaveSlot>>,
     mut written: ResMut<PersistedProgress>,
 ) {
@@ -1746,6 +1767,7 @@ fn persist_progress(
         instability: LegacyInstability::default(),
         station_stability: instability.map(|i| i.clone()).unwrap_or_default(),
         evacuated: shift.evacuated,
+        social: social.map(|state| state.clone()).unwrap_or_default(),
     };
     if written.0.as_ref() == Some(&save) {
         return;
@@ -3264,6 +3286,44 @@ mod tests {
             save.campaign.is_none(),
             "an older save has no campaign, so `arc::assign_campaign` should roll one"
         );
+        assert!(
+            !save.social.initialized,
+            "a pre-social save must retain the migration marker"
+        );
+    }
+
+    #[test]
+    fn social_opinions_round_trip_only_inside_the_owning_save() {
+        let mut social = crate::social::SocialState::fresh();
+        let relationship = social.relationship_mut(crate::social::SATO);
+        relationship.tier = crate::social::RelationshipTier::Trusted;
+        relationship.helpful = 2;
+        social.dialogue_history.insert(
+            crate::social::SATO.into(),
+            vec![crate::social::DialogueLine {
+                speaker: crate::social::SATO.into(),
+                text: "Shared save transcript.".into(),
+            }],
+        );
+        let save = ProgressSave {
+            social: social.clone(),
+            ..default()
+        };
+
+        let text = ron::ser::to_string(&save).unwrap();
+        let restored: ProgressSave = ron::from_str(&text).unwrap();
+        assert_eq!(restored.social, social);
+
+        let separate_new_save = crate::social::SocialState::fresh();
+        assert_eq!(
+            separate_new_save.relationships[crate::social::SATO].tier,
+            crate::social::RelationshipTier::Neutral
+        );
+        assert_eq!(
+            separate_new_save.relationships[crate::social::SATO].helpful,
+            0
+        );
+        assert!(separate_new_save.dialogue_history.is_empty());
     }
 
     #[test]

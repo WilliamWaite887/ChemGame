@@ -578,6 +578,7 @@ fn handle_illicit_resolutions(
     mut broadcasts: ResMut<PendingBroadcasts>,
     mut radio: ResMut<RadioLog>,
     mut raid_schedule: Option<ResMut<crate::security::RaidSchedule>>,
+    mut observed: Option<ResMut<Messages<crate::social::ObservedAction>>>,
 ) {
     let Some(script) = script else {
         resolved.clear();
@@ -607,6 +608,18 @@ fn handle_illicit_resolutions(
         // at all — and every sale to them would silently have cost nothing.
         nudge_underworld(&mut underworld, UNDERWORLD_PER_DELIVERY);
         nudge_suspicion(&mut suspicion, SUSPICION_PER_DELIVERY);
+        if let Some(observed) = observed.as_deref_mut() {
+            observed.write(crate::social::ObservedAction {
+                actor: Entity::PLACEHOLDER,
+                target: None,
+                position: Vec3::new(
+                    crate::lab::COUNTER_SPOT.x,
+                    crate::lab::COUNTER_TOP,
+                    crate::lab::COUNTER_SPOT.z,
+                ),
+                kind: crate::social::ObservationKind::IllicitDelivery,
+            });
+        }
 
         // Only the *flavour* needs an authored request. No entry simply means
         // no chaos line and no sting for this one, which is exactly right for

@@ -17,8 +17,7 @@ use crate::chem_data::ChemDb;
 use crate::chem_world::{assess_exposure, ChemicalExposure, ExposureSource};
 use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlot, Stored};
 use crate::crew::{
-    recall_resident_for_order, spawn_crew_member, Ambient, CrewDef, CrewMember, CrewPhase,
-    CrewRoute,
+    recall_resident_for_order, spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewRoute,
 };
 use crate::interaction::{InteractRequested, Interactable};
 use crate::knowledge::{research_for_delivery_at_purity, Knowledge};
@@ -1285,7 +1284,13 @@ fn generate_orders(
     forecast: Option<Res<CurrentForecast>>,
     mut radio: ResMut<RadioLog>,
     active: Query<&CrewMember, crate::crew::NotResident>,
-    mut residents: Query<(Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute), With<Ambient>>,
+    mut residents: Query<
+        (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
+        (
+            With<crate::crew::Ambient>,
+            Without<crate::social::NpcCommitment>,
+        ),
+    >,
     development_orders: Query<(), With<DevelopmentOrder>>,
     chemists: Query<(), With<Chemist>>,
     containers: Query<&Container>,
@@ -1490,7 +1495,13 @@ fn generate_specific_orders(
     forecast: Option<Res<CurrentForecast>>,
     mut radio: ResMut<RadioLog>,
     active: Query<&CrewMember, crate::crew::NotResident>,
-    mut residents: Query<(Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute), With<Ambient>>,
+    mut residents: Query<
+        (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
+        (
+            With<crate::crew::Ambient>,
+            Without<crate::social::NpcCommitment>,
+        ),
+    >,
     chemists: Query<(), With<Chemist>>,
     containers: Query<&Container>,
     produce: Query<&Produce>,

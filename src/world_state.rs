@@ -26,9 +26,10 @@ use crate::player::{Chemist, Look, PlayerAccount};
 use crate::produce::{Produce, ProduceId};
 use crate::rogue_security::Deterrent;
 use crate::saves::SaveSlot;
+use crate::social::{EvidenceItem, ParcelPayload, SocialParcel};
 use crate::AppState;
 
-const WORLD_FORMAT_VERSION: u32 = 2;
+const WORLD_FORMAT_VERSION: u32 = 3;
 const AUTOSAVE_SECONDS: f32 = 2.0;
 
 pub struct WorldStatePlugin;
@@ -191,9 +192,21 @@ enum MachineSlot {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum ItemSave {
     Container(ContainerSave),
+    EvidenceContainer {
+        container: ContainerSave,
+        evidence: EvidenceItem,
+    },
+    SocialParcel {
+        public: SocialParcel,
+        payload: ParcelPayload,
+    },
     Produce(ProduceId),
-    Deterrent { charges: u32 },
-    Overclock { charges: u32 },
+    Deterrent {
+        charges: u32,
+    },
+    Overclock {
+        charges: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -492,6 +505,19 @@ fn spawn_item(
                 entity.insert(label);
             }
         }
+        ItemSave::EvidenceContainer {
+            container,
+            evidence,
+        } => {
+            let (container, label) = container.into_live(db);
+            entity.insert((container, evidence));
+            if let Some(label) = label {
+                entity.insert(label);
+            }
+        }
+        ItemSave::SocialParcel { public, payload } => {
+            entity.insert((public, payload));
+        }
         ItemSave::Produce(id) => {
             entity.insert(Produce(id));
         }
@@ -529,6 +555,9 @@ type ItemQuery<'w, 's> = Query<
         Option<&'static Deterrent>,
         Option<&'static Overclock>,
         Option<&'static Label>,
+        Option<&'static SocialParcel>,
+        Option<&'static ParcelPayload>,
+        Option<&'static EvidenceItem>,
         Option<&'static InventorySlot>,
         Option<&'static HeldBy>,
         Option<&'static InSlot>,
@@ -540,6 +569,8 @@ type ItemQuery<'w, 's> = Query<
         With<Produce>,
         With<Deterrent>,
         With<Overclock>,
+        With<SocialParcel>,
+        With<EvidenceItem>,
     )>,
 >;
 
@@ -556,9 +587,22 @@ fn item_save(
     deterrent: Option<&Deterrent>,
     overclock: Option<&Overclock>,
     label: Option<&Label>,
+    parcel: Option<&SocialParcel>,
+    payload: Option<&ParcelPayload>,
+    evidence: Option<&EvidenceItem>,
     db: &ChemDb,
 ) -> Option<ItemSave> {
-    if let Some(container) = container {
+    if let (Some(parcel), Some(payload)) = (parcel, payload) {
+        Some(ItemSave::SocialParcel {
+            public: parcel.clone(),
+            payload: payload.clone(),
+        })
+    } else if let (Some(container), Some(evidence)) = (container, evidence) {
+        Some(ItemSave::EvidenceContainer {
+            container: ContainerSave::from_live(container, label, db),
+            evidence: evidence.clone(),
+        })
+    } else if let Some(container) = container {
         Some(ItemSave::Container(ContainerSave::from_live(
             container, label, db,
         )))
@@ -611,6 +655,9 @@ fn capture_world(source: &SnapshotSource, db: &ChemDb, pending: &PendingWorldSta
         deterrent,
         overclock,
         label,
+        parcel,
+        payload,
+        evidence,
         inventory,
         held,
         in_slot,
@@ -618,7 +665,9 @@ fn capture_world(source: &SnapshotSource, db: &ChemDb, pending: &PendingWorldSta
         stored,
     ) in &source.items
     {
-        let Some(item) = item_save(container, produce, deterrent, overclock, label, db) else {
+        let Some(item) = item_save(
+            container, produce, deterrent, overclock, label, parcel, payload, evidence, db,
+        ) else {
             continue;
         };
         let owner = inventory
@@ -769,6 +818,55 @@ mod tests {
     fn sparse_older_world_snapshot_remains_readable() {
         let save: WorldSave = ron::from_str("(players: [], placed: [])").unwrap();
         assert_eq!(save.version, 0);
+    }
+
+    #[test]
+    fn parcels_and_evidence_keep_one_incident_identity_across_reload() {
+        let parcel = ItemSave::SocialParcel {
+            public: SocialParcel {
+                recipient: crate::social::BEX.into(),
+                priority: true,
+                seal: crate::social::ParcelSeal::Sealed,
+            },
+            payload: ParcelPayload {
+                incident_id: 77,
+                sender: crate::social::SATO.into(),
+                evidence_for: Some(crate::social::SATO.into()),
+                reagent: Some("space_drugs".into()),
+            },
+        };
+        let evidence = ItemSave::EvidenceContainer {
+            container: ContainerSave::from_live(
+                &Container::new(ContainerKind::Bottle),
+                None,
+                &db(),
+            ),
+            evidence: EvidenceItem {
+                incident_id: 77,
+                against: crate::social::SATO.into(),
+                description: "manifest link".into(),
+            },
+        };
+        let save = WorldSave {
+            version: WORLD_FORMAT_VERSION,
+            placed: vec![
+                PlacedItemSave {
+                    transform: TransformSave::from_transform(&Transform::default()),
+                    placement: PlacementSave::World,
+                    item: parcel,
+                },
+                PlacedItemSave {
+                    transform: TransformSave::from_transform(&Transform::default()),
+                    placement: PlacementSave::World,
+                    item: evidence,
+                },
+            ],
+            ..default()
+        };
+
+        let text = ron::ser::to_string(&save).unwrap();
+        let restored: WorldSave = ron::from_str(&text).unwrap();
+        assert_eq!(restored, save);
     }
 
     #[test]

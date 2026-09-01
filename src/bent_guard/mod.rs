@@ -35,7 +35,7 @@ use serde::Deserialize;
 
 use crate::antagonist::{nudge_suspicion, SecuritySuspicion};
 use crate::chem_data::ChemDb;
-use crate::crew::spawn_crew_member;
+use crate::crew::{recall_resident_for_order, spawn_crew_member};
 use crate::interaction::Interactable;
 use crate::net::is_authority;
 use crate::orders::{deliverable_amount, IllicitOrder, Order, OrderResolved, Shift, StationData};
@@ -144,11 +144,49 @@ fn generate_bent_guard_visit(
     progress: Res<BentGuardProgress>,
     shift: Res<Shift>,
     chemists: Query<(), With<Chemist>>,
+    social: Option<Res<crate::social::SocialState>>,
+    mut residents: Query<
+        (
+            Entity,
+            &crate::crew::CrewMember,
+            &crate::body::Body,
+            &crate::body::Bloodstream,
+            &mut crate::crew::CrewRoute,
+        ),
+        (
+            With<crate::crew::Ambient>,
+            Without<crate::social::NpcCommitment>,
+        ),
+    >,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
     };
     let mut rng = rand::rng();
+    if social.as_deref().is_some_and(|social| {
+        !social.threat_runs(crate::social::ResidentAntagonist::ReyesBentGuard)
+    }) {
+        return;
+    }
+    let name = social
+        .as_deref()
+        .map_or(script.name.as_str(), |social| {
+            social.threat_identity(
+                crate::social::ResidentAntagonist::ReyesBentGuard,
+                &script.name,
+            )
+        })
+        .to_string();
+    let resident_bound = social
+        .as_deref()
+        .is_some_and(|social| social.selected(crate::social::ResidentAntagonist::ReyesBentGuard));
+    if resident_bound
+        && !residents.iter_mut().any(|(_, member, body, blood, _)| {
+            member.name == name && !body.0.collapsed && !blood.0.incapacitated()
+        })
+    {
+        return;
+    }
     let rules = current_rules(&station.config, &shift, chemists.iter().count());
     let Some(visit) = threat::due_visit(
         &time,
@@ -173,12 +211,19 @@ fn generate_bent_guard_visit(
     // instead — `IllicitOrder` is what makes the match exact, and the two
     // never stack. See `Order::specific`'s own doc comment.
     let identity = crate::crew::CrewDef {
-        name: script.name.clone(),
+        name: name.clone(),
         role: script.role.clone(),
         color: script.color,
     };
     let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
-    let crew = spawn_crew_member(&mut commands, &identity, 0.0);
+    let crew = recall_resident_for_order(
+        &mut commands,
+        &mut residents,
+        &identity.name,
+        &identity.role,
+        0.0,
+    )
+    .unwrap_or_else(|| spawn_crew_member(&mut commands, &identity, 0.0));
 
     let reagent_name = db.reagents.get(reagent).name.clone();
     let amount = deliverable_amount(&db, reagent, chem_sim::Units::whole(visit.amount as i32));
@@ -193,18 +238,12 @@ fn generate_bent_guard_visit(
             waited: 0.0,
         },
         IllicitOrder,
-        Interactable::new(format!(
-            "{} — hand over {} {}",
-            script.name, amount, reagent_name
-        )),
+        Interactable::new(format!("{} — hand over {} {}", name, amount, reagent_name)),
     ));
 
     // Deliberately no radio push here, unlike every other minor's spawner.
     // See the module doc: the broadcast *is* the tell.
-    info!(
-        "bent guard: {} wants {}u {}",
-        script.name, amount, reagent_name
-    );
+    info!("bent guard: {} wants {}u {}", name, amount, reagent_name);
 }
 
 /// The favour, and the grudge.
@@ -224,6 +263,7 @@ fn handle_bent_guard_resolution(
     mut shift: ResMut<Shift>,
     mut suspicion: ResMut<SecuritySuspicion>,
     mut radio: ResMut<RadioLog>,
+    social: Option<Res<crate::social::SocialState>>,
 ) {
     let Some(script) = script else {
         resolved.clear();
@@ -231,12 +271,21 @@ fn handle_bent_guard_resolution(
     };
     let mut campaign = campaign;
     let mut instability = instability;
+    let identity = social
+        .as_deref()
+        .map_or(script.name.as_str(), |social| {
+            social.threat_identity(
+                crate::social::ResidentAntagonist::ReyesBentGuard,
+                &script.name,
+            )
+        })
+        .to_string();
 
     let mut chain = threat::ChainProgress(progress.0);
     let steps = threat::step_chain(
         &mut resolved,
         &mut chain,
-        &script.name,
+        &identity,
         script.visits.len(),
         threat::Trigger::Never,
         threat::Advance::EveryVisit,
@@ -261,11 +310,11 @@ fn handle_bent_guard_resolution(
             if let Some(line) = pool.choose(&mut rng) {
                 radio.push(
                     RadioEntry::new(channel_for(&script.role), line.clone())
-                        .speaker(&script.name)
+                        .speaker(&identity)
                         .positive(),
                 );
             }
-            info!("bent guard: sale to {} (ward banked: {paid})", script.name);
+            info!("bent guard: sale to {} (ward banked: {paid})", identity);
             continue;
         }
 
@@ -283,7 +332,7 @@ fn handle_bent_guard_resolution(
         if let Some(line) = script.snub_lines.choose(&mut rng) {
             radio.push(RadioEntry::new(channel_for(&script.role), line.clone()).negative());
         }
-        info!("bent guard: {} was turned down", script.name);
+        info!("bent guard: {} was turned down", identity);
 
         // A minor left to get on with it is a small gift to whoever the save
         // is really about — the same tie into the campaign every other

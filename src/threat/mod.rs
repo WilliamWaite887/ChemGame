@@ -330,6 +330,64 @@ pub enum Advance {
     EveryVisit,
 }
 
+/// The resident-aware form of [`spawn_scripted_visit`]. If the identity is a
+/// free station resident, the body already walking the station is recalled;
+/// outsiders and unavailable residents retain the proven spawn path.
+pub fn dispatch_scripted_visit(
+    commands: &mut Commands,
+    db: &ChemDb,
+    rng: &mut impl Rng,
+    rules: &ShiftRules,
+    residents: &mut Query<
+        (
+            Entity,
+            &crate::crew::CrewMember,
+            &crate::body::Body,
+            &crate::body::Bloodstream,
+            &mut crate::crew::CrewRoute,
+        ),
+        (
+            With<crate::crew::Ambient>,
+            Without<crate::social::NpcCommitment>,
+        ),
+    >,
+    visit: ScriptedVisit,
+) -> Entity {
+    let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
+    let crew =
+        crate::crew::recall_resident_for_order(commands, residents, visit.name, visit.role, 0.0)
+            .unwrap_or_else(|| {
+                let identity = crate::crew::CrewDef {
+                    name: visit.name.to_string(),
+                    role: visit.role.to_string(),
+                    color: visit.color,
+                };
+                crate::crew::spawn_crew_member(commands, &identity, 0.0)
+            });
+    let reagent_name = db.reagents.get(visit.reagent).name.clone();
+    let amount = crate::orders::deliverable_amount(
+        db,
+        visit.reagent,
+        chem_sim::Units::whole(visit.amount_units as i32),
+    );
+    commands.entity(crew).insert((
+        crate::orders::Order {
+            reagent: visit.reagent,
+            specific: true,
+            minimum_purity: 0.0,
+            amount,
+            plea: visit.plea,
+            patience,
+            waited: 0.0,
+        },
+        crate::interaction::Interactable::new(format!(
+            "{} — hand over {} {}",
+            visit.name, amount, reagent_name
+        )),
+    ));
+    crew
+}
+
 /// What one of this thread's resolutions meant to it.
 pub struct ChainStep {
     /// Whether this resolution is this thread's own [`Trigger`].

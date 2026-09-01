@@ -1160,6 +1160,106 @@ pub struct Remarks {
     spoken: Vec<usize>,
 }
 
+#[derive(Component, Default)]
+struct SocialRemarks {
+    personal_stage: u8,
+    evidence_stage: u8,
+}
+
+fn personal_relationship_line(
+    member: &CrewMember,
+    social: &crate::social::SocialState,
+) -> Option<(String, SpeechTone)> {
+    let relationship = social.relationships.get(&member.name)?;
+    if relationship.last_outcome == crate::social::FavorOutcome::Unresolved {
+        return None;
+    }
+    let profile = social.profile(&member.name)?;
+    let line = match (relationship.last_outcome, profile.temperament) {
+        (crate::social::FavorOutcome::Helped, crate::social::Temperament::Warm) => {
+            "You showed up when I needed someone. That matters."
+        }
+        (crate::social::FavorOutcome::Helped, crate::social::Temperament::Blunt) => {
+            "You did the job. I trust that more than promises."
+        }
+        (crate::social::FavorOutcome::Helped, crate::social::Temperament::Cautious) => {
+            "You handled my request carefully. I noticed."
+        }
+        (crate::social::FavorOutcome::Helped, crate::social::Temperament::Exacting) => {
+            "The handoff met every requirement. Good work."
+        }
+        (crate::social::FavorOutcome::Deceived, _) => {
+            "I checked what you handed me. The facts did not match the story."
+        }
+        (crate::social::FavorOutcome::Refused, _) => {
+            "You left my request hanging. I had to remember that."
+        }
+        (crate::social::FavorOutcome::Compromised, crate::social::Temperament::Warm) => {
+            "I know you meant to help. The result still put someone at risk."
+        }
+        (crate::social::FavorOutcome::Compromised, crate::social::Temperament::Blunt) => {
+            "Close enough is how people get hurt."
+        }
+        (crate::social::FavorOutcome::Compromised, crate::social::Temperament::Cautious) => {
+            "I cannot rely on a handoff with that many loose ends."
+        }
+        (crate::social::FavorOutcome::Compromised, crate::social::Temperament::Exacting) => {
+            "The sample failed the conditions I gave you."
+        }
+        _ => return None,
+    };
+    Some((line.into(), SpeechTone::Wary))
+}
+
+fn evidence_suspicion_line(
+    member: &CrewMember,
+    social: &crate::social::SocialState,
+) -> Option<(String, SpeechTone)> {
+    let selected = social.resident_antagonist?;
+    if social.antagonist_resolution == crate::social::AntagonistResolution::Turned
+        && member.name == selected.resident()
+    {
+        let text = match selected {
+            crate::social::ResidentAntagonist::OkonkwoQuack =>
+                "Quiet warning: somebody is shopping for another off-chart dose. Check Medical's real log.",
+            crate::social::ResidentAntagonist::SatoSmuggler =>
+                "Quiet warning: the next clean manifest is the suspicious one. Cargo is laundering a route.",
+            crate::social::ResidentAntagonist::ReyesBentGuard =>
+                "Quiet warning: an inspection is being timed around the evidence locker. Do not leave it open.",
+        };
+        return Some((text.into(), SpeechTone::Wary));
+    }
+    if social.evidence_progress == 0
+        || matches!(
+            social.antagonist_resolution,
+            crate::social::AntagonistResolution::Reported
+        )
+    {
+        return None;
+    }
+    if member.name == selected.resident() {
+        let profile = social.profile(&member.name)?;
+        let text = match profile.temperament {
+            crate::social::Temperament::Warm =>
+                "The paperwork looks strange because I was helping someone who had nowhere else to go.",
+            crate::social::Temperament::Blunt =>
+                "A discrepancy is not a crime. Either act on it or get out of my way.",
+            crate::social::Temperament::Cautious =>
+                "Keep the seals intact and follow the chain. Guessing will only contaminate it.",
+            crate::social::Temperament::Exacting =>
+                "Check the dose, label, time, and manifest. Precision will explain more than suspicion.",
+        };
+        return Some((text.into(), SpeechTone::Wary));
+    }
+    if member.name == crate::social::BEX && social.evidence_progress >= 2 {
+        return Some((
+            "One inconsistency is noise. A consequence and a matching item make a case. Bring me the physical link.".into(),
+            SpeechTone::Wary,
+        ));
+    }
+    None
+}
+
 /// Answers a chemist who walked up and asked.
 ///
 /// Triggered by an ordinary [`InteractRequested`] at a [`CrewMember`] from
@@ -1185,7 +1285,14 @@ fn handle_talk(
     mut requests: MessageReader<FromClient<InteractRequested>>,
     chemists: Query<(Entity, &Chemist)>,
     held: Query<&crate::containers::HeldBy>,
-    crew: Query<(&CrewMember, Option<&Remarks>, Option<&SpeechTimer>)>,
+    crew: Query<(
+        &CrewMember,
+        Option<&Remarks>,
+        Option<&SpeechTimer>,
+        Option<&crate::social::PersonalFavor>,
+        Option<&SocialRemarks>,
+    )>,
+    social: Option<Res<crate::social::SocialState>>,
 ) {
     let Some(script) = script else {
         requests.clear();
@@ -1199,12 +1306,50 @@ fn handle_talk(
         if held.iter().any(|holder| holder.0 == player) {
             continue;
         }
-        let Ok((member, remarks, talking)) = crew.get(request.target) else {
+        let Ok((member, remarks, talking, favor, social_remarks)) = crew.get(request.target) else {
             continue;
         };
         // Let them finish the word before starting the next one.
         if talking.is_some_and(|timer| timer.0.elapsed_secs() < MIN_BEFORE_NEXT_REMARK) {
             continue;
+        }
+
+        if let Some(favor) = favor {
+            say(
+                &mut commands,
+                request.target,
+                favor.summary.clone(),
+                SpeechTone::Wary,
+            );
+            continue;
+        }
+        if let Some(social) = social.as_deref() {
+            let spoken_personal = social_remarks.map_or(0, |remarks| remarks.personal_stage);
+            let chain_stage = social
+                .relationships
+                .get(&member.name)
+                .map_or(0, |relationship| relationship.chain_stage);
+            if chain_stage > spoken_personal {
+                if let Some(line) = personal_relationship_line(member, social) {
+                    say(&mut commands, request.target, line.0, line.1);
+                    commands.entity(request.target).insert(SocialRemarks {
+                        personal_stage: chain_stage,
+                        evidence_stage: social_remarks.map_or(0, |remarks| remarks.evidence_stage),
+                    });
+                    continue;
+                }
+            }
+            let spoken_evidence = social_remarks.map_or(0, |remarks| remarks.evidence_stage);
+            if social.evidence_progress > spoken_evidence {
+                if let Some(line) = evidence_suspicion_line(member, social) {
+                    say(&mut commands, request.target, line.0, line.1);
+                    commands.entity(request.target).insert(SocialRemarks {
+                        personal_stage: chain_stage,
+                        evidence_stage: social.evidence_progress,
+                    });
+                    continue;
+                }
+            }
         }
 
         let spoken = remarks

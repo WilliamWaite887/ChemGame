@@ -47,6 +47,10 @@ use crate::shift::{
     RequisitionRequested, ShiftReport, ToggleAcceptingOrders, OVERCLOCK_COST,
     PRESSURE_SPRAYER_COST, SYRINGE_GUN_COST, WATER_GUN_COST,
 };
+use crate::social::{
+    resident_department, ConversationHistory, FavorOutcome, PersonalHistory, PublicRelationship,
+    RelationshipTier,
+};
 use crate::AppState;
 
 mod book;
@@ -104,6 +108,7 @@ impl Plugin for UiPlugin {
                 spawn_vitals_panel,
                 spawn_hotbar,
                 spawn_room_label,
+                reset_social_view,
             ),
         )
         .add_systems(
@@ -155,6 +160,7 @@ impl Plugin for UiPlugin {
         .init_resource::<TooltipState>()
         .init_resource::<HplcView>()
         .init_resource::<BoardTab>()
+        .init_resource::<SocialView>()
         .init_resource::<LastPanel>()
         .init_resource::<LastSignState>()
         .init_resource::<ThermostatDrag>()
@@ -214,6 +220,9 @@ enum PanelAction {
     Requisition(RequisitionKind),
     NpcPack(NpcRequisitionKind),
     ShowBoardTab(BoardTab),
+    ShowSocialDepartment(Department),
+    SelectSocialResident(String),
+    CloseSocial,
     Close,
 }
 
@@ -236,8 +245,30 @@ struct Refused;
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
 enum BoardTab {
     #[default]
-    Standing,
+    Service,
     Radio,
+}
+
+/// Local navigation inside the social directory. The relationships and heard
+/// lines are save data; which department and person this player is currently
+/// looking at are only presentation.
+#[derive(Resource, Clone, Debug, PartialEq, Eq)]
+struct SocialView {
+    department: Department,
+    resident: Option<String>,
+}
+
+impl Default for SocialView {
+    fn default() -> Self {
+        Self {
+            department: Department::Medical,
+            resident: None,
+        }
+    }
+}
+
+fn reset_social_view(mut view: ResMut<SocialView>) {
+    *view = SocialView::default();
 }
 
 /// Which heading the reference book is open at. `None` is the "All" tab.
@@ -459,6 +490,10 @@ struct PanelSignature {
     /// `book_category`: switching tab changes what the panel shows, so it
     /// rebuilds the panel.
     board_tab: BoardTab,
+    /// Local social-directory navigation and the public, qualitative snapshot
+    /// it renders. Exact impressions and secret roles never enter this type.
+    social_view: SocialView,
+    social_residents: Vec<ResidentSocialSnapshot>,
     /// Latest delivered transmission. Unlike the old snapshot-only radio tab,
     /// this makes an open board update as traffic arrives.
     radio_sequence: Option<u64>,
@@ -536,7 +571,9 @@ impl Default for PanelSignature {
             accepting_orders: false,
             // Same reasoning again: the vector above is what guarantees a
             // difference on the first comparison, so this only needs a value.
-            board_tab: BoardTab::Standing,
+            board_tab: BoardTab::Service,
+            social_view: SocialView::default(),
+            social_residents: Vec::new(),
             radio_sequence: None,
             board: BoardStage::Open,
             research_points: u32::MAX,
@@ -721,6 +758,16 @@ struct BoardView<'w, 's> {
     tab: Res<'w, BoardTab>,
     radio_scroll:
         Query<'w, 's, (&'static ScrollPosition, &'static ComputedNode), With<RadioHistoryPane>>,
+    social_view: Res<'w, SocialView>,
+    social_residents: Query<
+        'w,
+        's,
+        (
+            &'static CrewMember,
+            Option<&'static PublicRelationship>,
+            Option<&'static ConversationHistory>,
+        ),
+    >,
 }
 
 impl BoardView<'_, '_> {
@@ -741,6 +788,34 @@ impl BoardView<'_, '_> {
             at_bottom: position.y >= limit - 4.0,
         }
     }
+
+    fn social_snapshot(&self) -> Vec<ResidentSocialSnapshot> {
+        crate::social::RESIDENT_NAMES
+            .into_iter()
+            .map(|name| {
+                let visible = self
+                    .social_residents
+                    .iter()
+                    .find(|(member, _, _)| member.name == name);
+                ResidentSocialSnapshot {
+                    name: name.to_string(),
+                    relationship: visible
+                        .and_then(|(_, relationship, _)| relationship.cloned())
+                        .unwrap_or_default(),
+                    history: visible
+                        .and_then(|(_, _, history)| history.cloned())
+                        .unwrap_or_default(),
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResidentSocialSnapshot {
+    name: String,
+    relationship: PublicRelationship,
+    history: ConversationHistory,
 }
 
 #[derive(Clone, Copy)]
@@ -884,6 +959,7 @@ fn sync_panel(
         knowledge.known_count(),
         db.reactions.len(),
     );
+    let social_residents = board.social_snapshot();
 
     // Only for the locker, and only while its panel is open. Reading every
     // stored item on every frame of every other panel would be a scan of the
@@ -952,6 +1028,8 @@ fn sync_panel(
         ivy_standing: shift.npc_standing("Botanist Ivy"),
         accepting_orders: shift.accepting_orders,
         board_tab: *board.tab,
+        social_view: board.social_view.clone(),
+        social_residents: social_residents.clone(),
         radio_sequence: board.radio.entries.back().map(|entry| entry.sequence),
         board: stage.clone(),
         research_points: knowledge.research_points,
@@ -993,6 +1071,18 @@ fn sync_panel(
             at_machine.is_some(),
             career_stage,
             board.shift.succeeded,
+            &views.icons,
+        );
+        return;
+    }
+    if matches!(mode, InteractionMode::Social { .. }) {
+        spawn_social_directory(
+            &mut commands,
+            &board.social_view,
+            &social_residents,
+            shift,
+            catalog.as_deref(),
+            board.station.as_deref(),
             &views.icons,
         );
         return;
@@ -1122,8 +1212,6 @@ fn sync_panel(
                                 &board.radio,
                                 *board.tab,
                                 radio_scroll,
-                                catalog.as_deref(),
-                                board.station.as_deref(),
                             );
                         }
                         MachineKind::ReactionChamber => {
@@ -1149,13 +1237,12 @@ fn sync_panel(
         });
 }
 
-/// Every department's standing, what each values, live requisitions, and the
-/// station's radio history, split across two tabs.
+/// Lab service controls and the station's radio history, split across two
+/// tabs. Relationship standing and shops live in the anytime Social screen.
 ///
 /// One panel rather than a modal, exactly like the old shift board: this is
 /// per-player `InteractionMode`, and a modal would trap one chemist on a
 /// summary screen while the other was still working the counter.
-#[allow(clippy::too_many_arguments)]
 fn standing_board_body(
     panel: &mut ChildSpawnerCommands,
     shift: &Shift,
@@ -1164,20 +1251,10 @@ fn standing_board_body(
     radio: &RadioLog,
     tab: BoardTab,
     radio_scroll: RadioScrollState,
-    catalog: Option<&ProduceCatalog>,
-    station: Option<&StationData>,
 ) {
-    // The campaign notice goes above everything else, on both tabs, because
-    // once there is one it is the most important thing on the board — and
-    // because a player who has just been told what they are dealing with
-    // should not have to switch tabs to read it.
-    if let Some(arc) = arc {
-        draw_arc_notice(panel, arc);
-    }
-
     panel.spawn(row()).with_children(|row| {
         for (caption, candidate) in [
-            ("Standing", BoardTab::Standing),
+            ("Lab service", BoardTab::Service),
             ("Radio log", BoardTab::Radio),
         ] {
             let mut entity = row.spawn(button(caption, PanelAction::ShowBoardTab(candidate)));
@@ -1191,114 +1268,24 @@ fn standing_board_body(
     });
 
     match tab {
-        BoardTab::Standing => {
-            // The debrief replaces the sign controls but *not* the
-            // requisition table below it. Reading what the shift came to and
-            // then spending what it earned is one thought, and it is the
-            // thought the removed prep phase used to be for — putting the
-            // debrief on a screen of its own would split it back in two.
-            // Both stay pinned above the scroll pane below: the sign toggle
-            // must always be reachable without scrolling.
+        BoardTab::Service => {
             match stage {
                 BoardStage::Debrief(report) => draw_debrief(panel, report),
                 _ => draw_sign_controls(panel, shift, stage),
             }
-            panel
-                .spawn((
-                    Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: px(10),
-                        max_height: vh(60),
-                        overflow: Overflow::scroll_y(),
-                        ..default()
-                    },
-                    ScrollPosition::default(),
-                    ScrollPane,
-                ))
-                .with_children(|scroll| {
-                    draw_department_shop(scroll, shift);
-                    if let Some(catalog) = catalog {
-                        let items: Vec<_> = catalog
-                            .packs()
-                            .iter()
-                            .map(|pack| {
-                                (
-                                    pack.label.clone(),
-                                    pack.blurb.clone(),
-                                    pack.cost,
-                                    PanelAction::NpcPack(NpcRequisitionKind::IvyPack(pack.id)),
-                                )
-                            })
-                            .collect();
-                        draw_seller_section(
-                            scroll,
-                            "Botanist Ivy",
-                            shift.npc_standing("Botanist Ivy"),
-                            "Sells themed packs off her own trust, not the department's.",
-                            &items,
-                        );
-                    }
-                    if let Some(station) = station {
-                        let mut items: Vec<_> = station
-                            .config
-                            .supply
-                            .personal_packs
-                            .iter()
-                            .enumerate()
-                            .map(|(index, pack)| {
-                                (
-                                    pack.label.clone(),
-                                    pack.blurb.clone(),
-                                    pack.cost,
-                                    PanelAction::NpcPack(NpcRequisitionKind::SatoPack(
-                                        GlasswarePackId(index as u32),
-                                    )),
-                                )
-                            })
-                            .collect();
-                        items.push((
-                            "Water Gun".to_string(),
-                            "Cheap and weak, but hits everyone caught in its spray, not just one target.".to_string(),
-                            WATER_GUN_COST,
-                            PanelAction::NpcPack(NpcRequisitionKind::SatoWaterGun),
-                        ));
-                        draw_seller_section(
-                            scroll,
-                            "Miner Sato",
-                            shift.npc_standing("Miner Sato"),
-                            "Sells glassware directly, off his own trust — faster than waiting on the deficit check.",
-                            &items,
-                        );
-                    }
-                    draw_seller_section(
-                        scroll,
-                        "Tech Lindqvist",
-                        shift.npc_standing("Tech Lindqvist"),
-                        "Sells a coil that overclocks the Reaction Chamber, and a pair of longer-reach confrontation tools.",
-                        &[
-                            (
-                                "Overclock Coil".to_string(),
-                                "Temporarily doubles the chamber's heating rate. Repurchasing tops up charges.".to_string(),
-                                OVERCLOCK_COST,
-                                PanelAction::NpcPack(NpcRequisitionKind::LindqvistOverclock),
-                            ),
-                            (
-                                "Syringe Gun".to_string(),
-                                "A syringe with real range — draws and injects from well beyond arm's reach.".to_string(),
-                                SYRINGE_GUN_COST,
-                                PanelAction::NpcPack(NpcRequisitionKind::LindqvistSyringeGun),
-                            ),
-                            (
-                                "Pressure Sprayer".to_string(),
-                                "A pressurized sprayer: longer reach than a hand bottle, and it catches everyone in its cone.".to_string(),
-                                PRESSURE_SPRAYER_COST,
-                                PanelAction::NpcPack(NpcRequisitionKind::LindqvistPressureSprayer),
-                            ),
-                        ],
-                    );
-                });
+            panel.spawn(label(
+                "Crew relationships and department shops are available from Social  (Tab).",
+                12.0,
+                TEXT_DIM,
+            ));
         }
         BoardTab::Radio => {
+            // Campaign intelligence is station traffic, so it belongs with
+            // the radio rather than turning the lab-service tab back into a
+            // third kind of board.
+            if let Some(arc) = arc {
+                draw_arc_notice(panel, arc);
+            }
             // The log is the whole tab — nothing else is pinned above it but
             // the tab row itself, so it gets the same generous height the
             // book's own top-level list does.
@@ -1322,6 +1309,414 @@ fn standing_board_body(
             });
         }
     }
+}
+
+fn department_icon(department: Department) -> BookIcon {
+    match department {
+        Department::Medical => BookIcon::Heal,
+        Department::Security => BookIcon::Controlled,
+        Department::Engineering => BookIcon::ReactionChamber,
+        Department::Cargo => BookIcon::Inputs,
+        Department::Service => BookIcon::Orders,
+    }
+}
+
+fn relationship_label(tier: RelationshipTier) -> &'static str {
+    match tier {
+        RelationshipTier::Burned => "Burned",
+        RelationshipTier::Wary => "Wary",
+        RelationshipTier::Neutral => "Neutral",
+        RelationshipTier::Trusted => "Trusted",
+    }
+}
+
+fn relationship_color(tier: RelationshipTier) -> Color {
+    match tier {
+        RelationshipTier::Burned => ERROR_TEXT,
+        RelationshipTier::Wary => Color::srgb(0.92, 0.72, 0.34),
+        RelationshipTier::Neutral => TEXT_DIM,
+        RelationshipTier::Trusted => GOOD_TEXT,
+    }
+}
+
+fn outcome_label(outcome: FavorOutcome) -> &'static str {
+    match outcome {
+        FavorOutcome::Unresolved => "No personal outcome yet",
+        FavorOutcome::Helped => "You helped them",
+        FavorOutcome::Compromised => "The last favor became complicated",
+        FavorOutcome::Refused => "You refused their last request",
+        FavorOutcome::Deceived => "Their last explanation did not hold up",
+    }
+}
+
+fn personal_history_label(history: PersonalHistory) -> &'static str {
+    match history {
+        PersonalHistory::New => "No shared personal history yet",
+        PersonalHistory::InProgress => "A personal matter is still unfolding",
+        PersonalHistory::Established => "You have an established history together",
+    }
+}
+
+fn standing_label(standing: i32) -> &'static str {
+    if standing > 0 {
+        "Good standing"
+    } else if standing < 0 {
+        "Strained standing"
+    } else {
+        "Unproven standing"
+    }
+}
+
+/// The anytime social directory. Its composition deliberately mirrors the
+/// new field manual: a fixed category rail, one generous scrolling detail
+/// pane, compact fact chips, inset cards, and the same blue active state.
+fn spawn_social_directory(
+    commands: &mut Commands,
+    view: &SocialView,
+    residents: &[ResidentSocialSnapshot],
+    shift: &Shift,
+    catalog: Option<&ProduceCatalog>,
+    station: Option<&StationData>,
+    icons: &BookIconAssets,
+) {
+    let heard_lines: usize = residents
+        .iter()
+        .map(|resident| resident.history.lines.len())
+        .sum();
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                height: percent(100),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.015, 0.02, 0.025, 0.72)),
+            PanelRoot,
+            crate::until_we_leave_the_lab(),
+        ))
+        .with_children(|screen| {
+            screen
+                .spawn((
+                    Node {
+                        width: percent(95),
+                        max_width: px(1360),
+                        height: vh(92),
+                        flex_direction: FlexDirection::Column,
+                        padding: UiRect::all(px(16)),
+                        row_gap: px(8),
+                        border: UiRect::all(px(2)),
+                        border_radius: BorderRadius::all(px(10)),
+                        ..default()
+                    },
+                    BackgroundColor(PANEL_BG),
+                    BorderColor::all(Color::srgb(0.24, 0.40, 0.50)),
+                ))
+                .with_children(|social| {
+                    social
+                        .spawn(Node {
+                            width: percent(100),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::SpaceBetween,
+                            ..default()
+                        })
+                        .with_children(|header| {
+                            header.spawn(row()).with_children(|title| {
+                                title.spawn(icon_image(icons, BookIcon::Orders, 30.0, BOOK_ACCENT));
+                                title.spawn(heading("CREW DIRECTORY"));
+                                title.spawn(label(
+                                    "RELATIONSHIPS  /  REQUISITIONS",
+                                    10.0,
+                                    TEXT_DIM,
+                                ));
+                            });
+                            header.spawn(button("‹ Back to station", PanelAction::CloseSocial));
+                        });
+
+                    social
+                        .spawn((
+                            Node {
+                                width: percent(100),
+                                flex_wrap: FlexWrap::Wrap,
+                                align_items: AlignItems::Center,
+                                column_gap: px(6),
+                                row_gap: px(5),
+                                padding: UiRect::axes(px(8), px(6)),
+                                border_radius: BorderRadius::all(px(6)),
+                                ..default()
+                            },
+                            BackgroundColor(BOOK_PAPER),
+                        ))
+                        .with_children(|strip| {
+                            fact_chip(
+                                strip,
+                                icons,
+                                BookIcon::All,
+                                residents.len().to_string(),
+                                "Named crew",
+                                "Persistent residents tracked during this save.",
+                                BOOK_ACCENT,
+                            );
+                            fact_chip(
+                                strip,
+                                icons,
+                                BookIcon::Book,
+                                heard_lines.to_string(),
+                                "Lines remembered",
+                                "Only dialogue actually heard in this save appears here.",
+                                GOOD_TEXT,
+                            );
+                            fact_chip(
+                                strip,
+                                icons,
+                                BookIcon::Inputs,
+                                "SHOPS",
+                                "Department requisitions",
+                                "Each department's catalog sits beside its crew records.",
+                                Color::srgb(0.76, 0.68, 0.96),
+                            );
+                            fact_chip(
+                                strip,
+                                icons,
+                                BookIcon::Key,
+                                "TAB / ESC",
+                                "Close directory",
+                                "Return to the exact lab, machine, or manual screen underneath.",
+                                TEXT_DIM,
+                            );
+                        });
+
+                    social
+                        .spawn(Node {
+                            column_gap: px(16),
+                            align_items: AlignItems::Start,
+                            flex_grow: 1.0,
+                            ..default()
+                        })
+                        .with_children(|columns| {
+                            social_department_sidebar(columns, view, icons);
+                            social_department_page(
+                                columns, view, residents, shift, catalog, station, icons,
+                            );
+                        });
+                });
+        });
+}
+
+fn social_department_sidebar(
+    columns: &mut ChildSpawnerCommands,
+    view: &SocialView,
+    icons: &BookIconAssets,
+) {
+    columns
+        .spawn((
+            Node {
+                width: px(154),
+                flex_direction: FlexDirection::Row,
+                flex_wrap: FlexWrap::Wrap,
+                align_content: AlignContent::FlexStart,
+                column_gap: px(4),
+                row_gap: px(4),
+                padding: UiRect::all(px(3)),
+                flex_shrink: 0.0,
+                border_radius: BorderRadius::all(px(7)),
+                ..default()
+            },
+            BackgroundColor(BOOK_INSET),
+        ))
+        .with_children(|sidebar| {
+            for department in Department::ALL {
+                let mut entity = sidebar.spawn(icon_control(
+                    PanelAction::ShowSocialDepartment(department),
+                    department.label(),
+                    department.blurb(),
+                    145.0,
+                    52.0,
+                ));
+                entity.with_children(|control| {
+                    control.spawn(icon_image(
+                        icons,
+                        department_icon(department),
+                        20.0,
+                        if department == view.department {
+                            BOOK_ACCENT
+                        } else {
+                            TEXT_DIM
+                        },
+                    ));
+                    control.spawn(label(department.label(), 11.0, TEXT));
+                });
+                if department == view.department {
+                    entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
+                }
+            }
+        });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn social_department_page(
+    columns: &mut ChildSpawnerCommands,
+    view: &SocialView,
+    residents: &[ResidentSocialSnapshot],
+    shift: &Shift,
+    catalog: Option<&ProduceCatalog>,
+    station: Option<&StationData>,
+    icons: &BookIconAssets,
+) {
+    columns
+        .spawn((
+            Node {
+                flex_grow: 1.0,
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8),
+                max_height: vh(69),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+            ScrollPosition::default(),
+            ScrollPane,
+        ))
+        .with_children(|pane| {
+            pane.spawn(row()).with_children(|heading_row| {
+                heading_row
+                    .spawn(icon_badge(
+                        view.department.label(),
+                        view.department.blurb(),
+                        36.0,
+                    ))
+                    .with_children(|badge| {
+                        badge.spawn(icon_image(
+                            icons,
+                            department_icon(view.department),
+                            23.0,
+                            BOOK_ACCENT,
+                        ));
+                    });
+                heading_row.spawn(label(view.department.label(), 20.0, TEXT));
+                heading_row.spawn(label(
+                    standing_label(shift.standing(view.department)),
+                    12.0,
+                    TEXT_DIM,
+                ));
+            });
+            pane.spawn(label(view.department.blurb(), 14.0, TEXT_DIM));
+
+            pane.spawn(wrap_row()).with_children(|cards| {
+                for resident in residents.iter().filter(|resident| {
+                    resident_department(&resident.name) == Some(view.department)
+                }) {
+                    let selected = view.resident.as_deref() == Some(resident.name.as_str());
+                    let mut entity = cards.spawn(icon_control(
+                        PanelAction::SelectSocialResident(resident.name.clone()),
+                        resident.name.clone(),
+                        "Open this crew member's relationship record and remembered dialogue.",
+                        180.0,
+                        64.0,
+                    ));
+                    entity.with_children(|card| {
+                        card.spawn(label(resident.name.clone(), 14.0, TEXT));
+                        card.spawn(label(
+                            relationship_label(resident.relationship.tier),
+                            11.0,
+                            relationship_color(resident.relationship.tier),
+                        ));
+                    });
+                    if selected {
+                        entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
+                    }
+                }
+            });
+
+            if let Some(selected) = view
+                .resident
+                .as_deref()
+                .and_then(|name| residents.iter().find(|resident| resident.name == name))
+                .filter(|resident| resident_department(&resident.name) == Some(view.department))
+            {
+                draw_resident_record(pane, selected);
+            } else {
+                pane.spawn((section(), BackgroundColor(BOOK_INSET)))
+                    .with_children(|card| {
+                        card.spawn(label("SELECT A CREW MEMBER", 11.0, BOOK_ACCENT));
+                        card.spawn(label(
+                            "Choose a resident above to review your relationship and the dialogue heard in this save.",
+                            13.0,
+                            TEXT_DIM,
+                        ));
+                    });
+            }
+
+            pane.spawn(label("DEPARTMENT SHOP", 11.0, BOOK_ACCENT));
+            draw_department_shop(pane, shift, view.department);
+            draw_department_sellers(pane, shift, view.department, catalog, station);
+        });
+}
+
+fn draw_resident_record(panel: &mut ChildSpawnerCommands, resident: &ResidentSocialSnapshot) {
+    panel
+        .spawn((
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(px(11)),
+                row_gap: px(6),
+                border: UiRect::left(px(3)),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(BOOK_INSET),
+            BorderColor::all(relationship_color(resident.relationship.tier)),
+        ))
+        .with_children(|record| {
+            record.spawn(row()).with_children(|header| {
+                header.spawn(label(resident.name.clone(), 18.0, TEXT));
+                header.spawn(label(
+                    relationship_label(resident.relationship.tier).to_uppercase(),
+                    11.0,
+                    relationship_color(resident.relationship.tier),
+                ));
+            });
+            record.spawn(label(
+                personal_history_label(resident.relationship.personal_history),
+                12.0,
+                TEXT_DIM,
+            ));
+            record.spawn(label(
+                outcome_label(resident.relationship.last_outcome),
+                12.0,
+                TEXT_DIM,
+            ));
+            record.spawn(label("REMEMBERED DIALOGUE", 10.0, BOOK_ACCENT));
+            if resident.history.lines.is_empty() {
+                record.spawn(label(
+                    "No conversation with this resident has been recorded in this save.",
+                    12.0,
+                    TEXT_DIM,
+                ));
+            } else {
+                for line in &resident.history.lines {
+                    record
+                        .spawn((
+                            Node {
+                                width: percent(100),
+                                padding: UiRect::axes(px(9), px(6)),
+                                border_radius: BorderRadius::all(px(4)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgba(0.11, 0.13, 0.16, 0.9)),
+                        ))
+                        .with_children(|entry| {
+                            entry.spawn(label(
+                                format!("{}: {}", line.speaker, line.text),
+                                12.0,
+                                TEXT,
+                            ));
+                        });
+                }
+            }
+        });
 }
 
 /// The station's radio history, oldest first — the same order the small
@@ -1407,49 +1802,132 @@ fn draw_radio_history(panel: &mut ChildSpawnerCommands, radio: &RadioLog) {
     }
 }
 
-/// Every department's standing, what each values, and its live requisitions.
-fn draw_department_shop(panel: &mut ChildSpawnerCommands, shift: &Shift) {
-    for department in Department::ALL {
-        panel.spawn(label(
-            format!(
-                "{}  ·  {:+} standing",
-                department.label(),
-                shift.standing(department)
-            ),
-            15.0,
-            TEXT,
-        ));
-        panel.spawn(label(department.blurb(), 12.0, TEXT_DIM));
-
-        let kinds: Vec<RequisitionKind> = RequisitionKind::ALL
-            .into_iter()
-            .filter(|kind| kind.department() == department)
-            .collect();
-        if kinds.is_empty() {
-            continue;
-        }
-        panel.spawn(wrap_row()).with_children(|row| {
-            for &kind in &kinds {
-                let available = can_afford(shift.standing(department), kind);
-                let caption = format!("{} ({})", kind.label(), kind.cost());
-                let mut entity = row.spawn(button(caption, PanelAction::Requisition(kind)));
-                // Drawn dead rather than drawn live and silently doing
-                // nothing — a button that looks clickable but is refused
-                // reads as the game being broken. `Refused` is what makes
-                // that literal: `handle_panel_clicks` reads it back and
-                // turns a click here into `Sfx::UiRefused`, not a request.
-                if !available {
-                    entity.insert((BackgroundColor(Color::srgb(0.11, 0.12, 0.14)), Refused));
-                }
+/// One department's standing, values, and live requisitions. The caller has
+/// already selected the department in the social directory's left rail.
+fn draw_department_shop(panel: &mut ChildSpawnerCommands, shift: &Shift, department: Department) {
+    let kinds: Vec<RequisitionKind> = RequisitionKind::ALL
+        .into_iter()
+        .filter(|kind| kind.department() == department)
+        .collect();
+    if kinds.is_empty() {
+        panel.spawn(label("No general requisitions available.", 12.0, TEXT_DIM));
+        return;
+    }
+    panel.spawn(wrap_row()).with_children(|row| {
+        for &kind in &kinds {
+            let available = can_afford(shift.standing(department), kind);
+            let caption = format!("{} ({})", kind.label(), kind.cost());
+            let mut entity = row.spawn(button(caption, PanelAction::Requisition(kind)));
+            if !available {
+                entity.insert((BackgroundColor(Color::srgb(0.11, 0.12, 0.14)), Refused));
             }
-        });
-        for kind in kinds {
-            panel.spawn(label(
-                format!("  {} — {}", kind.label(), kind.blurb()),
-                12.0,
-                TEXT_DIM,
-            ));
         }
+    });
+    for kind in kinds {
+        panel.spawn(label(
+            format!("  {} — {}", kind.label(), kind.blurb()),
+            12.0,
+            TEXT_DIM,
+        ));
+    }
+}
+
+fn draw_department_sellers(
+    panel: &mut ChildSpawnerCommands,
+    shift: &Shift,
+    department: Department,
+    catalog: Option<&ProduceCatalog>,
+    station: Option<&StationData>,
+) {
+    match department {
+        Department::Service => {
+            if let Some(catalog) = catalog {
+                let items: Vec<_> = catalog
+                    .packs()
+                    .iter()
+                    .map(|pack| {
+                        (
+                            pack.label.clone(),
+                            pack.blurb.clone(),
+                            pack.cost,
+                            PanelAction::NpcPack(NpcRequisitionKind::IvyPack(pack.id)),
+                        )
+                    })
+                    .collect();
+                draw_seller_section(
+                    panel,
+                    "Botanist Ivy",
+                    shift.npc_standing("Botanist Ivy"),
+                    "Sells themed packs off her own trust, not the department's.",
+                    &items,
+                );
+            }
+        }
+        Department::Cargo => {
+            if let Some(station) = station {
+                let mut items: Vec<_> = station
+                    .config
+                    .supply
+                    .personal_packs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, pack)| {
+                        (
+                            pack.label.clone(),
+                            pack.blurb.clone(),
+                            pack.cost,
+                            PanelAction::NpcPack(NpcRequisitionKind::SatoPack(GlasswarePackId(
+                                index as u32,
+                            ))),
+                        )
+                    })
+                    .collect();
+                items.push((
+                    "Water Gun".to_string(),
+                    "Cheap and weak, but hits everyone caught in its spray, not just one target."
+                        .to_string(),
+                    WATER_GUN_COST,
+                    PanelAction::NpcPack(NpcRequisitionKind::SatoWaterGun),
+                ));
+                draw_seller_section(
+                    panel,
+                    "Miner Sato",
+                    shift.npc_standing("Miner Sato"),
+                    "Sells glassware directly, off his own trust — faster than waiting on the deficit check.",
+                    &items,
+                );
+            }
+        }
+        Department::Engineering => draw_seller_section(
+            panel,
+            "Tech Lindqvist",
+            shift.npc_standing("Tech Lindqvist"),
+            "Sells a coil that overclocks the Reaction Chamber, and a pair of longer-reach confrontation tools.",
+            &[
+                (
+                    "Overclock Coil".to_string(),
+                    "Temporarily doubles the chamber's heating rate. Repurchasing tops up charges."
+                        .to_string(),
+                    OVERCLOCK_COST,
+                    PanelAction::NpcPack(NpcRequisitionKind::LindqvistOverclock),
+                ),
+                (
+                    "Syringe Gun".to_string(),
+                    "A syringe with real range — draws and injects from well beyond arm's reach."
+                        .to_string(),
+                    SYRINGE_GUN_COST,
+                    PanelAction::NpcPack(NpcRequisitionKind::LindqvistSyringeGun),
+                ),
+                (
+                    "Pressure Sprayer".to_string(),
+                    "A pressurized sprayer: longer reach than a hand bottle, and it catches everyone in its cone."
+                        .to_string(),
+                    PRESSURE_SPRAYER_COST,
+                    PanelAction::NpcPack(NpcRequisitionKind::LindqvistPressureSprayer),
+                ),
+            ],
+        ),
+        Department::Medical | Department::Security => {}
     }
 }
 
@@ -1477,7 +1955,7 @@ fn draw_seller_section(
     }
 
     panel.spawn(label(
-        format!("{seller_name}  ·  {seller_standing:+} standing"),
+        format!("{seller_name}  ·  {}", standing_label(seller_standing)),
         15.0,
         TEXT,
     ));
@@ -7829,7 +8307,7 @@ fn handle_panel_clicks(
     buttons: Query<(Entity, &Interaction, &PanelAction), Changed<Interaction>>,
     refused: Query<(), With<Refused>>,
     mut modes: Query<(Entity, &mut InteractionMode), With<LocalPlayer>>,
-    mut machines: Query<&mut Machine>,
+    mut machine_views: ParamSet<(Query<&mut Machine>, Query<(Entity, &Machine)>)>,
     mut amounts: Query<&mut DispenseAmount>,
     mut out: PanelMessages,
     thermostats: Query<&Thermostat>,
@@ -7847,6 +8325,7 @@ fn handle_panel_clicks(
     mut book: ResMut<BookView>,
     mut hplc_view: ResMut<HplcView>,
     mut board_tab: ResMut<BoardTab>,
+    mut social_view: ResMut<SocialView>,
 ) {
     let Some((player, mut mode)) = modes.iter_mut().next() else {
         return;
@@ -7855,6 +8334,11 @@ fn handle_panel_clicks(
         InteractionMode::UsingMachine(machine) => Some(machine),
         _ => None,
     };
+    let shop_board = machine_views
+        .p1()
+        .iter()
+        .find(|(_, machine)| machine.kind == MachineKind::StandingBoard)
+        .map(|(entity, _)| entity);
 
     for (entity, interaction, action) in &buttons {
         if *interaction != Interaction::Pressed {
@@ -7906,7 +8390,51 @@ fn handle_panel_clicks(
                 *board_tab = *tab;
                 continue;
             }
+            PanelAction::ShowSocialDepartment(department) => {
+                social_view.department = *department;
+                if social_view
+                    .resident
+                    .as_deref()
+                    .and_then(resident_department)
+                    != Some(*department)
+                {
+                    social_view.resident = None;
+                }
+                continue;
+            }
+            PanelAction::SelectSocialResident(resident) => {
+                if let Some(department) = resident_department(resident) {
+                    social_view.department = department;
+                    social_view.resident = Some(resident.clone());
+                }
+                continue;
+            }
+            PanelAction::CloseSocial => {
+                *mode = mode.toggled_social();
+                return;
+            }
+            PanelAction::Requisition(kind) => {
+                if refused.contains(entity) {
+                    out.play.write(PlaySfx(Sfx::UiRefused));
+                } else if let Some(board) = shop_board {
+                    out.requisition
+                        .write(RequisitionRequested { board, kind: *kind });
+                    out.play.write(PlaySfx(Sfx::RequisitionConfirm));
+                }
+                continue;
+            }
+            PanelAction::NpcPack(kind) => {
+                if refused.contains(entity) {
+                    out.play.write(PlaySfx(Sfx::UiRefused));
+                } else if let Some(board) = shop_board {
+                    out.npc_requisition
+                        .write(NpcRequisitionRequested { board, kind: *kind });
+                    out.play.write(PlaySfx(Sfx::RequisitionConfirm));
+                }
+                continue;
+            }
             PanelAction::Close => {
+                let mut machines = machine_views.p0();
                 leave_machine(player, &mut mode, &mut machines, &mut out.leave_machine);
                 return;
             }
@@ -8017,34 +8545,6 @@ fn handle_panel_clicks(
             PanelAction::OpenUpAgain => {
                 out.open_up.write(OpenUpAgain { board: machine });
             }
-            PanelAction::Requisition(kind) => {
-                if refused.contains(entity) {
-                    // Dimmed for insufficient standing (`draw_department_shop`)
-                    // — a click here plays the refusal and sends nothing,
-                    // rather than mailing a request the server would only
-                    // reject.
-                    out.play.write(PlaySfx(Sfx::UiRefused));
-                } else {
-                    out.requisition.write(RequisitionRequested {
-                        board: machine,
-                        kind: *kind,
-                    });
-                    out.play.write(PlaySfx(Sfx::RequisitionConfirm));
-                }
-            }
-            // The individual-NPC sibling of `Requisition`, same dead-button
-            // convention (`draw_npc_shop` is what dims it).
-            PanelAction::NpcPack(kind) => {
-                if refused.contains(entity) {
-                    out.play.write(PlaySfx(Sfx::UiRefused));
-                } else {
-                    out.npc_requisition.write(NpcRequisitionRequested {
-                        board: machine,
-                        kind: *kind,
-                    });
-                    out.play.write(PlaySfx(Sfx::RequisitionConfirm));
-                }
-            }
             // Handled above, before the machine guard.
             PanelAction::BuyHint(_)
             | PanelAction::UnlockAll
@@ -8055,6 +8555,11 @@ fn handle_panel_clicks(
             | PanelAction::CloseRecipe
             | PanelAction::CloseBook
             | PanelAction::ShowBoardTab(_)
+            | PanelAction::ShowSocialDepartment(_)
+            | PanelAction::SelectSocialResident(_)
+            | PanelAction::CloseSocial
+            | PanelAction::Requisition(_)
+            | PanelAction::NpcPack(_)
             | PanelAction::Close => {}
         }
     }
@@ -8063,6 +8568,122 @@ fn handle_panel_clicks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spawn_social_screen_fixture(mut commands: Commands, icons: Res<BookIconAssets>) {
+        let residents = crate::social::RESIDENT_NAMES
+            .into_iter()
+            .map(|name| ResidentSocialSnapshot {
+                name: name.into(),
+                relationship: PublicRelationship::default(),
+                history: ConversationHistory::default(),
+            })
+            .collect::<Vec<_>>();
+        spawn_social_directory(
+            &mut commands,
+            &SocialView::default(),
+            &residents,
+            &Shift::default(),
+            None,
+            None,
+            &icons,
+        );
+    }
+
+    #[test]
+    fn social_screen_uses_a_visible_department_directory_without_secret_labels() {
+        let mut app = App::new();
+        app.add_plugins((TaskPoolPlugin::default(), AssetPlugin::default()))
+            .init_asset::<Image>()
+            .init_resource::<BookIconAssets>()
+            .add_systems(Startup, spawn_social_screen_fixture);
+        app.update();
+
+        let mut text = app.world_mut().query::<&Text>();
+        let visible = text
+            .iter(app.world())
+            .map(|text| text.0.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(visible.contains("CREW DIRECTORY"));
+        for department in Department::ALL {
+            assert!(
+                visible.contains(department.label()),
+                "{} needs a visible directory label",
+                department.label()
+            );
+        }
+        assert!(visible.contains("Dr. Vance"));
+        assert!(visible.contains("Nurse Okonkwo"));
+        assert!(visible.contains("DEPARTMENT SHOP"));
+        for secret in ["ANTAGONIST", "WARM", "BLUNT", "CAUTIOUS", "EXACTING"] {
+            assert!(
+                !visible.to_uppercase().contains(secret),
+                "the social screen leaked secret state: {secret}"
+            );
+        }
+    }
+
+    #[test]
+    fn social_navigation_and_shops_do_not_require_an_open_machine_panel() {
+        let mut app = App::new();
+        app.init_resource::<BookView>()
+            .init_resource::<HplcView>()
+            .init_resource::<BoardTab>()
+            .init_resource::<SocialView>()
+            .add_message::<DispenseRequested>()
+            .add_message::<AgitateRequested>()
+            .add_message::<EjectRequested>()
+            .add_message::<TakeRequested>()
+            .add_message::<EmptyRequested>()
+            .add_message::<BufferTransferRequested>()
+            .add_message::<PackageRequested>()
+            .add_message::<AnalyzeRequested>()
+            .add_message::<PurifyRequested>()
+            .add_message::<GrindRequested>()
+            .add_message::<SetHeaterPower>()
+            .add_message::<ToggleAcceptingOrders>()
+            .add_message::<CallItAShift>()
+            .add_message::<OpenUpAgain>()
+            .add_message::<RequisitionRequested>()
+            .add_message::<NpcRequisitionRequested>()
+            .add_message::<LeaveMachineRequested>()
+            .add_message::<UnlockAllRequested>()
+            .add_message::<BuyHintRequested>()
+            .add_message::<PlaySfx>()
+            .add_systems(Update, handle_panel_clicks);
+        let board = app
+            .world_mut()
+            .spawn(Machine::new(MachineKind::StandingBoard))
+            .id();
+        app.world_mut().spawn((
+            LocalPlayer,
+            InteractionMode::Social {
+                machine: None,
+                return_to_book: false,
+            },
+        ));
+        app.world_mut().spawn((
+            Interaction::Pressed,
+            PanelAction::ShowSocialDepartment(Department::Cargo),
+        ));
+        app.world_mut().spawn((
+            Interaction::Pressed,
+            PanelAction::Requisition(RequisitionKind::Glassware),
+        ));
+
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<SocialView>().department,
+            Department::Cargo
+        );
+        let messages = app.world().resource::<Messages<RequisitionRequested>>();
+        let mut cursor = messages.get_cursor();
+        let sent: Vec<_> = cursor.read(messages).collect();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].board, board);
+        assert_eq!(sent[0].kind, RequisitionKind::Glassware);
+    }
 
     #[test]
     fn a_hotbar_cell_shows_a_short_label_whole_and_quotes_it() {

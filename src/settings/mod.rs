@@ -1066,6 +1066,8 @@ pub struct Bindings {
     pub drink: KeyCode,
     pub apply: KeyCode,
     pub book: KeyCode,
+    /// Shared crew relationships, dialogue, and department shops.
+    pub social: KeyCode,
     /// Write on whatever is in hand — see [`crate::labels`].
     pub label: KeyCode,
 }
@@ -1083,6 +1085,7 @@ impl Default for Bindings {
             drink: KeyCode::KeyR,
             apply: KeyCode::KeyF,
             book: KeyCode::KeyB,
+            social: KeyCode::Tab,
             label: KeyCode::KeyL,
         }
     }
@@ -1090,7 +1093,7 @@ impl Default for Bindings {
 
 impl Bindings {
     /// Assigns `key` to `slot`, swapping rather than refusing if another slot
-    /// already holds it. With 11 bindings, forcing every key to stay distinct
+    /// already holds it. With 12 bindings, forcing every key to stay distinct
     /// avoids two actions silently firing off one keypress, and a swap lets a
     /// player freely reorganise a whole layout (WASD for the arrow keys, say)
     /// without hitting a "that key is already taken" dead end.
@@ -1126,13 +1129,14 @@ enum BindingSlot {
     Drink,
     Apply,
     Book,
+    Social,
     Label,
 }
 
 impl BindingSlot {
     /// In the order the Controls screen reads best — movement, then the
     /// hands, then the book.
-    const ALL: [BindingSlot; 11] = [
+    const ALL: [BindingSlot; 12] = [
         BindingSlot::Forward,
         BindingSlot::Back,
         BindingSlot::Left,
@@ -1143,6 +1147,7 @@ impl BindingSlot {
         BindingSlot::Drink,
         BindingSlot::Apply,
         BindingSlot::Book,
+        BindingSlot::Social,
         BindingSlot::Label,
     ];
 
@@ -1158,6 +1163,7 @@ impl BindingSlot {
             BindingSlot::Drink => "Drink or swallow",
             BindingSlot::Apply => "Apply held item",
             BindingSlot::Book => "Reference book",
+            BindingSlot::Social => "Crew relationships / shops",
             BindingSlot::Label => "Write on what you hold",
         }
     }
@@ -1174,6 +1180,7 @@ impl BindingSlot {
             BindingSlot::Drink => bindings.drink,
             BindingSlot::Apply => bindings.apply,
             BindingSlot::Book => bindings.book,
+            BindingSlot::Social => bindings.social,
             BindingSlot::Label => bindings.label,
         }
     }
@@ -1190,6 +1197,7 @@ impl BindingSlot {
             BindingSlot::Drink => bindings.drink = key,
             BindingSlot::Apply => bindings.apply = key,
             BindingSlot::Book => bindings.book = key,
+            BindingSlot::Social => bindings.social = key,
             BindingSlot::Label => bindings.label = key,
         }
     }
@@ -1378,6 +1386,7 @@ mod tests {
         assert_eq!(settings.bindings.drink, KeyCode::KeyR);
         assert_eq!(settings.bindings.apply, KeyCode::KeyF);
         assert_eq!(settings.bindings.book, KeyCode::KeyB);
+        assert_eq!(settings.bindings.social, KeyCode::Tab);
     }
 
     #[test]
@@ -1467,12 +1476,13 @@ mod tests {
         // `label` had no row on the old `described()`-based Controls screen —
         // no way for a player to ever discover it existed. `BindingSlot::ALL`
         // enumerating every field of `Bindings` fixes that by construction.
-        assert_eq!(BindingSlot::ALL.len(), 11);
+        assert_eq!(BindingSlot::ALL.len(), 12);
         assert!(BindingSlot::ALL.iter().all(|slot| !slot.title().is_empty()));
         assert!(
             BindingSlot::ALL.contains(&BindingSlot::Label),
             "the label-writing key must be discoverable on the Controls screen"
         );
+        assert!(BindingSlot::ALL.contains(&BindingSlot::Social));
     }
 
     #[test]

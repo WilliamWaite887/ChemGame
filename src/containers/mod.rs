@@ -539,10 +539,9 @@ pub struct ContainerAssets {
 
 impl ContainerAssets {
     fn material(&self, kind: ContainerKind) -> Handle<StandardMaterial> {
-        self.materials
-            .get(&kind)
-            .cloned()
-            .unwrap_or_else(|| panic!("no material loaded for {kind:?} — is it missing from ContainerKind::ALL?"))
+        self.materials.get(&kind).cloned().unwrap_or_else(|| {
+            panic!("no material loaded for {kind:?} — is it missing from ContainerKind::ALL?")
+        })
     }
 }
 
@@ -727,6 +726,7 @@ type Pickable<'w, 's> = Query<
         With<Container>,
         With<Produce>,
         With<crate::rogue_security::Deterrent>,
+        With<crate::social::SocialParcel>,
     )>,
 >;
 
