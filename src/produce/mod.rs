@@ -285,6 +285,7 @@ fn promote_produce_data(
     mut commands: Commands,
     db: Option<Res<ChemDb>>,
     pending: Option<Res<PendingProduceData>>,
+    asset_server: Res<AssetServer>,
     mut configs: ResMut<Assets<ProduceConfig>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -297,13 +298,18 @@ fn promote_produce_data(
     };
 
     let catalog = ProduceCatalog::from_config(&config, &db.reagents);
+    // `tools/gen_produce_textures.py` already bakes each kind's own `color`
+    // into its mottled texture, so `base_color` stays white here — it
+    // multiplies with the texture in `StandardMaterial`, and tinting an
+    // already-tinted texture a second time would just darken it.
     let handles = config
         .kinds
         .iter()
         .map(|def| {
-            let [r, g, b] = def.color;
+            let texture: Handle<Image> =
+                asset_server.load(format!("textures/items/produce_{}.png", def.id));
             materials.add(StandardMaterial {
-                base_color: Color::srgb(r, g, b),
+                base_color_texture: Some(texture),
                 perceptual_roughness: 0.75,
                 ..default()
             })

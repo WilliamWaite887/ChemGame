@@ -1048,6 +1048,7 @@ mod tests {
             if dress {
                 app.add_plugins(AssetPlugin::default())
                     .init_asset::<Mesh>()
+                    .init_asset::<Image>()
                     .init_asset::<StandardMaterial>()
                     .init_asset::<WorldAsset>()
                     .init_asset::<AnimationClip>()

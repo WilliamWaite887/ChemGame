@@ -60,3 +60,6 @@ docs/npc-ai.md
 assets/ui/chemistry_book/README.md
 tools/capture-book-preview.ps1
 tools/export-book-icons.mjs
+tools/gen_item_textures.py
+tools/gen_produce_textures.py
+assets/textures/items/README.md

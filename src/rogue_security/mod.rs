@@ -560,15 +560,22 @@ fn handle_deterrent_use(
 /// uses.
 fn dress_deterrent(
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     added: Query<Entity, Added<Deterrent>>,
 ) {
     for entity in &added {
+        // `Cuboid`'s UV unwrap maps the same full square onto all six faces
+        // (`bevy_mesh` 0.19's `primitives/dim3/cuboid.rs`), so one texture
+        // from `tools/gen_item_textures.py` tiles identically all the way
+        // round — the whole baton reads as one gunmetal-and-grip skin rather
+        // than a flat painted color.
+        let texture: Handle<Image> = asset_server.load("textures/items/deterrent.png");
         commands.entity(entity).insert((
             Mesh3d(meshes.add(Cuboid::new(0.10, 0.045, 0.20))),
             MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgb(0.14, 0.16, 0.20),
+                base_color_texture: Some(texture),
                 perceptual_roughness: 0.35,
                 metallic: 0.6,
                 ..default()
