@@ -198,7 +198,7 @@ impl Plugin for InteractionPlugin {
 
 /// Set when the player deliberately frees the cursor to leave the window.
 #[derive(Resource, Default)]
-struct CursorReleased(bool);
+pub(crate) struct CursorReleased(bool);
 
 /// Closes whatever panel `player` has open and releases their claim on it.
 ///
@@ -300,7 +300,7 @@ pub(crate) fn escape_blocked_by_evacuation(
             .is_some_and(|ending| ending.evacuated)
 }
 
-fn panel_input(
+pub(crate) fn panel_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     cursor: Single<&mut CursorOptions>,
@@ -366,6 +366,17 @@ fn panel_input(
             // out of the machine. Closing both at once would silently drop a
             // claim the player only meant to stop reading over.
             match *mode {
+                InteractionMode::Inspecting { machine, .. } => {
+                    *mode = machine
+                        .filter(|entity| {
+                            machines
+                                .get(*entity)
+                                .is_ok_and(|machine| machine.available_to(player))
+                        })
+                        .map_or(InteractionMode::Roaming, InteractionMode::UsingMachine);
+                    panel_open = !mode.is_roaming();
+                    continue;
+                }
                 InteractionMode::ReadingBook(Some(machine)) => {
                     *mode = InteractionMode::UsingMachine(machine);
                     panel_open = true;
@@ -449,7 +460,12 @@ pub enum InteractionMode {
     /// gameplay keybind in the game gates on [`InteractionMode::is_roaming`] —
     /// typing a label cannot also walk, drop, drink, inject or use anything.
     Labelling(Entity),
+    Inspecting {
+        item: Entity,
+        machine: Option<Entity>,
+    },
     OrderConversation(Entity, u64),
+    SecurityConversation,
     OrderDirectory {
         machine: Option<Entity>,
         return_to_book: bool,
@@ -478,7 +494,8 @@ impl InteractionMode {
             // key while the label field is open, because a `b` belongs in the
             // word being typed. Answering "no change" rather than panicking
             // keeps that a presentation decision rather than an invariant.
-            InteractionMode::OrderConversation(..) => self,
+            InteractionMode::Inspecting { .. } => self,
+            InteractionMode::SecurityConversation | InteractionMode::OrderConversation(..) => self,
             InteractionMode::OrderDirectory { .. } => self,
             InteractionMode::Labelling(container) => InteractionMode::Labelling(container),
         }
@@ -510,7 +527,8 @@ impl InteractionMode {
                     machine.map_or(InteractionMode::Roaming, InteractionMode::UsingMachine)
                 }
             }
-            InteractionMode::OrderConversation(..) => self,
+            InteractionMode::Inspecting { .. } => self,
+            InteractionMode::SecurityConversation | InteractionMode::OrderConversation(..) => self,
             InteractionMode::OrderDirectory {
                 machine,
                 return_to_book,
@@ -533,11 +551,13 @@ impl InteractionMode {
         match *self {
             InteractionMode::UsingMachine(machine) => Some(machine),
             InteractionMode::ReadingBook(machine) => machine,
+            InteractionMode::Inspecting { machine, .. } => machine,
             InteractionMode::Social { machine, .. }
             | InteractionMode::OrderDirectory { machine, .. } => machine,
             // A container, not a machine, and nothing to release.
             InteractionMode::Roaming
             | InteractionMode::Labelling(_)
+            | InteractionMode::SecurityConversation
             | InteractionMode::OrderConversation(..) => None,
         }
     }
@@ -810,13 +830,10 @@ fn update_prompt(
                         Ok(member) if empty_handed => {
                             format!("[E]  speak to {}", member.name)
                         }
-                        // What it *claims* to be, shown beside what the lab
-                        // knows it is. Both, never one replacing the other:
-                        // the chemist who wrote the label is not the person
-                        // being deceived by it, and hiding the truth from
-                        // them would make their own shelf unreadable.
+                        // Reading a label reveals its claim. Only laboratory
+                        // equipment identifies the actual contents.
                         _ => match written.get(target) {
-                            Ok(written) => format!("[E]  {label}   ·   marked “{}”", written.0),
+                            Ok(written) => format!("[E]  “{}”", written.0),
                             Err(_) => format!("[E]  {label}"),
                         },
                     },

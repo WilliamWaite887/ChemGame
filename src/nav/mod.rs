@@ -584,9 +584,26 @@ impl Trail {
             // its deadline writes it off.
             let step = waypoint - transform.translation;
             let waypoint_distance = Vec2::new(step.x, step.z).length();
-            if waypoint_distance <= 0.02 {
+            if waypoint_distance <= 0.02
+                && areas.is_none_or(|areas| {
+                    crate::npc_motion::walkable_segment(
+                        areas,
+                        transform.translation,
+                        self.path
+                            .get(self.waypoint + 1)
+                            .copied()
+                            .unwrap_or(waypoint),
+                        body_offset,
+                    )
+                })
+            {
                 self.waypoint += 1;
                 continue;
+            }
+            if waypoint_distance <= f32::EPSILON {
+                // An invalid onward portal needs replanning, not a zero-length
+                // step that divides by zero or loops without using distance.
+                break;
             }
             let walked = remaining.min(waypoint_distance).min(0.12);
             let direction = Vec3::new(step.x, 0.0, step.z) / waypoint_distance;
@@ -615,9 +632,9 @@ impl Trail {
             }
             heading = Some(direction);
             remaining -= walked;
-            if walked >= waypoint_distance {
-                self.waypoint += 1;
-            }
+            // `walked` is the requested distance. Containment or avoidance
+            // may have moved the body elsewhere, so only the actual-position
+            // arrival check on the next iteration can consume the waypoint.
         }
         heading
     }
@@ -692,6 +709,35 @@ mod tests {
 
     fn lab_graph() -> NavGraph {
         NavGraph::build(&WalkableAreas::from_floor_plan(), NAV_RADIUS)
+    }
+
+    #[test]
+    fn clamped_final_step_does_not_consume_an_unreached_waypoint() {
+        let mut areas = WalkableAreas::default();
+        areas.push(
+            Bounds {
+                min_x: 0.0,
+                max_x: 1.0,
+                min_z: 0.0,
+                max_z: 1.0,
+            },
+            None,
+        );
+        // A target moved behind the floor boundary after this route was
+        // cached. The requested last step is 0.1 m, but containment permits
+        // only 0.05 m. A stale route must remain visibly unfinished.
+        let target = Vec3::new(0.70, 0.93, 0.5);
+        let mut trail = Trail {
+            path: vec![target],
+            ..Default::default()
+        };
+        let mut at = Transform::from_xyz(0.60, 0.93, 0.5);
+        for _ in 0..3 {
+            trail.walk_avoiding(&mut at, Some(&areas), 0.12, 0.93, None);
+            assert_eq!(trail.waypoint, 0);
+            assert!(trail.remaining(at.translation).unwrap() > 0.04);
+        }
+        assert!((at.translation.x - 0.65).abs() < 0.001);
     }
 
     #[test]

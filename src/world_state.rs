@@ -29,7 +29,7 @@ use crate::saves::SaveSlot;
 use crate::social::{EvidenceItem, ParcelPayload, SocialParcel};
 use crate::AppState;
 
-const WORLD_FORMAT_VERSION: u32 = 4;
+const WORLD_FORMAT_VERSION: u32 = 6;
 const AUTOSAVE_SECONDS: f32 = 2.0;
 
 pub struct WorldStatePlugin;
@@ -129,6 +129,8 @@ struct WorldSave {
     players: Vec<PlayerSave>,
     #[serde(default)]
     placed: Vec<PlacedItemSave>,
+    #[serde(default)]
+    security: crate::security_case::SecurityCaseState,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -174,6 +176,9 @@ enum PlacementSave {
         machine: MachineLocator,
         slot: MachineSlot,
     },
+    ReportOutput {
+        machine: MachineLocator,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -192,6 +197,16 @@ enum MachineSlot {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum ItemSave {
+    Report(crate::analysis_reports::AnalysisReport),
+    Annotated {
+        item: Box<ItemSave>,
+        label: Option<String>,
+        sample: Option<u64>,
+        #[serde(default)]
+        case_sample: Option<u64>,
+        #[serde(default)]
+        custody: Option<u64>,
+    },
     Container(ContainerSave),
     EvidenceContainer {
         container: ContainerSave,
@@ -331,6 +346,7 @@ fn load_world(mut commands: Commands, slot: Option<Res<SaveSlot>>) {
     commands.insert_resource(CachedWorldState::default());
     commands.insert_resource(WrittenWorldState::default());
     commands.insert_resource(WorldAutosaveClock::default());
+    commands.insert_resource(crate::security_case::SecurityCaseState::default());
     let Some(slot) = slot else {
         commands.insert_resource(PendingWorldState::default());
         return;
@@ -354,6 +370,7 @@ fn load_world(mut commands: Commands, slot: Option<Res<SaveSlot>>) {
                 });
                 return;
             }
+            commands.insert_resource(save.security);
             commands.insert_resource(PendingWorldState {
                 loaded_from_disk: true,
                 write_blocked: false,
@@ -447,7 +464,7 @@ fn restore_placed_items(
     for saved in std::mem::take(&mut pending.placed) {
         let relation = match &saved.placement {
             PlacementSave::World => None,
-            PlacementSave::Machine { machine, slot } => {
+            PlacementSave::Machine { machine, .. } | PlacementSave::ReportOutput { machine } => {
                 let target = machines
                     .iter()
                     .filter(|(_, state, _)| state.kind == machine.kind)
@@ -466,7 +483,15 @@ fn restore_placed_items(
                             .distance_squared(Vec3::from_array(machine.position))
                             < 1.0
                     })
-                    .map(|(entity, _, _)| (entity, *slot));
+                    .map(|(entity, _, _)| {
+                        (
+                            entity,
+                            match &saved.placement {
+                                PlacementSave::Machine { slot, .. } => Some(*slot),
+                                _ => None,
+                            },
+                        )
+                    });
                 let Some(target) = target else {
                     waiting.push(saved);
                     continue;
@@ -482,10 +507,13 @@ fn restore_placed_items(
         );
         if let Some((machine, slot)) = relation {
             match slot {
-                MachineSlot::Primary => commands.entity(item).insert(InSlot(machine)),
-                MachineSlot::Secondary => commands.entity(item).insert(InSlotB(machine)),
-                MachineSlot::Tertiary => commands.entity(item).insert(InSlotC(machine)),
-                MachineSlot::Stored => commands.entity(item).insert(Stored(machine)),
+                Some(MachineSlot::Primary) => commands.entity(item).insert(InSlot(machine)),
+                Some(MachineSlot::Secondary) => commands.entity(item).insert(InSlotB(machine)),
+                Some(MachineSlot::Tertiary) => commands.entity(item).insert(InSlotC(machine)),
+                Some(MachineSlot::Stored) => commands.entity(item).insert(Stored(machine)),
+                None => commands
+                    .entity(item)
+                    .insert(crate::analysis_reports::ReportOutput(machine)),
             };
         }
     }
@@ -498,8 +526,45 @@ fn spawn_item(
     transform: Transform,
     db: &ChemDb,
 ) -> Entity {
+    if let ItemSave::Annotated {
+        item,
+        label,
+        sample,
+        case_sample,
+        custody,
+    } = saved
+    {
+        let entity = spawn_item(commands, *item, transform, db);
+        if let Some(label) = label {
+            commands.entity(entity).insert(Label(label));
+        }
+        if let Some(sample) = sample {
+            commands
+                .entity(entity)
+                .insert(crate::analysis_reports::SampleId(sample));
+        }
+        if let Some(case) = case_sample {
+            commands
+                .entity(entity)
+                .insert(crate::security_case::CaseSample(case));
+        }
+        if let Some(case) = custody {
+            commands
+                .entity(entity)
+                .insert(crate::security_case::CaseCustody(case));
+        }
+        return entity;
+    }
     let mut entity = commands.spawn((transform, Replicated, crate::until_we_leave_the_lab()));
     match saved {
+        ItemSave::Annotated { .. } => unreachable!(),
+        ItemSave::Report(report) => {
+            entity.insert((
+                report,
+                crate::interaction::Interactable::new("Analysis report"),
+                Visibility::default(),
+            ));
+        }
         ItemSave::Container(saved) => {
             let (container, label) = saved.into_live(db);
             entity.insert(container);
@@ -573,6 +638,7 @@ type ItemQuery<'w, 's> = Query<
         With<Overclock>,
         With<SocialParcel>,
         With<EvidenceItem>,
+        With<crate::analysis_reports::AnalysisReport>,
     )>,
 >;
 
@@ -581,6 +647,12 @@ struct SnapshotSource<'w, 's> {
     players: PlayerQuery<'w, 's>,
     items: ItemQuery<'w, 's>,
     slot_c: Query<'w, 's, &'static InSlotC>,
+    reports: Query<'w, 's, &'static crate::analysis_reports::AnalysisReport>,
+    samples: Query<'w, 's, &'static crate::analysis_reports::SampleId>,
+    case_samples: Query<'w, 's, &'static crate::security_case::CaseSample>,
+    custody: Query<'w, 's, &'static crate::security_case::CaseCustody>,
+    report_outputs: Query<'w, 's, &'static crate::analysis_reports::ReportOutput>,
+    security: Option<Res<'w, crate::security_case::SecurityCaseState>>,
     machines: Query<'w, 's, (&'static Machine, &'static Transform)>,
 }
 
@@ -668,11 +740,35 @@ fn capture_world(source: &SnapshotSource, db: &ChemDb, pending: &PendingWorldSta
         stored,
     ) in &source.items
     {
-        let Some(item) = item_save(
-            container, produce, deterrent, overclock, label, parcel, payload, evidence, db,
-        ) else {
+        let Some(item) = source
+            .reports
+            .get(_entity)
+            .ok()
+            .cloned()
+            .map(ItemSave::Report)
+            .or_else(|| {
+                item_save(
+                    container, produce, deterrent, overclock, label, parcel, payload, evidence, db,
+                )
+            })
+        else {
             continue;
         };
+        let sample = source.samples.get(_entity).ok().map(|s| s.0);
+        let case_sample = source.case_samples.get(_entity).ok().map(|s| s.0);
+        let custody = source.custody.get(_entity).ok().map(|s| s.0);
+        let item =
+            if label.is_some() || sample.is_some() || case_sample.is_some() || custody.is_some() {
+                ItemSave::Annotated {
+                    item: Box::new(item),
+                    label: label.map(|l| l.0.clone()),
+                    sample,
+                    case_sample,
+                    custody,
+                }
+            } else {
+                item
+            };
         let owner = inventory
             .and_then(|inventory| owners.get(&inventory.owner).copied())
             .or_else(|| held.and_then(|held| owners.get(&held.0).copied()));
@@ -699,7 +795,7 @@ fn capture_world(source: &SnapshotSource, db: &ChemDb, pending: &PendingWorldSta
                     .map(|slot| (slot.0, MachineSlot::Tertiary))
             })
             .or_else(|| stored.map(|stored| (stored.0, MachineSlot::Stored)));
-        let placement = relation
+        let mut placement = relation
             .and_then(|(target, slot)| source.machines.get(target).ok().map(|m| (m, slot)))
             .map_or(PlacementSave::World, |((machine, transform), slot)| {
                 PlacementSave::Machine {
@@ -710,6 +806,16 @@ fn capture_world(source: &SnapshotSource, db: &ChemDb, pending: &PendingWorldSta
                     slot,
                 }
             });
+        if let Ok(output) = source.report_outputs.get(_entity) {
+            if let Ok((machine, transform)) = source.machines.get(output.0) {
+                placement = PlacementSave::ReportOutput {
+                    machine: MachineLocator {
+                        kind: machine.kind,
+                        position: transform.translation.to_array(),
+                    },
+                };
+            }
+        }
         placed.push(PlacedItemSave {
             transform: TransformSave::from_transform(transform),
             placement,
@@ -727,6 +833,7 @@ fn capture_world(source: &SnapshotSource, db: &ChemDb, pending: &PendingWorldSta
         version: WORLD_FORMAT_VERSION,
         players,
         placed,
+        security: source.security.as_deref().cloned().unwrap_or_default(),
     }
 }
 
@@ -877,6 +984,145 @@ mod tests {
         let text = ron::ser::to_string(&save).unwrap();
         let restored: WorldSave = ron::from_str(&text).unwrap();
         assert_eq!(restored, save);
+    }
+
+    #[test]
+    fn annotated_reports_and_custody_metadata_survive_save_and_restore() {
+        let db = db();
+        let mut container = Container::new(ContainerKind::Bottle);
+        let _ = container
+            .solution
+            .add(db.reagent("water"), Units::whole(12));
+        let report = crate::analysis_reports::AnalysisReport::measure(
+            &container.solution,
+            &db,
+            17,
+            30.0,
+            Some(42),
+        );
+        let saved = WorldSave {
+            version: WORLD_FORMAT_VERSION,
+            security: crate::security_case::SecurityCaseState {
+                complaints: 3,
+                history: vec![crate::security_case::CaseRecord {
+                    id: 41,
+                    customer: "Customer".into(),
+                    result: "Released".into(),
+                }],
+                ..default()
+            },
+            placed: vec![
+                PlacedItemSave {
+                    transform: TransformSave::from_transform(&Transform::default()),
+                    placement: PlacementSave::ReportOutput {
+                        machine: MachineLocator {
+                            kind: MachineKind::Analyzer,
+                            position: [0.0; 3],
+                        },
+                    },
+                    item: ItemSave::Annotated {
+                        item: Box::new(ItemSave::Report(report.clone())),
+                        label: Some("Nothing to see here".into()),
+                        sample: None,
+                        case_sample: None,
+                        custody: None,
+                    },
+                },
+                PlacedItemSave {
+                    transform: TransformSave::from_transform(&Transform::default()),
+                    placement: PlacementSave::World,
+                    item: ItemSave::Annotated {
+                        item: Box::new(ItemSave::Container(ContainerSave::from_live(
+                            &container, None, &db,
+                        ))),
+                        label: Some("Totally juice".into()),
+                        sample: Some(17),
+                        case_sample: Some(42),
+                        custody: Some(42),
+                    },
+                },
+            ],
+            ..default()
+        };
+        let encoded = ron::ser::to_string(&saved).unwrap();
+        let decoded: WorldSave = ron::from_str(&encoded).unwrap();
+        assert_eq!(decoded, saved);
+        let mut world = World::new();
+        world.insert_resource(db);
+        world.insert_resource(decoded.security.clone());
+        let analyzer = world
+            .spawn((Machine::new(MachineKind::Analyzer), Transform::default()))
+            .id();
+        world.insert_resource(PendingWorldState {
+            placed: decoded.placed,
+            ..default()
+        });
+        world.run_system_once(restore_placed_items).unwrap();
+        let (paper, label) = world
+            .query::<(&crate::analysis_reports::AnalysisReport, &Label)>()
+            .single(&world)
+            .unwrap();
+        assert_eq!(*paper, report);
+        assert_eq!(label.0, "Nothing to see here");
+        let (sample, case, custody, label, live) = world
+            .query::<(
+                &crate::analysis_reports::SampleId,
+                &crate::security_case::CaseSample,
+                &crate::security_case::CaseCustody,
+                &Label,
+                &Container,
+            )>()
+            .single(&world)
+            .unwrap();
+        assert_eq!((sample.0, case.0, custody.0), (17, 42, 42));
+        assert_eq!(label.0, "Totally juice");
+        assert_eq!(live.solution.total_volume(), Units::whole(12));
+        assert_eq!(
+            world
+                .query::<&crate::analysis_reports::ReportOutput>()
+                .single(&world)
+                .unwrap()
+                .0,
+            analyzer
+        );
+        world.insert_resource(CachedWorldState::default());
+        world.run_system_once(capture_world_cache).unwrap();
+        let captured = world.resource::<CachedWorldState>().0.as_ref().unwrap();
+        assert_eq!(captured.security, saved.security);
+        assert!(captured
+            .placed
+            .iter()
+            .any(|item| matches!(item.placement, PlacementSave::ReportOutput { .. })));
+        assert!(captured.placed.iter().any(|item| matches!(
+            item.item,
+            ItemSave::Annotated {
+                sample: Some(17),
+                case_sample: Some(42),
+                custody: Some(42),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn previous_world_format_needs_no_security_or_new_annotations() {
+        let saved: WorldSave = ron::from_str("(version:5,players:[],placed:[])").unwrap();
+        assert_eq!(
+            saved.security,
+            crate::security_case::SecurityCaseState::default()
+        );
+        let annotated: ItemSave = ron::from_str(
+            "Annotated(item:Deterrent(charges:3),label:Some(\"Coffee\"),sample:None)",
+        )
+        .unwrap();
+        assert!(matches!(
+            annotated,
+            ItemSave::Annotated {
+                case_sample: None,
+                custody: None,
+                ..
+            }
+        ));
     }
 
     #[test]

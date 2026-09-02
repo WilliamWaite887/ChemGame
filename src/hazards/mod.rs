@@ -490,6 +490,14 @@ fn container_context(
             .ok()
             .map(|transform| (transform.translation, Some(holder.0)));
     }
+    // Explicit agitation can run inside the machine's internal chamber.
+    // Its effects still originate at the workstation and belong to its operator.
+    if let Ok(machine) = machines.get(container) {
+        return transforms
+            .get(container)
+            .ok()
+            .map(|transform| (transform.translation, machine.in_use_by));
+    }
     let machine = slots
         .get(container)
         .ok()
@@ -512,6 +520,12 @@ fn container_context(
 }
 
 /// Turns reported effects into things in the room.
+#[derive(SystemParam)]
+struct ReactionSolutions<'w, 's> {
+    containers: Query<'w, 's, &'static mut Container>,
+    buffers: Query<'w, 's, &'static mut crate::machines::Buffer>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_hazards(
     mut commands: Commands,
@@ -526,7 +540,7 @@ fn spawn_hazards(
     slots_b: Query<&InSlotB>,
     machines: Query<&Machine>,
     armed: Query<&ArmedCharge>,
-    mut containers: Query<&mut Container>,
+    mut solutions: ReactionSolutions,
     mut bodies: Query<(
         Entity,
         &mut Body,
@@ -591,10 +605,14 @@ fn spawn_hazards(
 
         if radius > 0.0 {
             // The cloud takes a share of the batch with it.
-            let payload = containers
-                .get_mut(report.container)
-                .map(|mut container| container.mutate(&db, |s| s.split(SMOKE_PAYLOAD)).0)
-                .unwrap_or_else(|_| Solution::unbounded());
+            let payload = if let Ok(mut container) = solutions.containers.get_mut(report.container)
+            {
+                container.mutate(&db, |s| s.split(SMOKE_PAYLOAD)).0
+            } else if let Ok(mut buffer) = solutions.buffers.get_mut(report.container) {
+                buffer.0.split(SMOKE_PAYLOAD)
+            } else {
+                Solution::unbounded()
+            };
 
             commands.spawn((
                 SmokeCloud {
@@ -625,8 +643,10 @@ fn spawn_hazards(
             if let Some(sounds) = &mut sounds {
                 sounds.write(EmitWorldSfx::new(Sfx::HazardExplosion, origin));
             }
-            // The glass and everything in it are gone.
-            if let Ok(mut entity) = commands.get_entity(report.container) {
+            // Glassware is destroyed; a fixed machine loses only its batch.
+            if let Ok(mut buffer) = solutions.buffers.get_mut(report.container) {
+                buffer.0.clear();
+            } else if let Ok(mut entity) = commands.get_entity(report.container) {
                 entity.despawn();
             }
 
@@ -1380,6 +1400,74 @@ mod tests {
         }
 
         assert_eq!(clouds(&mut app), 0, "smoke clears");
+    }
+
+    #[test]
+    fn chamber_smoke_conserves_payload_and_identifies_operator() {
+        let mut app = test_app();
+        let player = chemist_at(&mut app, Vec3::splat(30.0));
+        let reagent = app.world().resource::<ChemDb>().reagent("radium");
+        let mut mixture = Solution::unbounded();
+        let _ = mixture.add(reagent, Units::whole(40));
+        let mut station = Machine::new(crate::machines::MachineKind::MixingChamber);
+        station.in_use_by = Some(player);
+        let machine = app
+            .world_mut()
+            .spawn((
+                station,
+                crate::machines::Buffer(mixture),
+                Transform::from_xyz(4.0, 0.0, 4.0),
+            ))
+            .id();
+        report(&mut app, machine, vec![ReactionEffect::Smoke(2.0)]);
+        let (payload, owner, transform) = app
+            .world_mut()
+            .query::<(&SmokePayload, &SmokeOwner, &Transform)>()
+            .single(app.world())
+            .unwrap();
+        assert_eq!(payload.0.total_volume(), SMOKE_PAYLOAD);
+        assert_eq!(owner.0, Some(player));
+        assert_eq!(transform.translation, Vec3::new(4.0, 0.0, 4.0));
+        assert_eq!(
+            app.world()
+                .get::<crate::machines::Buffer>(machine)
+                .unwrap()
+                .0
+                .total_volume(),
+            Units::whole(40) - SMOKE_PAYLOAD
+        );
+    }
+
+    #[test]
+    fn chamber_explosion_consumes_batch_without_destroying_equipment() {
+        let mut app = test_app();
+        let player = chemist_at(&mut app, Vec3::new(0.5, 0.0, 0.0));
+        let reagent = app.world().resource::<ChemDb>().reagent("radium");
+        let mut mixture = Solution::unbounded();
+        let _ = mixture.add(reagent, Units::whole(40));
+        let machine = app
+            .world_mut()
+            .spawn((
+                Machine::new(crate::machines::MachineKind::MixingChamber),
+                crate::machines::Buffer(mixture),
+                Transform::default(),
+            ))
+            .id();
+        report(&mut app, machine, vec![ReactionEffect::Explosion(3.0)]);
+        assert!(app.world().get::<Machine>(machine).is_some());
+        assert!(app
+            .world()
+            .get::<crate::machines::Buffer>(machine)
+            .unwrap()
+            .0
+            .is_empty());
+        assert!(app
+            .world()
+            .get::<Body>(player)
+            .unwrap()
+            .0
+            .total()
+            .is_positive());
     }
 
     #[test]

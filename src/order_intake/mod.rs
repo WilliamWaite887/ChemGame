@@ -40,6 +40,7 @@ pub enum RequestSource {
     Smuggler,
     Saboteur,
     BentGuard,
+    Security,
 }
 
 #[derive(Component, Clone, Copy, Debug)]
@@ -334,6 +335,14 @@ fn update_pending(
             || route.routing_failed()
             || request.unroutable >= 10.0
         {
+            if request.context.source == RequestSource::Security {
+                warn!(
+                    "Security approach withdrawn by intake: npc={} position={:?} target={:?} reached={} phase={:?} moving={} routing_failed={} unroutable={:.2} obsolete={} ended_step={} incapacitated={} leaving={}",
+                    member.name, at.translation, place.map(|p| p.target),
+                    place.is_some_and(|p| p.reached), route.phase, route.is_moving(),
+                    route.routing_failed(), request.unroutable, obsolete, ended_step, unable, abandoned,
+                );
+            }
             release_script(&request.context, &mut cult);
             withdraw(&mut commands, entity, &mut route);
             continue;
@@ -375,7 +384,9 @@ fn update_pending(
             }
         }
         if request.waited >= GREETING_SECONDS {
-            shift.adjust_npc(&member.name, -1);
+            if request.context.source != RequestSource::Security {
+                shift.adjust_npc(&member.name, -1);
+            }
             radio.push(
                 crate::radio::RadioEntry::new(
                     crate::radio::channel_for(&member.role),
@@ -459,7 +470,7 @@ pub(crate) struct ConversationAccess<'w, 's> {
     solids: Query<'w, 's, (&'static Transform, &'static crate::lab::Solid)>,
 }
 impl ConversationAccess<'_, '_> {
-    fn player(&self, client: ClientId, target: Entity) -> Option<Entity> {
+    pub(crate) fn player(&self, client: ClientId, target: Entity) -> Option<Entity> {
         let (entity, _, at, body, blood) =
             self.actors.iter().find(|(_, c, ..)| c.client == client)?;
         let (target, target_body, target_blood) = self.positions.get(target).ok()?;
@@ -503,7 +514,10 @@ pub(crate) fn open_conversations(
         let Ok((member, pending, visible)) = pending.get(request.target) else {
             continue;
         };
-        if pending.context.id != request.id || !visible.arrived {
+        if pending.context.source == RequestSource::Security
+            || pending.context.id != request.id
+            || !visible.arrived
+        {
             continue;
         }
         let key = (request.target, request.id);
@@ -559,7 +573,8 @@ pub(crate) fn accept_orders(
         let Ok((member, pending, visible)) = pending.get_mut(request.target) else {
             continue;
         };
-        if pending.context.id != request.id
+        if pending.context.source == RequestSource::Security
+            || pending.context.id != request.id
             || !visible.arrived
             || pending.waited >= GREETING_SECONDS
         {

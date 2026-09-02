@@ -1745,6 +1745,7 @@ pub(crate) fn expire_orders(
         Has<HostileOrder>,
         Option<&DevelopmentOrder>,
         Has<crate::order_intake::AcceptedOrder>,
+        Has<crate::security_case::OrderHold>,
     )>,
 ) {
     // Deliberately *not* gated on `accepting_orders`. The sign stops new
@@ -1764,12 +1765,13 @@ pub(crate) fn expire_orders(
         hostile,
         development,
         accepted,
+        security_hold,
     ) in &mut orders
     {
         let kind = OrderKind::of_with_hostile(illicit, crisis, counter.is_some(), hostile);
         // Patience only runs down once they have actually arrived, so a slow
         // walk in never counts against the player.
-        if !accepted && route.phase != CrewPhase::Waiting {
+        if security_hold || (!accepted && route.phase != CrewPhase::Waiting) {
             continue;
         }
         // The queue only ever shows `remaining()` truncated to whole seconds
@@ -1841,6 +1843,7 @@ pub(crate) fn expire_orders(
         commands
             .entity(entity)
             .remove::<Order>()
+            .remove::<crate::security_case::OrderHold>()
             .remove::<crate::order_intake::AcceptedOrder>()
             .remove::<DevelopmentOrder>();
         route.leave();
@@ -2248,6 +2251,7 @@ fn complete_delivery(
     commands
         .entity(crew)
         .remove::<Order>()
+        .remove::<crate::security_case::OrderHold>()
         .remove::<crate::order_intake::AcceptedOrder>()
         .remove::<DevelopmentOrder>()
         .remove::<Interactable>()
@@ -2795,6 +2799,36 @@ mod tests {
             .add_message::<ChemicalExposure>()
             .add_systems(Update, handle_window_delivery);
         app
+    }
+
+    #[test]
+    fn replacement_delivery_removes_security_hold_before_resident_can_take_another_order() {
+        let mut app = window_app();
+        let crew = waiting_crew(&mut app, "Dr. Vance", "kelotane", 20, 180.0, true);
+        app.world_mut()
+            .entity_mut(crew)
+            .insert(crate::security_case::OrderHold(42));
+        window_with(&mut app, &[("kelotane", 20)]);
+        app.update();
+        assert!(app.world().get::<Order>(crew).is_none());
+        assert!(app
+            .world()
+            .get::<crate::security_case::OrderHold>(crew)
+            .is_none());
+        let reagent = reagent_id(&app, "kelotane");
+        app.world_mut().entity_mut(crew).insert(Order {
+            reagent,
+            specific: true,
+            minimum_purity: 0.0,
+            amount: Units::whole(10),
+            plea: "A different request after the replacement was delivered.".into(),
+            patience: 180.0,
+            waited: 0.0,
+        });
+        assert!(app
+            .world()
+            .get::<crate::security_case::OrderHold>(crew)
+            .is_none());
     }
 
     fn reagent_id(app: &App, key: &str) -> ReagentId {

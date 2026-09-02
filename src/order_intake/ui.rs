@@ -166,7 +166,7 @@ fn draw(
                 ..default()
             },
             BackgroundColor(Color::srgba(0.015, 0.02, 0.025, 0.72)),
-            GlobalZIndex(20),
+            GlobalZIndex(60),
             RequestPanel,
             crate::until_we_leave_the_lab(),
         ))
@@ -293,11 +293,18 @@ fn draw(
         });
 }
 
-fn countdowns(orders: Query<&Order>, mut labels: Query<(&Countdown, &mut Text)>) {
+fn countdowns(
+    orders: Query<(&Order, Has<crate::security_case::OrderHold>)>,
+    mut labels: Query<(&Countdown, &mut Text)>,
+) {
     for (countdown, mut label) in &mut labels {
-        if let Ok(order) = orders.get(countdown.0) {
+        if let Ok((order, held)) = orders.get(countdown.0) {
             let seconds = order.remaining() as u32;
-            let next = format!("Remaining  {}:{:02}", seconds / 60, seconds % 60);
+            let next = if held {
+                "Security hold — visit Bex at Security".into()
+            } else {
+                format!("Remaining  {}:{:02}", seconds / 60, seconds % 60)
+            };
             if label.0 != next {
                 label.0 = next;
             }

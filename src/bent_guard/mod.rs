@@ -73,6 +73,11 @@ impl Plugin for BentGuardPlugin {
             Update,
             (generate_bent_guard_visit, handle_bent_guard_resolution)
                 .chain()
+                // The unified Reyes case relationship owns new approaches.
+                // Legacy progress and already banked wards remain loadable.
+                .run_if(not(resource_exists::<
+                    crate::security_case::SecurityCaseState,
+                >))
                 .after(threat::PromoteScripts)
                 .run_if(is_authority)
                 // No `arc::is_active` gate — a department minor runs in every

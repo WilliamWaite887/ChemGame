@@ -116,7 +116,10 @@ pub(crate) fn walkable_segment(areas: &WalkableAreas, from: Vec3, to: Vec3, offs
     (0..=steps).all(|i| {
         let point = from.lerp(to, i as f32 / steps as f32);
         let confined = areas.contain_on_surface(point, BODY_RADIUS, offset);
-        flat(confined - point).length() < 0.02 && (confined.y - point.y).abs() < 0.5
+        // This is used to skip door portals. Only numerical tolerance is
+        // safe here: accepting a centimetre of wall clamping can turn a body
+        // before its full footprint has entered the corridor.
+        flat(confined - point).length() < 0.001 && (confined.y - point.y).abs() < 0.5
     })
 }
 
@@ -240,10 +243,16 @@ impl NpcMotion {
             return VecDeque::new();
         }
         let target = flat(goal - from) / GRID;
-        let min_x = target.x.floor().min(0.0) as i32 - 10;
-        let max_x = target.x.ceil().max(0.0) as i32 + 10;
-        let min_z = target.y.floor().min(0.0) as i32 - 10;
-        let max_z = target.y.ceil().max(0.0) as i32 + 10;
+        // A nearby destination can be on the far side of a long pickup
+        // line. Looking only 2.5 m beside it traps the walker against the
+        // middle of the line even though its authored aisle is clear.
+        // Include room to round a full department queue, still bounded so
+        // an unreachable destination cannot search the entire station.
+        const DETOUR_MARGIN: i32 = 48;
+        let min_x = target.x.floor().min(0.0) as i32 - DETOUR_MARGIN;
+        let max_x = target.x.ceil().max(0.0) as i32 + DETOUR_MARGIN;
+        let min_z = target.y.floor().min(0.0) as i32 - DETOUR_MARGIN;
+        let max_z = target.y.ceil().max(0.0) as i32 + DETOUR_MARGIN;
         let position = |(x, z): (i32, i32)| from + Vec3::new(x as f32 * GRID, 0.0, z as f32 * GRID);
         let clear = |a: Vec3, b: Vec3| {
             walkable_segment(areas, a, b, offset)
@@ -266,7 +275,7 @@ impl NpcMotion {
                 continue;
             }
             examined += 1;
-            if examined > 5000 {
+            if examined > 12000 {
                 break;
             }
             let at = position(key);
@@ -370,6 +379,7 @@ impl NpcMotion {
                     && angle == 0.0
                     && self.bodies.iter().any(|(e, at)| {
                         self.departing.contains(e)
+                            && (at.y - position.y).abs() < 1.2
                             && flat(*at - position).length() < 1.2
                             && flat(candidate - *at).length() < flat(position - *at).length()
                     })
@@ -487,5 +497,22 @@ mod tests {
                 .distance(above + Vec3::X * 4.0)
                 < 0.0001
         );
+    }
+
+    #[test]
+    fn departing_traffic_on_another_floor_does_not_claim_the_ground_floor_aisle() {
+        let incoming = Entity::from_bits(1);
+        let upstairs = Entity::from_bits(2);
+        let mut motion = NpcMotion::default();
+        let from = Vec3::new(0.0, 0.93, 0.0);
+        let desired = from + Vec3::X * 0.2;
+        motion.bodies.insert(upstairs, Vec3::new(0.8, 4.53, 0.0));
+        motion.departing.insert(upstairs);
+        let reached = motion.step(incoming, from, desired, None, 0.93);
+        assert!(
+            reached.distance(desired) < 0.0001,
+            "an upstairs departure diverted a downstairs requester: {reached:?}"
+        );
+        assert!(!motion.waiting(incoming));
     }
 }

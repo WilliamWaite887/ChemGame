@@ -68,7 +68,16 @@ use crate::AppState;
 /// Bounded for the same reason `menu::type_address` bounds its own field: an
 /// unbounded string is a way to make the layout jump, and this one also
 /// crosses the wire from a client that can say anything.
-pub const MAX_LABEL: usize = 28;
+pub const MAX_LABEL: usize = 256;
+
+pub fn clean_label(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_LABEL)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
 
 pub struct LabelPlugin;
 
@@ -202,7 +211,7 @@ fn type_label(
                 // arrive as whitespace in the middle of the word — the same
                 // filter `menu::type_address` applies for the same reason.
                 for character in text.chars().filter(|c| !c.is_control()) {
-                    if draft.text.len() < MAX_LABEL {
+                    if draft.text.chars().count() < MAX_LABEL {
                         draft.text.push(character);
                     }
                 }
@@ -267,11 +276,16 @@ fn draw_draft(
         children![
             (
                 Node {
+                    width: percent(65),
+                    max_height: px(240),
+                    overflow: Overflow::scroll_y(),
                     padding: UiRect::axes(px(16), px(8)),
                     border_radius: BorderRadius::all(px(6)),
                     ..default()
                 },
                 BackgroundColor(Color::srgba(0.05, 0.06, 0.08, 0.94)),
+                ScrollPosition::default(),
+                crate::ui::ScrollPane,
                 children![(
                     Text::new(String::new()),
                     TextFont::from_font_size(20.0),
@@ -294,6 +308,7 @@ fn handle_label_request(
     mut requests: MessageReader<FromClient<LabelRequested>>,
     chemists: Query<(Entity, &Chemist)>,
     held: Query<&HeldBy>,
+    labels: Query<&Label>,
     evidence: Query<(), With<crate::social::EvidenceItem>>,
     transforms: Query<&Transform>,
     mut observed: Option<ResMut<Messages<crate::social::ObservedAction>>>,
@@ -306,6 +321,14 @@ fn handle_label_request(
         // something already in your hands, and a forged request naming
         // somebody else's beaker fails here.
         if held.get(request.container).map(|holder| holder.0) != Ok(player) {
+            continue;
+        }
+        // Opening and confirming a complete automatic mixture label must not
+        // shorten the stored claim to the manual editor's input limit.
+        if labels
+            .get(request.container)
+            .is_ok_and(|label| label.0 == request.text.trim())
+        {
             continue;
         }
         let text: String = request
@@ -585,6 +608,18 @@ mod tests {
 
         let label = app.world().get::<Label>(bottle).unwrap();
         assert_eq!(label.0.chars().count(), MAX_LABEL);
+    }
+
+    #[test]
+    fn confirming_a_complete_automatic_label_keeps_its_full_text() {
+        let (mut app, _, bottle) = labelling_app();
+        let automatic = "Water + Ethanol + ".repeat(40);
+        let automatic = automatic.trim().to_string();
+        app.world_mut()
+            .entity_mut(bottle)
+            .insert(Label(automatic.clone()));
+        write(&mut app, bottle, &automatic);
+        assert_eq!(app.world().get::<Label>(bottle).unwrap().0, automatic);
     }
 
     #[test]

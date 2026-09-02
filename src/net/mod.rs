@@ -63,7 +63,7 @@ pub mod steam;
 /// Explicit revision for replicated Rust types that are not represented by
 /// the authored chemistry catalogs below. Bump it when one of those wire
 /// shapes changes incompatibly.
-const PROTOCOL_REVISION: u64 = 13;
+const PROTOCOL_REVISION: u64 = 14;
 
 /// FNV-1a is deliberately small and `const`: the protocol id is derived at
 /// compile time from every catalog whose list position crosses the wire.

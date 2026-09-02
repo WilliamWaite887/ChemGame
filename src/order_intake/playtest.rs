@@ -4,7 +4,6 @@ use super::*;
 use crate::{
     crew::{AtCounter, ReturnsToDuty},
     interaction::InteractionMode,
-    lab::{DeliveryLane, DeliveryStations},
     net::LaunchMode,
     player::{LocalPlayer, PlayerCamera},
 };
@@ -17,6 +16,8 @@ struct Scenario {
     seeded: bool,
     stage: u8,
     shots: HashSet<u8>,
+    incoming_reached: bool,
+    conversation_started: Option<f32>,
 }
 
 pub(super) fn install(app: &mut App) {
@@ -74,7 +75,7 @@ fn drive(world: &mut World) {
         seed(world);
         world.resource_mut::<Scenario>().seeded = true;
     }
-    if authority && elapsed < 24.0 {
+    if authority && elapsed < 36.0 {
         for mut at in world
             .query_filtered::<&mut Transform, With<Chemist>>()
             .iter_mut(world)
@@ -87,11 +88,14 @@ fn drive(world: &mut World) {
         .iter(world)
         .find(|(_, p)| p.id == 900_001 && p.arrived)
         .map(|(e, p)| (e, p.id));
+    if speaker.is_some() {
+        world.resource_mut::<Scenario>().incoming_reached = true;
+    }
     let local_takes_order = matches!(
         world.resource::<LaunchMode>(),
         LaunchMode::Singleplayer | LaunchMode::Join(_)
     );
-    if elapsed > 8.0 && elapsed < 14.0 && local_takes_order {
+    if elapsed > 8.0 && elapsed < 34.0 && local_takes_order {
         if let Some((target, id)) = speaker {
             if world
                 .get::<InteractionMode>(player)
@@ -106,9 +110,19 @@ fn drive(world: &mut World) {
             .get::<InteractionMode>(player)
             .is_some_and(|m| matches!(m, InteractionMode::OrderConversation(..)))
     {
+        world
+            .resource_mut::<Scenario>()
+            .conversation_started
+            .get_or_insert(elapsed);
         shoot(world, 1, "conversation");
     }
-    if elapsed > 15.0 && elapsed < 24.0 && local_takes_order {
+    if world
+        .resource::<Scenario>()
+        .conversation_started
+        .is_some_and(|at| elapsed > at + 3.0)
+        && elapsed < 36.0
+        && local_takes_order
+    {
         if let Some((target, id)) = speaker {
             if matches!(
                 world.get::<InteractionMode>(player),
@@ -119,17 +133,17 @@ fn drive(world: &mut World) {
             }
         }
     }
-    if elapsed > 26.0 && world.resource::<Scenario>().stage < 1 {
+    if elapsed > 37.0 && world.resource::<Scenario>().stage < 1 {
         *world.get_mut::<InteractionMode>(player).unwrap() = InteractionMode::OrderDirectory {
             machine: None,
             return_to_book: false,
         };
         world.resource_mut::<Scenario>().stage = 1;
     }
-    if elapsed > 29.0 {
+    if elapsed > 39.0 {
         shoot(world, 2, "all-orders");
     }
-    if elapsed > 35.0 && world.resource::<Scenario>().stage < 2 {
+    if elapsed > 43.0 && world.resource::<Scenario>().stage < 2 {
         *world.get_mut::<InteractionMode>(player).unwrap() = InteractionMode::Roaming;
         world.resource_mut::<Scenario>().stage = 2;
     }
@@ -172,7 +186,8 @@ fn drive(world: &mut World) {
                 }
             }
         }
-        let report=format!("Accepted requests: {accepted}\nWaiting to speak: {waiting}\nPickup positions reached (authority only): {reached}\nClosest NPC bodies on same floor: {closest:.3} m\n");
+        let incoming_reached = world.resource::<Scenario>().incoming_reached;
+        let report=format!("Accepted requests: {accepted}\nWaiting to speak: {waiting}\nIncoming requester reached window from corridor: {incoming_reached}\nPickup positions reached (authority only): {reached}\nClosest NPC bodies on same floor: {closest:.3} m\n");
         let root = output(world);
         let _ = std::fs::create_dir_all(&root);
         let _ = std::fs::write(root.join("result.txt"), &report);
@@ -237,11 +252,9 @@ fn seed(world: &mut World) {
             plea:"The department's emergency cupboard needs a fresh supply. Please prepare this batch for us.".into(),patience:600.0,waited:index as f32};
         let pending = index == 10;
         let at = if pending {
-            world
-                .resource::<DeliveryStations>()
-                .station(DeliveryLane::Public)
-                .queue_position(0.0)
-                + Vec3::Y * 0.93
+            // Exercise the actual approach past the pickup line. Starting at
+            // the greeting window hides customers blocking the doorway.
+            Vec3::new(9.0, 0.93, 13.0)
         } else {
             Vec3::new(11.0 - index as f32 * 1.1, 0.93, 12.0)
         };

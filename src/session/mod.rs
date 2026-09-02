@@ -95,6 +95,7 @@ pub(crate) fn clear_session_state(world: &mut World) {
     reset::<crate::hazards::IncidentGrace>(world);
     reset::<crate::addiction::CarriedSuspicion>(world);
     reset::<crate::ui::LastPanel>(world);
+    reset::<crate::ui::mixing::PackagingDraft>(world);
     reset::<crate::ui::LastSignState>(world);
     // Holds the *last* arc's ending, and the outcome it was watching for. A
     // leftover one would have the next save's ending screen ready to draw

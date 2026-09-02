@@ -735,6 +735,8 @@ type Pickable<'w, 's> = Query<
         With<Produce>,
         With<crate::rogue_security::Deterrent>,
         With<crate::social::SocialParcel>,
+        With<crate::analysis_reports::AnalysisReport>,
+        With<crate::machines::Overclock>,
     )>,
 >;
 
@@ -752,6 +754,7 @@ fn handle_pickup(
     inventory: Query<&InventorySlot>,
     selected: Query<&SelectedInventorySlot>,
     stored: Query<&Stored>,
+    custody: Query<(), With<crate::security_case::CaseCustody>>,
     chemists: Query<(Entity, &Chemist)>,
     bodies: Query<(&Body, &Bloodstream)>,
 ) {
@@ -776,7 +779,7 @@ fn handle_pickup(
         // Belt and braces. A stored item is hidden, so the crosshair cannot
         // land on one — but the target comes off the wire, and the server does
         // not take a client's word for what it can see.
-        if stored.contains(request.target) {
+        if stored.contains(request.target) || custody.contains(request.target) {
             continue;
         }
         let preferred = selected.get(player).map_or(0, |selected| selected.0);

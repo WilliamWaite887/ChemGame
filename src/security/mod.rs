@@ -6,12 +6,10 @@
 //! window to act on it, then an officer who inspects whatever is physically
 //! sitting out right now.
 //!
-//! The sweep is a global query, not a spatial one, because the decision it
-//! is checking — "does the lab hold contraband" — has no location to walk
-//! to. `CrewRoute::arrival`/`.leave()` are reused completely unmodified for
-//! the officer's entrance and exit; a multi-stop patrol would be animation
-//! with no mechanical payoff, since the check runs once regardless of where
-//! the officer's model happens to be standing.
+//! Inspections are physical: officers walk to an accessible Chemistry batch
+//! and inspect only nearby, unobstructed loose containers. Held, loaded and
+//! stored containers require an explicit search and are outside this sweep.
+//! Seized contents are preserved in the Security evidence locker.
 //!
 //! What the officer *reads*, though, is not simply what is in the bottle.
 //! A [`crate::labels::Label`] is a claim about which chemical a container
@@ -110,6 +108,7 @@ struct RaidOfficer {
     /// Seconds left standing at the counter before the sweep fires, once
     /// they arrive — a beat of "something is happening" before it does.
     dwell: f32,
+    target: Option<Entity>,
 }
 
 /// When the next warning or sweep is due. `None` means suspicion has not
@@ -175,6 +174,7 @@ fn schedule_raid(
             let officer = spawn_crew_member(&mut commands, &officer_def, 0.0);
             commands.entity(officer).insert(RaidOfficer {
                 dwell: script.dwell_seconds,
+                target: None,
             });
             return;
         }
@@ -300,26 +300,38 @@ fn officer_reads_the_labels(standing: i32, roll: f64) -> bool {
 // The sweep
 // ---------------------------------------------------------------------------
 
-/// Inspects every container in the world, once, when the officer's dwell
-/// runs out.
-///
-/// No filter on `HeldBy` or `InSlot` — every `Container` is checked, wherever
-/// it is: on a bench, in a hand, loaded into a machine.
+/// After the announced window, walk to one accessible batch and inspect its
+/// immediate surroundings. There is no remote disposal or inventory search.
 #[allow(clippy::too_many_arguments)]
 fn run_sweep(
     mut commands: Commands,
     db: Res<ChemDb>,
     script: Option<Res<Script>>,
     time: Res<Time>,
-    mut officers: Query<(Entity, &mut RaidOfficer, &mut CrewRoute)>,
-    mut containers: Query<(Entity, &mut Container, Option<&Label>)>,
+    mut officers: Query<(Entity, &mut RaidOfficer, &mut CrewRoute, &Transform)>,
+    containers: Query<
+        (Entity, &Container, Option<&Label>, &Transform),
+        (
+            Without<crate::containers::HeldBy>,
+            Without<crate::containers::InventorySlot>,
+            Without<crate::containers::InSlot>,
+            Without<crate::containers::InSlotB>,
+            Without<crate::containers::InSlotC>,
+            Without<crate::containers::Stored>,
+            Without<crate::security_case::CaseCustody>,
+        ),
+    >,
+    solids: Query<(&Transform, &crate::lab::Solid)>,
+    nav: Option<Res<crate::nav::NavGraph>>,
+    areas: Option<Res<crate::lab::WalkableAreas>>,
+    lockers: Query<(Entity, &Transform), With<crate::security_case::CaseLocker>>,
     mut shift: ResMut<Shift>,
     mut radio: ResMut<RadioLog>,
 ) {
     let Some(script) = script else {
         return;
     };
-    for (entity, mut officer, mut route) in &mut officers {
+    for (entity, mut officer, mut route, position) in &mut officers {
         if route.phase != CrewPhase::Waiting {
             continue;
         }
@@ -328,12 +340,57 @@ fn run_sweep(
             continue;
         }
 
+        if officer.target.is_none() {
+            let next = containers
+                .iter()
+                .filter(|(_, container, _, at)| {
+                    !container.solution.is_empty()
+                        && areas.as_ref().is_none_or(|areas| {
+                            areas.room_at(at.translation).is_some_and(|room| {
+                                matches!(room, "Chemistry" | "Mixing Hall" | "Reaction Bay")
+                            })
+                        })
+                })
+                .filter(|(_, _, _, at)| {
+                    nav.as_ref().is_none_or(|nav| {
+                        nav.path(position.translation, nav.standable_goal(at.translation))
+                            .is_some()
+                    })
+                })
+                .min_by(|a, b| {
+                    a.3.translation
+                        .distance_squared(position.translation)
+                        .total_cmp(&b.3.translation.distance_squared(position.translation))
+                });
+            if let Some((target, _, _, at)) = next {
+                officer.target = Some(target);
+                if position.translation.xz().distance(at.translation.xz()) > 1.85 {
+                    if let Some(nav) = nav.as_ref() {
+                        *route = CrewRoute::to(nav.standable_goal(at.translation));
+                        continue;
+                    }
+                }
+            }
+        }
+
         // Two passes, because whether a labelled bottle survives depends on
         // what the *rest* of the bench looks like, which is not known until
         // everything has been classified.
         let suspect: Vec<(Entity, Reads)> = containers
             .iter()
-            .map(|(id, container, label)| (id, reads_as(&db, &container.solution, label)))
+            .filter(|(_, _, _, at)| {
+                position.translation.xz().distance(at.translation.xz()) <= 1.85
+                    && (position.translation.y - at.translation.y).abs() < 1.1
+                    && !solids.iter().any(|(solid_at, solid)| {
+                        crate::interaction::authority_segment_blocked(
+                            position.translation + Vec3::Y * 0.65,
+                            at.translation,
+                            solid_at.translation,
+                            solid.half_extents,
+                        )
+                    })
+            })
+            .map(|(id, container, label, _)| (id, reads_as(&db, &container.solution, label)))
             .filter(|(_, reads)| *reads != Reads::Clean)
             .collect();
 
@@ -348,17 +405,23 @@ fn run_sweep(
         // physically turned up contraband nobody even tried to hide, they are
         // going to read everything else properly: one careless beaker blows
         // the cover on every careful one beside it.
-        let seized = bare
-            || (!suspect.is_empty()
-                && officer_reads_the_labels(
-                    shift.standing(Department::Security),
-                    rand::rng().random::<f64>(),
-                ));
+        let seized = !lockers.is_empty()
+            && (bare
+                || (!suspect.is_empty()
+                    && officer_reads_the_labels(
+                        shift.standing(Department::Security),
+                        rand::rng().random::<f64>(),
+                    )));
 
         if seized {
             for (id, _) in &suspect {
-                if let Ok((_, mut container, _)) = containers.get_mut(*id) {
-                    container.solution.clear();
+                if let Some((locker, at)) = lockers.iter().next() {
+                    commands.entity(*id).insert((
+                        crate::containers::Stored(locker),
+                        crate::security_case::CaseCustody(0),
+                        Transform::from_translation(at.translation),
+                        Visibility::Hidden,
+                    ));
                 }
             }
         }
@@ -445,13 +508,26 @@ mod tests {
             .init_resource::<Time>()
             .init_resource::<RadioLog>()
             .add_systems(Update, run_sweep);
+        app.world_mut().spawn((
+            crate::security_case::CaseLocker,
+            Transform::from_xyz(20.0, 0.5, 0.0),
+        ));
         app
     }
 
     fn officer_waiting(app: &mut App, dwell: f32) -> Entity {
         let mut route = CrewRoute::arrival(0.0);
         route.phase = CrewPhase::Waiting;
-        app.world_mut().spawn((RaidOfficer { dwell }, route)).id()
+        app.world_mut()
+            .spawn((
+                RaidOfficer {
+                    dwell,
+                    target: None,
+                },
+                route,
+                Transform::from_xyz(0.0, 0.93, 0.0),
+            ))
+            .id()
     }
 
     /// Enough app to run `schedule_raid` directly, headless.
@@ -529,7 +605,9 @@ mod tests {
         let id = app.world().resource::<ChemDb>().reagent(reagent);
         let mut container = Container::new(ContainerKind::LargeBeaker);
         let _ = container.solution.add(id, Units::whole(amount));
-        app.world_mut().spawn(container).id()
+        app.world_mut()
+            .spawn((container, Transform::from_xyz(1.0, 1.0, 0.0)))
+            .id()
     }
 
     /// What a crew member would expect to read on a bottle of this, taken
@@ -563,12 +641,12 @@ mod tests {
         );
     }
 
-    fn is_empty(app: &App, beaker: Entity) -> bool {
+    fn in_custody(app: &App, beaker: Entity) -> bool {
+        // Existing tests ask whether the bottle was removed from the worktop.
+        // Custody now preserves the actual solution instead of clearing it.
         app.world()
-            .get::<Container>(beaker)
-            .unwrap()
-            .solution
-            .is_empty()
+            .get::<crate::security_case::CaseCustody>(beaker)
+            .is_some()
     }
 
     /// The two ends of the trust ladder where the sweep is deterministic, so
@@ -594,12 +672,16 @@ mod tests {
         advance(&mut app, 1.0);
 
         assert!(
+            in_custody(&app, beaker),
+            "contraband should be preserved in custody"
+        );
+        assert_eq!(
             app.world()
                 .get::<Container>(beaker)
                 .unwrap()
                 .solution
-                .is_empty(),
-            "contraband should be confiscated"
+                .total_volume(),
+            Units::whole(15)
         );
         assert_eq!(
             app.world()
@@ -706,7 +788,7 @@ mod tests {
         advance(&mut app, 1.0);
 
         assert!(
-            !is_empty(&app, beaker),
+            !in_custody(&app, beaker),
             "an officer who takes the label at its word has no reason to seize the bottle"
         );
         assert_eq!(
@@ -753,7 +835,7 @@ mod tests {
         advance(&mut app, 1.0);
 
         assert!(
-            is_empty(&app, beaker),
+            in_custody(&app, beaker),
             "unlabelled contraband is always seized"
         );
         assert_eq!(
@@ -780,7 +862,7 @@ mod tests {
         advance(&mut app, 1.0);
 
         assert!(
-            is_empty(&app, beaker),
+            in_custody(&app, beaker),
             "a label has to name something specific to be worth believing"
         );
     }
@@ -798,7 +880,7 @@ mod tests {
         advance(&mut app, 1.0);
 
         assert!(
-            is_empty(&app, beaker),
+            in_custody(&app, beaker),
             "claiming to be a different controlled substance is still claiming to be contraband"
         );
     }
@@ -813,9 +895,9 @@ mod tests {
 
         advance(&mut app, 1.0);
 
-        assert!(is_empty(&app, careless));
+        assert!(in_custody(&app, careless));
         assert!(
-            is_empty(&app, careful),
+            in_custody(&app, careful),
             "an officer holding contraband nobody hid will read everything else properly"
         );
     }
@@ -830,7 +912,7 @@ mod tests {
         advance(&mut app, 1.0);
 
         assert!(
-            is_empty(&app, beaker),
+            in_custody(&app, beaker),
             "the relationship is what lets you lie to them; burn it and the label is just ink"
         );
     }
@@ -877,7 +959,10 @@ mod tests {
 
         advance(&mut app, 1.0);
 
-        assert!(!is_empty(&app, beaker), "there was nothing in it to seize");
+        assert!(
+            !in_custody(&app, beaker),
+            "there was nothing in it to seize"
+        );
         assert_eq!(
             app.world()
                 .resource::<Shift>()

@@ -141,7 +141,52 @@ pub(crate) fn authored_queue_paths() -> crate::order_intake::queue::QueuePaths {
         public: lane("public"),
         medical: lane("medical"),
         clearances,
+        access: ["public_access", "medical_access"]
+            .into_iter()
+            .flat_map(|name| {
+                lane(name)
+                    .windows(2)
+                    .map(|pair| (pair[0], pair[1]))
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
     }
+}
+
+/// Use the actual window positions and orientations in movement regressions.
+/// Default stations intentionally fall back to the public window, including
+/// for Medical, so they cannot validate the second lane's approach.
+pub(crate) fn authored_delivery_stations() -> crate::lab::DeliveryStations {
+    let mut spots = crate::lab::MachineSpots::default();
+    for entity in parse() {
+        if classname(&entity).as_deref() != Some("machine_spot")
+            || property(&entity, "kind").as_deref() != Some("DeliveryWindow")
+        {
+            continue;
+        }
+        let (x, z) = origin_xz(&entity).unwrap();
+        let angles = property(&entity, "angles").unwrap();
+        let yaw = angles
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse::<f32>()
+            .unwrap();
+        let lane = match property(&entity, "lane").as_deref() {
+            Some("medical") => crate::lab::DeliveryLane::Medical,
+            _ => crate::lab::DeliveryLane::Public,
+        };
+        spots.insert_with_lane(
+            property(&entity, "id").unwrap(),
+            MachineKind::DeliveryWindow,
+            bevy::prelude::Transform::from_xyz(x, 0.0, z)
+                .with_rotation(bevy::prelude::Quat::from_rotation_y(yaw.to_radians())),
+            Some(lane),
+        );
+    }
+    let mut stations = crate::lab::DeliveryStations::default();
+    stations.rebuild_from(&spots);
+    stations
 }
 
 #[test]
@@ -153,9 +198,48 @@ fn pickup_queues_fit_the_whole_cast_and_clear_authored_furniture() {
     let solids = authored_solid_colliders();
     let roster: Vec<crate::crew::CrewDef> =
         ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap();
+    assert!(
+        !paths.access.is_empty(),
+        "both windows need an authored walking aisle"
+    );
+    let map = parse();
+    for lane in ["public_access", "medical_access"] {
+        assert!(
+            map.iter()
+                .filter(|entity| classname(entity).as_deref() == Some("queue_point")
+                    && property(entity, "lane").as_deref() == Some(lane))
+                .count()
+                >= 2,
+            "{lane} needs a complete authored approach aisle"
+        );
+    }
+    for (from, to) in &paths.access {
+        assert!(
+            crate::npc_motion::walkable_segment(
+                &areas,
+                *from + Vec3::Y * crate::crew::BODY_OFFSET,
+                *to + Vec3::Y * crate::crew::BODY_OFFSET,
+                crate::crew::BODY_OFFSET,
+            ),
+            "greeting access crosses unwalkable floor: {from:?} -> {to:?}"
+        );
+        let steps = (from.distance(*to) / 0.1).ceil().max(1.0) as usize;
+        for i in 0..=steps {
+            let body = from.lerp(*to, i as f32 / steps as f32) + Vec3::Y * crate::crew::BODY_OFFSET;
+            for (center, half) in &solids {
+                if (body.y - center.y).abs() < half.y + 0.6 {
+                    assert!(
+                        (body.x - center.x).abs() - half.x >= NAV_RADIUS
+                            || (body.z - center.z).abs() - half.z >= NAV_RADIUS,
+                        "greeting access clips furniture/wall at {body:?}: {center:?} {half:?}"
+                    );
+                }
+            }
+        }
+    }
     for (lane, anchors) in [("public", paths.public), ("medical", paths.medical)] {
         let line = navigable_line(&anchors, &nav);
-        let points = standing_points(&line, &[], &paths.clearances);
+        let points = standing_points(&line, &[], &paths.clearances, &paths.access);
         assert!(
             points.len() >= roster.len() + 6,
             "{lane}: only {} standing places for {} possible identities",

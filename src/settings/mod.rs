@@ -988,7 +988,10 @@ impl Settings {
             return Settings::default();
         }
         match std::fs::read_to_string(&path).map(|text| ron::from_str::<Settings>(&text)) {
-            Ok(Ok(settings)) => settings,
+            Ok(Ok(mut settings)) => {
+                settings.bindings.migrate_inspect_binding();
+                settings
+            }
             Ok(Err(error)) => {
                 warn!("ignoring unreadable {}: {error}", path.display());
                 Settings::default()
@@ -1045,6 +1048,7 @@ pub struct Bindings {
     pub social: KeyCode,
     /// Write on whatever is in hand — see [`crate::labels`].
     pub label: KeyCode,
+    pub inspect: KeyCode,
 }
 
 impl Default for Bindings {
@@ -1062,11 +1066,42 @@ impl Default for Bindings {
             book: KeyCode::KeyB,
             social: KeyCode::Tab,
             label: KeyCode::KeyL,
+            inspect: KeyCode::KeyI,
         }
     }
 }
 
 impl Bindings {
+    fn migrate_inspect_binding(&mut self) {
+        let old: Vec<_> = BindingSlot::ALL
+            .iter()
+            .filter(|s| **s != BindingSlot::Inspect)
+            .map(|s| s.read(self))
+            .collect();
+        if old.contains(&self.inspect) {
+            if let Some(key) = [
+                KeyCode::KeyI,
+                KeyCode::KeyO,
+                KeyCode::KeyP,
+                KeyCode::KeyK,
+                KeyCode::F6,
+                KeyCode::F7,
+                KeyCode::F8,
+                KeyCode::F9,
+                KeyCode::F10,
+                KeyCode::F11,
+                KeyCode::F12,
+                KeyCode::F5,
+                KeyCode::F4,
+            ]
+            .into_iter()
+            .find(|k| !old.contains(k))
+            {
+                self.inspect = key;
+            }
+        }
+    }
+
     /// Assigns `key` to `slot`, swapping rather than refusing if another slot
     /// already holds it. With 12 bindings, forcing every key to stay distinct
     /// avoids two actions silently firing off one keypress, and a swap lets a
@@ -1106,12 +1141,13 @@ enum BindingSlot {
     Book,
     Social,
     Label,
+    Inspect,
 }
 
 impl BindingSlot {
     /// In the order the Controls screen reads best — movement, then the
     /// hands, then the book.
-    const ALL: [BindingSlot; 12] = [
+    const ALL: [BindingSlot; 13] = [
         BindingSlot::Forward,
         BindingSlot::Back,
         BindingSlot::Left,
@@ -1124,6 +1160,7 @@ impl BindingSlot {
         BindingSlot::Book,
         BindingSlot::Social,
         BindingSlot::Label,
+        BindingSlot::Inspect,
     ];
 
     fn title(self) -> &'static str {
@@ -1140,6 +1177,7 @@ impl BindingSlot {
             BindingSlot::Book => "Reference book",
             BindingSlot::Social => "Crew relationships / shops",
             BindingSlot::Label => "Write on what you hold",
+            BindingSlot::Inspect => "Inspect held item",
         }
     }
 
@@ -1157,6 +1195,7 @@ impl BindingSlot {
             BindingSlot::Book => bindings.book,
             BindingSlot::Social => bindings.social,
             BindingSlot::Label => bindings.label,
+            BindingSlot::Inspect => bindings.inspect,
         }
     }
 
@@ -1174,6 +1213,7 @@ impl BindingSlot {
             BindingSlot::Book => bindings.book = key,
             BindingSlot::Social => bindings.social = key,
             BindingSlot::Label => bindings.label = key,
+            BindingSlot::Inspect => bindings.inspect = key,
         }
     }
 }
@@ -1451,7 +1491,7 @@ mod tests {
         // `label` had no row on the old `described()`-based Controls screen —
         // no way for a player to ever discover it existed. `BindingSlot::ALL`
         // enumerating every field of `Bindings` fixes that by construction.
-        assert_eq!(BindingSlot::ALL.len(), 12);
+        assert_eq!(BindingSlot::ALL.len(), 13);
         assert!(BindingSlot::ALL.iter().all(|slot| !slot.title().is_empty()));
         assert!(
             BindingSlot::ALL.contains(&BindingSlot::Label),
@@ -1755,5 +1795,13 @@ mod tests {
         assert!(owns_the_clock(None));
         assert!(!owns_the_clock(Some(&LaunchMode::Host)));
         assert!(!owns_the_clock(Some(&LaunchMode::HostSteam)));
+    }
+    #[test]
+    fn adding_inspect_keeps_existing_rebound_keys_distinct() {
+        let mut old: Bindings = ron::from_str("(interact:KeyI)").unwrap();
+        old.migrate_inspect_binding();
+        assert_eq!(old.interact, KeyCode::KeyI);
+        assert_ne!(old.inspect, old.interact);
+        assert_eq!(old.inspect, KeyCode::KeyO);
     }
 }

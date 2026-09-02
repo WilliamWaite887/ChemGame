@@ -1,6 +1,7 @@
 //! ChemGame — a focused recreation of the Space Station 13/14 chemist.
 
 mod addiction;
+mod analysis_reports;
 mod antagonist;
 mod arc;
 mod audio;
@@ -24,6 +25,7 @@ mod estrangement;
 mod freight;
 mod fx;
 mod hazards;
+mod inspection;
 mod instability;
 mod interaction;
 mod knowledge;
@@ -47,6 +49,7 @@ mod rogue_security;
 mod saboteur;
 mod saves;
 mod security;
+mod security_case;
 mod session;
 mod settings;
 mod shift;
@@ -135,7 +138,11 @@ fn main() {
         // After the lab: it rebuilds off `WalkableAreas`, which the lab owns.
         nav::NavPlugin,
         machines::MachinePlugin,
-        containers::ContainerPlugin,
+        (
+            containers::ContainerPlugin,
+            inspection::InspectionPlugin,
+            analysis_reports::AnalysisReportPlugin,
+        ),
         crew::CrewPlugin,
         knowledge::KnowledgePlugin,
         (
@@ -190,7 +197,7 @@ fn main() {
             // reads the suspicion antagonist builds, and since
             // antagonist's Spy-flavoured sting arms its `RaidSchedule`
             // directly.
-            security::SecurityPlugin,
+            (security::SecurityPlugin, security_case::SecurityCasePlugin),
             // The station-wide fallout of it. After antagonist, since it
             // reads `UnderworldStanding`; independent of security.
             crisis::CrisisPlugin,
@@ -204,11 +211,8 @@ fn main() {
             estrangement::EstrangementPlugin,
             // The department minors: one per department, running in
             // every save regardless of which main antagonist was drawn.
-            // `obsessed` is Service's. Security has two, and they are two
-            // different people: `rogue_security` above is the officer who
-            // turns on you in the open when standing collapses, and
-            // `bent_guard` is the one who quietly wants what he would
-            // arrest you for. Each is independent of every other here.
+            // Security's legacy state remains for earned rewards and saves;
+            // the unified Reyes case pilot owns new corruption incidents.
             obsessed::ObsessedPlugin,
             smuggler::SmugglerPlugin,
             saboteur::SaboteurPlugin,

@@ -14,6 +14,9 @@ pub struct QueuePaths {
     pub public: Vec<Vec3>,
     pub medical: Vec<Vec3>,
     pub clearances: Vec<(Vec3, f32)>,
+    /// Centre lines of the walking aisle beside each pickup line. These are
+    /// never standing places, even when all eligible customers are waiting.
+    pub access: Vec<(Vec3, Vec3)>,
 }
 
 #[derive(Resource, Default)]
@@ -68,6 +71,19 @@ fn collect_paths(
     if paths.clearances != clearances {
         paths.clearances = clearances;
     }
+    let mut access = Vec::new();
+    for lane in ["public_access", "medical_access"] {
+        let mut ordered: Vec<_> = points.iter().filter(|(p, _)| p.lane == lane).collect();
+        ordered.sort_by_key(|(p, _)| p.sequence);
+        access.extend(
+            ordered
+                .windows(2)
+                .map(|pair| (pair[0].1.translation, pair[1].1.translation)),
+        );
+    }
+    if paths.access != access {
+        paths.access = access;
+    }
     let mut ordered: Vec<_> = points.iter().filter(|(p, _)| p.lane == "public").collect();
     ordered.sort_by_key(|(p, _)| p.sequence);
     let next: Vec<_> = ordered.iter().map(|(_, t)| t.translation).collect();
@@ -121,6 +137,7 @@ pub(crate) fn standing_points(
     line: &[Vec3],
     greetings: &[Vec3],
     clearances: &[(Vec3, f32)],
+    access: &[(Vec3, Vec3)],
 ) -> Vec<Vec3> {
     let mut result: Vec<Vec3> = Vec::new();
     let mut distance = 0.0;
@@ -131,7 +148,15 @@ pub(crate) fn standing_points(
             .all(|p| p.distance(point) >= 0.85)
             && clearances
                 .iter()
-                .all(|(at, radius)| at.distance(point) >= *radius);
+                .all(|(at, radius)| at.distance(point) >= *radius)
+            && access.iter().all(|(a, b)| {
+                let segment = *b - *a;
+                let fraction = ((point - *a).dot(segment) / segment.length_squared().max(0.0001))
+                    .clamp(0.0, 1.0);
+                // Two body radii, plus a small walking tolerance. Point-only
+                // doorway clearances cannot protect the full approach aisle.
+                point.distance(a.lerp(*b, fraction)) >= crate::npc_motion::BODY_RADIUS * 2.0 + 0.12
+            });
         if clear {
             result.push(point);
             distance += 1.0;
@@ -202,7 +227,8 @@ fn assign_positions(
                 nav.standable_goal(station.queue_position(0.0)),
                 nav.standable_goal(station.queue_position(1.0)),
             ];
-            prepared.lanes[lane_index] = standing_points(&line, &greetings, &paths.clearances);
+            prepared.lanes[lane_index] =
+                standing_points(&line, &greetings, &paths.clearances, &paths.access);
         }
         let mut waiting: Vec<_> = people
             .iter()
@@ -311,6 +337,327 @@ mod tests {
         exercise_long_line(DeliveryLane::Medical);
     }
 
+    #[test]
+    fn security_resident_walks_from_department_to_public_greeting() {
+        for frame_ms in [10_u64, 16, 17, 20, 25, 33, 40, 50, 67, 100, 200] {
+            for start in [Vec3::new(-96.0, 0.93, 6.5), Vec3::new(-83.85, 0.93, 7.92)] {
+                let areas = crate::lab::tb_map::authored_walkable_areas();
+                let nav = NavGraph::build(&areas, crate::nav::NAV_RADIUS);
+                let stations = crate::lab::tb_map::authored_delivery_stations();
+                let original = nav.path(
+                    start,
+                    stations.station(DeliveryLane::Public).queue_position(0.0),
+                );
+                let mut app = App::new();
+                app.init_resource::<Time>()
+                    .init_resource::<crate::crew::Departments>()
+                    .init_resource::<PreparedQueues>()
+                    .init_resource::<crate::npc_motion::NpcMotion>()
+                    .insert_resource(stations)
+                    .insert_resource(nav)
+                    .insert_resource(areas)
+                    .insert_resource(crate::lab::tb_map::authored_queue_paths())
+                    .add_systems(
+                        Update,
+                        (
+                            crate::npc_motion::snapshot,
+                            assign_positions,
+                            crate::crew::walk_route,
+                        )
+                            .chain(),
+                    );
+                let officer = app
+                    .world_mut()
+                    .spawn((
+                        CrewMember {
+                            name: "Officer Reyes".into(),
+                            role: "Security".into(),
+                        },
+                        Transform::from_translation(start),
+                        CrewRoute::arrival_for(DeliveryLane::Public, 0.0),
+                        PendingOrder::new(
+                            super::super::tests::sample_order(),
+                            super::super::RequestContext {
+                                id: 1,
+                                source: super::super::RequestSource::Security,
+                                campaign: None,
+                                greeting: super::super::GreetingKind::Ordinary,
+                                step: None,
+                            },
+                        ),
+                    ))
+                    .id();
+                let mut trace = Vec::new();
+                for frame in 0..(120_000 / frame_ms) {
+                    app.world_mut()
+                        .resource_mut::<Time>()
+                        .advance_by(std::time::Duration::from_millis(frame_ms));
+                    app.update();
+                    if frame % 100 == 0 {
+                        trace.push((
+                            frame,
+                            app.world().get::<Transform>(officer).unwrap().translation,
+                            app.world()
+                                .get::<CrewRoute>(officer)
+                                .unwrap()
+                                .routing_diagnostic(),
+                        ));
+                    }
+                    assert!(!app.world().get::<CrewRoute>(officer).unwrap().routing_failed(),
+                    "A valid Security trip would be withdrawn by intake from {start:?} at {frame_ms}ms; original route {original:?}; trace {trace:?}");
+                    if app
+                        .world()
+                        .get::<QueuePosition>(officer)
+                        .is_some_and(|q| q.reached)
+                    {
+                        break;
+                    }
+                }
+                assert!(app.world().get::<QueuePosition>(officer).unwrap().reached,
+                "Security resident never reached public window from {start:?} at {frame_ms}ms; original route {original:?}; trace {trace:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn continuous_aisle_prevents_a_pickup_line_sealing_an_incoming_route() {
+        let run = |reserve_access: bool| {
+            let mut areas = crate::lab::WalkableAreas::default();
+            areas.push(
+                crate::lab::Bounds {
+                    min_x: 0.0,
+                    max_x: 12.0,
+                    min_z: 0.0,
+                    max_z: 4.0,
+                },
+                None,
+            );
+            let line = [Vec3::new(6.0, 0.0, 0.5), Vec3::new(6.0, 0.0, 3.5)];
+            let access = [(Vec3::new(0.5, 0.0, 2.0), Vec3::new(11.5, 0.0, 2.0))];
+            let slots =
+                standing_points(&line, &[], &[], if reserve_access { &access } else { &[] });
+            let mut app = App::new();
+            app.init_resource::<Time>()
+                .init_resource::<crate::npc_motion::NpcMotion>()
+                .insert_resource(areas)
+                .add_systems(Update, crate::npc_motion::snapshot);
+            for (i, slot) in slots.iter().enumerate() {
+                app.world_mut().spawn((
+                    CrewMember {
+                        name: format!("Waiting {i}"),
+                        role: "Service".into(),
+                    },
+                    Transform::from_translation(*slot + Vec3::Y * crate::crew::BODY_OFFSET),
+                ));
+            }
+            let start = Vec3::new(1.0, crate::crew::BODY_OFFSET, 2.0);
+            let goal = Vec3::new(11.0, crate::crew::BODY_OFFSET, 2.0);
+            let incoming = app
+                .world_mut()
+                .spawn((
+                    CrewMember {
+                        name: "Incoming".into(),
+                        role: "Service".into(),
+                    },
+                    Transform::from_translation(start),
+                ))
+                .id();
+            let mut at = start;
+            for _ in 0..150 {
+                app.world_mut()
+                    .resource_mut::<Time>()
+                    .advance_by(std::time::Duration::from_millis(200));
+                app.update();
+                at = app.world_mut().resource_scope(
+                    |world, mut motion: Mut<crate::npc_motion::NpcMotion>| {
+                        motion.advance(
+                            incoming,
+                            at,
+                            goal,
+                            goal,
+                            0.42,
+                            Some(world.resource::<crate::lab::WalkableAreas>()),
+                            crate::crew::BODY_OFFSET,
+                        )
+                    },
+                );
+                app.world_mut()
+                    .get_mut::<Transform>(incoming)
+                    .unwrap()
+                    .translation = at;
+                for slot in &slots {
+                    assert!(
+                        crate::nav::flat_distance(at, *slot) >= 0.70,
+                        "incoming body crossed a waiting customer"
+                    );
+                }
+            }
+            at.distance(goal) < 0.2
+        };
+        assert!(
+            !run(false),
+            "fixture must reproduce the original blocked approach without aisle protection"
+        );
+        assert!(
+            run(true),
+            "an incoming requester must walk through the reserved gap in the pickup line"
+        );
+    }
+
+    #[test]
+    fn new_requesters_reach_both_windows_past_full_pickup_lines() {
+        for lane in [DeliveryLane::Public, DeliveryLane::Medical] {
+            let areas = crate::lab::tb_map::authored_walkable_areas();
+            let nav = NavGraph::build(&areas, crate::nav::NAV_RADIUS);
+            let paths = crate::lab::tb_map::authored_queue_paths();
+            let stations = crate::lab::tb_map::authored_delivery_stations();
+            let station = stations.station(lane);
+            let greetings = [0.0, 1.0].map(|slot| nav.standable_goal(station.queue_position(slot)));
+            let anchors = if lane == DeliveryLane::Public {
+                &paths.public
+            } else {
+                &paths.medical
+            };
+            let slots = standing_points(
+                &navigable_line(anchors, &nav),
+                &greetings,
+                &paths.clearances,
+                &paths.access,
+            );
+            let mut app = App::new();
+            app.init_resource::<Time>()
+                .init_resource::<crate::crew::Departments>()
+                .init_resource::<PreparedQueues>()
+                .init_resource::<crate::npc_motion::NpcMotion>()
+                .insert_resource(stations)
+                .insert_resource(nav)
+                .insert_resource(areas)
+                .insert_resource(paths)
+                .add_systems(
+                    Update,
+                    (
+                        crate::npc_motion::snapshot,
+                        assign_positions,
+                        crate::crew::walk_route,
+                    )
+                        .chain(),
+                );
+            // Settled accepted customers are real stationary bodies, not just
+            // hypothetical points in a spacing test. Both greetings must be
+            // reachable with the entire pickup line already occupied.
+            for (i, slot) in slots.iter().take(14).enumerate() {
+                let mut route = CrewRoute::standing();
+                route.delivery_lane = lane;
+                app.world_mut().spawn((
+                    CrewMember {
+                        name: format!("Accepted {i}"),
+                        role: "Service".into(),
+                    },
+                    Transform::from_translation(*slot + Vec3::Y * crate::crew::BODY_OFFSET),
+                    route,
+                    super::super::tests::sample_order(),
+                    AcceptedOrder { sequence: i as u64 },
+                    QueuePosition {
+                        target: *slot,
+                        reached: true,
+                        pickup: true,
+                    },
+                ));
+            }
+            app.update();
+            let mut arrivals = Vec::new();
+            for i in 0..2 {
+                arrivals.push(
+                    app.world_mut()
+                        .spawn((
+                            CrewMember {
+                                name: format!("Incoming {i}"),
+                                role: "Service".into(),
+                            },
+                            Transform::from_xyz(
+                                if lane == DeliveryLane::Public {
+                                    9.0
+                                } else {
+                                    -22.0
+                                },
+                                crate::crew::BODY_OFFSET,
+                                12.0 + i as f32 * 1.0,
+                            ),
+                            CrewRoute::arrival_for(lane, 0.0),
+                            PendingOrder::new(
+                                super::super::tests::sample_order(),
+                                super::super::RequestContext {
+                                    id: 100 + i,
+                                    source: super::super::RequestSource::Ordinary,
+                                    campaign: None,
+                                    greeting: super::super::GreetingKind::Ordinary,
+                                    step: None,
+                                },
+                            ),
+                        ))
+                        .id(),
+                );
+            }
+            let advance = |app: &mut App| {
+                for _ in 0..600 {
+                    app.world_mut()
+                        .resource_mut::<Time>()
+                        .advance_by(std::time::Duration::from_millis(100));
+                    app.update();
+                    let positions: Vec<_> = app
+                        .world_mut()
+                        .query::<&Transform>()
+                        .iter(app.world())
+                        .map(|t| t.translation)
+                        .collect();
+                    for (i, a) in positions.iter().enumerate() {
+                        for b in positions.iter().skip(i + 1) {
+                            assert!(
+                                a.distance(*b) >= 0.70,
+                                "{lane:?}: overlapping bodies {a:?}, {b:?}"
+                            );
+                        }
+                    }
+                }
+            };
+            advance(&mut app);
+            for &entity in &arrivals {
+                let place = app.world().get::<QueuePosition>(entity).unwrap();
+                assert!(
+                    place.reached,
+                    "{lane:?} incoming requester blocked by pickup line: {:?} -> {:?}; {}",
+                    app.world().get::<Transform>(entity).unwrap().translation,
+                    place.target,
+                    app.world()
+                        .resource::<crate::npc_motion::NpcMotion>()
+                        .diagnostic(entity, app.world().resource::<crate::lab::WalkableAreas>())
+                );
+            }
+            // Accept the first conversation while the other window visitor
+            // remains standing. Moving into pickup must not require that
+            // second conversation to be accepted or that an order be served.
+            let newly_accepted = arrivals[0];
+            app.world_mut()
+                .entity_mut(newly_accepted)
+                .remove::<(PendingOrder, super::super::AwaitingConversation)>()
+                .insert((
+                    super::super::tests::sample_order(),
+                    AcceptedOrder { sequence: 14 },
+                ));
+            advance(&mut app);
+            let place = app.world().get::<QueuePosition>(newly_accepted).unwrap();
+            assert!(place.pickup && place.reached,
+                "{lane:?}: accepted requester could not leave greeting for the back of pickup: {:?} -> {:?}",
+                app.world().get::<Transform>(newly_accepted).unwrap().translation, place.target);
+            assert!(
+                app.world()
+                    .get::<QueuePosition>(arrivals[1])
+                    .unwrap()
+                    .reached
+            );
+        }
+    }
+
     fn exercise_long_line(lane: DeliveryLane) {
         let areas = crate::lab::tb_map::authored_walkable_areas();
         let nav = NavGraph::build(&areas, crate::nav::NAV_RADIUS);
@@ -318,7 +665,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<crate::crew::Departments>()
-            .init_resource::<DeliveryStations>()
+            .insert_resource(crate::lab::tb_map::authored_delivery_stations())
             .init_resource::<PreparedQueues>()
             .init_resource::<crate::npc_motion::NpcMotion>()
             .insert_resource(nav)

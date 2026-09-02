@@ -30,6 +30,9 @@ use crate::player::Chemist;
 use crate::produce::{Produce, ProduceCatalog, ProduceId};
 use crate::AppState;
 
+#[cfg(debug_assertions)]
+mod playtest;
+
 pub struct MachinePlugin;
 
 /// Recipe methods the shared notebook must contain before the analyzer's
@@ -44,6 +47,11 @@ fn emit_world_sfx(sounds: &mut Option<ResMut<Messages<EmitWorldSfx>>>, sound: Sf
 
 impl Plugin for MachinePlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(debug_assertions)]
+        if std::env::args().any(|a| a == "--chemistry-playtest") {
+            playtest::install(app);
+        }
+
         // Every action a chemist can take is a client message: the panel asks,
         // the server decides. `ReactionsFired` stays local because it is a
         // server-side consequence, not a request.
@@ -594,6 +602,7 @@ pub struct BufferTransferRequested {
 pub enum AgitateDirection {
     AToB,
     BToA,
+    ToMixer,
 }
 
 impl AgitateDirection {
@@ -601,6 +610,7 @@ impl AgitateDirection {
         match self {
             Self::AToB => MachineSlot::B,
             Self::BToA => MachineSlot::A,
+            Self::ToMixer => MachineSlot::C,
         }
     }
 
@@ -608,6 +618,7 @@ impl AgitateDirection {
         match self {
             Self::AToB => "A -> B",
             Self::BToA => "B -> A",
+            Self::ToMixer => "A + B -> Mixer",
         }
     }
 }
@@ -627,6 +638,8 @@ pub struct PackageRequested {
     #[entities]
     pub machine: Entity,
     pub kind: ContainerKind,
+    pub label: Option<String>,
+    pub nonce: u64,
 }
 
 /// Run the loaded sample through the analyzer and work out how it was made.
@@ -1032,6 +1045,7 @@ fn cool_to_ambient(
     heating: Query<(Entity, &Thermostat)>,
     slotted: Query<(Entity, &InSlot)>,
     mut containers: Query<(Entity, &mut Container)>,
+    mut buffers: Query<&mut Buffer>,
 ) {
     let dt = time.delta_secs();
     // Whatever a powered chamber is actively holding is exempt.
@@ -1064,6 +1078,19 @@ fn cool_to_ambient(
         }
         if reacted || temperature_bucket(next) != bucket_before {
             container.set_changed();
+        }
+    }
+    for mut buffer in &mut buffers {
+        if buffer.0.is_empty() {
+            continue;
+        }
+        let before = buffer.0.temperature;
+        let next = approach(before, Kelvin::AMBIENT, AMBIENT_RATE, dt);
+        if next != before {
+            buffer.bypass_change_detection().0.temperature = next;
+            if (before.0 * 10.0) as i32 != (next.0 * 10.0) as i32 {
+                buffer.set_changed();
+            }
         }
     }
 }
@@ -1159,10 +1186,8 @@ pub struct Reacting {
 /// chamber halfway, or be interrupted during — which is a verb this game did
 /// not have when every recipe was one click.
 ///
-/// The Mixing Chamber's buffer is deliberately **not** stepped. Reagents in the
-/// buffer are held separated on purpose — that is the whole point of the
-/// machine, and it has never run the resolver — so reacting them there would
-/// break the one tool the player has for cleaning up a contaminated batch.
+/// Ordinary chamber contents stay separated. A chamber only enters the timed
+/// chemistry path after an explicitly validated agitation request.
 fn accumulate_reaction_report(
     reactions: &mut Vec<chem_sim::ReactionId>,
     effects: &mut Vec<chem_sim::ReactionEffect>,
@@ -1178,6 +1203,34 @@ fn accumulate_reaction_report(
     changed
 }
 
+fn step_agitation(
+    solution: &mut Solution,
+    state: &mut AgitationRun,
+    dt: f32,
+    db: &ChemDb,
+) -> (bool, bool) {
+    state.elapsed_secs += dt;
+    state.chemistry_accumulator_secs += dt;
+    let mut finished = solution.is_empty();
+    let mut changed = false;
+    while !finished
+        && state.chemistry_accumulator_secs + CHEMISTRY_QUANTUM_EPSILON >= CHEMISTRY_QUANTUM_SECS
+    {
+        state.chemistry_accumulator_secs =
+            (state.chemistry_accumulator_secs - CHEMISTRY_QUANTUM_SECS).max(0.0);
+        let report = chem_sim::resolve_step_with_activation(
+            solution,
+            &db.reactions,
+            CHEMISTRY_QUANTUM_SECS,
+            &state.activation,
+        );
+        changed |= accumulate_reaction_report(&mut state.reactions, &mut state.effects, report);
+        finished =
+            !chem_sim::is_reacting_with_activation(solution, &db.reactions, &state.activation);
+    }
+    (changed, finished)
+}
+
 fn tick_reactions(
     mut commands: Commands,
     time: Res<Time>,
@@ -1185,6 +1238,7 @@ fn tick_reactions(
     mut fired: MessageWriter<ReactionsFired>,
     mut agitations: Query<(Entity, &mut AgitationRun)>,
     mut containers: Query<(Entity, &mut Container, Option<&mut Reacting>)>,
+    mut buffers: Query<&mut Buffer>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -1199,49 +1253,41 @@ fn tick_reactions(
     for (machine, mut run) in &mut agitations {
         let destination = run.destination;
         agitated_destinations.push(destination);
-        let Ok((_, mut container, _)) = containers.get_mut(destination) else {
+        let displayed_tenths_before = (run.elapsed_secs * 10.0).floor() as i32;
+        let result = if run.direction == AgitateDirection::ToMixer {
+            buffers.get_mut(destination).ok().map(|mut buffer| {
+                let result = step_agitation(
+                    &mut buffer.bypass_change_detection().0,
+                    run.bypass_change_detection(),
+                    dt,
+                    &db,
+                );
+                if result.0 {
+                    buffer.set_changed();
+                }
+                result
+            })
+        } else {
+            containers
+                .get_mut(destination)
+                .ok()
+                .map(|(_, mut container, _)| {
+                    let result = step_agitation(
+                        &mut container.bypass_change_detection().solution,
+                        run.bypass_change_detection(),
+                        dt,
+                        &db,
+                    );
+                    if result.0 {
+                        container.set_changed();
+                    }
+                    result
+                })
+        };
+        let Some((changed, finished)) = result else {
             commands.entity(machine).remove::<AgitationRun>();
             continue;
         };
-
-        if container.solution.is_empty() {
-            commands.entity(machine).remove::<AgitationRun>();
-            continue;
-        }
-
-        // The panel only ever compares `AgitationRun` at 0.1s resolution (see
-        // `PanelSignature`'s own `elapsed_secs * 10.0`), so the clock advance
-        // below is authority-only bookkeeping — same reasoning as
-        // `apply_thermostats` applies to `Container`'s temperature. Marking
-        // the whole component changed every frame would otherwise wake
-        // replication for the full 4-8s of every batch for no visible gain.
-        let displayed_tenths_before = (run.elapsed_secs * 10.0).floor() as i32;
-        let state = run.bypass_change_detection();
-        state.elapsed_secs += dt;
-        state.chemistry_accumulator_secs += dt;
-        let mut finished = false;
-        let mut changed = false;
-        while state.chemistry_accumulator_secs + CHEMISTRY_QUANTUM_EPSILON >= CHEMISTRY_QUANTUM_SECS
-        {
-            state.chemistry_accumulator_secs =
-                (state.chemistry_accumulator_secs - CHEMISTRY_QUANTUM_SECS).max(0.0);
-            let solution = &mut container.bypass_change_detection().solution;
-            let report = chem_sim::resolve_step_with_activation(
-                solution,
-                &db.reactions,
-                CHEMISTRY_QUANTUM_SECS,
-                &state.activation,
-            );
-            changed |= accumulate_reaction_report(&mut state.reactions, &mut state.effects, report);
-            finished =
-                !chem_sim::is_reacting_with_activation(solution, &db.reactions, &state.activation);
-            if finished {
-                break;
-            }
-        }
-        if changed {
-            container.set_changed();
-        }
         // Wake replication only when something a client can actually see
         // moved: a reaction fired/finished, or the displayed tenths-of-a-
         // second advanced.
@@ -1381,7 +1427,7 @@ pub fn chemist_entity(chemists: &Query<(Entity, &Chemist)>, client: ClientId) ->
 /// action handler calls this before mutation so delayed or forged requests
 /// cannot operate a machine after its claim moved to another player, cannot
 /// use the wrong machine kind, and cannot act while incapacitated.
-fn authorized_machine_actor(
+pub(crate) fn authorized_machine_actor(
     client: ClientId,
     machine: Option<&Machine>,
     allowed: &[MachineKind],
@@ -1517,8 +1563,13 @@ fn handle_agitate(
     slotted: Query<(Entity, &InSlot)>,
     slotted_b: Query<(Entity, &InSlotB)>,
     mut containers: Query<(Entity, &mut Container, Has<Reacting>)>,
+    mut buffers: Query<&mut Buffer>,
 ) {
+    let mut started = HashSet::new();
     for request in requests.read() {
+        if started.contains(&request.machine) {
+            continue;
+        }
         let Ok((machine, active)) = machines.get(request.machine) else {
             continue;
         };
@@ -1548,6 +1599,7 @@ fn handle_agitate(
         let (source, destination) = match request.direction {
             AgitateDirection::AToB => (slot_a, slot_b),
             AgitateDirection::BToA => (slot_b, slot_a),
+            AgitateDirection::ToMixer => (slot_a, slot_b),
         };
         let Ok(
             [(_, mut source_container, source_reacting), (_, mut destination_container, destination_reacting)],
@@ -1578,7 +1630,8 @@ fn handle_agitate(
         let source_volume = source_container.solution.total_volume();
         let destination_volume = destination_container.solution.total_volume();
         if !source_volume.is_positive()
-            || destination_container.solution.available_volume() < source_volume
+            || (request.direction != AgitateDirection::ToMixer
+                && destination_container.solution.available_volume() < source_volume)
         {
             continue;
         }
@@ -1597,6 +1650,38 @@ fn handle_agitate(
                 + destination_container.solution.temperature.0 * destination_volume.as_f32())
                 / (source_volume + destination_volume).as_f32(),
         );
+        if request.direction == AgitateDirection::ToMixer {
+            let Ok(mut buffer) = buffers.get_mut(request.machine) else {
+                continue;
+            };
+            if !buffer.0.is_empty()
+                || buffer.0.available_volume() < source_volume + destination_volume
+            {
+                continue;
+            }
+            let _ = source_container
+                .solution
+                .transfer_to(&mut buffer.0, source_volume);
+            let _ = destination_container
+                .solution
+                .transfer_to(&mut buffer.0, destination_volume);
+            buffer.0.temperature = combined_temperature;
+            let expected_secs = expected_agitation_secs(&buffer.0, &activation, &db);
+            let distinct_reagents = buffer.0.len();
+            commands.entity(request.machine).insert(AgitationRun {
+                destination: request.machine,
+                direction: request.direction,
+                activation,
+                elapsed_secs: 0.0,
+                expected_secs,
+                chemistry_accumulator_secs: 0.0,
+                reactions: Vec::new(),
+                effects: Vec::new(),
+                distinct_reagents,
+            });
+            started.insert(request.machine);
+            continue;
+        }
         let moved = source_container
             .solution
             .transfer_to(&mut destination_container.solution, source_volume);
@@ -1612,6 +1697,7 @@ fn handle_agitate(
         let expected_secs =
             expected_agitation_secs(&destination_container.solution, &activation, &db);
         let distinct_reagents = destination_container.solution.len();
+        started.insert(request.machine);
         commands.entity(request.machine).insert(AgitationRun {
             destination,
             direction: request.direction,
@@ -1627,6 +1713,7 @@ fn handle_agitate(
 }
 
 fn handle_buffer_transfer(
+    mut prepared: Option<ResMut<crate::security_case::preparation::PreparedBatches>>,
     db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<BufferTransferRequested>>,
     mut fired: MessageWriter<ReactionsFired>,
@@ -1673,6 +1760,14 @@ fn handle_buffer_transfer(
             continue;
         };
 
+        let buffer_empty = buffer.0.is_empty();
+        let container_empty = container.solution.is_empty();
+        let buffer_prepared = prepared
+            .as_ref()
+            .and_then(|p| p.get(request.machine, &buffer.0));
+        let container_prepared = prepared
+            .as_ref()
+            .and_then(|p| p.get(target, &container.solution));
         let moved_any = match request.direction {
             BufferDirection::ToBuffer => {
                 // Pulling a single named reagent out of a mixture is the whole
@@ -1680,6 +1775,8 @@ fn handle_buffer_transfer(
                 // gets cleaned up before it goes in a pill.
                 let purity = container.solution.purity_of(request.reagent);
                 let ph = container.solution.reagent_ph(request.reagent);
+                let temperature = container.solution.temperature.0;
+                let before = buffer.0.total_volume().as_f32();
                 let moved = container.solution.remove(request.reagent, request.amount);
                 let overflow = buffer.0.add_profiled(request.reagent, moved, purity, ph);
                 if overflow.is_positive() {
@@ -1687,14 +1784,31 @@ fn handle_buffer_transfer(
                         .solution
                         .add_profiled(request.reagent, overflow, purity, ph);
                 }
+                let accepted = (moved - overflow).as_f32();
+                if accepted > 0.0 {
+                    buffer.0.temperature = Kelvin(
+                        (buffer.0.temperature.0 * before + temperature * accepted)
+                            / (before + accepted),
+                    );
+                }
                 moved != overflow
             }
             BufferDirection::ToContainer => {
                 let purity = buffer.0.purity_of(request.reagent);
                 let ph = buffer.0.reagent_ph(request.reagent);
+                let temperature = buffer.0.temperature.0;
+                let before = container.solution.total_volume().as_f32();
                 let moved = buffer.0.remove(request.reagent, request.amount);
                 let (overflow, report) = container.mutate(&db, |solution| {
-                    solution.add_profiled(request.reagent, moved, purity, ph)
+                    let overflow = solution.add_profiled(request.reagent, moved, purity, ph);
+                    let accepted = (moved - overflow).as_f32();
+                    if accepted > 0.0 {
+                        solution.temperature = Kelvin(
+                            (solution.temperature.0 * before + temperature * accepted)
+                                / (before + accepted),
+                        );
+                    }
+                    overflow
                 });
                 if overflow.is_positive() {
                     let _ = buffer.0.add_profiled(request.reagent, overflow, purity, ph);
@@ -1706,6 +1820,28 @@ fn handle_buffer_transfer(
             }
         };
         if moved_any {
+            if let Some(prepared) = prepared.as_mut() {
+                match request.direction {
+                    BufferDirection::ToBuffer => prepared.transfer(
+                        target,
+                        request.machine,
+                        &container.solution,
+                        &buffer.0,
+                        container_prepared,
+                        buffer_prepared,
+                        buffer_empty,
+                    ),
+                    BufferDirection::ToContainer => prepared.transfer(
+                        request.machine,
+                        target,
+                        &buffer.0,
+                        &container.solution,
+                        buffer_prepared,
+                        container_prepared,
+                        container_empty,
+                    ),
+                }
+            }
             if let Ok(transform) = transforms.get(request.machine) {
                 emit_world_sfx(&mut sounds, Sfx::BufferTransfer, transform.translation);
             }
@@ -1713,7 +1849,9 @@ fn handle_buffer_transfer(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_package(
+    mut prepared: Option<ResMut<crate::security_case::preparation::PreparedBatches>>,
     mut commands: Commands,
     db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<PackageRequested>>,
@@ -1722,21 +1860,37 @@ fn handle_package(
     chemists: Query<(Entity, &Chemist)>,
     bodies: Query<&crate::body::Body>,
     bloodstreams: Query<&crate::body::Bloodstream>,
+    inventory: Query<&InventorySlot>,
+    selected: Query<&SelectedInventorySlot>,
+    held: Query<&HeldBy>,
+    fittings: Query<(&Solid, Option<&Facing>)>,
+    active: Query<(), With<AgitationRun>>,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
+    mut seen: Local<std::collections::HashMap<(ClientId, Entity), u64>>,
 ) {
+    let mut reserved = Vec::new();
     for request in requests.read() {
-        if authorized_machine_actor(
+        let Some(player) = authorized_machine_actor(
             request.client_id,
             machine_states.get(request.machine).ok(),
             &[MachineKind::MixingChamber],
             &chemists,
             &bodies,
             &bloodstreams,
-        )
-        .is_none()
-        {
+        ) else {
+            continue;
+        };
+        if active.contains(request.machine) {
             continue;
         }
+        seen.retain(|(_, machine), _| machine_states.contains(*machine));
+        let previous = seen
+            .entry((request.client_id, request.machine))
+            .or_default();
+        if request.nonce <= *previous {
+            continue;
+        }
+        *previous = request.nonce;
         let Ok((mut buffer, transform)) = machines.get_mut(request.machine) else {
             continue;
         };
@@ -1753,58 +1907,75 @@ fn handle_package(
                 | ContainerKind::ChemicalCharge20
                 | ContainerKind::PhPaper
         ) {
-            // The kind crosses the network. Only authored package forms are
-            // accepted; a forged request cannot mint beakers or used tools.
             continue;
         }
-        if request.kind == ContainerKind::PhPaper {
-            let drop_at = transform.translation + Vec3::new(0.0, 0.95, 0.45);
-            spawn_container(&mut commands, ContainerKind::PhPaper, drop_at);
-            emit_world_sfx(&mut sounds, Sfx::PackagePop, drop_at);
-            continue;
-        }
-        if !buffer.0.total_volume().is_positive() {
-            continue;
-        }
-        if request.kind.charge_fuse().is_some()
-            && !buffer
-                .0
-                .iter()
-                .any(|(reagent, _)| db.reagents.get(reagent).explosive.is_some())
+        if request.kind != ContainerKind::PhPaper
+            && (buffer.0.is_empty()
+                || (request.kind.charge_fuse().is_some()
+                    && !buffer
+                        .0
+                        .iter()
+                        .any(|(r, _)| db.reagents.get(r).explosive.is_some())))
         {
             continue;
         }
-
-        // Packaging draws proportionally, so a pill made from a dirty buffer
-        // carries the contamination through rather than magically purifying.
-        let portion = buffer.0.split(request.kind.capacity());
-        if !portion.total_volume().is_positive() {
-            continue;
+        let batch_prepared = prepared
+            .as_ref()
+            .and_then(|p| p.get(request.machine, &buffer.0));
+        let mut portion = buffer.0.split(request.kind.capacity());
+        let _ = portion.set_max_volume(request.kind.capacity());
+        let label = request
+            .label
+            .as_deref()
+            .map(crate::labels::clean_label)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                (request.kind != ContainerKind::PhPaper).then(|| automatic_label(&portion, &db))
+            });
+        let preferred = selected.get(player).map_or(0, |s| s.0);
+        // Older session states can have a held item before inventory metadata
+        // is repaired. Treat that hand as occupied throughout this transaction.
+        if held.iter().any(|holder| holder.0 == player) {
+            reserved.push((player, preferred));
         }
-
-        let drop_at = transform.translation + Vec3::new(0.0, 0.95, 0.45);
+        let slot = free_inventory_slot(player, preferred, &inventory, &reserved);
+        let drop_at = fittings.get(request.machine).map_or(
+            transform.translation + Vec3::new(0.0, 0.95, 0.45),
+            |(solid, facing)| front_of(transform, solid, facing, request.kind.dimensions().1 * 0.5),
+        );
         let package = spawn_container(&mut commands, request.kind, drop_at);
-        emit_world_sfx(
-            &mut sounds,
-            if matches!(request.kind, ContainerKind::Pill | ContainerKind::Syringe) {
-                Sfx::PackagePop
-            } else {
-                Sfx::GlassClunk
-            },
+        if let Some(prepared) = prepared.as_mut() {
+            prepared.set(package, batch_prepared.clone(), &portion);
+            prepared.set(request.machine, batch_prepared, &buffer.0);
+        }
+        let mut output = commands.entity(package);
+        output.insert(Container {
+            kind: request.kind,
+            solution: portion,
+        });
+        if let Some(label) = label {
+            output.insert(crate::labels::Label(label));
+        }
+        if let Some(slot) = slot {
+            reserved.push((player, slot));
+        }
+        place_output(
+            &mut commands,
+            package,
+            player,
+            slot.map(|s| (s, preferred)),
             drop_at,
         );
-
-        // The container was only just queued for spawn, so its `Container`
-        // component is not readable yet; fill it in on the command queue.
-        let contents = portion;
-        commands.queue(move |world: &mut World| {
-            if let Some(mut container) = world.get_mut::<Container>(package) {
-                let mut contents = contents;
-                let amount = contents.total_volume();
-                let _ = contents.transfer_to(&mut container.solution, amount);
-            }
-        });
+        emit_world_sfx(&mut sounds, Sfx::PackagePop, drop_at);
     }
+}
+
+pub fn automatic_label(solution: &Solution, db: &ChemDb) -> String {
+    solution
+        .iter()
+        .map(|(r, _)| db.reagents.get(r).name.clone())
+        .collect::<Vec<_>>()
+        .join(" + ")
 }
 
 /// Floor level, just clear of a machine's working face.
@@ -1813,7 +1984,12 @@ fn handle_package(
 /// whichever machine this is, at whatever height that machine stands, rather
 /// than at one offset that happened to suit the hall's north wall. The transform
 /// deliberately stays at identity scale now that the authored GLB is a child.
-fn front_of(machine: &Transform, solid: &Solid, facing: Option<&Facing>, lift: f32) -> Vec3 {
+pub(crate) fn front_of(
+    machine: &Transform,
+    solid: &Solid,
+    facing: Option<&Facing>,
+    lift: f32,
+) -> Vec3 {
     // `Vec3::Z` only for a machine that has not been dressed yet, which in
     // practice means a test that spawned one by hand.
     let facing = facing.map_or(Vec3::Z, |facing| facing.0);
@@ -1840,8 +2016,26 @@ fn give_back(
     facing: Option<&Facing>,
     lift: f32,
 ) {
+    place_output(
+        commands,
+        item,
+        player,
+        inventory_cell,
+        front_of(machine, solid, facing, lift),
+    );
+}
+
+/// Shared final placement for packaging, ejection and locker collection.
+pub(crate) fn place_output(
+    commands: &mut Commands,
+    item: Entity,
+    player: Entity,
+    cell: Option<(u8, u8)>,
+    drop_at: Vec3,
+) {
     let mut item = commands.entity(item);
-    if let Some((slot, selected)) = inventory_cell {
+    item.remove::<(HeldBy, InventorySlot)>();
+    if let Some((slot, selected)) = cell {
         item.insert(InventorySlot {
             owner: player,
             slot,
@@ -1850,9 +2044,7 @@ fn give_back(
             item.insert(HeldBy(player));
         }
     } else {
-        item.insert(Transform::from_translation(front_of(
-            machine, solid, facing, lift,
-        )));
+        item.insert(Transform::from_translation(drop_at));
     }
 }
 
@@ -2084,7 +2276,7 @@ fn handle_empty(
 /// by any means — a lucky mix, a vial a crew member left behind — and the
 /// machine tells you how it was put together. It is also the anti-softlock, so
 /// an order for something unmakeable is never a dead end.
-fn handle_analyze(
+pub(crate) fn handle_analyze(
     db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<AnalyzeRequested>>,
     machines: Query<&Machine>,
@@ -2559,7 +2751,16 @@ mod tests {
     fn request_package(app: &mut App, machine: Entity, kind: ContainerKind) {
         app.world_mut().write_message(FromClient {
             client_id: ClientId::Server,
-            message: PackageRequested { machine, kind },
+            message: PackageRequested {
+                machine,
+                kind,
+                label: None,
+                nonce: {
+                    static NONCE: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(100);
+                    NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                },
+            },
         });
         app.update();
     }
@@ -3247,6 +3448,7 @@ mod tests {
             let (source, destination) = match direction {
                 AgitateDirection::AToB => (beaker_a, beaker_b),
                 AgitateDirection::BToA => (beaker_b, beaker_a),
+                AgitateDirection::ToMixer => (beaker_a, machine),
             };
 
             request_agitation(&mut app, client, machine, direction);
@@ -5114,5 +5316,411 @@ mod tests {
             Units::ZERO,
             "and the reactants go in full regardless — that is what overheating costs"
         );
+    }
+
+    #[test]
+    fn package_and_agitation_requests_round_trip_on_the_actual_wire() {
+        let mut world = World::new();
+        let machine = world.spawn_empty().id();
+        let remote_machine = world.spawn_empty().id();
+        for label in [
+            None,
+            Some(String::new()),
+            Some("Purified water — sûrement!".into()),
+            Some("x".repeat(crate::labels::MAX_LABEL)),
+        ] {
+            let request = PackageRequested {
+                machine,
+                kind: ContainerKind::ChemicalCharge10,
+                label: label.clone(),
+                nonce: u64::MAX - 1,
+            };
+            let bytes = postcard::to_allocvec(&request).unwrap();
+            let mut decoded: PackageRequested = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(decoded.machine, machine);
+            assert_eq!(decoded.kind, ContainerKind::ChemicalCharge10);
+            assert_eq!(decoded.label, label);
+            assert_eq!(decoded.nonce, u64::MAX - 1);
+            decoded.map_entities(&mut (machine, remote_machine));
+            assert_eq!(decoded.machine, remote_machine);
+            assert_eq!(decoded.label, label);
+        }
+        for direction in [
+            AgitateDirection::AToB,
+            AgitateDirection::BToA,
+            AgitateDirection::ToMixer,
+        ] {
+            let request = AgitateRequested { machine, direction };
+            let bytes = postcard::to_allocvec(&request).unwrap();
+            let mut decoded: AgitateRequested = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(decoded.machine, machine);
+            assert_eq!(decoded.direction, direction);
+            decoded.map_entities(&mut (machine, remote_machine));
+            assert_eq!(decoded.machine, remote_machine);
+            assert_eq!(decoded.direction, direction);
+        }
+    }
+
+    #[test]
+    fn packaged_forms_keep_their_real_capacity_after_refilling() {
+        for kind in [
+            ContainerKind::Bottle,
+            ContainerKind::Pill,
+            ContainerKind::Syringe,
+            ContainerKind::PhPaper,
+        ] {
+            let mut app = test_app();
+            let (client, machine, _, _) = staged_mixer(&mut app, &[], &[]);
+            let water = reagent(&app, "water");
+            let _ = app
+                .world_mut()
+                .get_mut::<Buffer>(machine)
+                .unwrap()
+                .0
+                .add(water, Units::whole(300));
+            app.world_mut().write_message(FromClient {
+                client_id: client,
+                message: PackageRequested {
+                    machine,
+                    kind,
+                    label: None,
+                    nonce: 1,
+                },
+            });
+            app.update();
+            let item = app
+                .world_mut()
+                .query::<(Entity, &Container)>()
+                .iter(app.world())
+                .find(|(_, c)| c.kind == kind)
+                .unwrap()
+                .0;
+            let mut packaged = app.world_mut().get_mut::<Container>(item).unwrap();
+            assert_eq!(
+                packaged.solution.max_volume(),
+                kind.capacity(),
+                "a packaged {kind:?} must not become an unbounded solution"
+            );
+            assert_eq!(packaged.solution.total_volume(), kind.capacity());
+            assert_eq!(
+                packaged.solution.add(water, Units::whole(10)),
+                Units::whole(10),
+                "refilling a full package must reject overflow"
+            );
+        }
+    }
+
+    #[test]
+    fn packaging_does_not_create_a_second_held_item_for_a_legacy_hand() {
+        let mut app = test_app();
+        let (client, machine, _, _) = staged_mixer(&mut app, &[], &[]);
+        let player = app
+            .world()
+            .get::<Machine>(machine)
+            .unwrap()
+            .in_use_by
+            .unwrap();
+        app.world_mut()
+            .entity_mut(player)
+            .insert(SelectedInventorySlot(0));
+        let existing = app
+            .world_mut()
+            .spawn((Container::new(ContainerKind::Beaker), HeldBy(player)))
+            .id();
+        let water = reagent(&app, "water");
+        let _ = app
+            .world_mut()
+            .get_mut::<Buffer>(machine)
+            .unwrap()
+            .0
+            .add(water, Units::whole(30));
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: PackageRequested {
+                machine,
+                kind: ContainerKind::Bottle,
+                label: None,
+                nonce: 1,
+            },
+        });
+        app.update();
+        let held: Vec<_> = app
+            .world_mut()
+            .query::<(Entity, &HeldBy)>()
+            .iter(app.world())
+            .filter(|(_, h)| h.0 == player)
+            .map(|(e, _)| e)
+            .collect();
+        assert_eq!(
+            held,
+            vec![existing],
+            "an existing hand without migrated inventory metadata still occupies the hand"
+        );
+        let package = app
+            .world_mut()
+            .query::<(Entity, &Container)>()
+            .iter(app.world())
+            .find(|(_, c)| c.kind == ContainerKind::Bottle)
+            .unwrap()
+            .0;
+        assert!(app
+            .world()
+            .get::<InventorySlot>(package)
+            .is_none_or(|slot| slot.slot != 0));
+    }
+
+    #[test]
+    fn forged_package_requests_cannot_drain_stock_or_poison_the_owner_nonce() {
+        let mut app = test_app();
+        let (owner, machine, _, _) = staged_mixer(&mut app, &[], &[]);
+        let (stranger, _) = chemist(&mut app);
+        let water = reagent(&app, "water");
+        let _ = app
+            .world_mut()
+            .get_mut::<Buffer>(machine)
+            .unwrap()
+            .0
+            .add(water, Units::whole(60));
+        app.world_mut().write_message(FromClient {
+            client_id: stranger,
+            message: PackageRequested {
+                machine,
+                kind: ContainerKind::Bottle,
+                label: Some("Forged".into()),
+                nonce: u64::MAX,
+            },
+        });
+        app.world_mut().write_message(FromClient {
+            client_id: owner,
+            message: PackageRequested {
+                machine,
+                kind: ContainerKind::Bottle,
+                label: None,
+                nonce: 1,
+            },
+        });
+        app.update();
+        let products: Vec<_> = app
+            .world_mut()
+            .query::<(&Container, &crate::labels::Label)>()
+            .iter(app.world())
+            .filter(|(c, _)| c.kind == ContainerKind::Bottle)
+            .collect();
+        assert_eq!(products.len(), 1);
+        assert_eq!(products[0].1 .0, "Water");
+        assert_eq!(
+            app.world().get::<Buffer>(machine).unwrap().0.total_volume(),
+            Units::whole(30)
+        );
+    }
+
+    #[test]
+    fn mixer_destination_matches_both_beaker_routes_and_reports_once() {
+        let mut results = Vec::new();
+        for direction in [
+            AgitateDirection::AToB,
+            AgitateDirection::BToA,
+            AgitateDirection::ToMixer,
+        ] {
+            let mut app = test_app();
+            let (client, machine, a, b) =
+                staged_mixer(&mut app, &[("inaprovaline", 10)], &[("carbon", 10)]);
+            for (item, temperature) in [(a, 300.0), (b, 310.0)] {
+                app.world_mut()
+                    .get_mut::<Container>(item)
+                    .unwrap()
+                    .solution
+                    .temperature = Kelvin(temperature);
+            }
+            request_agitation(&mut app, client, machine, direction);
+            let duration = app
+                .world()
+                .get::<AgitationRun>(machine)
+                .unwrap()
+                .expected_secs;
+            if direction == AgitateDirection::ToMixer {
+                assert!(app.world().get::<Container>(a).unwrap().solution.is_empty());
+                assert!(app.world().get::<Container>(b).unwrap().solution.is_empty());
+                assert_eq!(
+                    app.world().get::<Buffer>(machine).unwrap().0.temperature,
+                    Kelvin(305.0)
+                );
+            }
+            let reports = fired_over(&mut app, duration + 1.0);
+            assert_eq!(
+                reports.len(),
+                1,
+                "each destination publishes one aggregate report"
+            );
+            assert_eq!(reports[0].distinct_reagents, 2);
+            let result = match direction {
+                AgitateDirection::AToB => &app.world().get::<Container>(b).unwrap().solution,
+                AgitateDirection::BToA => &app.world().get::<Container>(a).unwrap().solution,
+                AgitateDirection::ToMixer => &app.world().get::<Buffer>(machine).unwrap().0,
+            };
+            results.push((
+                result.iter().collect::<Vec<_>>(),
+                result.average_purity(),
+                result.ph(),
+                result.temperature.0,
+            ));
+        }
+        assert_eq!(results[0].0, results[1].0);
+        assert_eq!(results[0].0, results[2].0);
+        for other in &results[1..] {
+            assert!((results[0].1 - other.1).abs() < 0.0001);
+            assert!((results[0].2 - other.2).abs() < 0.0001);
+            assert!((results[0].3 - other.3).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn mixer_destination_refuses_occupied_or_undersized_chamber_without_moving_liquid() {
+        for occupied in [false, true] {
+            let mut app = test_app();
+            let (client, machine, a, b) =
+                staged_mixer(&mut app, &[("inaprovaline", 10)], &[("carbon", 10)]);
+            let water = reagent(&app, "water");
+            let mut chamber = Solution::new(Units::whole(if occupied { 300 } else { 5 }));
+            if occupied {
+                let _ = chamber.add(water, Units::whole(1));
+            }
+            app.world_mut().get_mut::<Buffer>(machine).unwrap().0 = chamber.clone();
+            let before_a = app.world().get::<Container>(a).unwrap().solution.clone();
+            let before_b = app.world().get::<Container>(b).unwrap().solution.clone();
+            request_agitation(&mut app, client, machine, AgitateDirection::ToMixer);
+            assert!(app.world().get::<AgitationRun>(machine).is_none());
+            assert_eq!(app.world().get::<Container>(a).unwrap().solution, before_a);
+            assert_eq!(app.world().get::<Container>(b).unwrap().solution, before_b);
+            assert_eq!(app.world().get::<Buffer>(machine).unwrap().0, chamber);
+        }
+    }
+
+    #[test]
+    fn labeled_packages_use_inventory_then_drop_and_duplicate_requests_are_ignored() {
+        for occupied in [0, 1, 4] {
+            let mut app = test_app();
+            let (client, machine, _, _) = staged_mixer(&mut app, &[], &[]);
+            let player = app
+                .world()
+                .get::<Machine>(machine)
+                .unwrap()
+                .in_use_by
+                .unwrap();
+            app.world_mut()
+                .entity_mut(player)
+                .insert(SelectedInventorySlot(0));
+            let mut carried = None;
+            for slot in 0..occupied {
+                let e = app
+                    .world_mut()
+                    .spawn(InventorySlot {
+                        owner: player,
+                        slot,
+                    })
+                    .id();
+                if slot == 0 {
+                    app.world_mut().entity_mut(e).insert(HeldBy(player));
+                    carried = Some(e);
+                }
+            }
+            let water = reagent(&app, "water");
+            let ethanol = reagent(&app, "ethanol");
+            let mut stock = Solution::new(Units::whole(300));
+            let _ = stock.add_profiled(water, Units::whole(24), 0.8, 6.5);
+            let _ = stock.add_profiled(ethanol, Units::whole(6), 0.6, 7.5);
+            app.world_mut().get_mut::<Buffer>(machine).unwrap().0 = stock;
+            let request = PackageRequested {
+                machine,
+                kind: ContainerKind::Pill,
+                label: Some("Just water".into()),
+                nonce: 1,
+            };
+            for _ in 0..2 {
+                app.world_mut().write_message(FromClient {
+                    client_id: client,
+                    message: request.clone(),
+                });
+            }
+            app.update();
+            let packages: Vec<_> = app
+                .world_mut()
+                .query::<(Entity, &Container, &crate::labels::Label)>()
+                .iter(app.world())
+                .filter(|(_, c, _)| c.kind == ContainerKind::Pill)
+                .map(|(e, _, l)| (e, l.0.clone()))
+                .collect();
+            assert_eq!(packages.len(), 1);
+            let (item, label) = &packages[0];
+            assert_eq!(label, "Just water");
+            let contents = &app.world().get::<Container>(*item).unwrap().solution;
+            assert_eq!(contents.volume_of(water), Units::whole(16));
+            assert_eq!(contents.volume_of(ethanol), Units::whole(4));
+            assert!((contents.purity_of(water) - 0.8).abs() < 0.0001);
+            assert_eq!(
+                app.world().get::<Buffer>(machine).unwrap().0.total_volume(),
+                Units::whole(10)
+            );
+            match occupied {
+                0 => assert_eq!(app.world().get::<HeldBy>(*item).unwrap().0, player),
+                1 => {
+                    assert_eq!(app.world().get::<InventorySlot>(*item).unwrap().slot, 1);
+                    assert!(app.world().get::<HeldBy>(*item).is_none());
+                }
+                _ => {
+                    assert!(app.world().get::<InventorySlot>(*item).is_none());
+                    assert!(app.world().get::<HeldBy>(*item).is_none());
+                    assert!(app.world().get::<Transform>(*item).is_some());
+                }
+            }
+            if let Some(old) = carried {
+                assert_eq!(app.world().get::<HeldBy>(old).unwrap().0, player);
+            }
+        }
+    }
+
+    #[test]
+    fn packaging_defaults_include_every_chemical_and_paper_does_not_mask_readings() {
+        let mut app = test_app();
+        let (client, machine, _, _) = staged_mixer(&mut app, &[], &[]);
+        let water = reagent(&app, "water");
+        let ethanol = reagent(&app, "ethanol");
+        {
+            let mut buffer = app.world_mut().get_mut::<Buffer>(machine).unwrap();
+            let _ = buffer.0.add(water, Units::whole(25));
+            let _ = buffer.0.add(ethanol, Units::whole(5));
+        }
+        for (nonce, kind) in [(1, ContainerKind::Bottle), (2, ContainerKind::PhPaper)] {
+            app.world_mut().write_message(FromClient {
+                client_id: client,
+                message: PackageRequested {
+                    machine,
+                    kind,
+                    label: None,
+                    nonce,
+                },
+            });
+            app.update();
+        }
+        let items: Vec<_> = app
+            .world_mut()
+            .query::<(&Container, Option<&crate::labels::Label>)>()
+            .iter(app.world())
+            .map(|(c, l)| (c.kind, l.map(|l| l.0.clone())))
+            .collect();
+        let label = items
+            .iter()
+            .find(|(k, _)| *k == ContainerKind::Bottle)
+            .unwrap()
+            .1
+            .as_ref()
+            .unwrap();
+        assert!(label.contains("Water") && label.contains("Ethanol"));
+        assert!(items
+            .iter()
+            .find(|(k, _)| *k == ContainerKind::PhPaper)
+            .unwrap()
+            .1
+            .is_none());
     }
 }

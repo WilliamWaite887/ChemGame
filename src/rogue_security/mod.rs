@@ -86,11 +86,16 @@ impl Plugin for RogueSecurityPlugin {
                     schedule_rogue_encounter,
                     handle_rogue_delivery,
                     expire_rogue_encounters,
-                    handle_deterrent_use,
                     check_redemption,
                 )
                     .chain()
+                    // Voss shakedowns are retired when the unified Reyes pilot
+                    // is installed. Keep old reward/save types compatible.
+                    .run_if(not(resource_exists::<
+                        crate::security_case::SecurityCaseState,
+                    >))
                     .run_if(is_authority),
+                handle_deterrent_use.run_if(is_authority),
                 // Presentation, everywhere: the reward prop needs a mesh on
                 // whichever peer it appears for, same split every other
                 // pickable thing in the lab already uses.

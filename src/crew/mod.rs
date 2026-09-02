@@ -310,10 +310,13 @@ pub struct CrewRoute {
     stall: ProgressWatch,
     /// Cooldown on replanning a route containment has shoved the body off.
     replan_in: f32,
-    /// Recovery legs taken toward the *current* goal, so a body that wedges
-    /// twice is sent somewhere new the second time. Reset when a fresh
-    /// destination is resolved into waypoints.
+    /// Recovery legs since the last meaningful progress toward this goal, so
+    /// a body wedging repeatedly tries a different recovery point. Reset at
+    /// a fresh destination or after a metre of forward route progress.
     unstick: usize,
+    /// Best remaining-route distance since the last metre of progress.
+    /// Recovery detours may lengthen the route but cannot raise this mark.
+    recovery_remaining: f32,
 }
 
 impl CrewRoute {
@@ -333,6 +336,20 @@ impl CrewRoute {
         self.unstick >= 6
     }
 
+    #[cfg(any(debug_assertions, test))]
+    pub(crate) fn routing_diagnostic(&self) -> String {
+        format!("pending {:?}, index {}/{}, recoveries {}, remaining mark {}, next {:?}, goal {:?}, counter_bound {}",
+            self.pending, self.index, self.waypoints.len(), self.unstick, self.recovery_remaining,
+            self.waypoints.get(self.index), self.waypoints.last(), self.counter_bound)
+    }
+
+    fn record_recovery_progress(&mut self, remaining: f32) {
+        if self.recovery_remaining - remaining >= 1.0 {
+            self.recovery_remaining = remaining;
+            self.unstick = 0;
+        }
+    }
+
     /// The walk in: to their place at the counter.
     pub fn arrival(lane: f32) -> Self {
         Self::arrival_for(DeliveryLane::Public, lane)
@@ -350,6 +367,7 @@ impl CrewRoute {
             stall: ProgressWatch::default(),
             replan_in: 0.0,
             unstick: 0,
+            recovery_remaining: f32::INFINITY,
         }
     }
 
@@ -370,6 +388,7 @@ impl CrewRoute {
             stall: ProgressWatch::default(),
             replan_in: 0.0,
             unstick: 0,
+            recovery_remaining: f32::INFINITY,
         }
     }
 
@@ -411,6 +430,7 @@ impl CrewRoute {
             stall: ProgressWatch::default(),
             replan_in: 0.0,
             unstick: 0,
+            recovery_remaining: f32::INFINITY,
         }
     }
 
@@ -423,6 +443,7 @@ impl CrewRoute {
         self.counter_bound = false;
         self.stall.restart();
         self.unstick = 0;
+        self.recovery_remaining = f32::INFINITY;
     }
 }
 
@@ -1562,6 +1583,7 @@ pub(crate) fn walk_route(
             // the watchdog's running measure no longer means anything.
             route.stall.restart();
             route.unstick = 0;
+            route.recovery_remaining = f32::INFINITY;
         }
 
         if let Some(areas) = areas.as_deref() {
@@ -1636,6 +1658,10 @@ pub(crate) fn walk_route(
         // this costs a detour rather than the errand.
         let remaining =
             crate::nav::floor_length(transform.translation, &route.waypoints[route.index..]);
+        // Six unrelated difficult corners on a long trip are not six failed
+        // attempts at the same obstruction. Only real route progress clears
+        // the failure count; jitter and a longer recovery leg do not.
+        route.record_recovery_progress(remaining);
         if route.stall.stalled(time.delta_secs(), remaining) {
             let goal = *route.waypoints.last().expect("a target implies a route");
             let detour = nav
@@ -1676,7 +1702,36 @@ pub(crate) fn walk_route(
         // work — walk horizontally, and let containment put the feet down.
         let to_target = target - transform.translation;
         let flat = Vec2::new(to_target.x, to_target.z);
-        if flat.length() <= ARRIVE_EPSILON {
+        // Portal overlaps can be narrower than the arrival tolerance. Turning
+        // early at such a portal cuts back into the wall before the body has
+        // cleared the doorway (Security's exit overlaps by only 0.1 m).
+        // Continue to the portal until the next leg is walkable from the
+        // body's actual position; final destinations keep their normal reach.
+        let can_continue = flat.length() <= ARRIVE_EPSILON
+            && route.waypoints.get(route.index + 1).is_none_or(|next| {
+                areas.as_deref().is_none_or(|areas| {
+                    crate::npc_motion::walkable_segment(
+                        areas,
+                        transform.translation,
+                        *next,
+                        BODY_OFFSET,
+                    )
+                })
+            });
+        // A true station exit deliberately ends outside the walkable floor.
+        // Keep its existing departure behavior while retaining portal clearance
+        // for routes back to a resident's department.
+        let leaving_floor = route.phase == CrewPhase::Leaving
+            && route.index + 2 == route.waypoints.len()
+            && flat.length() <= ARRIVE_EPSILON
+            && areas.as_deref().is_some_and(|areas| {
+                let last = *route.waypoints.last().unwrap();
+                crate::nav::flat_distance(
+                    last,
+                    areas.contain_on_surface(last, crate::nav::NAV_RADIUS, BODY_OFFSET),
+                ) > 0.01
+            });
+        if can_continue || flat.length() <= 0.001 || leaving_floor {
             route.index += 1;
             continue;
         }
@@ -2071,6 +2126,72 @@ mod tests {
                 route,
             ))
             .id()
+    }
+
+    #[test]
+    fn forward_progress_clears_old_corner_recoveries_on_a_long_route() {
+        let mut areas = crate::lab::WalkableAreas::default();
+        areas.push(
+            crate::lab::Bounds {
+                min_x: 0.0,
+                max_x: 20.0,
+                min_z: 0.0,
+                max_z: 4.0,
+            },
+            None,
+        );
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Departments>()
+            .init_resource::<DeliveryStations>()
+            .insert_resource(crate::nav::NavGraph::build(&areas, crate::nav::NAV_RADIUS))
+            .insert_resource(areas)
+            .add_systems(Update, walk_route);
+        let entity = walker(
+            &mut app,
+            Vec3::new(1.0, BODY_OFFSET, 2.0),
+            CrewRoute::to(Vec3::new(18.0, 0.0, 2.0)),
+        );
+        tick(&mut app, 0.1);
+        let at = app.world().get::<Transform>(entity).unwrap().translation;
+        {
+            let mut route = app.world_mut().get_mut::<CrewRoute>(entity).unwrap();
+            route.unstick = 5;
+            route.recovery_remaining =
+                crate::nav::floor_length(at, &route.waypoints[route.index..]);
+        }
+        for _ in 0..10 {
+            tick(&mut app, 0.1);
+        }
+        assert!(app.world().get::<Transform>(entity).unwrap().translation.x > at.x + 1.0);
+        let mut route = app.world_mut().get_mut::<CrewRoute>(entity).unwrap();
+        assert_eq!(
+            route.unstick, 0,
+            "successful travel carried old failed-recovery attempts into the next corner"
+        );
+        route.unstick += 1;
+        assert!(
+            !route.routing_failed(),
+            "a new corner inherited unrelated previous recoveries"
+        );
+    }
+
+    #[test]
+    fn jitter_and_recovery_detours_do_not_reset_the_failure_budget() {
+        let mut route = CrewRoute::to(Vec3::ZERO);
+        route.recovery_remaining = 20.0;
+        for attempt in 1..=6 {
+            route.unstick = attempt;
+            // A recovery step adds distance, then returns to the obstruction;
+            // neither that loop nor sub-metre jitter is meaningful progress.
+            for remaining in [23.0, 20.0, 19.7, 20.2] {
+                route.record_recovery_progress(remaining);
+            }
+        }
+        assert!(
+            route.routing_failed(),
+            "repeated failures must still release an unroutable request"
+        );
     }
 
     fn tick(app: &mut App, seconds: f32) {

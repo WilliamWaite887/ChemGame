@@ -52,6 +52,7 @@ use crate::AppState;
 
 mod book;
 mod icons;
+pub(crate) mod mixing;
 mod tooltip;
 
 use accesskit::Role;
@@ -155,6 +156,15 @@ impl Plugin for UiPlugin {
         .init_resource::<BookView>()
         .init_resource::<BookIconAssets>()
         .init_resource::<TooltipState>()
+        .init_resource::<mixing::PackagingDraft>()
+        .add_systems(
+            Update,
+            mixing::type_label
+                .before(crate::inspection::input)
+                .before(crate::interaction::panel_input)
+                .before(handle_panel_clicks)
+                .run_if(in_state(AppState::Playing)),
+        )
         .init_resource::<HplcView>()
         .init_resource::<SocialView>()
         .init_resource::<LastPanel>()
@@ -198,6 +208,9 @@ enum PanelAction {
     ToContainer(ReagentId, Units, MachineSlot),
     Agitate(AgitateDirection),
     Package(ContainerKind),
+    FinishPackage,
+    FocusPackageLabel,
+    PrintReport(u64),
     Analyze,
     /// Locally highlights a band in the analyzer. The actual separation is
     /// still requested by [`PanelAction::Purify`]'s single Start button.
@@ -379,10 +392,13 @@ struct HplcView {
 /// system-parameter arity while the book and analyzer each keep independent
 /// presentation state.
 #[derive(SystemParam)]
-struct PanelViews<'w> {
+struct PanelViews<'w, 's> {
     book: Res<'w, BookView>,
     hplc: Res<'w, HplcView>,
     icons: Res<'w, BookIconAssets>,
+    packaging: Res<'w, mixing::PackagingDraft>,
+    mixing_scroll: Query<'w, 's, (&'static mixing::ScrollArea, &'static ScrollPosition)>,
+    reports: Query<'w, 's, &'static crate::analysis_reports::AnalyzerSnapshot>,
 }
 
 /// Everything the open panel displays, flattened for comparison.
@@ -444,6 +460,10 @@ struct PanelSignature {
     /// Replicated Mixing Chamber run, rounded to tenths so its visible timer
     /// updates smoothly without rebuilding the entire panel every frame.
     agitation: Option<(Entity, MachineSlot, i32, i32)>,
+    packaging: mixing::PackagingDraft,
+    report: Option<u64>,
+    buffer_metrics: Option<(i32, i16, i16)>,
+    security_text: String,
     amount: Option<Units>,
     /// Whole seconds of EMP lockout remaining. The coarse bucket keeps the
     /// warning live without rebuilding a complex instrument every frame.
@@ -543,6 +563,10 @@ impl Default for PanelSignature {
             reacting_b: false,
             reacting_c: false,
             agitation: None,
+            packaging: default(),
+            report: None,
+            buffer_metrics: None,
+            security_text: String::new(),
             amount: None,
             disabled_seconds: u16::MAX,
             known_recipes: usize::MAX,
@@ -725,6 +749,7 @@ struct StorageView<'w, 's> {
     /// name from here rather than matching on the item's type is what lets a
     /// locker list something this module has never heard of.
     labels: Query<'w, 's, &'static Interactable>,
+    written: Query<'w, 's, &'static crate::labels::Label>,
 }
 
 /// What the standing board reads on top of [`Shift`] itself.
@@ -736,6 +761,7 @@ struct StorageView<'w, 's> {
 #[derive(SystemParam)]
 struct BoardView<'w, 's> {
     shift: Res<'w, Shift>,
+    security: Option<Res<'w, crate::security_case::SecurityCaseSummary>>,
     /// Sato's/Lindqvist's own personal-pack catalogs live off `StationData.
     /// config.supply`, not a promoted resource of their own the way produce
     /// packs are — folded in here for the same "one off the ceiling" reason
@@ -868,7 +894,7 @@ struct StoredItem {
 /// anything about it.
 fn stored_items(
     locker: Entity,
-    db: &ChemDb,
+    _db: &ChemDb,
     view: &StorageView,
     containers: &SlotContents,
 ) -> Vec<StoredItem> {
@@ -879,25 +905,20 @@ fn stored_items(
             let container = entry.map(|(container, _)| container);
             // A shelf of identical beakers is exactly what labelling is for,
             // so what is written on one wins over its kind here.
-            let name = entry
-                .and_then(|(_, marked)| marked)
+            let name = view
+                .written
+                .get(item)
+                .ok()
                 .filter(|marked| !marked.0.trim().is_empty())
                 .map(|marked| format!("\"{}\"", marked.0))
                 .or_else(|| container.map(|container| container.kind.label().to_string()))
                 .or_else(|| view.labels.get(item).ok().map(|label| label.label.clone()))
                 .unwrap_or_else(|| "Item".to_string());
             let detail = container.map_or_else(String::new, |container| {
-                if container.solution.is_empty() {
-                    "empty".to_string()
+                if entry.is_some_and(|(_, label)| label.is_some()) {
+                    String::new()
                 } else {
-                    container
-                        .solution
-                        .iter()
-                        .map(|(reagent, amount)| {
-                            format!("{amount} {}", db.reagents.get(reagent).name)
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    crate::inspection::container_description(container)
                 }
             });
             StoredItem { item, name, detail }
@@ -986,6 +1007,18 @@ fn sync_panel(
     };
 
     let signature = PanelSignature {
+        packaging: views.packaging.clone(),
+        buffer_metrics: machine_parts.and_then(|(_, _, b, ..)| b).map(|b| {
+            let (ph, purity) = panel_quality(&b.0);
+            ((b.0.temperature.0 * 10.0) as i32, ph, purity)
+        }),
+        security_text: board
+            .security
+            .as_deref()
+            .map_or(String::new(), |s| s.text.clone()),
+        report: open_machine
+            .and_then(|e| views.reports.get(e).ok())
+            .map(|s| s.report.id),
         mode,
         container: loaded_entity,
         contents: loaded
@@ -1127,9 +1160,19 @@ fn sync_panel(
                 width: percent(100),
                 height: percent(100),
                 justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
+                align_items: if machine.kind == MachineKind::MixingChamber {
+                    AlignItems::Start
+                } else {
+                    AlignItems::Center
+                },
+                padding: if machine.kind == MachineKind::MixingChamber {
+                    UiRect::top(px(12))
+                } else {
+                    UiRect::ZERO
+                },
                 ..default()
             },
+            GlobalZIndex(30),
             PanelRoot,
             crate::until_we_leave_the_lab(),
         ))
@@ -1140,7 +1183,9 @@ fn sync_panel(
                         width: px(
                             if matches!(
                                 machine.kind,
-                                MachineKind::ChemMaster5000 | MachineKind::StandingBoard
+                                MachineKind::ChemMaster5000
+                                    | MachineKind::StandingBoard
+                                    | MachineKind::MixingChamber
                             ) {
                                 1040
                             } else {
@@ -1211,18 +1256,41 @@ fn sync_panel(
                                     );
                                 }
                                 MachineKind::MixingChamber => {
-                                    mixing_chamber_body(
+                                    mixing::body(
                                         body,
                                         &db,
+                                        open_machine.unwrap(),
                                         buffer,
                                         loaded_entity,
                                         loaded,
                                         loaded_entity_b,
                                         loaded_b,
                                         agitation,
+                                        &views.packaging,
+                                        std::array::from_fn(|index| {
+                                            views
+                                                .mixing_scroll
+                                                .iter()
+                                                .find(|(area, _)| area.0 == index)
+                                                .map_or(0.0, |(_, position)| position.y)
+                                        }),
                                     );
                                 }
                                 MachineKind::Analyzer => {
+                                    if let Some(snapshot) =
+                                        open_machine.and_then(|e| views.reports.get(e).ok())
+                                    {
+                                        if loaded_entity == Some(snapshot.item)
+                                            && loaded.is_some_and(|c| {
+                                                snapshot.report.matches(&c.solution, &db)
+                                            })
+                                        {
+                                            body.spawn(button(
+                                                "Print Report",
+                                                PanelAction::PrintReport(snapshot.report.id),
+                                            ));
+                                        }
+                                    }
                                     analyzer_body(
                                         body,
                                         &db,
@@ -1274,6 +1342,11 @@ fn sync_panel(
                                     );
                                 }
                                 MachineKind::StandingBoard => {
+                                    if let Some(case) =
+                                        board.security.as_deref().filter(|s| !s.text.is_empty())
+                                    {
+                                        body.spawn(label(&case.text, 14.0, TEXT));
+                                    }
                                     let radio_scroll = board.radio_scroll_state();
                                     standing_board_body(
                                         body,
@@ -3445,277 +3518,6 @@ fn sync_thermostat_slider(
 /// Two beaker slots sharing one buffer, rather than the single slot every
 /// other machine has: pull a reagent from Beaker A into the buffer, then push
 /// it into Beaker B, without ejecting one to swap the other in.
-fn mixing_chamber_body(
-    panel: &mut ChildSpawnerCommands,
-    db: &ChemDb,
-    buffer: Option<&Buffer>,
-    container_a: Option<Entity>,
-    loaded_a: Option<&Container>,
-    container_b: Option<Entity>,
-    loaded_b: Option<&Container>,
-    agitation: Option<&AgitationRun>,
-) {
-    let locked = agitation.is_some();
-    if let Some(run) = agitation {
-        panel.spawn(label(
-            format!(
-                "AGITATING {}   {:>3.0}%   {:.1}s remaining",
-                run.direction.label(),
-                run.progress() * 100.0,
-                run.remaining_secs(),
-            ),
-            15.0,
-            Color::srgb(0.48, 0.82, 0.96),
-        ));
-        panel.spawn(label(
-            format!(
-                "Batch locked in Beaker {}. Separation and ejection resume when it settles.",
-                match run.direction.destination() {
-                    MachineSlot::A => "A",
-                    MachineSlot::B => "B",
-                    MachineSlot::C => "C",
-                }
-            ),
-            13.0,
-            TEXT_DIM,
-        ));
-    } else {
-        let eligible = |source: Option<&Container>, destination: Option<&Container>| {
-            let (Some(source), Some(destination)) = (source, destination) else {
-                return false;
-            };
-            matches!(
-                source.kind,
-                ContainerKind::Beaker | ContainerKind::LargeBeaker
-            ) && matches!(
-                destination.kind,
-                ContainerKind::Beaker | ContainerKind::LargeBeaker
-            ) && source.solution.total_volume().is_positive()
-                && destination.solution.available_volume() >= source.solution.total_volume()
-                && !chem_sim::is_reacting(&source.solution, &db.reactions)
-                && !chem_sim::is_reacting(&destination.solution, &db.reactions)
-                && !db
-                    .reactions
-                    .activate_agitation(&source.solution, &destination.solution)
-                    .is_empty()
-        };
-        let a_to_b = eligible(loaded_a, loaded_b);
-        let b_to_a = eligible(loaded_b, loaded_a);
-        panel.spawn(label(
-            "Prepare recipe sides separately, then transfer one complete beaker under agitation.",
-            13.0,
-            TEXT_DIM,
-        ));
-        if a_to_b || b_to_a {
-            panel.spawn(row()).with_children(|row| {
-                if a_to_b {
-                    row.spawn(button(
-                        "Agitate A -> B",
-                        PanelAction::Agitate(AgitateDirection::AToB),
-                    ));
-                }
-                if b_to_a {
-                    row.spawn(button(
-                        "Agitate B -> A",
-                        PanelAction::Agitate(AgitateDirection::BToA),
-                    ));
-                }
-            });
-        } else {
-            panel.spawn(label(
-                "No staged recipe matches these two beakers, or the destination lacks space.",
-                13.0,
-                Color::srgb(0.82, 0.62, 0.42),
-            ));
-        }
-    }
-
-    mixing_chamber_beaker(
-        panel,
-        db,
-        "Beaker A",
-        container_a,
-        loaded_a,
-        MachineSlot::A,
-        locked,
-    );
-    mixing_chamber_beaker(
-        panel,
-        db,
-        "Beaker B",
-        container_b,
-        loaded_b,
-        MachineSlot::B,
-        locked,
-    );
-
-    panel.spawn(label("Buffer", 13.0, TEXT_DIM));
-    panel
-        .spawn((section(), BackgroundColor(SECTION_BG)))
-        .with_children(|section| {
-            let Some(buffer) = buffer else {
-                return;
-            };
-            if buffer.0.is_empty() {
-                section.spawn(label("Empty.", 14.0, TEXT_DIM));
-                return;
-            }
-            for (reagent, quantity) in buffer.0.iter() {
-                section.spawn(row()).with_children(|row| {
-                    row.spawn(reagent_name(db, reagent, quantity));
-                    if !locked {
-                        row.spawn(button(
-                            "◂A",
-                            PanelAction::ToContainer(reagent, quantity, MachineSlot::A),
-                        ));
-                        row.spawn(button(
-                            "◂B",
-                            PanelAction::ToContainer(reagent, quantity, MachineSlot::B),
-                        ));
-                    }
-                });
-            }
-        });
-
-    panel.spawn(label("Package from buffer", 13.0, TEXT_DIM));
-    panel.spawn(row()).with_children(|row| {
-        row.spawn(button(
-            format!("Pill  ({})", ContainerKind::Pill.capacity()),
-            PanelAction::Package(ContainerKind::Pill),
-        ));
-        row.spawn(button(
-            format!("Bottle  ({})", ContainerKind::Bottle.capacity()),
-            PanelAction::Package(ContainerKind::Bottle),
-        ));
-        // The only source of syringes in the lab. Cargo does not stock them,
-        // so a chemist who wants one makes it.
-        row.spawn(button(
-            format!("Syringe  ({})", ContainerKind::Syringe.capacity()),
-            PanelAction::Package(ContainerKind::Syringe),
-        ));
-        row.spawn(button(
-            format!("Patch  ({})", ContainerKind::Patch.capacity()),
-            PanelAction::Package(ContainerKind::Patch),
-        ));
-        row.spawn(button(
-            format!("Spray  ({})", ContainerKind::SprayBottle.capacity()),
-            PanelAction::Package(ContainerKind::SprayBottle),
-        ));
-    });
-    panel.spawn(label("Sealed demolition charges", 12.0, TEXT_DIM));
-    panel.spawn(row()).with_children(|row| {
-        for (kind, fuse) in [
-            (ContainerKind::ChemicalCharge5, 5),
-            (ContainerKind::ChemicalCharge10, 10),
-            (ContainerKind::ChemicalCharge20, 20),
-        ] {
-            row.spawn(button(
-                format!("Charge {fuse}s"),
-                PanelAction::Package(kind),
-            ));
-        }
-    });
-    panel.spawn(label("Laboratory tools", 12.0, TEXT_DIM));
-    panel.spawn(row()).with_children(|row| {
-        row.spawn(button(
-            "pH paper",
-            PanelAction::Package(ContainerKind::PhPaper),
-        ));
-        row.spawn(button(
-            format!(
-                "Smoke projector  ({})",
-                ContainerKind::SmokeProjector.capacity()
-            ),
-            PanelAction::Package(ContainerKind::SmokeProjector),
-        ));
-    });
-    panel.spawn(label(
-        "Routes: spray uses 3u at 35% topical absorption; the projector aerosolizes up to 30u at 40% inhaled absorption. Charges reject non-explosive payloads.",
-        11.0,
-        TEXT_DIM,
-    ));
-}
-
-/// One of the Mixing Chamber's two beaker slots: its contents, a way to pull
-/// each reagent into the shared buffer, and its own eject button — ejecting
-/// is per slot, so pulling one beaker never disturbs the other.
-fn mixing_chamber_beaker(
-    panel: &mut ChildSpawnerCommands,
-    db: &ChemDb,
-    heading_text: &str,
-    container_entity: Option<Entity>,
-    loaded: Option<&Container>,
-    slot: MachineSlot,
-    locked: bool,
-) {
-    panel.spawn(label(heading_text, 13.0, TEXT_DIM));
-    panel
-        .spawn((section(), BackgroundColor(SECTION_BG)))
-        .with_children(|section| {
-            section.spawn(row()).with_children(|preview_row| {
-                beaker_preview(preview_row, container_entity);
-                preview_row
-                    .spawn(Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: px(3),
-                        flex_grow: 1.0,
-                        ..default()
-                    })
-                    .with_children(|column| {
-                        if let Some(container) = loaded {
-                            column.spawn(label(
-                                format!(
-                                    "{} / {}   •   {:.0}K",
-                                    container.solution.total_volume(),
-                                    container.solution.max_volume(),
-                                    container.solution.temperature.0,
-                                ),
-                                12.0,
-                                Color::srgb(0.60, 0.72, 0.82),
-                            ));
-                        }
-                        match loaded {
-                            None => {
-                                column.spawn(label(
-                                    "No container loaded. Carry a beaker over and press E.",
-                                    14.0,
-                                    TEXT_DIM,
-                                ));
-                            }
-                            Some(container) if container.solution.is_empty() => {
-                                column.spawn(label("Empty.", 14.0, TEXT_DIM));
-                            }
-                            Some(container) => {
-                                for (reagent, quantity) in container.solution.iter() {
-                                    column.spawn(row()).with_children(|row| {
-                                        row.spawn(reagent_name(db, reagent, quantity));
-                                        if !locked {
-                                            for step in [5, 10] {
-                                                let units = Units::whole(step);
-                                                row.spawn(button(
-                                                    format!("▸{step}"),
-                                                    PanelAction::ToBuffer(reagent, units, slot),
-                                                ));
-                                            }
-                                            row.spawn(button(
-                                                "▸All",
-                                                PanelAction::ToBuffer(reagent, quantity, slot),
-                                            ));
-                                        }
-                                    });
-                                }
-                            }
-                        }
-                        if !locked {
-                            column.spawn(row()).with_children(|row| {
-                                row.spawn(button("Eject", PanelAction::Eject(slot)));
-                            });
-                        }
-                    });
-            });
-        });
-}
-
 const HPLC_CLEAN: Color = Color::srgb(0.24, 0.86, 0.58);
 const HPLC_IMPURITY: Color = Color::srgb(0.96, 0.62, 0.20);
 const HPLC_INVERSE: Color = Color::srgb(0.88, 0.12, 0.48);
@@ -6797,7 +6599,12 @@ fn update_phase_banner(shift: Res<Shift>, banner: BannerText) {
 fn update_order_queue(
     db: Res<ChemDb>,
     shift: Res<Shift>,
-    orders: Query<(&CrewMember, &Order, Has<DevelopmentOrder>)>,
+    orders: Query<(
+        &CrewMember,
+        &Order,
+        Has<DevelopmentOrder>,
+        Has<crate::security_case::OrderHold>,
+    )>,
     waiting: Query<(&CrewMember, &crate::order_intake::AwaitingConversation)>,
     mut slots: Query<(&OrderSlot, &mut Text, &mut TextColor, &mut Node), Without<ShiftReadout>>,
     readout: ShiftText,
@@ -6820,7 +6627,14 @@ fn update_order_queue(
             node.display = display;
         }
         let next = entry
-            .map(|(member, order, development)| {
+            .map(|(member, order, development, held)| {
+                if *held {
+                    return format!(
+                        "{}  |  SECURITY HOLD\n{}",
+                        member.name,
+                        crate::order_intake::requirements(order, &db)
+                    );
+                }
                 let remaining = order.remaining().ceil() as u32;
                 let kind = if *development { " · OPTIONAL R&D" } else { "" };
                 format!(
@@ -6836,7 +6650,7 @@ fn update_order_queue(
         if text.0 != next {
             text.0 = next;
         }
-        let wanted = if entry.is_some_and(|(_, o, d)| !d && o.remaining() < 30.0) {
+        let wanted = if entry.is_some_and(|(_, o, d, held)| !d && !held && o.remaining() < 30.0) {
             ERROR_TEXT
         } else {
             Color::srgb(0.90, 0.94, 0.96)
@@ -7199,6 +7013,7 @@ fn spawn_hotbar(mut commands: Commands) {
 fn update_hotbar(
     local: Query<(Entity, &SelectedInventorySlot), With<LocalPlayer>>,
     items: HotbarItems,
+    settings: Option<Res<crate::settings::Settings>>,
     mut cells: Query<(&HotbarCell, &mut BackgroundColor, &mut BorderColor)>,
     mut texts: Query<(&HotbarText, &mut Text, &mut TextColor)>,
 ) {
@@ -7235,13 +7050,27 @@ fn update_hotbar(
             .iter()
             .find(|(entry, _, _, _)| entry.owner == owner && entry.slot == slot);
         let (wanted, wanted_color) = match part {
-            HotbarText::Key(_) => (format!("{}", slot + 1), TEXT_DIM),
+            HotbarText::Key(_) => (
+                if slot == selected.0 && item.is_some() {
+                    let key = settings
+                        .as_deref()
+                        .map_or(KeyCode::KeyI, |s| s.bindings.inspect);
+                    format!(
+                        "{}  {} inspect",
+                        slot + 1,
+                        format!("{key:?}").trim_start_matches("Key")
+                    )
+                } else {
+                    format!("{}", slot + 1)
+                },
+                TEXT_DIM,
+            ),
             HotbarText::Name(_) => match item {
                 // The label wins over the kind here, and this is the place it
                 // earns the whole feature: a hotbar of four identical beakers
                 // is otherwise four cells reading "Beaker", and telling them
                 // apart means opening each one.
-                Some((_, Some(_), _, Some(marked))) if !marked.0.trim().is_empty() => {
+                Some((_, _, _, Some(marked))) if !marked.0.trim().is_empty() => {
                     (hotbar_label(marked), LABEL_INK)
                 }
                 Some((_, Some(container), _, _)) => {
@@ -8042,6 +7871,7 @@ fn animate_beaker_previews(
     time: Res<Time>,
     db: Res<ChemDb>,
     containers: Query<&Container>,
+    buffers: Query<&Buffer>,
     agitations: Query<&AgitationRun>,
     mut fills: Query<
         (&BeakerOf, &mut Node, &mut BackgroundColor),
@@ -8062,12 +7892,27 @@ fn animate_beaker_previews(
     >,
 ) {
     let t = time.elapsed_secs();
+    let read = |entity| {
+        containers
+            .get(entity)
+            .ok()
+            .map(|c| Container {
+                kind: c.kind,
+                solution: c.solution.clone(),
+            })
+            .or_else(|| {
+                buffers.get(entity).ok().map(|b| Container {
+                    kind: ContainerKind::LargeBeaker,
+                    solution: b.0.clone(),
+                })
+            })
+    };
 
     for (of, mut node, mut background) in &mut fills {
-        let Ok(container) = containers.get(of.0) else {
+        let Some(container) = read(of.0) else {
             continue;
         };
-        let fill = fill_fraction(container);
+        let fill = fill_fraction(&container);
         let wanted_height = percent(fill * 100.0);
         if node.height != wanted_height {
             node.height = wanted_height;
@@ -8084,7 +7929,7 @@ fn animate_beaker_previews(
     }
 
     for (of, mut shadow) in &mut glows {
-        let Ok(container) = containers.get(of.0) else {
+        let Some(container) = read(of.0) else {
             continue;
         };
         let wanted = BoxShadow(vec![heat_glow(container.solution.temperature)]);
@@ -8094,7 +7939,7 @@ fn animate_beaker_previews(
     }
 
     for (of, mut background) in &mut hazards {
-        let Ok(container) = containers.get(of.0) else {
+        let Some(container) = read(of.0) else {
             continue;
         };
         let hazardous = solution_is_hazardous(&container.solution, &db.reactions);
@@ -8111,10 +7956,10 @@ fn animate_beaker_previews(
     }
 
     for (of, bubble, mut node, mut background) in &mut bubbles {
-        let Ok(container) = containers.get(of.0) else {
+        let Some(container) = read(of.0) else {
             continue;
         };
-        let fill = fill_fraction(container);
+        let fill = fill_fraction(&container);
         let reacting = chem_sim::is_reacting(&container.solution, &db.reactions);
         let agitating = agitations.iter().any(|run| run.destination == of.0);
         let active = (reacting || agitating) && fill > 0.04;
@@ -8143,7 +7988,7 @@ fn fill_fraction(container: &Container) -> f32 {
     if !volume.is_positive() {
         return 0.0;
     }
-    (volume.as_f32() / container.kind.capacity().as_f32()).clamp(0.0, 1.0)
+    (volume.as_f32() / container.solution.max_volume().as_f32()).clamp(0.0, 1.0)
 }
 
 /// Colour/blur/spread for the beaker's ambient-temperature glow: fully
@@ -8183,7 +8028,7 @@ fn heat_glow(temperature: Kelvin) -> ShadowStyle {
 /// Keeping this at the presentation boundary preserves readable source prose
 /// and accessibility labels while guaranteeing that dynamic strings from data
 /// files receive the same treatment as hard-coded HUD readouts.
-fn font_safe_text(text: impl AsRef<str>) -> String {
+pub(crate) fn font_safe_text(text: impl AsRef<str>) -> String {
     let mut safe = String::with_capacity(text.as_ref().len());
     for character in text.as_ref().chars() {
         safe.push_str(match character {
@@ -8202,6 +8047,7 @@ fn font_safe_text(text: impl AsRef<str>) -> String {
             '\u{207b}' => "^-",
             '\u{00b9}' => "1",
             '\u{201c}' | '\u{201d}' => "\"",
+            '\u{2018}' | '\u{2019}' => "'",
             '\u{25c7}' => "OPT ",
             '\u{25af}' => "-",
             '\u{00b1}' => "+/-",
@@ -8239,30 +8085,6 @@ pub(crate) fn label(text: impl Into<String>, size: f32, color: Color) -> impl Bu
         Text::new(font_safe_text(text.into())),
         TextFont::from_font_size(size),
         TextColor(color),
-    )
-}
-
-fn reagent_name(db: &ChemDb, reagent: ReagentId, quantity: Units) -> impl Bundle {
-    let definition = db.reagents.get(reagent);
-    let [r, g, b] = definition.color;
-    (
-        Text::new(format!(
-            "{:<16} {:>8}",
-            definition.name,
-            quantity.to_string()
-        )),
-        TextFont::from_font_size(14.0),
-        // Tinting toward the reagent's own colour makes a mixed beaker
-        // scannable at a glance instead of a wall of identical text.
-        TextColor(Color::srgb(
-            0.45 + r * 0.55,
-            0.45 + g * 0.55,
-            0.45 + b * 0.55,
-        )),
-        Node {
-            min_width: px(230),
-            ..default()
-        },
     )
 }
 
@@ -8486,6 +8308,7 @@ struct PanelMessages<'w> {
     empty: MessageWriter<'w, EmptyRequested>,
     transfer: MessageWriter<'w, BufferTransferRequested>,
     package: MessageWriter<'w, PackageRequested>,
+    print: MessageWriter<'w, crate::analysis_reports::PrintReportRequested>,
     analyze: MessageWriter<'w, AnalyzeRequested>,
     purify: MessageWriter<'w, PurifyRequested>,
     grind: MessageWriter<'w, GrindRequested>,
@@ -8524,6 +8347,8 @@ fn handle_panel_clicks(
     mut book: ResMut<BookView>,
     mut hplc_view: ResMut<HplcView>,
     mut social_view: ResMut<SocialView>,
+    mut packaging: ResMut<mixing::PackagingDraft>,
+    mouse: Option<Res<ButtonInput<MouseButton>>>,
 ) {
     let Some((player, mut mode)) = modes.iter_mut().next() else {
         return;
@@ -8538,6 +8363,9 @@ fn handle_panel_clicks(
         .find(|(_, machine)| machine.kind == MachineKind::StandingBoard)
         .map(|(entity, _)| entity);
 
+    if mouse.is_some_and(|mouse| !mouse.just_pressed(MouseButton::Left)) {
+        return;
+    }
     for (interaction, action) in &buttons {
         if *interaction != Interaction::Pressed {
             continue;
@@ -8647,6 +8475,9 @@ fn handle_panel_clicks(
         let Some(machine) = open_machine else {
             continue;
         };
+        if !matches!(action, PanelAction::FocusPackageLabel) {
+            packaging.editing = false;
+        }
         match action {
             PanelAction::SetAmount(units) => {
                 if let Ok(mut amount) = amounts.get_mut(machine) {
@@ -8709,10 +8540,28 @@ fn handle_panel_clicks(
                 });
             }
             PanelAction::Package(kind) => {
+                packaging.kind = *kind;
+                packaging.editing = false;
+            }
+            PanelAction::FocusPackageLabel => {
+                packaging.editing = true;
+            }
+            PanelAction::FinishPackage => {
+                packaging.nonce += 1;
                 out.package.write(PackageRequested {
                     machine,
-                    kind: *kind,
+                    kind: packaging.kind,
+                    label: (!packaging.text.trim().is_empty()).then(|| packaging.text.clone()),
+                    nonce: packaging.nonce,
                 });
+                packaging.editing = false;
+            }
+            PanelAction::PrintReport(report_id) => {
+                out.print
+                    .write(crate::analysis_reports::PrintReportRequested {
+                        machine,
+                        report_id: *report_id,
+                    });
             }
             PanelAction::Analyze => {
                 out.analyze.write(AnalyzeRequested { machine });
@@ -8871,6 +8720,7 @@ mod tests {
     fn social_navigation_and_shops_do_not_require_an_open_machine_panel() {
         let mut app = App::new();
         app.init_resource::<BookView>()
+            .init_resource::<mixing::PackagingDraft>()
             .init_resource::<HplcView>()
             .init_resource::<SocialView>()
             .add_message::<DispenseRequested>()
@@ -8881,6 +8731,7 @@ mod tests {
             .add_message::<BufferTransferRequested>()
             .add_message::<PackageRequested>()
             .add_message::<AnalyzeRequested>()
+            .add_message::<crate::analysis_reports::PrintReportRequested>()
             .add_message::<PurifyRequested>()
             .add_message::<GrindRequested>()
             .add_message::<SetHeaterPower>()
@@ -9267,7 +9118,7 @@ mod tests {
 
     #[test]
     fn font_safe_text_covers_every_typographic_symbol_authored_in_the_ui() {
-        let authored = "—·–→…•≥‹°■≤−⚠▸⁻¹←○“”›◇▯±●≈◌×";
+        let authored = "—·–→…•≥‹°■≤−⚠▸⁻¹←○“”‘’›◇▯±●≈◌×";
         let safe = font_safe_text(authored);
         assert!(
             safe.is_ascii(),

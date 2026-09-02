@@ -7,21 +7,22 @@ if (-not (Test-Path -LiteralPath $executable)) { throw 'Run cargo build first.' 
 $roles = if ($Mode -eq 'coop') { @('host', 'client') } else { @('solo') }
 $processes = @()
 $started = Get-Date
+$run = $started.ToString('yyyyMMdd-HHmmss')
 $previous = @{}
 foreach ($key in @('LOCALAPPDATA', 'APPDATA', 'BEVY_ASSET_ROOT', 'RUST_LOG')) {
     $previous[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
 }
 try {
     foreach ($role in $roles) {
-        $output = Join-Path $workspace "target/order-playtest/$role"
-        New-Item -ItemType Directory -Force -Path "$output/appdata", "$output/roaming" | Out-Null
-        $env:LOCALAPPDATA = "$output/appdata"
-        $env:APPDATA = "$output/roaming"
+        $output = Join-Path $workspace "target/chemistry-playtest/$role"
+        New-Item -ItemType Directory -Force -Path "$output/$run/appdata", "$output/$run/roaming" | Out-Null
+        $env:LOCALAPPDATA = "$output/$run/appdata"
+        $env:APPDATA = "$output/$run/roaming"
         $env:BEVY_ASSET_ROOT = $workspace
         $env:RUST_LOG = 'info,wgpu=warn,naga=warn'
-        $launchArgs = if ($role -eq 'client') { @('--join', '127.0.0.1', '--order-playtest') }
-            elseif ($role -eq 'host') { @('--host', '--order-playtest') }
-            else { @('--solo', '--order-playtest') }
+        $launchArgs = if ($role -eq 'client') { @('--join', '127.0.0.1', '--chemistry-playtest') }
+            elseif ($role -eq 'host') { @('--host', '--chemistry-playtest') }
+            else { @('--solo', '--chemistry-playtest') }
         $process = Start-Process -FilePath $executable -ArgumentList $launchArgs `
             -WorkingDirectory $workspace -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput "$output/stdout.log" -RedirectStandardError "$output/stderr.log"
@@ -45,17 +46,11 @@ while (@($processes | Where-Object { -not $_.HasExited }).Count -gt 0) {
 }
 foreach ($role in $roles) {
     Write-Output "${role}:"
-    $report = Get-Item -LiteralPath (Join-Path $workspace "target/order-playtest/$role/result.txt")
+    $report = Get-Item -LiteralPath (Join-Path $workspace "target/chemistry-playtest/$role/result.txt")
     if ($report.LastWriteTime -lt $started) { throw "$role did not write a fresh report." }
     $result = Get-Content -LiteralPath $report.FullName -Raw
-    if ($result -notmatch 'Accepted requests: 11\r?\nWaiting to speak: 0') {
-        throw "$role did not complete the shared conversation: $result"
-    }
-    if ($result -notmatch 'Incoming requester reached window from corridor: true') {
-        throw "$role did not verify the new requester's approach past the pickup line: $result"
-    }
-    if ($role -ne 'client' -and $result -notmatch 'positions reached \(authority only\): 11') {
-        throw "$role did not form the entire pickup line: $result"
+    if ($result -notmatch 'PASS\r?\nProducts: 3\r?\nReport shared: true') {
+        throw "$role did not complete the chemistry scenario: $result"
     }
     Write-Output $result
 }

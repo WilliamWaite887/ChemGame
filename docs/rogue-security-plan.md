@@ -1,7 +1,9 @@
 # Rogue Security: chemistry under pressure
 
-Status: **Deferred**. Implement conversation-first NPC orders, campaign greetings,
-shared intake, and physical queues before returning to this design.
+Status: **Disputed-seizure pilot implemented** (2026-09-02).
+Conversation-first intake and physical queues are implemented prerequisites.
+Held-item inspection, label-first packaging and physical analyzer reports are
+implemented prerequisites; see [label-first-chemistry-plan.md](label-first-chemistry-plan.md).
 
 ## Agreed direction
 
@@ -12,14 +14,14 @@ accountable and provides a dependable appeal route. Honest chemists can encounte
 pressure but always have workable options without supplying drugs or accepting
 violence. Individual disputes resolve; the relationship continues.
 
-## Recurring incidents
+## Pilot and later incidents
 
-- **Unlogged requisition:** supply chemicals, offer a useful legitimate substitute,
+- **Unlogged requisition (subsequent work):** supply chemicals, offer a useful legitimate substitute,
   refuse, or insist on an accountable handover. Substitutes must meet the actual
   need; an explicit drug demand does not accept any convenient mixture.
-- **Disputed seizure:** surrender a particular batch temporarily, negotiate its
+- **Disputed seizure (current pilot):** surrender a particular batch temporarily, negotiate its
   release, or challenge the claim using a sample and the incident record.
-- **Protection bargain:** exchange supplies for a concrete favor, such as releasing
+- **Protection bargain (subsequent work):** exchange supplies for a concrete favor, such as releasing
   a held batch or cancelling an inspection. The promised favor actually happens.
 
 Start with one incident per 8–12 minutes of active work after the opening
@@ -64,6 +66,43 @@ basic chemistry supplies.
   Preserve previously resolved resident stories in old saves.
 
 ## First slice and acceptance
+
+### Approved disputed-seizure flow
+
+- Begin after three successful ordinary deliveries, every 8–12 minutes of open
+  active work, one unresolved case. Resolution restarts the interval; an upheld
+  complaint grants 20 minutes. Use the existing hidden Reyes assignment and keep
+  Bex accountable, with evidence-based help independent of standing.
+- Target a finished, genuinely legal batch on a reachable lab bench for an
+  accepted ordinary order with at least 90 seconds left. Exclude reacting,
+  emergency/campaign, spare, held, slotted and stored batches. Retain 1u.
+  Track fresh completed chemistry against the oldest matching accepted ordinary
+  request at production time. Existing stock and analyzer scans never create
+  that association; only the first available batch claims a request. Authorized
+  chamber transfers and packaging preserve provenance. Chemistry changes or
+  request completion invalidate it, and session changes clear it.
+- Reyes uses shared greeting intake and existing conversation validation. Opening
+  does not seize. Offer grounds, recorded hold, refusal and departure. Unheard
+  corruption approaches have no ordinary standing penalty. Refusal can announce
+  a 45-second inspection notice, never automatic violence/arrest/detention.
+- Physically reach the same unchanged batch or withdraw. Record order, grounds,
+  identity and seizure. Give a reference sample and preserve the original
+  container/remainder in a Security evidence locker. Pause only the affected
+  order, starting at actual seizure; resume when released batch is collected.
+- Analyze sample, print report, visit Bex at Security and explicitly present
+  evidence. Verify authentic sample/report connection plus contextual case facts.
+  Labels and unrelated reports cannot establish the case. Upheld complaints
+  release custody, record caution and start the cooldown.
+- Restore the unchanged returned sample without duplication. Lost reports can
+  be reprinted; Bex can examine custody if the sample is lost/altered. Missing
+  liquid is never recreated. Replacement delivery detaches the order. Abandon
+  claim forfeits custody and resumes an outstanding order.
+- Show hold on the order and a compact case card on the existing board. Reuse
+  residents and shared motion. Keep Bex available; interrupted/incapacitated
+  actors must leave an accessible recovery path. Never confiscate globally.
+- Persist case/custody/evidence/history with stable IDs, but do not restore old
+  customer orders or attach their hold to another session's order. Retire Voss
+  and merge Reyes corruption without deleting rewards or resolved stories.
 
 Build one disputed seizure with Reyes and Bex before adding requisitions and
 protection bargains. An honest player must be able to recover a legitimate batch
