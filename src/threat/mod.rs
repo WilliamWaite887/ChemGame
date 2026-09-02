@@ -208,59 +208,15 @@ pub fn roll_next_gap(
 // ---------------------------------------------------------------------------
 
 /// The fields a scripted visit needs from its own thread's authored data —
-/// see [`spawn_scripted_visit`].
+/// see [`dispatch_scripted_visit`].
 pub struct ScriptedVisit<'a> {
+    pub context: crate::order_intake::RequestContext,
     pub name: &'a str,
     pub role: &'a str,
     pub color: [f32; 3],
     pub reagent: chem_sim::ReagentId,
     pub amount_units: u32,
     pub plea: String,
-}
-
-/// Spawns one crew member for a scripted "recurring identity" visit — the
-/// common tail every such thread (`obsessed`, `smuggler`, `saboteur`,
-/// `quack`, `cult`) reaches once its own script and gap logic have already
-/// decided a visit is happening. Reuses the ordinary `Order`/`Interactable`
-/// pipeline unmodified — see `obsessed`'s own module doc for why that
-/// matters.
-pub fn spawn_scripted_visit(
-    commands: &mut Commands,
-    db: &ChemDb,
-    rng: &mut impl Rng,
-    rules: &ShiftRules,
-    visit: ScriptedVisit,
-) -> Entity {
-    let identity = crate::crew::CrewDef {
-        name: visit.name.to_string(),
-        role: visit.role.to_string(),
-        color: visit.color,
-    };
-    let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
-    let crew = crate::crew::spawn_crew_member(commands, &identity, 0.0);
-
-    let reagent_name = db.reagents.get(visit.reagent).name.clone();
-    let amount = crate::orders::deliverable_amount(
-        db,
-        visit.reagent,
-        chem_sim::Units::whole(visit.amount_units as i32),
-    );
-    commands.entity(crew).insert((
-        crate::orders::Order {
-            reagent: visit.reagent,
-            specific: true,
-            minimum_purity: 0.0,
-            amount,
-            plea: visit.plea.clone(),
-            patience,
-            waited: 0.0,
-        },
-        crate::interaction::Interactable::new(format!(
-            "{} — hand over {} {}",
-            visit.name, amount, reagent_name
-        )),
-    ));
-    crew
 }
 
 // ---------------------------------------------------------------------------
@@ -330,9 +286,9 @@ pub enum Advance {
     EveryVisit,
 }
 
-/// The resident-aware form of [`spawn_scripted_visit`]. If the identity is a
-/// free station resident, the body already walking the station is recalled;
-/// outsiders and unavailable residents retain the proven spawn path.
+/// Dispatches an admitted scripted request. Reuses an available resident;
+/// only identities absent from the station are spawned by the fallback.
+/// Callers must acquire Intake admission first so busy residents cannot clone.
 pub fn dispatch_scripted_visit(
     commands: &mut Commands,
     db: &ChemDb,
@@ -364,26 +320,25 @@ pub fn dispatch_scripted_visit(
                 };
                 crate::crew::spawn_crew_member(commands, &identity, 0.0)
             });
-    let reagent_name = db.reagents.get(visit.reagent).name.clone();
     let amount = crate::orders::deliverable_amount(
         db,
         visit.reagent,
         chem_sim::Units::whole(visit.amount_units as i32),
     );
     commands.entity(crew).insert((
-        crate::orders::Order {
-            reagent: visit.reagent,
-            specific: true,
-            minimum_purity: 0.0,
-            amount,
-            plea: visit.plea,
-            patience,
-            waited: 0.0,
-        },
-        crate::interaction::Interactable::new(format!(
-            "{} — hand over {} {}",
-            visit.name, amount, reagent_name
-        )),
+        crate::order_intake::PendingOrder::new(
+            crate::orders::Order {
+                reagent: visit.reagent,
+                specific: true,
+                minimum_purity: 0.0,
+                amount,
+                plea: visit.plea,
+                patience,
+                waited: 0.0,
+            },
+            visit.context,
+        ),
+        crate::interaction::Interactable::new("Waiting to speak"),
     ));
     crew
 }

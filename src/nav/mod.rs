@@ -538,16 +538,40 @@ impl Trail {
     /// applied per step rather than per frame for the same reason
     /// `crew::walk_route` does it: a long step across a doorway can pass
     /// through geometry the endpoints are both clear of.
-    pub fn walk(
+    pub fn walk_avoiding(
         &mut self,
         transform: &mut Transform,
         areas: Option<&WalkableAreas>,
         distance: f32,
         body_offset: f32,
+        mut motion: Option<(Entity, &mut crate::npc_motion::NpcMotion)>,
     ) -> Option<Vec3> {
         let mut remaining = distance;
         let mut heading = None;
         while remaining > 0.0 {
+            if let Some(areas) = areas {
+                if self.path.last().is_some_and(|last| {
+                    flat_distance(transform.translation, *last) < 0.02
+                        && crate::npc_motion::walkable_segment(
+                            areas,
+                            transform.translation,
+                            *last,
+                            body_offset,
+                        )
+                }) {
+                    self.waypoint = self.path.len();
+                }
+                while self.path.get(self.waypoint + 1).is_some_and(|next| {
+                    crate::npc_motion::walkable_segment(
+                        areas,
+                        transform.translation,
+                        *next,
+                        body_offset,
+                    )
+                }) {
+                    self.waypoint += 1;
+                }
+            }
             let Some(waypoint) = self.path.get(self.waypoint).copied() else {
                 break;
             };
@@ -564,18 +588,35 @@ impl Trail {
                 self.waypoint += 1;
                 continue;
             }
-            let walked = remaining.min(waypoint_distance);
+            let walked = remaining.min(waypoint_distance).min(0.12);
             let direction = Vec3::new(step.x, 0.0, step.z) / waypoint_distance;
             let candidate = transform.translation + direction * walked;
-            transform.translation = areas.map_or(candidate, |areas| {
-                areas.contain_on_surface(candidate, NAV_RADIUS, body_offset)
-            });
+            transform.translation = if let Some((entity, motion)) = motion.as_mut() {
+                motion.advance(
+                    *entity,
+                    transform.translation,
+                    waypoint,
+                    *self.path.last().unwrap_or(&waypoint),
+                    walked,
+                    areas,
+                    body_offset,
+                )
+            } else {
+                areas.map_or(candidate, |areas| {
+                    areas.contain_on_surface(candidate, NAV_RADIUS, body_offset)
+                })
+            };
+            if motion
+                .as_ref()
+                .is_some_and(|(entity, m)| m.waiting(*entity))
+            {
+                return (transform.translation.distance_squared(candidate) < walked * walked)
+                    .then_some(direction);
+            }
             heading = Some(direction);
             remaining -= walked;
             if walked >= waypoint_distance {
                 self.waypoint += 1;
-            } else {
-                break;
             }
         }
         heading

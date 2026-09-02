@@ -35,7 +35,9 @@ mod machines;
 mod menu;
 mod nav;
 mod net;
+mod npc_motion;
 mod obsessed;
+mod order_intake;
 mod orders;
 mod player;
 mod produce;
@@ -136,7 +138,11 @@ fn main() {
         containers::ContainerPlugin,
         crew::CrewPlugin,
         knowledge::KnowledgePlugin,
-        orders::OrderPlugin,
+        (
+            orders::OrderPlugin,
+            order_intake::OrderIntakePlugin,
+            npc_motion::NpcMotionPlugin,
+        ),
         // Nested so the outer tuple stays inside Bevy's 16-plugin limit.
         // The phase machine, the supply it schedules, and its save file.
         (

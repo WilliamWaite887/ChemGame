@@ -333,7 +333,7 @@ impl SocialState {
         id
     }
 
-    fn remember_dialogue(&mut self, resident: &str, text: &str) {
+    pub(crate) fn remember_dialogue(&mut self, resident: &str, text: &str) {
         let lines = self
             .dialogue_history
             .entry(resident.to_string())
@@ -1138,6 +1138,12 @@ fn handle_evidence_resolution(
                     .remove::<PersonalFavor>()
                     .remove::<NpcCommitment>()
                     .remove::<crate::orders::Order>()
+                    .remove::<(
+                        crate::order_intake::PendingOrder,
+                        crate::order_intake::AwaitingConversation,
+                        crate::order_intake::AcceptedOrder,
+                        crate::order_intake::queue::QueuePosition,
+                    )>()
                     .remove::<crate::orders::IllicitOrder>()
                     .insert(Interactable::new(format!(
                         "{} — {}",

@@ -607,12 +607,6 @@ fn apply_radio(mut log: ResMut<RadioLog>, mut incoming: MessageReader<RadioSync>
     }
 }
 
-/// Puts an incoming request on the feed. Called when an order is created, so
-/// the radio carries both halves of the conversation.
-pub fn announce_request(log: &mut RadioLog, name: &str, role: &str, plea: &str) {
-    log.push(RadioEntry::new(channel_for(role), plea).speaker(name));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -606,8 +606,9 @@ fn generate_cult_visit(
     mut spawner: Option<ResMut<CultSpawner>>,
     mut progress: ResMut<CultProgress>,
     shift: Res<Shift>,
-    mut radio: ResMut<RadioLog>,
     chemists: Query<(), With<Chemist>>,
+    mut intake: crate::order_intake::Intake,
+    mut residents: crate::crew::AvailableResidents,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
@@ -636,12 +637,23 @@ fn generate_cult_visit(
         return;
     };
 
-    let visitor = threat::spawn_scripted_visit(
+    let Some(mut context) = intake.admit(
+        crate::order_intake::RequestSource::Cult,
+        &script.name,
+        &mut spawner.timer,
+        true,
+    ) else {
+        return;
+    };
+    context.step = Some(progress.next_stage);
+    let visitor = threat::dispatch_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
         &rules,
+        &mut residents,
         threat::ScriptedVisit {
+            context,
             name: &script.name,
             role: &script.role,
             color: script.color,
@@ -654,12 +666,6 @@ fn generate_cult_visit(
         .entity(visitor)
         .insert((crate::orders::HostileOrder, CultHerald));
     progress.offered_stage = Some(progress.next_stage);
-
-    radio.push(
-        RadioEntry::new(channel_for(&script.role), stage.pretext.clone())
-            .speaker(&script.name)
-            .negative(),
-    );
 
     info!("cult offer: {} stage {}", script.name, progress.next_stage);
 }

@@ -1166,6 +1166,15 @@ pub struct MachineSpot {
     pub lane: String,
 }
 
+/// Ordered bends of the separate pickup queue; coordinates belong to the map.
+#[point_class(classname("queue_point"), base(Transform), color(80 180 255), size(-4 -4 0, 4 4 8))]
+#[derive(Debug, Clone, Default)]
+pub struct QueuePoint {
+    pub lane: String,
+    pub sequence: i32,
+    pub clearance: f32,
+}
+
 /// A department's home ground: where its crew belong when they are not
 /// somewhere else.
 ///
@@ -1929,6 +1938,7 @@ impl Plugin for LabTrenchBroomPlugin {
         // worldspawn has to already be in it.
         app.override_class::<LabWorldspawn>()
             .register_type::<MachineSpot>()
+            .register_type::<QueuePoint>()
             .register_type::<ChemistStart>()
             .register_type::<Walkable>()
             .register_type::<DepartmentSpot>()

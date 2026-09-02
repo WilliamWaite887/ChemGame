@@ -93,7 +93,7 @@
             // "station.orders.ron" for the general case.
             amounts: [15, 18],
             role: "Service",
-            pretext: "Could I get some Space Drugs? It's for the bar — someone asked, I didn't ask why.",
+            pretext: "Could I get some Space Drugs? It's for the bar someone asked, I didn't ask why.",
             incident_line: "Security log: a crewman was seen glassy-eyed and giggling near the bar, no idea why.",
             chaos_line: "Whatever's been going around the bar has three people missing their shift now.",
         ),

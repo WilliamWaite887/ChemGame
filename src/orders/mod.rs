@@ -33,7 +33,7 @@ use crate::machines::{
 use crate::net::is_authority;
 use crate::player::Chemist;
 use crate::produce::{Produce, ProduceCatalog};
-use crate::radio::{announce_request, channel_for, RadioEntry, RadioLog};
+use crate::radio::{channel_for, RadioEntry, RadioLog};
 use crate::shift::{current_rules, weighted_pick, CurrentForecast};
 use crate::AppState;
 
@@ -533,9 +533,9 @@ pub struct Order {
     /// prompt and the plea, so a specific order that resolves `Wrong` names
     /// it in the report exactly as it always has, and this field is freely
     /// replicated and queryable everywhere (contrast `IllicitOrder`'s own
-    /// doc comment). Always `false` on an `IllicitOrder` — that thread's
-    /// exactness comes from the marker, not this field, and the two never
-    /// stack.
+    /// doc comment). Illicit requests also set this public recipe requirement;
+    /// the private marker controls consequences, not what the chemist is told
+    /// to prepare. Ordinary exact requests use the same presentation.
     pub specific: bool,
     /// Minimum purity accepted for the matched reagent. Kept on the order so
     /// replication and late joiners grade against the same authored target.
@@ -596,10 +596,8 @@ pub struct CrisisOrder;
 /// Marks a crew visit as a department's countermeasure against the save's
 /// main antagonist — see `crate::arc`.
 ///
-/// Follows [`CrisisOrder`], not [`IllicitOrder`]: a counter-track request is
-/// public by design (the whole point is that the departments have worked out
-/// what they need and are asking you for it), so it is replicated and free to
-/// be queried anywhere.
+/// Authority-only consequence metadata. The conversation and accepted Order
+/// expose the department's request without replicating a hidden campaign ID.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CounterOrder {
     pub campaign: crate::arc::CampaignId,
@@ -1360,8 +1358,7 @@ fn generate_orders(
     knowledge: Option<Res<Knowledge>>,
     mut shift: ResMut<Shift>,
     forecast: Option<Res<CurrentForecast>>,
-    mut radio: ResMut<RadioLog>,
-    active: Query<&CrewMember, crate::crew::NotResident>,
+    mut intake: crate::order_intake::Intake,
     mut residents: Query<
         (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
         (
@@ -1399,16 +1396,17 @@ fn generate_orders(
         return;
     }
 
-    let waiting = active.iter().count();
+    let waiting = 0usize;
     let mut rng = rand::rng();
     let gap = rng.random_range(rules.gap_seconds.0..=rules.gap_seconds.1);
     spawner.timer = Timer::from_seconds(gap, TimerMode::Once);
 
-    if waiting >= rules.max_active {
-        return;
-    }
-
-    let Some(crew_def) = station.crew.choose(&mut rng) else {
+    let eligible: Vec<_> = station
+        .crew
+        .iter()
+        .filter(|p| intake.available(&p.name))
+        .collect();
+    let Some(&crew_def) = eligible.choose(&mut rng) else {
         return;
     };
 
@@ -1489,6 +1487,14 @@ fn generate_orders(
     // patience — only this ordinary stream, never `generate_specific_orders`
     // or any minor-thread visit, each of which has its own authored identity
     // that "comped by the kitchen" doesn't fit.
+    let Some(context) = intake.admit(
+        crate::order_intake::RequestSource::Ordinary,
+        &crew_def.name,
+        &mut spawner.timer,
+        false,
+    ) else {
+        return;
+    };
     if !is_development && shift.requisition.patience_bonus_orders > 0 {
         shift.requisition.patience_bonus_orders -= 1;
         patience += crate::shift::COMPED_PATIENCE_BONUS_SECONDS;
@@ -1512,40 +1518,29 @@ fn generate_orders(
         .map(|cat| cat.want_phrase().to_string())
         .unwrap_or_else(|| db.reagents.get(reagent).name.clone());
     commands.entity(crew).insert((
-        Order {
-            reagent,
-            specific: request.exact,
-            minimum_purity: request.minimum_purity.clamp(0.0, 1.0),
-            amount,
-            plea: if request.exact {
-                request.specific_plea.clone()
-            } else {
-                request.plea.clone()
+        crate::order_intake::PendingOrder::new(
+            Order {
+                reagent,
+                specific: request.exact,
+                minimum_purity: request.minimum_purity.clamp(0.0, 1.0),
+                amount,
+                plea: if request.exact {
+                    request.specific_plea.clone()
+                } else {
+                    request.plea.clone()
+                },
+                patience,
+                waited: 0.0,
             },
-            patience,
-            waited: 0.0,
-        },
-        Interactable::new(format!(
-            "{} — hand over {} {}",
-            crew_def.name, amount, want_label
-        )),
+            context,
+        ),
+        crate::interaction::Interactable::new("Waiting to speak"),
     ));
     if is_development {
         commands.entity(crew).insert(DevelopmentOrder {
             expiry_standing: station.config.ramp.stretch_expiry_standing.min(0),
         });
     }
-
-    // The request goes out over the radio too, so the feed carries both halves
-    // of the conversation rather than only the verdict.
-    let announced_plea = if is_development {
-        format!("Optional R&D request \u{2014} {}", request.plea)
-    } else if request.exact {
-        request.specific_plea.clone()
-    } else {
-        request.plea.clone()
-    };
-    announce_request(&mut radio, &crew_def.name, &crew_def.role, &announced_plea);
 
     info!(
         "{} ({}) wants {} {}",
@@ -1575,8 +1570,7 @@ fn generate_specific_orders(
     knowledge: Option<Res<Knowledge>>,
     shift: Res<Shift>,
     forecast: Option<Res<CurrentForecast>>,
-    mut radio: ResMut<RadioLog>,
-    active: Query<&CrewMember, crate::crew::NotResident>,
+    mut intake: crate::order_intake::Intake,
     mut residents: Query<
         (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
         (
@@ -1606,7 +1600,7 @@ fn generate_specific_orders(
         return;
     }
 
-    let waiting = active.iter().count();
+    let waiting = 0usize;
     let mut rng = rand::rng();
     // Scaled off the *current* legitimate gap, exactly like
     // `antagonist::generate_antagonist_orders`'s own re-arm — the two rates
@@ -1620,11 +1614,13 @@ fn generate_specific_orders(
     // Respects the same concurrent-order cap as an ordinary lenient order —
     // this is still fundamentally an ordinary order, just a picky one, not a
     // second antagonist-style thread that ignores the queue's capacity.
-    if waiting >= rules.max_active {
-        return;
-    }
 
-    let Some(crew_def) = station.crew.choose(&mut rng) else {
+    let eligible: Vec<_> = station
+        .crew
+        .iter()
+        .filter(|p| intake.available(&p.name))
+        .collect();
+    let Some(&crew_def) = eligible.choose(&mut rng) else {
         return;
     };
 
@@ -1667,6 +1663,14 @@ fn generate_specific_orders(
 
     let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1)
         * request.patience_scale.max(0.25);
+    let Some(context) = intake.admit(
+        crate::order_intake::RequestSource::Specific,
+        &crew_def.name,
+        &mut spawner.timer,
+        false,
+    ) else {
+        return;
+    };
     let lane_offset = waiting as f32 * 0.95;
     let crew = recall_resident_for_order(
         &mut commands,
@@ -1679,27 +1683,20 @@ fn generate_specific_orders(
 
     let reagent_name = db.reagents.get(reagent).name.clone();
     commands.entity(crew).insert((
-        Order {
-            reagent,
-            specific: true,
-            minimum_purity: request.minimum_purity.clamp(0.0, 1.0),
-            amount,
-            plea: request.specific_plea.clone(),
-            patience,
-            waited: 0.0,
-        },
-        Interactable::new(format!(
-            "{} — hand over {} {}",
-            crew_def.name, amount, reagent_name
-        )),
+        crate::order_intake::PendingOrder::new(
+            Order {
+                reagent,
+                specific: true,
+                minimum_purity: request.minimum_purity.clamp(0.0, 1.0),
+                amount,
+                plea: request.specific_plea.clone(),
+                patience,
+                waited: 0.0,
+            },
+            context,
+        ),
+        crate::interaction::Interactable::new("Waiting to speak"),
     ));
-
-    announce_request(
-        &mut radio,
-        &crew_def.name,
-        &crew_def.role,
-        &request.specific_plea,
-    );
 
     info!(
         "{} ({}) specifically wants {} {}",
@@ -1731,7 +1728,7 @@ pub(crate) fn physical_reagent_inventory(
 }
 
 #[allow(clippy::type_complexity)]
-fn expire_orders(
+pub(crate) fn expire_orders(
     mut commands: Commands,
     time: Res<Time>,
     db: Res<ChemDb>,
@@ -1747,6 +1744,7 @@ fn expire_orders(
         Option<&CounterOrder>,
         Has<HostileOrder>,
         Option<&DevelopmentOrder>,
+        Has<crate::order_intake::AcceptedOrder>,
     )>,
 ) {
     // Deliberately *not* gated on `accepting_orders`. The sign stops new
@@ -1755,13 +1753,23 @@ fn expire_orders(
     // were still up.
     let dt = time.delta_secs();
 
-    for (entity, mut order, crew, mut route, illicit, crisis, counter, hostile, development) in
-        &mut orders
+    for (
+        entity,
+        mut order,
+        crew,
+        mut route,
+        illicit,
+        crisis,
+        counter,
+        hostile,
+        development,
+        accepted,
+    ) in &mut orders
     {
         let kind = OrderKind::of_with_hostile(illicit, crisis, counter.is_some(), hostile);
         // Patience only runs down once they have actually arrived, so a slow
         // walk in never counts against the player.
-        if route.phase != CrewPhase::Waiting {
+        if !accepted && route.phase != CrewPhase::Waiting {
             continue;
         }
         // The queue only ever shows `remaining()` truncated to whole seconds
@@ -1833,6 +1841,7 @@ fn expire_orders(
         commands
             .entity(entity)
             .remove::<Order>()
+            .remove::<crate::order_intake::AcceptedOrder>()
             .remove::<DevelopmentOrder>();
         route.leave();
     }
@@ -2239,6 +2248,7 @@ fn complete_delivery(
     commands
         .entity(crew)
         .remove::<Order>()
+        .remove::<crate::order_intake::AcceptedOrder>()
         .remove::<DevelopmentOrder>()
         .remove::<Interactable>()
         // Comes off with the order it marks. Both `crisis::schedule_crisis`
@@ -2399,18 +2409,20 @@ pub fn believed_a_lie(
 /// walk out.
 fn window_recipient<'a>(
     contents: &Solution,
-    waiting: impl Iterator<Item = (Entity, &'a Order, &'a CrewRoute, OrderKind)>,
+    waiting: impl Iterator<Item = (Entity, &'a Order, &'a CrewRoute, OrderKind, bool)>,
     reserved: &HashSet<Entity>,
     lane: DeliveryLane,
     db: &ChemDb,
 ) -> Option<Entity> {
     waiting
         .filter(|(entity, ..)| !reserved.contains(entity))
-        .filter(|(_, _, route, _)| route.delivery_lane == lane)
-        .filter(|(_, _, route, _)| route.phase == CrewPhase::Waiting)
-        .filter(|(_, order, _, kind)| container_matches(contents, order, *kind, db))
+        .filter(|(_, _, route, _, _)| route.delivery_lane == lane)
+        .filter(|(_, _, route, _, accepted)| {
+            route.phase != CrewPhase::Leaving && (route.phase == CrewPhase::Waiting || *accepted)
+        })
+        .filter(|(_, order, _, kind, _)| container_matches(contents, order, *kind, db))
         .min_by(|a, b| a.1.remaining().total_cmp(&b.1.remaining()))
-        .map(|(entity, _, _, _)| entity)
+        .map(|(entity, ..)| entity)
 }
 
 /// Hands over whatever is sitting in the delivery window.
@@ -2443,6 +2455,7 @@ fn handle_window_delivery(
         Option<&CounterOrder>,
         Has<HostileOrder>,
         Has<DevelopmentOrder>,
+        Has<crate::order_intake::AcceptedOrder>,
     )>,
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
     instability: Option<Res<crate::instability::Instability>>,
@@ -2477,12 +2490,13 @@ fn handle_window_delivery(
             }
 
             let candidates = crew.iter().map(
-                |(entity, _, order, route, illicit, crisis, counter, hostile, _)| {
+                |(entity, _, order, route, illicit, crisis, counter, hostile, _, accepted)| {
                     (
                         entity,
                         order,
                         route,
                         OrderKind::of_with_hostile(illicit, crisis, counter.is_some(), hostile),
+                        accepted,
                     )
                 },
             );
@@ -2506,6 +2520,7 @@ fn handle_window_delivery(
                 counter,
                 hostile,
                 development,
+                _,
             )) = crew.get_mut(recipient)
             else {
                 continue;
@@ -3135,6 +3150,64 @@ mod tests {
     }
 
     #[test]
+    fn neither_handover_nor_tray_can_consume_an_unaccepted_request() {
+        use crate::order_intake::{GreetingKind, PendingOrder, RequestContext, RequestSource};
+        let mut app = window_app();
+        app.add_message::<FromClient<InteractRequested>>()
+            .add_systems(Update, handle_delivery.before(handle_window_delivery));
+        let (_, tray) = window_with(&mut app, &[("dylovene", 30)]);
+        let npc = waiting_crew(&mut app, "Unheard", "dylovene", 30, 100.0, true);
+        let order = app.world().get::<Order>(npc).unwrap().clone();
+        app.world_mut()
+            .entity_mut(npc)
+            .remove::<Order>()
+            .insert(PendingOrder::new(
+                order,
+                RequestContext {
+                    id: 1,
+                    source: RequestSource::Ordinary,
+                    campaign: None,
+                    greeting: GreetingKind::Ordinary,
+                    step: None,
+                },
+            ));
+        let player = app
+            .world_mut()
+            .spawn(Chemist {
+                client: ClientId::Server,
+            })
+            .id();
+        let source = app.world().get::<Container>(tray).unwrap();
+        let container = Container {
+            kind: source.kind,
+            solution: source.solution.clone(),
+        };
+        let hand = app.world_mut().spawn((container, HeldBy(player))).id();
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: InteractRequested { target: npc },
+        });
+        app.update();
+        assert!(outcomes(&app).is_empty());
+        assert!(app.world().get::<Container>(hand).is_some());
+        assert!(app.world().get::<Container>(tray).is_some());
+        assert!(app.world().get::<PendingOrder>(npc).is_some());
+    }
+
+    #[test]
+    fn tray_can_serve_an_accepted_customer_while_they_step_into_line() {
+        let mut app = window_app();
+        let (_, beaker) = window_with(&mut app, &[("dylovene", 30)]);
+        let npc = waiting_crew(&mut app, "Accepted", "dylovene", 30, 100.0, false);
+        app.world_mut()
+            .entity_mut(npc)
+            .insert(crate::order_intake::AcceptedOrder { sequence: 1 });
+        app.update();
+        assert!(app.world().get::<Container>(beaker).is_none());
+        assert_eq!(outcomes(&app).len(), 1);
+    }
+
+    #[test]
     fn recipient_reservation_excludes_an_order_before_deferred_removal() {
         let db = db();
         let reagent = db.reagent("dylovene");
@@ -3156,7 +3229,7 @@ mod tests {
         assert_eq!(
             window_recipient(
                 &contents,
-                std::iter::once((recipient, &order, &route, OrderKind::Normal)),
+                std::iter::once((recipient, &order, &route, OrderKind::Normal, false)),
                 &reserved,
                 DeliveryLane::Public,
                 &db,
@@ -3973,8 +4046,10 @@ mod tests {
 
         advance(&mut app, 1.0);
 
-        let mut query = app.world_mut().query::<&Order>();
-        let orders: Vec<&Order> = query.iter(app.world()).collect();
+        let mut query = app
+            .world_mut()
+            .query::<&crate::order_intake::PendingOrder>();
+        let orders: Vec<&Order> = query.iter(app.world()).map(|p| &p.order).collect();
         assert_eq!(orders.len(), 1, "exactly one order should have spawned");
         assert_eq!(
             orders[0].patience,
@@ -3997,8 +4072,10 @@ mod tests {
 
         advance(&mut app, 1.0);
 
-        let mut query = app.world_mut().query::<&Order>();
-        let orders: Vec<&Order> = query.iter(app.world()).collect();
+        let mut query = app
+            .world_mut()
+            .query::<&crate::order_intake::PendingOrder>();
+        let orders: Vec<&Order> = query.iter(app.world()).map(|p| &p.order).collect();
         assert_eq!(orders.len(), 1);
         assert_eq!(orders[0].patience, PINNED_PATIENCE);
     }
@@ -4014,10 +4091,12 @@ mod tests {
 
         advance(&mut app, 1.0);
 
-        let mut orders = app.world_mut().query::<(Entity, &Order)>();
+        let mut orders = app
+            .world_mut()
+            .query::<(Entity, &crate::order_intake::PendingOrder)>();
         let (entity, reagent) = orders
             .single(app.world())
-            .map(|(entity, order)| (entity, order.reagent))
+            .map(|(entity, order)| (entity, order.order.reagent))
             .unwrap();
         let world = app.world();
         assert!(world
@@ -4046,10 +4125,12 @@ mod tests {
 
         advance(&mut app, 1.0);
 
-        let mut orders = app.world_mut().query::<(Entity, &Order)>();
+        let mut orders = app
+            .world_mut()
+            .query::<(Entity, &crate::order_intake::PendingOrder)>();
         let (development, order) = orders.single(app.world()).unwrap();
         assert!(app.world().get::<DevelopmentOrder>(development).is_some());
-        assert_eq!(order.patience, PINNED_PATIENCE * 1.5);
+        assert_eq!(order.order.patience, PINNED_PATIENCE * 1.5);
         assert_eq!(
             app.world()
                 .resource::<Shift>()

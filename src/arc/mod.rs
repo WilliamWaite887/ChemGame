@@ -36,14 +36,13 @@ use chem_sim::Units;
 
 use crate::chem_data::ChemDb;
 use crate::crew::{spawn_crew_member, CrewDef, CrewMember};
-use crate::interaction::Interactable;
 use crate::net::is_authority;
 use crate::orders::{
     deliverable_amount, reference_category, CounterOrder, Order, OrderKind, OrderResolved, Shift,
     StationData,
 };
 use crate::player::Chemist;
-use crate::radio::{announce_request, RadioEntry, RadioLog};
+use crate::radio::{RadioEntry, RadioLog};
 use crate::shift::current_rules;
 use crate::threat;
 use crate::AppState;
@@ -948,10 +947,11 @@ fn generate_counter_orders(
     campaign: Option<Res<Campaign>>,
     mut spawner: Option<ResMut<CounterSpawner>>,
     shift: Res<Shift>,
-    mut radio: ResMut<RadioLog>,
     active: Query<(), With<CounterOrder>>,
     waiting: Query<&CrewMember, crate::crew::NotResident>,
     chemists: Query<(), With<Chemist>>,
+    mut intake: crate::order_intake::Intake,
+    mut residents: crate::crew::AvailableResidents,
 ) {
     let (Some(station), Some(script), Some(campaign)) = (station, script, campaign) else {
         return;
@@ -1026,34 +1026,48 @@ fn generate_counter_orders(
     // counter step is the ending the player is working toward, and losing one
     // to a clock they never saw would be the worst possible way to lose it.
     let patience = rng.random_range(COUNTER_PATIENCE_SECONDS.0..=COUNTER_PATIENCE_SECONDS.1);
+    let Some(context) = intake.admit(
+        crate::order_intake::RequestSource::Counter,
+        &crew_def.name,
+        &mut spawner.timer,
+        true,
+    ) else {
+        return;
+    };
     let lane = waiting.iter().count() as f32 * 0.95;
-    let crew = spawn_crew_member(&mut commands, crew_def, lane);
+    let crew = crate::crew::recall_resident_for_order(
+        &mut commands,
+        &mut residents,
+        &crew_def.name,
+        &crew_def.role,
+        lane,
+    )
+    .unwrap_or_else(|| spawn_crew_member(&mut commands, crew_def, lane));
 
     let want_label = reference_category(&db, reagent)
         .map(|cat| cat.want_phrase().to_string())
         .unwrap_or_else(|| db.reagents.get(reagent).name.clone());
     let amount = deliverable_amount(&db, reagent, Units::whole(step.amount as i32));
     commands.entity(crew).insert((
-        Order {
-            reagent,
-            specific: false,
-            minimum_purity: 0.0,
-            amount,
-            plea: step.plea.clone(),
-            patience,
-            waited: 0.0,
-        },
+        crate::order_intake::PendingOrder::new(
+            Order {
+                reagent,
+                specific: false,
+                minimum_purity: 0.0,
+                amount,
+                plea: step.plea.clone(),
+                patience,
+                waited: 0.0,
+            },
+            context,
+        ),
         CounterOrder {
             campaign: campaign.id,
             step: step_index,
         },
-        Interactable::new(format!(
-            "{} — hand over {} {}",
-            crew_def.name, amount, want_label
-        )),
+        crate::interaction::Interactable::new("Waiting to speak"),
     ));
 
-    announce_request(&mut radio, &crew_def.name, &crew_def.role, &step.plea);
     info!(
         "counter-track: {} ({}) wants {} {}",
         crew_def.name, crew_def.role, amount, want_label
@@ -1628,13 +1642,23 @@ mod tests {
         let mut app = counter_app(AntagId::Cult);
         open_the_track(&mut app);
 
-        let mut counters = app
-            .world_mut()
-            .query::<(&CounterOrder, &Order, &CrewMember)>();
+        let mut counters = app.world_mut().query::<(
+            &CounterOrder,
+            &crate::order_intake::PendingOrder,
+            &CrewMember,
+        )>();
         let (_, order, member) = counters
             .iter(app.world())
             .next()
             .expect("a counter-track request should be at the counter");
+        assert_eq!(
+            order.context.greeting,
+            crate::order_intake::GreetingKind::Campaign
+        );
+        assert_eq!(
+            order.context.campaign,
+            Some(app.world().resource::<Campaign>().id)
+        );
 
         let expected = app
             .world()
@@ -1649,7 +1673,7 @@ mod tests {
             "the track runs in its authored order"
         );
         assert!(
-            !order.specific,
+            !order.order.specific,
             "a counter step must stay lenient, or it demands one exact reagent \
              instead of the category the department actually needs"
         );

@@ -21,7 +21,7 @@ use crate::containers::{
     Container, ContainerKind, InSlot, InSlotB, InSlotC, InventorySlot, SelectedInventorySlot,
     Stored, INVENTORY_SLOTS,
 };
-use crate::crew::{AtCounter, CrewMember};
+use crate::crew::CrewMember;
 use crate::interaction::{leave_machine, Interactable, InteractionMode, LeaveMachineRequested};
 use crate::knowledge::{
     product_name, reaction_categories, BuyHintRequested, Knowledge, RecipeDiscovered,
@@ -35,9 +35,7 @@ use crate::machines::{
     PurifyRequested, SetHeaterPower, SetTargetTemperature, TakeRequested, Thermostat,
     HPLC_RECIPE_REQUIREMENT, LOCKER_CAPACITY, TEMPERATURE_MAX, TEMPERATURE_MIN,
 };
-use crate::orders::{
-    reference_category, Department, DevelopmentOrder, GlasswarePackId, Order, Shift, StationData,
-};
+use crate::orders::{Department, DevelopmentOrder, GlasswarePackId, Order, Shift, StationData};
 use crate::player::LocalPlayer;
 use crate::produce::{ProduceCatalog, ProduceId};
 use crate::radio::{RadioChannel, RadioEntry, RadioLog, RadioPriority, RadioTone};
@@ -158,7 +156,6 @@ impl Plugin for UiPlugin {
         .init_resource::<BookIconAssets>()
         .init_resource::<TooltipState>()
         .init_resource::<HplcView>()
-        .init_resource::<BoardTab>()
         .init_resource::<SocialView>()
         .init_resource::<LastPanel>()
         .init_resource::<LastSignState>()
@@ -222,26 +219,11 @@ enum PanelAction {
     OpenUpAgain,
     Requisition(RequisitionKind),
     NpcPack(NpcRequisitionKind),
-    ShowBoardTab(BoardTab),
+    OpenOrders,
     ShowSocialDepartment(Department),
     SelectSocialResident(String),
     CloseSocial,
     Close,
-}
-
-/// Which of the standing board's two tabs is open.
-///
-/// Local presentation state, same rationale as [`BookView`]: which tab a
-/// chemist has open is nobody else's business and not worth a line in
-/// `save.ron`. Split out once the radio history grew from a couple of lines
-/// squeezed above the department shop into its own real scrollable section —
-/// on its own tab it can be the whole panel instead of splitting the screen
-/// with standing every time.
-#[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
-enum BoardTab {
-    #[default]
-    Service,
-    Radio,
 }
 
 /// Local navigation inside the social directory. The relationships and heard
@@ -491,7 +473,6 @@ struct PanelSignature {
     /// Which of the board's two tabs is open — same rationale as
     /// `book_category`: switching tab changes what the panel shows, so it
     /// rebuilds the panel.
-    board_tab: BoardTab,
     /// Local social-directory navigation and the public, qualitative snapshot
     /// it renders. Exact impressions and secret roles never enter this type.
     social_view: SocialView,
@@ -579,7 +560,6 @@ impl Default for PanelSignature {
             accepting_orders: false,
             // Same reasoning again: the vector above is what guarantees a
             // difference on the first comparison, so this only needs a value.
-            board_tab: BoardTab::Service,
             social_view: SocialView::default(),
             social_residents: Vec::new(),
             radio_sequence: None,
@@ -765,14 +745,21 @@ struct BoardView<'w, 's> {
     /// filtered out because they live here: they are never what a shift is
     /// waiting on, and counting them would mean the sign could never come
     /// down at all.
-    waiting: Query<'w, 's, (), (With<Order>, crate::crew::NotResident)>,
+    waiting: Query<
+        'w,
+        's,
+        (),
+        (
+            Or<(With<Order>, With<crate::order_intake::AwaitingConversation>)>,
+            crate::crew::NotResident,
+        ),
+    >,
     /// The full chatter history, for the board's own scrollable section —
     /// folded in here rather than added to `sync_panel` directly, which is
     /// already at Bevy's sixteen-parameter ceiling.
     radio: Res<'w, RadioLog>,
     /// Which of the board's two tabs is open — same reason `radio` is here
     /// rather than a bare `sync_panel` parameter.
-    tab: Res<'w, BoardTab>,
     radio_scroll:
         Query<'w, 's, (&'static ScrollPosition, &'static ComputedNode), With<RadioHistoryPane>>,
     social_view: Res<'w, SocialView>,
@@ -1064,7 +1051,6 @@ fn sync_panel(
             .collect(),
         ivy_standing: shift.npc_standing("Botanist Ivy"),
         accepting_orders: shift.accepting_orders,
-        board_tab: *board.tab,
         social_view: board.social_view.clone(),
         social_residents: social_residents.clone(),
         radio_sequence: board.radio.entries.back().map(|entry| entry.sequence),
@@ -1151,11 +1137,16 @@ fn sync_panel(
             screen
                 .spawn((
                     Node {
-                        width: px(if machine.kind == MachineKind::ChemMaster5000 {
-                            1040
-                        } else {
-                            760
-                        }),
+                        width: px(
+                            if matches!(
+                                machine.kind,
+                                MachineKind::ChemMaster5000 | MachineKind::StandingBoard
+                            ) {
+                                1040
+                            } else {
+                                760
+                            },
+                        ),
                         max_width: percent(94),
                         max_height: percent(90),
                         flex_direction: FlexDirection::Column,
@@ -1290,7 +1281,6 @@ fn sync_panel(
                                         &stage,
                                         arc.as_ref(),
                                         &board.radio,
-                                        *board.tab,
                                         radio_scroll,
                                     );
                                 }
@@ -1314,8 +1304,7 @@ fn sync_panel(
         });
 }
 
-/// Lab service controls and the station's radio history, split across two
-/// tabs. Relationship standing and shops live in the anytime Social screen.
+/// Lab service controls and the station's radio history share one screen. Relationship standing and shops live in the anytime Social screen.
 ///
 /// One panel rather than a modal, exactly like the old shift board: this is
 /// per-player `InteractionMode`, and a modal would trap one chemist on a
@@ -1326,66 +1315,70 @@ fn standing_board_body(
     stage: &BoardStage,
     arc: Option<&ArcHeadline>,
     radio: &RadioLog,
-    tab: BoardTab,
     radio_scroll: RadioScrollState,
 ) {
-    panel.spawn(row()).with_children(|row| {
-        for (caption, candidate) in [
-            ("Lab service", BoardTab::Service),
-            ("Radio log", BoardTab::Radio),
-        ] {
-            let mut entity = row.spawn(button(caption, PanelAction::ShowBoardTab(candidate)));
-            // Same marker the dispense-amount row and the book's own tabs
-            // use, so `button_feedback` colours the open one with no extra
-            // code.
-            if candidate == tab {
-                entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
-            }
-        }
-    });
-
-    match tab {
-        BoardTab::Service => {
-            match stage {
-                BoardStage::Debrief(report) => draw_debrief(panel, report),
-                _ => draw_sign_controls(panel, shift, stage),
-            }
-            panel.spawn(label(
-                "Crew relationships and department shops are available from Social  (Tab).",
-                12.0,
-                TEXT_DIM,
-            ));
-        }
-        BoardTab::Radio => {
-            // Campaign intelligence is station traffic, so it belongs with
-            // the radio rather than turning the lab-service tab back into a
-            // third kind of board.
-            if let Some(arc) = arc {
-                draw_arc_notice(panel, arc);
-            }
-            // The log is the whole tab — nothing else is pinned above it but
-            // the tab row itself, so it gets the same generous height the
-            // book's own top-level list does.
-            let mut pane = panel.spawn((
-                Node {
+    panel
+        .spawn(Node {
+            flex_wrap: FlexWrap::Wrap,
+            column_gap: px(20),
+            row_gap: px(16),
+            width: percent(100),
+            ..default()
+        })
+        .with_children(|columns| {
+            columns
+                .spawn(Node {
                     flex_direction: FlexDirection::Column,
-                    row_gap: px(6),
-                    max_height: vh(66),
-                    overflow: Overflow::scroll_y(),
+                    row_gap: px(10),
+                    flex_grow: 1.0,
+                    flex_basis: px(330),
+                    min_width: px(280),
                     ..default()
-                },
-                ScrollPosition(Vec2::new(0.0, radio_scroll.offset)),
-                ScrollPane,
-                RadioHistoryPane,
-            ));
-            if radio_scroll.at_bottom {
-                pane.insert(ScrollToRadioBottom);
-            }
-            pane.with_children(|scroll| {
-                draw_radio_history(scroll, radio);
-            });
-        }
-    }
+                })
+                .with_children(|service| {
+                    service.spawn(heading("LAB SERVICE"));
+                    match stage {
+                        BoardStage::Debrief(report) => draw_debrief(service, report),
+                        _ => draw_sign_controls(service, shift, stage),
+                    }
+                    service.spawn(label(
+                        "Crew relationships and department shops: Social (Tab).",
+                        12.0,
+                        TEXT_DIM,
+                    ));
+                    if let Some(arc) = arc {
+                        draw_arc_notice(service, arc);
+                    }
+                });
+            columns
+                .spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(10),
+                    flex_grow: 1.4,
+                    flex_basis: px(460),
+                    min_width: px(280),
+                    ..default()
+                })
+                .with_children(|radio_column| {
+                    radio_column.spawn(heading("STATION RADIO"));
+                    let mut pane = radio_column.spawn((
+                        Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: px(6),
+                            max_height: vh(57),
+                            overflow: Overflow::scroll_y(),
+                            ..default()
+                        },
+                        ScrollPosition(Vec2::new(0.0, radio_scroll.offset)),
+                        ScrollPane,
+                        RadioHistoryPane,
+                    ));
+                    if radio_scroll.at_bottom {
+                        pane.insert(ScrollToRadioBottom);
+                    }
+                    pane.with_children(|scroll| draw_radio_history(scroll, radio));
+                });
+        });
 }
 
 fn department_icon(department: Department) -> BookIcon {
@@ -1517,6 +1510,7 @@ fn spawn_social_directory(
                                     TEXT_DIM,
                                 ));
                             });
+                            header.spawn(button("Orders", PanelAction::OpenOrders));
                             header.spawn(button("‹ Back to station", PanelAction::CloseSocial));
                         });
 
@@ -6282,7 +6276,16 @@ pub(crate) struct ScrollPane;
 /// [`ScrollPane`] ever exists at a time for this to be ambiguous about.
 fn scroll_active_pane(
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
-    mut book: Query<(&mut ScrollPosition, &ComputedNode), With<ScrollPane>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut book: Query<
+        (
+            Entity,
+            &mut ScrollPosition,
+            &ComputedNode,
+            &UiGlobalTransform,
+        ),
+        With<ScrollPane>,
+    >,
 ) {
     let scrolled: f32 = wheel
         .read()
@@ -6295,7 +6298,24 @@ fn scroll_active_pane(
         return;
     }
 
-    for (mut position, computed) in &mut book {
+    let cursor = windows.iter().next().and_then(Window::cursor_position);
+    // A board contains a radio pane inside its page. Wheel input goes to the
+    // smallest pane under the pointer, so scrolling the radio does not also
+    // move the surrounding service controls.
+    let hovered = cursor.and_then(|cursor| {
+        book.iter()
+            .filter(|(_, _, node, transform)| {
+                node.normalize_point(**transform, cursor)
+                    .is_some_and(|p| p.x.abs() <= 0.5 && p.y.abs() <= 0.5)
+            })
+            .min_by(|a, b| (a.2.size().x * a.2.size().y).total_cmp(&(b.2.size().x * b.2.size().y)))
+            .map(|(entity, ..)| entity)
+    });
+    let only = (book.iter().count() == 1).then(|| book.iter().next().unwrap().0);
+    for (entity, mut position, computed, _) in &mut book {
+        if Some(entity) != hovered.or(only) {
+            continue;
+        }
         // Content taller than the box is exactly how far it can travel.
         let limit = (computed.content_size().y - computed.size().y).max(0.0);
         position.y = (position.y - scrolled).clamp(0.0, limit);
@@ -6624,7 +6644,7 @@ struct OrderSlot(usize);
 #[derive(Component)]
 struct ShiftReadout;
 
-/// What the most urgent requester actually said.
+/// Compact, undisclosed call-over indicators for the two waiting visitors.
 #[derive(Component)]
 struct PleaLine;
 
@@ -6673,21 +6693,21 @@ type BannerText<'w, 's> = Single<
 /// The queue shows a live countdown, so rebuilding it on change would mean
 /// rebuilding every frame. Writing into pre-spawned rows keeps it to a couple
 /// of string comparisons instead.
-fn spawn_order_queue(mut commands: Commands) {
+fn spawn_order_queue(mut commands: Commands, icons: Res<BookIconAssets>) {
     commands
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
                 top: px(16),
                 right: px(16),
-                width: px(310),
+                width: px(350),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::all(px(12)),
-                row_gap: px(6),
+                row_gap: px(8),
                 border_radius: BorderRadius::all(px(6)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.06, 0.07, 0.09, 0.82)),
+            BackgroundColor(Color::srgba(0.035, 0.055, 0.07, 0.94)),
             crate::until_we_leave_the_lab(),
         ))
         .with_children(|queue| {
@@ -6697,9 +6717,26 @@ fn spawn_order_queue(mut commands: Commands) {
                 TextColor(Color::srgb(0.95, 0.88, 0.45)),
                 PhaseBanner,
             ));
-            queue.spawn(label("ORDERS", 13.0, TEXT_DIM));
+            queue
+                .spawn(Node {
+                    column_gap: px(9),
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|header| {
+                    header.spawn(icon_image(&icons, BookIcon::Orders, 22.0, BOOK_ACCENT));
+                    header.spawn(label("ORDER DESK", 16.0, Color::srgb(0.90, 0.94, 0.96)));
+                });
             for index in 0..ORDER_SLOTS {
                 queue.spawn((
+                    Node {
+                        padding: UiRect::all(px(10)),
+                        border: UiRect::left(px(2)),
+                        border_radius: BorderRadius::all(px(4)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.08, 0.115, 0.14)),
+                    BorderColor::all(BOOK_ACCENT),
                     Text::new(""),
                     TextFont::from_font_size(14.0),
                     TextColor(TEXT),
@@ -6760,108 +6797,92 @@ fn update_phase_banner(shift: Res<Shift>, banner: BannerText) {
 fn update_order_queue(
     db: Res<ChemDb>,
     shift: Res<Shift>,
-    orders: Query<(&CrewMember, &Order, Has<AtCounter>, Has<DevelopmentOrder>)>,
-    mut slots: Query<(&OrderSlot, &mut Text, &mut TextColor), Without<ShiftReadout>>,
+    orders: Query<(&CrewMember, &Order, Has<DevelopmentOrder>)>,
+    waiting: Query<(&CrewMember, &crate::order_intake::AwaitingConversation)>,
+    mut slots: Query<(&OrderSlot, &mut Text, &mut TextColor, &mut Node), Without<ShiftReadout>>,
     readout: ShiftText,
     plea_line: PleaText,
 ) {
-    // Most urgent first, so the one about to expire is always at the top.
-    let mut pending: Vec<(&CrewMember, &Order, bool, bool)> = orders.iter().collect();
-    pending.sort_by(|a, b| a.1.remaining().total_cmp(&b.1.remaining()));
-
-    for (slot, mut text, mut color) in &mut slots {
-        let line = pending
-            .get(slot.0)
-            .map(|(member, order, at_counter, development)| {
-                // `order.specific` is freely queryable (nothing secret about it —
-                // see its own doc comment) and always wins when set. Otherwise
-                // this never queries `Has<IllicitOrder>` — see that marker's own
-                // doc comment — and instead reads purely from the reagent's own
-                // category: a lenient legitimate order's category is always one
-                // of the six orderable ones, so it shows a want-phrase; anything
-                // else (every antagonist reagent is `Illicit`) falls back to the
-                // real name, which is no more a tell than the pretext already is.
-                let want = if order.specific {
-                    db.reagents.get(order.reagent).name.clone()
-                } else {
-                    reference_category(&db, order.reagent)
-                        .filter(|cat| cat.is_legitimately_orderable())
-                        .map(|cat| cat.want_phrase().to_string())
-                        .unwrap_or_else(|| db.reagents.get(order.reagent).name.clone())
-                };
-                let reagent = &want;
-                let quality = if order.minimum_purity > 0.0 {
-                    format!("  |  >={:.0}% purity", order.minimum_purity * 100.0)
-                } else {
-                    String::new()
-                };
-                let heading = if *development {
-                    format!("OPTIONAL R&D - {}", member.name)
-                } else {
-                    member.name.clone()
-                };
-                if *at_counter {
-                    let remaining = order.remaining() as u32;
-                    format!(
-                        "{}\n  {} {}{}  |  {}:{:02}",
-                        heading,
-                        order.amount,
-                        reagent,
-                        quality,
-                        remaining / 60,
-                        remaining % 60
-                    )
-                } else {
-                    format!(
-                        "{}\n  {} {}{}  |  on the way",
-                        heading, order.amount, reagent, quality
-                    )
-                }
-            });
-
-        let urgent = pending
-            .get(slot.0)
-            .map(|(_, order, _, development)| !development && order.remaining() < 30.0)
-            .unwrap_or(false);
-        let development = pending
-            .get(slot.0)
-            .map(|(_, _, _, development)| *development)
-            .unwrap_or(false);
-        let wanted = if development {
-            Color::srgb(0.50, 0.82, 0.92)
-        } else if urgent {
-            Color::srgb(0.95, 0.55, 0.45)
+    let mut accepted: Vec<_> = orders.iter().collect();
+    accepted.sort_by(|a, b| {
+        a.1.remaining()
+            .total_cmp(&b.1.remaining())
+            .then(a.0.name.cmp(&b.0.name))
+    });
+    for (slot, mut text, mut color, mut node) in &mut slots {
+        let entry = accepted.get(slot.0);
+        let display = if entry.is_some() {
+            Display::Flex
         } else {
-            TEXT
+            Display::None
+        };
+        if node.display != display {
+            node.display = display;
+        }
+        let next = entry
+            .map(|(member, order, development)| {
+                let remaining = order.remaining().ceil() as u32;
+                let kind = if *development { " · OPTIONAL R&D" } else { "" };
+                format!(
+                    "{}{}    {}:{:02}\n{}",
+                    member.name,
+                    kind,
+                    remaining / 60,
+                    remaining % 60,
+                    crate::order_intake::requirements(order, &db)
+                )
+            })
+            .unwrap_or_default();
+        if text.0 != next {
+            text.0 = next;
+        }
+        let wanted = if entry.is_some_and(|(_, o, d)| !d && o.remaining() < 30.0) {
+            ERROR_TEXT
+        } else {
+            Color::srgb(0.90, 0.94, 0.96)
         };
         if color.0 != wanted {
             color.0 = wanted;
         }
-
-        let line = line.unwrap_or_default();
-        if text.0 != line {
-            text.0 = line;
-        }
     }
-
-    // Only the most urgent request gets its words shown; three at once is a
-    // wall of text nobody reads mid-shift.
-    let plea = pending
-        .first()
-        .map(|(_, order, _, development)| {
-            if *development {
-                format!("Optional development request - \"{}\"", order.plea)
-            } else {
-                format!("\"{}\"", order.plea)
-            }
+    let mut visitors: Vec<_> = waiting.iter().collect();
+    visitors.sort_by_key(|(_, p)| p.id);
+    let calls = visitors
+        .iter()
+        .map(|(member, p)| {
+            format!(
+                "{} · {} window\n{}",
+                member.name,
+                if member.role == "Medical" {
+                    "Medical"
+                } else {
+                    "Public"
+                },
+                if p.arrived {
+                    "Waiting to speak"
+                } else {
+                    "Coming to the window"
+                }
+            )
         })
-        .unwrap_or_default();
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let mut plea_line = plea_line.into_inner();
-    if plea_line.0 != plea {
-        plea_line.0 = plea;
+    if plea_line.0 != calls {
+        plea_line.0 = calls;
     }
-
-    let summary = format!("delivered {}   botched {}", shift.succeeded, shift.botched);
+    let extra = accepted.len().saturating_sub(ORDER_SLOTS);
+    let summary = format!(
+        "{} accepted{}  |  Tab: Orders\nDelivered {}   /   Botched {}",
+        accepted.len(),
+        if extra > 0 {
+            format!(" (+{extra} more)")
+        } else {
+            String::new()
+        },
+        shift.succeeded,
+        shift.botched
+    );
     let mut readout = readout.into_inner();
     if readout.0 != summary {
         readout.0 = summary;
@@ -8502,7 +8523,6 @@ fn handle_panel_clicks(
     // that merely reads the notebook.
     mut book: ResMut<BookView>,
     mut hplc_view: ResMut<HplcView>,
-    mut board_tab: ResMut<BoardTab>,
     mut social_view: ResMut<SocialView>,
 ) {
     let Some((player, mut mode)) = modes.iter_mut().next() else {
@@ -8564,8 +8584,17 @@ fn handle_panel_clicks(
                 *mode = mode.toggled_book();
                 return;
             }
-            PanelAction::ShowBoardTab(tab) => {
-                *board_tab = *tab;
+            PanelAction::OpenOrders => {
+                if let InteractionMode::Social {
+                    machine,
+                    return_to_book,
+                } = *mode
+                {
+                    *mode = InteractionMode::OrderDirectory {
+                        machine,
+                        return_to_book,
+                    };
+                }
                 continue;
             }
             PanelAction::ShowSocialDepartment(department) => {
@@ -8729,7 +8758,7 @@ fn handle_panel_clicks(
             | PanelAction::OpenRecipe(_)
             | PanelAction::CloseRecipe
             | PanelAction::CloseBook
-            | PanelAction::ShowBoardTab(_)
+            | PanelAction::OpenOrders
             | PanelAction::ShowSocialDepartment(_)
             | PanelAction::SelectSocialResident(_)
             | PanelAction::CloseSocial
@@ -8843,7 +8872,6 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<BookView>()
             .init_resource::<HplcView>()
-            .init_resource::<BoardTab>()
             .init_resource::<SocialView>()
             .add_message::<DispenseRequested>()
             .add_message::<AgitateRequested>()

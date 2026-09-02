@@ -235,7 +235,6 @@ fn generate_smuggler_visit(
     mut spawner: Option<ResMut<SmugglerSpawner>>,
     progress: Res<SmugglerProgress>,
     shift: Res<Shift>,
-    mut radio: ResMut<RadioLog>,
     chemists: Query<(), With<Chemist>>,
     social: Option<Res<crate::social::SocialState>>,
     mut residents: Query<
@@ -251,6 +250,7 @@ fn generate_smuggler_visit(
             Without<crate::social::NpcCommitment>,
         ),
     >,
+    mut intake: crate::order_intake::Intake,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
@@ -299,6 +299,14 @@ fn generate_smuggler_visit(
         return;
     };
 
+    let Some(context) = intake.admit(
+        crate::order_intake::RequestSource::Smuggler,
+        &identity,
+        &mut spawner.timer,
+        true,
+    ) else {
+        return;
+    };
     threat::dispatch_scripted_visit(
         &mut commands,
         &db,
@@ -306,6 +314,7 @@ fn generate_smuggler_visit(
         &rules,
         &mut residents,
         threat::ScriptedVisit {
+            context,
             name: &identity,
             role: &script.role,
             color: script.color,
@@ -313,12 +322,6 @@ fn generate_smuggler_visit(
             amount_units: visit.amount,
             plea: visit.plea.clone(),
         },
-    );
-
-    radio.push(
-        RadioEntry::new(channel_for(&script.role), visit.plea.clone())
-            .speaker(&identity)
-            .negative(),
     );
 }
 

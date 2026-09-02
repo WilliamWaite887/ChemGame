@@ -371,7 +371,7 @@ fn panel_input(
                     panel_open = true;
                     continue;
                 }
-                InteractionMode::Social { .. } => {
+                InteractionMode::Social { .. } | InteractionMode::OrderDirectory { .. } => {
                     *mode = mode.toggled_social();
                     panel_open = !mode.is_roaming();
                     continue;
@@ -449,6 +449,11 @@ pub enum InteractionMode {
     /// gameplay keybind in the game gates on [`InteractionMode::is_roaming`] —
     /// typing a label cannot also walk, drop, drink, inject or use anything.
     Labelling(Entity),
+    OrderConversation(Entity, u64),
+    OrderDirectory {
+        machine: Option<Entity>,
+        return_to_book: bool,
+    },
 }
 
 impl InteractionMode {
@@ -473,6 +478,8 @@ impl InteractionMode {
             // key while the label field is open, because a `b` belongs in the
             // word being typed. Answering "no change" rather than panicking
             // keeps that a presentation decision rather than an invariant.
+            InteractionMode::OrderConversation(..) => self,
+            InteractionMode::OrderDirectory { .. } => self,
             InteractionMode::Labelling(container) => InteractionMode::Labelling(container),
         }
     }
@@ -503,6 +510,14 @@ impl InteractionMode {
                     machine.map_or(InteractionMode::Roaming, InteractionMode::UsingMachine)
                 }
             }
+            InteractionMode::OrderConversation(..) => self,
+            InteractionMode::OrderDirectory {
+                machine,
+                return_to_book,
+            } => InteractionMode::Social {
+                machine,
+                return_to_book,
+            },
             InteractionMode::Labelling(container) => InteractionMode::Labelling(container),
         }
     }
@@ -518,9 +533,12 @@ impl InteractionMode {
         match *self {
             InteractionMode::UsingMachine(machine) => Some(machine),
             InteractionMode::ReadingBook(machine) => machine,
-            InteractionMode::Social { machine, .. } => machine,
+            InteractionMode::Social { machine, .. }
+            | InteractionMode::OrderDirectory { machine, .. } => machine,
             // A container, not a machine, and nothing to release.
-            InteractionMode::Roaming | InteractionMode::Labelling(_) => None,
+            InteractionMode::Roaming
+            | InteractionMode::Labelling(_)
+            | InteractionMode::OrderConversation(..) => None,
         }
     }
 }
@@ -681,6 +699,8 @@ fn request_interaction(
     evacuations: Query<(), With<NeedsMedicalEvacuation>>,
     mut requests: MessageWriter<InteractRequested>,
     mut evacuation_requests: MessageWriter<EvacuateCrewRequested>,
+    pending: Query<&crate::order_intake::AwaitingConversation>,
+    mut conversations: MessageWriter<crate::order_intake::OpenOrderConversation>,
 ) {
     if !keys.just_pressed(controls.bindings.interact) {
         return;
@@ -690,7 +710,14 @@ fn request_interaction(
             continue;
         }
         if let Some(target) = focus.target {
-            if evacuations.contains(target) {
+            if let Ok(waiting) = pending.get(target) {
+                if waiting.arrived {
+                    conversations.write(crate::order_intake::OpenOrderConversation {
+                        target,
+                        id: waiting.id,
+                    });
+                }
+            } else if evacuations.contains(target) {
                 evacuation_requests.write(EvacuateCrewRequested { target });
             } else {
                 requests.write(InteractRequested { target });
@@ -749,6 +776,7 @@ fn update_prompt(
     crew: Query<&crate::crew::CrewMember>,
     written: Query<&crate::labels::Label>,
     prompt: Single<&mut Text, With<InteractionPrompt>>,
+    pending: Query<&crate::order_intake::AwaitingConversation>,
 ) {
     let mut text = prompt.into_inner();
     let message = players
@@ -757,6 +785,14 @@ fn update_prompt(
             let empty_handed = !held.iter().any(|(holder, _)| holder.0 == player);
             let looking_at = focus.target.and_then(|target| {
                 let label = &interactables.get(target).ok()?.label;
+                if let Ok(waiting) = pending.get(target) {
+                    let name = crew.get(target).map_or("Crew member", |c| c.name.as_str());
+                    return Some(if waiting.arrived {
+                        format!("[E]  speak to {name}")
+                    } else {
+                        format!("{name} — heading to the window")
+                    });
+                }
                 // Occupied machines still show a prompt, just an unusable one,
                 // so the other chemist's activity is visible rather than
                 // mysterious.
@@ -994,6 +1030,7 @@ mod tests {
             .init_resource::<crate::settings::Settings>()
             .add_message::<InteractRequested>()
             .add_message::<EvacuateCrewRequested>()
+            .add_message::<crate::order_intake::OpenOrderConversation>()
             .add_systems(Update, request_interaction);
         let target = app.world_mut().spawn(NeedsMedicalEvacuation).id();
         app.world_mut().spawn((

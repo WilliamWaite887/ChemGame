@@ -114,7 +114,6 @@ fn generate_quack_visit(
     mut spawner: Option<ResMut<QuackSpawner>>,
     progress: Res<QuackProgress>,
     shift: Res<Shift>,
-    mut radio: ResMut<RadioLog>,
     chemists: Query<(), With<Chemist>>,
     social: Option<Res<crate::social::SocialState>>,
     mut residents: Query<
@@ -130,6 +129,7 @@ fn generate_quack_visit(
             Without<crate::social::NpcCommitment>,
         ),
     >,
+    mut intake: crate::order_intake::Intake,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
@@ -178,6 +178,14 @@ fn generate_quack_visit(
         return;
     };
 
+    let Some(context) = intake.admit(
+        crate::order_intake::RequestSource::Quack,
+        &identity,
+        &mut spawner.timer,
+        true,
+    ) else {
+        return;
+    };
     threat::dispatch_scripted_visit(
         &mut commands,
         &db,
@@ -185,6 +193,7 @@ fn generate_quack_visit(
         &rules,
         &mut residents,
         threat::ScriptedVisit {
+            context,
             name: &identity,
             role: &script.role,
             color: script.color,
@@ -192,12 +201,6 @@ fn generate_quack_visit(
             amount_units: visit.amount,
             plea: visit.plea.clone(),
         },
-    );
-
-    radio.push(
-        RadioEntry::new(channel_for(&script.role), visit.plea.clone())
-            .speaker(&identity)
-            .negative(),
     );
 }
 

@@ -36,7 +36,6 @@ use serde::Deserialize;
 use crate::antagonist::{nudge_suspicion, SecuritySuspicion};
 use crate::chem_data::ChemDb;
 use crate::crew::{recall_resident_for_order, spawn_crew_member};
-use crate::interaction::Interactable;
 use crate::net::is_authority;
 use crate::orders::{deliverable_amount, IllicitOrder, Order, OrderResolved, Shift, StationData};
 use crate::player::Chemist;
@@ -158,6 +157,7 @@ fn generate_bent_guard_visit(
             Without<crate::social::NpcCommitment>,
         ),
     >,
+    mut intake: crate::order_intake::Intake,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
@@ -205,11 +205,16 @@ fn generate_bent_guard_visit(
         return;
     };
 
-    // Built inline rather than through `threat::spawn_scripted_visit`, which
-    // is the *legitimate* scripted-visit shape: it hardcodes `specific: true`
-    // and adds no `IllicitOrder`. This follows `antagonist`'s illicit shape
-    // instead — `IllicitOrder` is what makes the match exact, and the two
-    // never stack. See `Order::specific`'s own doc comment.
+    // Exact requirements are public once heard. IllicitOrder stays private
+    // and controls the consequences of fulfilling the request.
+    let Some(context) = intake.admit(
+        crate::order_intake::RequestSource::BentGuard,
+        &name,
+        &mut spawner.timer,
+        true,
+    ) else {
+        return;
+    };
     let identity = crate::crew::CrewDef {
         name: name.clone(),
         role: script.role.clone(),
@@ -228,21 +233,23 @@ fn generate_bent_guard_visit(
     let reagent_name = db.reagents.get(reagent).name.clone();
     let amount = deliverable_amount(&db, reagent, chem_sim::Units::whole(visit.amount as i32));
     commands.entity(crew).insert((
-        Order {
-            reagent,
-            specific: false,
-            minimum_purity: 0.0,
-            amount,
-            plea: visit.plea.clone(),
-            patience,
-            waited: 0.0,
-        },
+        crate::order_intake::PendingOrder::new(
+            Order {
+                reagent,
+                specific: true,
+                minimum_purity: 0.0,
+                amount,
+                plea: visit.plea.clone(),
+                patience,
+                waited: 0.0,
+            },
+            context,
+        ),
         IllicitOrder,
-        Interactable::new(format!("{} — hand over {} {}", name, amount, reagent_name)),
+        crate::interaction::Interactable::new("Waiting to speak"),
     ));
 
-    // Deliberately no radio push here, unlike every other minor's spawner.
-    // See the module doc: the broadcast *is* the tell.
+    // Arrival speech and radio are selected by conversation intake.
     info!("bent guard: {} wants {}u {}", name, amount, reagent_name);
 }
 

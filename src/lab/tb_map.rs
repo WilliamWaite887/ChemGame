@@ -107,6 +107,96 @@ fn parse() -> Vec<Entity> {
         .entities
 }
 
+pub(crate) fn authored_queue_paths() -> crate::order_intake::queue::QueuePaths {
+    let map = parse();
+    let lane = |name: &str| {
+        let mut points: Vec<_> = map
+            .iter()
+            .filter(|e| {
+                classname(e).as_deref() == Some("queue_point")
+                    && property(e, "lane").as_deref() == Some(name)
+            })
+            .collect();
+        points.sort_by_key(|e| property(e, "sequence").unwrap().parse::<usize>().unwrap());
+        points
+            .into_iter()
+            .map(|e| {
+                let (x, z) = origin_xz(e).unwrap();
+                Vec3::new(x, 0.0, z)
+            })
+            .collect()
+    };
+    let clearances = map
+        .iter()
+        .filter_map(|e| {
+            if classname(e).as_deref() != Some("queue_point") {
+                return None;
+            }
+            let radius = property(e, "clearance")?.parse().ok()?;
+            let (x, z) = origin_xz(e)?;
+            Some((Vec3::new(x, 0.0, z), radius))
+        })
+        .collect();
+    crate::order_intake::queue::QueuePaths {
+        public: lane("public"),
+        medical: lane("medical"),
+        clearances,
+    }
+}
+
+#[test]
+fn pickup_queues_fit_the_whole_cast_and_clear_authored_furniture() {
+    use crate::order_intake::queue::{navigable_line, standing_points};
+    let areas = authored_walkable_areas();
+    let nav = NavGraph::build(&areas, NAV_RADIUS);
+    let paths = authored_queue_paths();
+    let solids = authored_solid_colliders();
+    let roster: Vec<crate::crew::CrewDef> =
+        ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap();
+    for (lane, anchors) in [("public", paths.public), ("medical", paths.medical)] {
+        let line = navigable_line(&anchors, &nav);
+        let points = standing_points(&line, &[], &paths.clearances);
+        assert!(
+            points.len() >= roster.len() + 6,
+            "{lane}: only {} standing places for {} possible identities",
+            points.len(),
+            roster.len() + 6
+        );
+        for (i, point) in points.iter().enumerate() {
+            assert!(
+                nav.standable_goal(*point).distance(*point) < 0.05,
+                "{lane} slot {i} is not standable: {point:?}"
+            );
+            for (center, half) in &solids {
+                let body = *point + Vec3::Y * crate::crew::BODY_OFFSET;
+                if (body.y - center.y).abs() >= half.y + 0.6 {
+                    continue;
+                }
+                let dx = (body.x - center.x).abs() - half.x;
+                let dz = (body.z - center.z).abs() - half.z;
+                assert!(
+                    dx >= NAV_RADIUS || dz >= NAV_RADIUS,
+                    "{lane} slot {i} clips furniture/wall at {point:?}: {center:?} {half:?}"
+                );
+            }
+            for other in points.iter().skip(i + 1) {
+                assert!(point.distance(*other) >= 0.84);
+            }
+        }
+        if lane == "public" {
+            assert!(
+                points.iter().any(|p| p.z > 10.0),
+                "public queue must extend outside the lobby"
+            );
+            assert!(
+                line.iter()
+                    .any(|p| p.z >= 6.2 && p.z <= 8.5 && p.x > 3.0 && p.x < 5.0),
+                "queue must cross the actual lobby doorway"
+            );
+        }
+    }
+}
+
 #[test]
 fn every_map_texture_has_a_runtime_asset() {
     for entity in parse() {
@@ -4010,6 +4100,7 @@ fn every_entity_in_the_map_is_a_class_the_game_registers() {
         "chemist_start",
         "department_spot",
         "crew_post",
+        "queue_point",
         "department_dressing",
         "decoration_spot",
         "conveyor_spot",

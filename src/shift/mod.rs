@@ -1245,7 +1245,16 @@ fn open_the_shift(mut shift: ResMut<Shift>, knowledge: Res<Knowledge>) {
 fn handle_call_it_a_shift(
     mut requests: MessageReader<FromClient<CallItAShift>>,
     boards: Query<&Machine>,
-    counter: Query<(), (With<crate::orders::Order>, crate::crew::NotResident)>,
+    counter: Query<
+        (),
+        (
+            Or<(
+                With<crate::orders::Order>,
+                With<crate::order_intake::PendingOrder>,
+            )>,
+            crate::crew::NotResident,
+        ),
+    >,
     mut shift: ResMut<Shift>,
     mut radio: ResMut<RadioLog>,
 ) {

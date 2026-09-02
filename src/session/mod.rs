@@ -51,6 +51,12 @@ impl Plugin for SessionPlugin {
 pub(crate) fn clear_session_state(world: &mut World) {
     // -- reset: read non-optionally somewhere ------------------------------
     reset::<crate::orders::Shift>(world);
+    reset::<crate::order_intake::IntakeState>(world);
+    reset::<crate::order_intake::queue::QueuePaths>(world);
+    reset::<crate::order_intake::queue::PreparedQueues>(world);
+    reset::<crate::order_intake::ui::ConversationView>(world);
+    reset::<crate::order_intake::ui::Signature>(world);
+    reset::<crate::npc_motion::NpcMotion>(world);
     reset::<crate::radio::RadioLog>(world);
     reset::<crate::radio::PendingBroadcasts>(world);
     reset::<crate::addiction::Addictions>(world);

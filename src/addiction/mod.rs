@@ -53,7 +53,6 @@ use crate::antagonist::SecuritySuspicion;
 use crate::body::Bloodstream;
 use crate::chem_data::ChemDb;
 use crate::crew::{spawn_crew_member, CrewMember, CrewPhase, CrewRoute};
-use crate::interaction::Interactable;
 use crate::knowledge::Knowledge;
 use crate::net::is_authority;
 use crate::orders::{
@@ -454,6 +453,8 @@ fn generate_addict_visits(
     shift: Res<Shift>,
     active: Query<&CrewMember, crate::crew::NotResident>,
     chemists: Query<(), With<Chemist>>,
+    mut intake: crate::order_intake::Intake,
+    mut residents: crate::crew::AvailableResidents,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
@@ -497,8 +498,23 @@ fn generate_addict_visits(
     // visit uses it: a visit that waited noticeably longer or shorter than
     // normal would itself be a statistical tell.
     let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
+    let Some(context) = intake.admit(
+        crate::order_intake::RequestSource::Addiction,
+        &crew_def.name,
+        &mut spawner.timer,
+        true,
+    ) else {
+        return;
+    };
     let lane = active.iter().count() as f32 * 0.95;
-    let crew = spawn_crew_member(&mut commands, crew_def, lane);
+    let crew = crate::crew::recall_resident_for_order(
+        &mut commands,
+        &mut residents,
+        &crew_def.name,
+        &crew_def.role,
+        lane,
+    )
+    .unwrap_or_else(|| spawn_crew_member(&mut commands, crew_def, lane));
 
     let reagent_name = db.reagents.get(reagent).name.clone();
     // The one spawner whose amounts are authored without knowing the reagent —
@@ -508,20 +524,20 @@ fn generate_addict_visits(
     // methamphetamine (10).
     let amount = deliverable_amount(&db, reagent, Units::whole(amount as i32));
     commands.entity(crew).insert((
-        Order {
-            reagent,
-            specific: false,
-            minimum_purity: 0.0,
-            amount,
-            plea: plea.clone(),
-            patience,
-            waited: 0.0,
-        },
+        crate::order_intake::PendingOrder::new(
+            Order {
+                reagent,
+                specific: true,
+                minimum_purity: 0.0,
+                amount,
+                plea: plea.clone(),
+                patience,
+                waited: 0.0,
+            },
+            context,
+        ),
         IllicitOrder,
-        Interactable::new(format!(
-            "{} — hand over {} {}",
-            crew_def.name, amount, reagent_name
-        )),
+        crate::interaction::Interactable::new("Waiting to speak"),
     ));
 
     info!(

@@ -1,0 +1,14 @@
+(
+    ordinary: [
+        "Chemist, have you got a moment?",
+        "Could you come to the window? I have a request.",
+        "When you've got a moment, I'd like to speak to you at the window.",
+    ],
+    campaign: [
+        "Chemist, there's something happening on the station we need to discuss.",
+        "Come to the window when you can. This concerns more than a routine delivery.",
+        "Chemist, I need a word about a station matter. Can you come over?",
+    ],
+    ordinary_reminders: ["Still waiting at the window, chemist. Can you spare a moment?"],
+    campaign_reminders: ["I'm still at the window. That station matter needs a conversation when you have a moment."],
+)

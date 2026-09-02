@@ -329,6 +329,10 @@ impl CrewRoute {
         self.pending.is_some() || self.waypoints.get(self.index).is_some()
     }
 
+    pub fn routing_failed(&self) -> bool {
+        self.unstick >= 6
+    }
+
     /// The walk in: to their place at the counter.
     pub fn arrival(lane: f32) -> Self {
         Self::arrival_for(DeliveryLane::Public, lane)
@@ -367,6 +371,12 @@ impl CrewRoute {
             replan_in: 0.0,
             unstick: 0,
         }
+    }
+
+    /// A reserved greeting/pickup position is a place, not a counter x-offset.
+    pub fn queue_to(&mut self, target: Vec3, lane: DeliveryLane) {
+        *self = Self::to(target);
+        self.delivery_lane = lane;
     }
 
     /// A fresh route straight back out of the station.
@@ -1114,6 +1124,19 @@ pub(crate) struct ReturnsToDuty;
 /// resident by that name is down. The caller falls back to spawning an
 /// ordinary, disposable customer in that case, exactly as before this
 /// existed.
+pub type AvailableResidents<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static CrewMember,
+        &'static Body,
+        &'static Bloodstream,
+        &'static mut CrewRoute,
+    ),
+    (With<Ambient>, Without<crate::social::NpcCommitment>),
+>;
+
 pub fn recall_resident_for_order(
     commands: &mut Commands,
     residents: &mut Query<
@@ -1229,7 +1252,7 @@ fn ambient_behaviour(
 /// call sites across thirteen modules — none of which should have to learn about
 /// the station's layout to ask for a customer. They spawn off-screen either way,
 /// so moving them the same frame is invisible.
-fn start_crew_at_their_department(
+pub(crate) fn start_crew_at_their_department(
     departments: Res<Departments>,
     crew_posts: Res<CrewPosts>,
     mut arriving: Query<(&CrewMember, &mut Transform), Added<CrewRoute>>,
@@ -1465,8 +1488,22 @@ pub(crate) fn walk_route(
         Option<&Bloodstream>,
         Has<ReturnsToDuty>,
     )>,
+    mut motion: Option<ResMut<crate::npc_motion::NpcMotion>>,
 ) {
-    for (entity, mut transform, mut route, member, blood, returns_to_duty) in &mut crew {
+    let mut walkers: Vec<_> = crew
+        .iter()
+        .map(|(entity, _, route, ..)| (u8::from(route.phase != CrewPhase::Leaving), entity))
+        .collect();
+    walkers.sort();
+    for (_, entity) in walkers {
+        let Ok((_, mut transform, mut route, member, blood, returns_to_duty)) =
+            crew.get_mut(entity)
+        else {
+            continue;
+        };
+        if motion.as_ref().is_some_and(|m| m.waiting(entity)) {
+            route.stall.restart();
+        }
         // Any chemical sedation stops a resident in place. Mild sedation is
         // still drowsiness rather than incapacity, but letting that resident
         // briskly walk home immediately after deciding to leave contradicts
@@ -1527,6 +1564,31 @@ pub(crate) fn walk_route(
             route.unstick = 0;
         }
 
+        if let Some(areas) = areas.as_deref() {
+            if route.waypoints.last().is_some_and(|last| {
+                crate::nav::flat_distance(transform.translation, *last) <= ARRIVE_EPSILON
+                    && crate::npc_motion::walkable_segment(
+                        areas,
+                        transform.translation,
+                        *last,
+                        BODY_OFFSET,
+                    )
+            }) {
+                route.index = route.waypoints.len();
+            }
+            while route.unstick == 0
+                && route.waypoints.get(route.index + 1).is_some_and(|next| {
+                    crate::npc_motion::walkable_segment(
+                        areas,
+                        transform.translation,
+                        *next,
+                        BODY_OFFSET,
+                    )
+                })
+            {
+                route.index += 1;
+            }
+        }
         let Some(target) = route.waypoints.get(route.index).copied() else {
             // Route finished. Arriving crew wait; leaving crew are done —
             // unless they were only ever a resident recalled for this one
@@ -1622,7 +1684,8 @@ pub(crate) fn walk_route(
         let chemistry = blood.map_or(1.0, |blood| blood.0.movement_multiplier());
         let stumble = crew_stride_multiplier(entity, time.elapsed_secs(), blood);
         let heading = Vec3::new(to_target.x, 0.0, to_target.z).normalize_or_zero();
-        let step = heading * WALK_SPEED * chemistry * stumble * time.delta_secs();
+        let step =
+            heading * (WALK_SPEED * chemistry * stumble * time.delta_secs()).min(flat.length());
         // Confined to the walkable floor, exactly like the chemist
         // (`player::apply_movement`) and a hostile pursuer
         // (`showdown::run_pursuers`). Following waypoints is not on its own
@@ -1643,14 +1706,40 @@ pub(crate) fn walk_route(
         // *through* the building; only the step out of the door is free.
         let walked_from = transform.translation;
         let candidate = walked_from + step;
-        let leaving_the_station =
-            route.phase == CrewPhase::Leaving && route.index + 1 == route.waypoints.len();
-        transform.translation = match (leaving_the_station, areas.as_deref()) {
-            (false, Some(areas)) => {
-                areas.contain_on_surface(candidate, crate::nav::NAV_RADIUS, BODY_OFFSET)
+        let leaving_the_station = route.phase == CrewPhase::Leaving
+            && route.index + 1 == route.waypoints.len()
+            && member.is_none_or(|m| departments.home(&m.role).is_none());
+        transform.translation = if let Some(motion) = motion.as_mut() {
+            motion.advance(
+                entity,
+                walked_from,
+                target,
+                *route.waypoints.last().unwrap_or(&target),
+                step.length(),
+                if leaving_the_station {
+                    None
+                } else {
+                    areas.as_deref()
+                },
+                BODY_OFFSET,
+            )
+        } else {
+            match (leaving_the_station, areas.as_deref()) {
+                (false, Some(areas)) => {
+                    areas.contain_on_surface(candidate, crate::nav::NAV_RADIUS, BODY_OFFSET)
+                }
+                _ => candidate,
             }
-            _ => candidate,
         };
+        if motion.as_ref().is_some_and(|m| m.waiting(entity)) {
+            route.stall.restart();
+            let travel = transform.translation - walked_from;
+            if travel.length_squared() > 0.000001 {
+                transform.rotation = Quat::from_rotation_y(travel.x.atan2(travel.z));
+            }
+            continue;
+        }
+
         // Face the direction of travel so they read as people rather than
         // sliding props.
         transform.rotation = Quat::from_rotation_y(to_target.x.atan2(to_target.z));
@@ -1846,6 +1935,7 @@ pub(crate) fn run_errands(
         Without<CrewRoute>,
     >,
     goals: Query<&Transform, Without<Errand>>,
+    mut motion: Option<ResMut<crate::npc_motion::NpcMotion>>,
 ) {
     let dt = time.delta_secs();
 
@@ -1915,11 +2005,13 @@ pub(crate) fn run_errands(
         }
 
         let step = errand.speed * dt;
-        if let Some(heading) =
-            errand
-                .trail
-                .walk(&mut transform, areas.as_deref(), step, BODY_OFFSET)
-        {
+        if let Some(heading) = errand.trail.walk_avoiding(
+            &mut transform,
+            areas.as_deref(),
+            step,
+            BODY_OFFSET,
+            motion.as_deref_mut().map(|m| (entity, m)),
+        ) {
             // Face the way they are going, the same as `walk_route` — an
             // errand-runner is a person crossing the room, and the whole point
             // of the primitive is that the player can watch them do it.
@@ -3164,8 +3256,15 @@ mod tests {
         }
         let wedged = app.world().get::<Transform>(crew).unwrap().translation;
 
+        let mut furthest_from_wall = 0.0_f32;
         for _ in 0..100 {
             tick(&mut app, 0.05);
+            let at = app.world().get::<Transform>(crew).unwrap().translation;
+            furthest_from_wall = furthest_from_wall.max(crate::nav::flat_distance(at, wedged));
+            assert!(
+                off_the_floor(&app, at) < 0.01,
+                "recovery left the floor at {at:?}"
+            );
         }
 
         let route = app.world().get::<CrewRoute>(crew).unwrap();
@@ -3175,8 +3274,8 @@ mod tests {
         );
         let at = app.world().get::<Transform>(crew).unwrap().translation;
         assert!(
-            crate::nav::flat_distance(at, wedged) > 0.5,
-            "still standing where they wedged, at {at:?}",
+            furthest_from_wall > 0.5,
+            "never walked clear of the wall, ending at {at:?}",
         );
         assert!(
             off_the_floor(&app, at) < 0.01,

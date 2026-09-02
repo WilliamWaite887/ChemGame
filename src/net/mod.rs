@@ -43,7 +43,7 @@ use crate::machines::{
     AgitationRun, Buffer, DispenseAmount, Hopper, HplcReport, Machine, Overclock, Overclocked,
     Thermostat,
 };
-use crate::orders::{CounterOrder, CrisisOrder, DevelopmentOrder, Order};
+use crate::orders::{CrisisOrder, DevelopmentOrder, Order};
 use crate::player::{Player, PlayerAccount};
 use crate::produce::Produce;
 use crate::rogue_security::Deterrent;
@@ -823,6 +823,8 @@ fn register_replication(app: &mut App) {
         // order queue sat empty. `patience`/`waited` are plain `f32`, so it
         // can finally ride the wire like everything else here.
         .replicate::<Order>()
+        .replicate::<crate::order_intake::AwaitingConversation>()
+        .replicate::<crate::order_intake::AcceptedOrder>()
         .replicate::<DevelopmentOrder>()
         // The one bit of the (deliberately server-side) `CrewRoute::phase` a
         // client's order queue HUD needs — see `crew::AtCounter`'s own doc
@@ -838,7 +840,6 @@ fn register_replication(app: &mut App) {
         // Same reasoning as `CrisisOrder`: a department's countermeasure
         // request is public by design, and both peers need to see the same
         // one open so either chemist can fill it.
-        .replicate::<CounterOrder>()
         .replicate::<Produce>()
         .replicate::<CrewMember>()
         .replicate::<CrewAppearance>()
@@ -1062,6 +1063,13 @@ mod tests {
                 RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
             ));
             register_replication(app);
+            app.add_mapped_client_message::<crate::order_intake::OpenOrderConversation>(
+                Channel::Ordered,
+            )
+            .add_mapped_client_message::<crate::order_intake::AcceptOrder>(Channel::Ordered)
+            .add_mapped_server_message::<crate::order_intake::OrderConversationOpened>(
+                Channel::Ordered,
+            );
             if dress {
                 app.add_plugins(AssetPlugin::default())
                     .init_asset::<Mesh>()
@@ -1096,6 +1104,165 @@ mod tests {
 
     fn connected_pair() -> (App, App) {
         connected_pair_inner(false)
+    }
+
+    #[test]
+    fn conversation_payload_is_private_until_talk_and_acceptance_reaches_late_joiners() {
+        use crate::order_intake::{
+            AcceptOrder, AcceptedOrder, AwaitingConversation, GreetingKind, IntakeState,
+            OpenOrderConversation, OrderConversationOpened, PendingOrder, RequestContext,
+            RequestSource,
+        };
+        #[derive(Resource, Default)]
+        struct Heard(Vec<OrderConversationOpened>);
+        let (mut server, mut client) = connected_pair();
+        server
+            .init_resource::<IntakeState>()
+            .insert_resource(crate::chem_data::ChemDb(
+                chem_sim::ChemData::from_ron(
+                    include_str!("../../assets/data/chem.reagents.ron"),
+                    include_str!("../../assets/data/chem.reactions.ron"),
+                )
+                .unwrap(),
+            ))
+            .add_systems(
+                Update,
+                (
+                    crate::order_intake::open_conversations,
+                    crate::order_intake::accept_orders,
+                )
+                    .chain(),
+            );
+        client.init_resource::<Heard>().add_systems(
+            Update,
+            |mut messages: MessageReader<OrderConversationOpened>, mut heard: ResMut<Heard>| {
+                heard.0.extend(messages.read().cloned());
+            },
+        );
+        let connection = **client
+            .world()
+            .resource::<bevy_replicon::test_app::TestClientEntity>();
+        server.world_mut().spawn((
+            crate::player::Chemist {
+                client: ClientId::Client(connection),
+            },
+            Transform::from_xyz(0.0, 0.93, 0.0),
+            Body::default(),
+            Bloodstream::default(),
+        ));
+        let order = Order {
+            reagent: chem_sim::ReagentId(0),
+            specific: true,
+            minimum_purity: 0.0,
+            amount: Units::whole(20),
+            plea: "Private campaign request details".into(),
+            patience: 180.0,
+            waited: 0.0,
+        };
+        let npc = server
+            .world_mut()
+            .spawn((
+                Replicated,
+                CrewMember {
+                    name: "Undercover visitor".into(),
+                    role: "Service".into(),
+                },
+                Transform::from_xyz(1.0, 0.93, 0.0),
+                PendingOrder::new(
+                    order.clone(),
+                    RequestContext {
+                        id: 81,
+                        source: RequestSource::Antagonist,
+                        campaign: Some(crate::arc::CampaignId(12)),
+                        greeting: GreetingKind::Campaign,
+                        step: None,
+                    },
+                ),
+                AwaitingConversation {
+                    id: 81,
+                    arrived: true,
+                },
+            ))
+            .id();
+        settle(&mut server, &mut client);
+        let guest_npc = client
+            .world_mut()
+            .query_filtered::<Entity, With<AwaitingConversation>>()
+            .single(client.world())
+            .unwrap();
+        assert!(client.world().get::<PendingOrder>(guest_npc).is_none());
+        assert!(client.world().get::<Order>(guest_npc).is_none());
+        client.world_mut().write_message(OpenOrderConversation {
+            target: guest_npc,
+            id: 81,
+        });
+        settle(&mut server, &mut client);
+        settle(&mut server, &mut client);
+        let heard = &client.world().resource::<Heard>().0;
+        assert_eq!(heard.len(), 1);
+        assert_eq!(heard[0].explanation, order.plea);
+        assert!(server.world().get::<Order>(npc).is_none());
+        client.world_mut().write_message(AcceptOrder {
+            target: guest_npc,
+            id: 81,
+        });
+        settle(&mut server, &mut client);
+        settle(&mut server, &mut client);
+        assert_eq!(
+            client.world().get::<Order>(guest_npc).unwrap().plea,
+            order.plea
+        );
+        assert!(client
+            .world()
+            .get::<AwaitingConversation>(guest_npc)
+            .is_none());
+        assert!(server.world().get::<AcceptedOrder>(npc).is_some());
+        // A fresh peer learns both shared states, without hearing the accepted request again.
+        server.world_mut().spawn((
+            Replicated,
+            CrewMember {
+                name: "Next visitor".into(),
+                role: "Medical".into(),
+            },
+            AwaitingConversation {
+                id: 82,
+                arrived: false,
+            },
+        ));
+        let mut late = App::new();
+        late.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+        ));
+        register_replication(&mut late);
+        late.add_mapped_client_message::<OpenOrderConversation>(Channel::Ordered)
+            .add_mapped_client_message::<AcceptOrder>(Channel::Ordered)
+            .add_mapped_server_message::<OrderConversationOpened>(Channel::Ordered);
+        late.finish();
+        server.connect_client(&mut late);
+        settle(&mut server, &mut late);
+        assert_eq!(
+            late.world_mut()
+                .query::<&Order>()
+                .iter(late.world())
+                .count(),
+            1
+        );
+        assert_eq!(
+            late.world_mut()
+                .query::<&AwaitingConversation>()
+                .iter(late.world())
+                .count(),
+            1
+        );
+        assert_eq!(
+            late.world_mut()
+                .query::<&PendingOrder>()
+                .iter(late.world())
+                .count(),
+            0
+        );
     }
 
     /// A pair where each end can build what it is sent.

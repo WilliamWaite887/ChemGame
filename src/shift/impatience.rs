@@ -184,7 +184,13 @@ fn tick_impatience(
     mut impatience: ResMut<Impatience>,
     mut radio: ResMut<RadioLog>,
     mut stability: MessageWriter<crate::instability::StabilityEvent>,
-    waiting: Query<(), (With<Order>, NotResident)>,
+    waiting: Query<
+        (),
+        (
+            Or<(With<Order>, With<crate::order_intake::PendingOrder>)>,
+            NotResident,
+        ),
+    >,
 ) {
     let mut rng = rand::rng();
 

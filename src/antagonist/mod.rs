@@ -361,6 +361,8 @@ fn generate_antagonist_orders(
     containers: Query<&Container>,
     produce: Query<&Produce>,
     produce_catalog: Option<Res<ProduceCatalog>>,
+    mut intake: crate::order_intake::Intake,
+    mut residents: crate::crew::AvailableResidents,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
@@ -466,27 +468,40 @@ fn generate_antagonist_orders(
         return;
     };
 
-    let crew = spawn_crew_member(&mut commands, crew_def, lane);
+    let Some(context) = intake.admit(
+        crate::order_intake::RequestSource::Antagonist,
+        &crew_def.name,
+        &mut spawner.timer,
+        true,
+    ) else {
+        return;
+    };
+    let crew = crate::crew::recall_resident_for_order(
+        &mut commands,
+        &mut residents,
+        &crew_def.name,
+        &crew_def.role,
+        lane,
+    )
+    .unwrap_or_else(|| spawn_crew_member(&mut commands, crew_def, lane));
 
     let reagent_name = db.reagents.get(reagent).name.clone();
     let amount = deliverable_amount(&db, reagent, Units::whole(amount as i32));
     commands.entity(crew).insert((
-        Order {
-            reagent,
-            // `IllicitOrder` is what makes this exact, not this field — the
-            // two never stack. See `Order::specific`'s own doc comment.
-            specific: false,
-            minimum_purity: 0.0,
-            amount,
-            plea: request.pretext.clone(),
-            patience,
-            waited: 0.0,
-        },
+        crate::order_intake::PendingOrder::new(
+            Order {
+                reagent,
+                specific: true,
+                minimum_purity: 0.0,
+                amount,
+                plea: request.pretext.clone(),
+                patience,
+                waited: 0.0,
+            },
+            context,
+        ),
         IllicitOrder,
-        Interactable::new(format!(
-            "{} — hand over {} {}",
-            crew_def.name, amount, reagent_name
-        )),
+        crate::interaction::Interactable::new("Waiting to speak"),
     ));
 
     let priming_delay = rng.random_range(PRIMING_DELAY_SECONDS.0..=PRIMING_DELAY_SECONDS.1);
@@ -1019,6 +1034,12 @@ mod tests {
     #[test]
     fn a_low_standing_request_is_reachable_from_the_start() {
         let mut app = antagonist_app();
+        app.insert_resource(crate::arc::Campaign::new(
+            crate::arc::AntagId::Spy,
+            crate::arc::Mode::default(),
+            1,
+        ));
+        app.world_mut().resource_mut::<Script>().0.offer_chance = 0.0;
         app.world_mut()
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_secs_f32(0.1));
@@ -1029,6 +1050,19 @@ mod tests {
             illicit.iter(app.world()).count(),
             1,
             "at least one request has no min_standing floor, so a fresh career must still see a visit"
+        );
+        let pending = app
+            .world_mut()
+            .query::<&crate::order_intake::PendingOrder>()
+            .single(app.world())
+            .unwrap();
+        assert_eq!(
+            pending.context.greeting,
+            crate::order_intake::GreetingKind::Campaign
+        );
+        assert_eq!(
+            pending.context.campaign,
+            Some(app.world().resource::<crate::arc::Campaign>().id)
         );
     }
 

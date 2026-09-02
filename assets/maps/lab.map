@@ -6473,3 +6473,111 @@
 "kind" "cargo.requisitions_desk"
 "angles" "0 180 0"
 }
+
+{
+"classname" "queue_point"
+"lane" "public"
+"sequence" "0"
+"origin" "-220 -244 0"
+}
+
+{
+"classname" "queue_point"
+"lane" "public"
+"sequence" "1"
+"origin" "-244 -244 0"
+}
+
+{
+"classname" "queue_point"
+"lane" "public"
+"sequence" "2"
+"origin" "-244 -176 0"
+}
+
+{
+"classname" "queue_point"
+"lane" "public"
+"sequence" "3"
+"origin" "-340 -176 0"
+}
+
+{
+"classname" "queue_point"
+"lane" "public"
+"sequence" "4"
+"origin" "-552 -176 0"
+}
+
+{
+"classname" "queue_point"
+"lane" "public"
+"sequence" "5"
+"origin" "-552 400 0"
+}
+
+{
+"classname" "queue_point"
+"lane" "public"
+"sequence" "6"
+"origin" "-552 2400 0"
+}
+
+{
+"classname" "queue_point"
+"lane" "medical"
+"sequence" "0"
+"origin" "-192 700 0"
+}
+
+{
+"classname" "queue_point"
+"lane" "medical"
+"sequence" "1"
+"origin" "-340 700 0"
+}
+
+{
+"classname" "queue_point"
+"lane" "medical"
+"sequence" "2"
+"origin" "-340 1064 0"
+}
+
+{
+"classname" "queue_point"
+"lane" "medical"
+"sequence" "3"
+"origin" "-448 1064 0"
+}
+
+{
+"classname" "queue_point"
+"lane" "medical"
+"sequence" "4"
+"origin" "-448 1600 0"
+}
+
+{
+"classname" "queue_point"
+"lane" "medical"
+"sequence" "5"
+"origin" "-448 2400 0"
+}
+
+// Leave crossing space at the corridor mouths of both pickup lines.
+{
+"classname" "queue_point"
+"lane" "clearance"
+"sequence" "0"
+"origin" "-440 -176 0"
+"clearance" "1.4"
+}
+
+{
+"classname" "queue_point"
+"lane" "clearance"
+"sequence" "1"
+"origin" "-412 1064 0"
+"clearance" "1.3"
+}

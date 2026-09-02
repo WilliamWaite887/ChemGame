@@ -25,7 +25,6 @@ use crate::lab::{DeliveryLane, DeliveryStations};
 use crate::net::is_authority;
 use crate::orders::{OrderResolved, Shift, StationData};
 use crate::player::Chemist;
-use crate::radio::{channel_for, RadioEntry, RadioLog};
 use crate::shift::current_rules;
 use crate::threat;
 use crate::AppState;
@@ -129,9 +128,10 @@ fn generate_obsessed_visit(
     mut spawner: Option<ResMut<ObsessedSpawner>>,
     progress: Res<ObsessedProgress>,
     shift: Res<Shift>,
-    mut radio: ResMut<RadioLog>,
     chemists: Query<(), With<Chemist>>,
     stations: Option<Res<DeliveryStations>>,
+    mut intake: crate::order_intake::Intake,
+    mut residents: crate::crew::AvailableResidents,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
@@ -155,12 +155,22 @@ fn generate_obsessed_visit(
         return;
     };
 
-    threat::spawn_scripted_visit(
+    let Some(context) = intake.admit(
+        crate::order_intake::RequestSource::Obsessed,
+        &script.name,
+        &mut spawner.timer,
+        false,
+    ) else {
+        return;
+    };
+    let visitor = threat::dispatch_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
         &rules,
+        &mut residents,
         threat::ScriptedVisit {
+            context,
             name: &script.name,
             role: &script.role,
             color: script.color,
@@ -170,17 +180,12 @@ fn generate_obsessed_visit(
         },
     );
 
-    let channel = channel_for(&script.role);
-    radio.push(
-        RadioEntry::new(channel, visit.plea.clone())
-            .speaker(&script.name)
-            .negative(),
-    );
-    radio.push(
-        RadioEntry::new(channel, visit.unsettling_line.clone())
-            .speaker(&script.name)
-            .negative(),
-    );
+    let extra = visit.unsettling_line.clone();
+    commands.queue(move |world: &mut World| {
+        if let Some(mut pending) = world.get_mut::<crate::order_intake::PendingOrder>(visitor) {
+            pending.extra_dialogue.push(extra);
+        }
+    });
 
     if visit.leaves_token {
         let (_, height) = ContainerKind::Bottle.dimensions();

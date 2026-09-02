@@ -605,18 +605,19 @@ fn turn_hostile_on_arrival(
 /// replicated [`Body`], with a `HazardFelt` alongside so `fx` kicks the
 /// victim's camera. Nothing about how a chemist takes damage is new here.
 #[allow(clippy::too_many_arguments)]
-fn run_pursuers(
+pub(crate) fn run_pursuers(
     time: Res<Time>,
     nav: Option<Res<NavGraph>>,
     areas: Option<Res<WalkableAreas>>,
-    mut pursuers: Query<(&mut Transform, &mut Pursuit, Option<&Bloodstream>)>,
+    mut pursuers: Query<(Entity, &mut Transform, &mut Pursuit, Option<&Bloodstream>)>,
     mut chemists: Query<(Entity, &Transform, &mut Body, &Chemist), Without<Pursuit>>,
     mut felt: MessageWriter<ToClients<HazardFelt>>,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
+    mut motion: Option<ResMut<crate::npc_motion::NpcMotion>>,
 ) {
     let dt = time.delta_secs();
 
-    for (mut transform, mut pursuit, blood) in &mut pursuers {
+    for (entity, mut transform, mut pursuit, blood) in &mut pursuers {
         if blood.is_some_and(|blood| blood.0.status(chem_sim::StatusKind::Pacified).intensity > 0.0)
         {
             pursuit.moving = false;
@@ -663,7 +664,13 @@ fn run_pursuers(
             let step = pursuit.speed * dt;
             pursuit.moving = pursuit
                 .trail
-                .walk(&mut transform, areas.as_deref(), step, BODY_OFFSET)
+                .walk_avoiding(
+                    &mut transform,
+                    areas.as_deref(),
+                    step,
+                    BODY_OFFSET,
+                    motion.as_deref_mut().map(|m| (entity, m)),
+                )
                 .is_some();
             continue;
         }

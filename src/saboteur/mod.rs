@@ -149,8 +149,9 @@ fn generate_saboteur_visit(
     mut spawner: Option<ResMut<SaboteurSpawner>>,
     progress: Res<SaboteurProgress>,
     shift: Res<Shift>,
-    mut radio: ResMut<RadioLog>,
     chemists: Query<(), With<Chemist>>,
+    mut intake: crate::order_intake::Intake,
+    mut residents: crate::crew::AvailableResidents,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
         return;
@@ -175,12 +176,22 @@ fn generate_saboteur_visit(
         return;
     };
 
-    threat::spawn_scripted_visit(
+    let Some(context) = intake.admit(
+        crate::order_intake::RequestSource::Saboteur,
+        &script.name,
+        &mut spawner.timer,
+        true,
+    ) else {
+        return;
+    };
+    threat::dispatch_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
         &rules,
+        &mut residents,
         threat::ScriptedVisit {
+            context,
             name: &script.name,
             role: &script.role,
             color: script.color,
@@ -188,12 +199,6 @@ fn generate_saboteur_visit(
             amount_units: visit.amount,
             plea: visit.plea.clone(),
         },
-    );
-
-    radio.push(
-        RadioEntry::new(channel_for(&script.role), visit.plea.clone())
-            .speaker(&script.name)
-            .negative(),
     );
 }
 

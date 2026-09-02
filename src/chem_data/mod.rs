@@ -60,6 +60,11 @@ fn finish_loading(
     from_args: Option<Res<crate::net::LaunchedFromArgs>>,
     mode: Res<crate::net::LaunchMode>,
 ) {
+    // Asset reads finish independently. Removing the first result before the
+    // other exists permanently loses it and leaves startup on Loading.
+    if !reagent_lists.contains(&pending.reagents) || !reaction_lists.contains(&pending.reactions) {
+        return;
+    }
     let (Some(reagents), Some(reactions)) = (
         reagent_lists.remove(&pending.reagents),
         reaction_lists.remove(&pending.reactions),
@@ -120,6 +125,32 @@ fn next_state_after_loading(from_args: bool, mode: crate::net::LaunchMode) -> Ap
 mod tests {
     use super::*;
     use crate::net::{steam::LobbyId, LaunchMode};
+
+    #[test]
+    fn loading_keeps_the_first_asset_until_the_other_file_is_ready() {
+        let mut app = App::new();
+        let mut reagents = Assets::<ReagentList>::default();
+        let reagent_handle = reagents.add(ReagentList(Vec::new()));
+        let mut reactions = Assets::<ReactionList>::default();
+        let reaction_handle = reactions.add(ReactionList(Vec::new()));
+        reactions.remove(&reaction_handle);
+        app.insert_resource(reagents)
+            .insert_resource(reactions)
+            .insert_resource(PendingChemData {
+                reagents: reagent_handle.clone(),
+                reactions: reaction_handle,
+            })
+            .insert_resource(NextState::<AppState>::default())
+            .insert_resource(LaunchMode::Singleplayer)
+            .add_systems(Update, finish_loading);
+        app.update();
+        app.update();
+        assert!(app
+            .world()
+            .resource::<Assets<ReagentList>>()
+            .contains(&reagent_handle));
+        assert!(!app.world().contains_resource::<ChemDb>());
+    }
 
     #[test]
     fn a_guest_waits_in_connecting_however_they_were_launched() {
