@@ -10,7 +10,8 @@
     // antagonist.ron's own gap_multiplier.
     gap_multiplier: (5.0, 9.0),
     hostile_below: -8,
-    redeemed_at: 15,
+    // Full recovery on the bounded department-standing scale.
+    redeemed_at: 10,
     // Applied only on a refused, `physical: true` encounter, and only once
     // standing is already at or below hostile_below — see
     // rogue_security::expire_rogue_encounters.

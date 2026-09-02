@@ -31,7 +31,8 @@ use crate::body::{Bloodstream, Body};
 use crate::character_lab::{LocomotionPreview, TestSubject};
 use crate::chem_world::ChemicalPuddle;
 use crate::containers::{
-    ArmedCharge, Container, HeldBy, InSlot, InSlotB, InventorySlot, SelectedInventorySlot, Stored,
+    ArmedCharge, Container, HeldBy, InSlot, InSlotB, InSlotC, InventorySlot, SelectedInventorySlot,
+    Stored,
 };
 use crate::crew::{AtCounter, CrewAppearance, CrewMember, NeedsMedicalEvacuation};
 use crate::cult::{CultHerald, CultVisual, Cultist, RitualAnchor, RitualFocus};
@@ -802,6 +803,7 @@ fn register_replication(app: &mut App) {
         // The Mixing Chamber's second beaker slot. Same reasoning as `InSlot`
         // itself: both chemists have to see which beaker is in which slot.
         .replicate::<InSlotB>()
+        .replicate::<InSlotC>()
         // What is shut in the locker, and which one. Both ends need it: the
         // guest's copy is what hides a stored beaker and what fills the panel
         // when they open the locker themselves.
@@ -1352,6 +1354,37 @@ mod tests {
         assert_eq!(held.0, mapped_owner);
         assert_eq!(entry.slot, 2);
         assert_eq!(container.kind, ContainerKind::SmokeProjector);
+    }
+
+    #[test]
+    fn tertiary_delivery_slot_replicates_with_its_mapped_machine() {
+        let (mut server, mut client) = connected_pair();
+        let window = server
+            .world_mut()
+            .spawn((
+                Replicated,
+                Machine::new(crate::machines::MachineKind::DeliveryWindow),
+            ))
+            .id();
+        server.world_mut().spawn((
+            Replicated,
+            Container::new(ContainerKind::LargeBeaker),
+            InSlotC(window),
+        ));
+
+        settle(&mut server, &mut client);
+
+        let mapped_window = client
+            .world_mut()
+            .query_filtered::<Entity, With<Machine>>()
+            .single(client.world())
+            .unwrap();
+        let slot = client
+            .world_mut()
+            .query::<&InSlotC>()
+            .single(client.world())
+            .unwrap();
+        assert_eq!(slot.0, mapped_window);
     }
 
     #[test]

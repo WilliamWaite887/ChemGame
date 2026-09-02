@@ -26,8 +26,8 @@ use chem_sim::{Solution, Units};
 
 use crate::interaction::Interactable;
 use crate::machines::{
-    Buffer, ContainerSlot, ContainerSlotB, DispenseAmount, Facing, Hopper, Machine, MachineKind,
-    Thermostat,
+    Buffer, ContainerSlot, ContainerSlotB, ContainerSlotC, DispenseAmount, Facing, Hopper, Machine,
+    MachineKind, Thermostat,
 };
 use crate::net::is_authority;
 use crate::AppState;
@@ -1543,20 +1543,25 @@ impl MachineFit {
 /// `gltf_xyz_m` entries. GLBs use floor-origin local coordinates with `+Z` as
 /// their working face; [`MachineFit::visual_point_offset`] performs the one
 /// conversion needed by both north/south and east/west placements.
-fn authored_container_sockets(kind: MachineKind) -> (Option<Vec3>, Option<Vec3>) {
-    let a = |point| (Some(point), None);
+fn authored_container_sockets(kind: MachineKind) -> (Option<Vec3>, Option<Vec3>, Option<Vec3>) {
+    let a = |point| (Some(point), None, None);
 
     match kind {
         MachineKind::ChemMaster5000 => a(Vec3::new(0.0, 1.77, 0.10)),
         MachineKind::MixingChamber => (
             Some(Vec3::new(-0.28, 1.77, 0.08)),
             Some(Vec3::new(0.28, 1.77, 0.08)),
+            None,
         ),
         MachineKind::Grinder => a(Vec3::new(0.30, 1.14, 0.08)),
         MachineKind::Analyzer => a(Vec3::new(-0.16, 1.43, 0.04)),
         MachineKind::ReactionChamber => a(Vec3::new(0.0, 1.58, 0.13)),
-        MachineKind::DeliveryWindow => a(Vec3::new(0.0, 1.27, 0.14)),
-        MachineKind::StandingBoard | MachineKind::Locker => (None, None),
+        MachineKind::DeliveryWindow => (
+            Some(Vec3::new(-0.65, 1.27, 0.14)),
+            Some(Vec3::new(0.0, 1.27, 0.14)),
+            Some(Vec3::new(0.65, 1.27, 0.14)),
+        ),
+        MachineKind::StandingBoard | MachineKind::Locker => (None, None, None),
     }
 }
 
@@ -1855,7 +1860,20 @@ pub(crate) fn dress_machines(
         // what is in your hand *inside*, and a slot would catch the first
         // beaker on the roof instead.
         match authored_container_sockets(kind) {
-            (Some(slot_a), Some(slot_b)) => {
+            (Some(slot_a), Some(slot_b), Some(slot_c)) => {
+                commands.entity(entity).insert((
+                    ContainerSlot {
+                        offset: fit.visual_point_offset(slot_a),
+                    },
+                    ContainerSlotB {
+                        offset: fit.visual_point_offset(slot_b),
+                    },
+                    ContainerSlotC {
+                        offset: fit.visual_point_offset(slot_c),
+                    },
+                ));
+            }
+            (Some(slot_a), Some(slot_b), None) => {
                 commands.entity(entity).insert((
                     ContainerSlot {
                         offset: fit.visual_point_offset(slot_a),
@@ -1865,13 +1883,13 @@ pub(crate) fn dress_machines(
                     },
                 ));
             }
-            (Some(slot_a), None) => {
+            (Some(slot_a), None, None) => {
                 commands.entity(entity).insert(ContainerSlot {
                     offset: fit.visual_point_offset(slot_a),
                 });
             }
-            (None, None) => {}
-            (None, Some(_)) => unreachable!("slot B cannot exist without slot A"),
+            (None, None, None) => {}
+            _ => unreachable!("container slots must be contiguous from A"),
         }
     }
 }
@@ -1982,33 +2000,47 @@ mod tests {
                 MachineKind::ChemMaster5000,
                 Vec3::new(0.0, 1.77, 0.10),
                 None,
+                None,
             ),
             (
                 MachineKind::MixingChamber,
                 Vec3::new(-0.28, 1.77, 0.08),
                 Some(Vec3::new(0.28, 1.77, 0.08)),
+                None,
             ),
-            (MachineKind::Grinder, Vec3::new(0.30, 1.14, 0.08), None),
-            (MachineKind::Analyzer, Vec3::new(-0.16, 1.43, 0.04), None),
+            (
+                MachineKind::Grinder,
+                Vec3::new(0.30, 1.14, 0.08),
+                None,
+                None,
+            ),
+            (
+                MachineKind::Analyzer,
+                Vec3::new(-0.16, 1.43, 0.04),
+                None,
+                None,
+            ),
             (
                 MachineKind::ReactionChamber,
                 Vec3::new(0.0, 1.58, 0.13),
                 None,
+                None,
             ),
             (
                 MachineKind::DeliveryWindow,
-                Vec3::new(0.0, 1.27, 0.14),
-                None,
+                Vec3::new(-0.65, 1.27, 0.14),
+                Some(Vec3::new(0.0, 1.27, 0.14)),
+                Some(Vec3::new(0.65, 1.27, 0.14)),
             ),
         ];
         let machines: Vec<_> = authored
             .iter()
-            .map(|(kind, _, _)| (*kind, app.world_mut().spawn(Machine::new(*kind)).id()))
+            .map(|(kind, _, _, _)| (*kind, app.world_mut().spawn(Machine::new(*kind)).id()))
             .collect();
 
         app.update();
 
-        for ((kind, slot_a, slot_b), (_, entity)) in authored.into_iter().zip(machines) {
+        for ((kind, slot_a, slot_b, slot_c), (_, entity)) in authored.into_iter().zip(machines) {
             let fit = fallback_machine_fit(kind);
             let yaw = Quat::from_rotation_y(fit.facing.x.atan2(fit.facing.z));
             let root = app.world().get::<Transform>(entity).unwrap().translation;
@@ -2029,6 +2061,17 @@ mod tests {
                     );
                 }
                 None => assert!(app.world().get::<ContainerSlotB>(entity).is_none()),
+            }
+            match slot_c {
+                Some(slot_c) => {
+                    let actual_c = root + app.world().get::<ContainerSlotC>(entity).unwrap().offset;
+                    let expected_c = fit.base + yaw * slot_c;
+                    assert!(
+                        actual_c.distance(expected_c) < 0.000_01,
+                        "{kind:?} slot C is at {actual_c}, expected authored socket {expected_c}"
+                    );
+                }
+                None => assert!(app.world().get::<ContainerSlotC>(entity).is_none()),
             }
         }
     }

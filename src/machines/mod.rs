@@ -4,6 +4,8 @@
 //! systems here apply them, so co-op can replicate actions later without
 //! rewriting any UI.
 
+use std::collections::HashSet;
+
 use bevy::ecs::entity::MapEntities;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
@@ -16,7 +18,7 @@ use crate::body::ApplyHeldRequested;
 use crate::chem_data::ChemDb;
 use crate::containers::{
     free_inventory_slot, set_down_lift, spawn_container, Container, ContainerKind, HeldBy, InSlot,
-    InSlotB, InventorySlot, SelectedInventorySlot, Stored,
+    InSlotB, InSlotC, InventorySlot, SelectedInventorySlot, Stored,
 };
 use crate::interaction::{
     InteractRequested, Interactable, InteractionMode, LeaveMachineRequested, MachineOpened,
@@ -408,6 +410,12 @@ pub struct ContainerSlotB {
     pub offset: Vec3,
 }
 
+/// A delivery window's third visible tray position.
+#[derive(Component)]
+pub struct ContainerSlotC {
+    pub offset: Vec3,
+}
+
 /// The unit vector out of a machine's working face — the side a chemist stands
 /// on to use it.
 ///
@@ -558,15 +566,15 @@ pub enum BufferDirection {
 
 /// Which of a machine's container slots a request means.
 ///
-/// Every machine but the [`MachineKind::MixingChamber`] has exactly one slot,
-/// so `A` is the only value their panels ever send — this exists at all so the
-/// Mixing Chamber's second beaker can be addressed without the request
-/// silently acting on whichever container happens to occupy slot A.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+/// Most machines use `A`; the Mixing Chamber uses `A`/`B`, and delivery
+/// windows use all three tray positions. Naming the slot prevents an action
+/// from silently targeting whichever container happens to be found first.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub enum MachineSlot {
     #[default]
     A,
     B,
+    C,
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, MapEntities)]
@@ -684,6 +692,14 @@ pub fn slotted_container_b(machine: Entity, slotted: &Query<(Entity, &InSlotB)>)
         .map(|(entity, _)| entity)
 }
 
+/// The same, for a delivery window's third tray position.
+pub fn slotted_container_c(machine: Entity, slotted: &Query<(Entity, &InSlotC)>) -> Option<Entity> {
+    slotted
+        .iter()
+        .find(|(_, slot)| slot.0 == machine)
+        .map(|(entity, _)| entity)
+}
+
 /// Using a machine with a beaker in hand loads it; using one empty-handed
 /// opens the panel. That matches how SS13 plays and avoids a separate
 /// "insert" control.
@@ -692,16 +708,23 @@ pub fn slotted_container_b(machine: Entity, slotted: &Query<(Entity, &InSlotB)>)
 /// *what* is in hand rather than merely that something is, because a plant
 /// dropped into the dispenser's beaker slot would sit there doing nothing with
 /// no way to tell the player why.
+type MachineSockets<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Machine,
+        Option<&'static ContainerSlot>,
+        Option<&'static ContainerSlotB>,
+        Option<&'static ContainerSlotC>,
+        &'static Transform,
+    ),
+>;
+
 #[allow(clippy::too_many_arguments)]
 fn handle_machine_interact(
     mut commands: Commands,
     mut requests: MessageReader<FromClient<InteractRequested>>,
-    mut machines: Query<(
-        &mut Machine,
-        Option<&ContainerSlot>,
-        Option<&ContainerSlotB>,
-        &Transform,
-    )>,
+    mut machines: MachineSockets,
     mut hoppers: Query<&mut Hopper>,
     mut modes: Query<&mut InteractionMode>,
     chemists: Query<(Entity, &Chemist)>,
@@ -709,11 +732,13 @@ fn handle_machine_interact(
     produce: Query<&Produce>,
     slotted: Query<(Entity, &InSlot)>,
     slotted_b: Query<(Entity, &InSlotB)>,
+    slotted_c: Query<(Entity, &InSlotC)>,
     stored: Query<(Entity, &Stored)>,
     bodies: Query<&crate::body::Body>,
     bloodstreams: Query<&crate::body::Bloodstream>,
     mut opened: MessageWriter<ToClients<MachineOpened>>,
 ) {
+    let mut reserved_slots = HashSet::new();
     for request in requests.read() {
         // The sender's identity comes from the connection, never from the
         // message. A client that could name its own player entity could act as
@@ -731,7 +756,8 @@ fn handle_machine_interact(
         {
             continue;
         }
-        let Ok((mut machine, slot, slot_b, transform)) = machines.get_mut(request.target) else {
+        let Ok((mut machine, slot, slot_b, slot_c, transform)) = machines.get_mut(request.target)
+        else {
             continue;
         };
 
@@ -784,31 +810,43 @@ fn handle_machine_interact(
 
         let loading = carrying.filter(|item| !produce.contains(*item));
 
-        // Slot A first; slot B only exists on the Mixing Chamber, and only
-        // comes into play once A is already taken — that is what lets it hold
-        // two beakers at once instead of forcing an eject to swap one in.
-        let free_slot = match (slot, slot_b) {
-            (Some(slot), _) if slotted_container(request.target, &slotted).is_none() => {
-                Some((slot.offset, false))
+        // Reserve immediately as the command buffer is deferred: simultaneous
+        // interactions must see A, B, then C rather than all choosing A.
+        let free_slot = match (slot, slot_b, slot_c) {
+            (Some(slot), _, _)
+                if slotted_container(request.target, &slotted).is_none()
+                    && !reserved_slots.contains(&(request.target, MachineSlot::A)) =>
+            {
+                Some((slot.offset, MachineSlot::A))
             }
-            (_, Some(slot_b)) if slotted_container_b(request.target, &slotted_b).is_none() => {
-                Some((slot_b.offset, true))
+            (_, Some(slot_b), _)
+                if slotted_container_b(request.target, &slotted_b).is_none()
+                    && !reserved_slots.contains(&(request.target, MachineSlot::B)) =>
+            {
+                Some((slot_b.offset, MachineSlot::B))
+            }
+            (_, _, Some(slot_c))
+                if slotted_container_c(request.target, &slotted_c).is_none()
+                    && !reserved_slots.contains(&(request.target, MachineSlot::C)) =>
+            {
+                Some((slot_c.offset, MachineSlot::C))
             }
             _ => None,
         };
 
         match (loading, free_slot) {
-            (Some(container), Some((offset, in_b))) => {
+            (Some(container), Some((offset, slot))) => {
+                reserved_slots.insert((request.target, slot));
                 let mut item = commands.entity(container);
                 item.remove::<HeldBy>()
                     .remove::<InventorySlot>()
                     .remove::<ChildOf>()
                     .insert(Transform::from_translation(transform.translation + offset));
-                if in_b {
-                    item.insert(InSlotB(request.target));
-                } else {
-                    item.insert(InSlot(request.target));
-                }
+                match slot {
+                    MachineSlot::A => item.insert(InSlot(request.target)),
+                    MachineSlot::B => item.insert(InSlotB(request.target)),
+                    MachineSlot::C => item.insert(InSlotC(request.target)),
+                };
             }
             _ => {
                 if !machine.available_to(player) {
@@ -1626,6 +1664,7 @@ fn handle_buffer_transfer(
         let target = match request.slot {
             MachineSlot::A => slotted_container(request.machine, &slotted),
             MachineSlot::B => slotted_container_b(request.machine, &slotted_b),
+            MachineSlot::C => None,
         };
         let Some(target) = target else {
             continue;
@@ -1830,9 +1869,8 @@ fn give_back(
 /// Refused outright with empty hands the only way in — unlike
 /// [`handle_take`], which still falls back to setting the item down. A locker
 /// take always names the one item it means, so a full-handed take has one
-/// natural place to land; an eject with a machine that has a second slot
-/// (only the Mixing Chamber does) does not, and a fallback spot shared by
-/// both slots would just let two ejects in a row land on top of each other.
+/// natural place to land; an eject from multi-slot equipment does not, and a
+/// fallback spot shared by several slots would let consecutive ejects overlap.
 fn handle_eject(
     mut commands: Commands,
     mut requests: MessageReader<FromClient<EjectRequested>>,
@@ -1841,6 +1879,7 @@ fn handle_eject(
     chemists: Query<(Entity, &Chemist)>,
     slotted: Query<(Entity, &InSlot)>,
     slotted_b: Query<(Entity, &InSlotB)>,
+    slotted_c: Query<(Entity, &InSlotC)>,
     held: Query<&HeldBy>,
     inventory: Query<&InventorySlot>,
     selected: Query<&SelectedInventorySlot>,
@@ -1856,6 +1895,7 @@ fn handle_eject(
         let container = match request.slot {
             MachineSlot::A => slotted_container(request.machine, &slotted),
             MachineSlot::B => slotted_container_b(request.machine, &slotted_b),
+            MachineSlot::C => slotted_container_c(request.machine, &slotted_c),
         };
         let Some(container) = container else {
             continue;
@@ -1871,6 +1911,7 @@ fn handle_eject(
                 MachineKind::MixingChamber,
                 MachineKind::Grinder,
                 MachineKind::Analyzer,
+                MachineKind::DeliveryWindow,
                 MachineKind::ReactionChamber,
             ],
             &chemists,
@@ -1895,6 +1936,7 @@ fn handle_eject(
         match request.slot {
             MachineSlot::A => commands.entity(container).remove::<InSlot>(),
             MachineSlot::B => commands.entity(container).remove::<InSlotB>(),
+            MachineSlot::C => commands.entity(container).remove::<InSlotC>(),
         };
         let mut item = commands.entity(container);
         item.insert(InventorySlot {
@@ -2025,6 +2067,7 @@ fn handle_empty(
         let target = match request.slot {
             MachineSlot::A => slotted_container(request.machine, &slotted),
             MachineSlot::B => slotted_container_b(request.machine, &slotted_b),
+            MachineSlot::C => None,
         };
         let Some(target) = target else {
             continue;
@@ -4449,6 +4492,56 @@ mod tests {
             *app.world().get::<InteractionMode>(loader).unwrap(),
             InteractionMode::Roaming,
             "loading is a physical action, not a second panel claim"
+        );
+    }
+
+    #[test]
+    fn simultaneous_delivery_loads_reserve_three_slots_and_the_fourth_keeps_their_item() {
+        let mut app = test_app();
+        let window = app
+            .world_mut()
+            .spawn((
+                Machine::new(MachineKind::DeliveryWindow),
+                ContainerSlot {
+                    offset: Vec3::X * -0.6,
+                },
+                ContainerSlotB { offset: Vec3::ZERO },
+                ContainerSlotC {
+                    offset: Vec3::X * 0.6,
+                },
+                Transform::default(),
+            ))
+            .id();
+        let operators: Vec<_> = (0..4).map(|_| chemist(&mut app)).collect();
+        let containers: Vec<_> = operators
+            .iter()
+            .map(|(_, player)| {
+                app.world_mut()
+                    .spawn((Container::new(ContainerKind::Beaker), HeldBy(*player)))
+                    .id()
+            })
+            .collect();
+        for (client, _) in &operators {
+            app.world_mut().write_message(FromClient {
+                client_id: *client,
+                message: InteractRequested { target: window },
+            });
+        }
+
+        app.update();
+
+        assert_eq!(app.world().get::<InSlot>(containers[0]).unwrap().0, window);
+        assert_eq!(app.world().get::<InSlotB>(containers[1]).unwrap().0, window);
+        assert_eq!(app.world().get::<InSlotC>(containers[2]).unwrap().0, window);
+        assert_eq!(
+            app.world().get::<HeldBy>(containers[3]).map(|held| held.0),
+            Some(operators[3].1),
+            "a full tray must not steal or drop the fourth chemist's container"
+        );
+        assert_eq!(
+            *app.world().get::<InteractionMode>(operators[3].1).unwrap(),
+            InteractionMode::UsingMachine(window),
+            "the fourth chemist should see the visibly full panel"
         );
     }
 

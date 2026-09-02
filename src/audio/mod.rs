@@ -60,6 +60,31 @@ const TENSE_AMBIENCE: [&str; 2] = [
 /// Quieter than any one-shot — this is a bed, not a cue.
 const AMBIENCE_VOLUME: f32 = 0.35;
 
+/// The host-selected ambience pool. Kept deliberately closed so malformed
+/// network data cannot name an arbitrary asset path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum AmbiencePool {
+    Calm,
+    Tense,
+}
+
+/// One ordered, bounds-checked ambience choice shared by every listener.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Message)]
+struct AmbienceCue {
+    pool: AmbiencePool,
+    track: u8,
+}
+
+impl AmbienceCue {
+    fn is_valid(self) -> bool {
+        usize::from(self.track)
+            < match self.pool {
+                AmbiencePool::Calm => CALM_AMBIENCE.len(),
+                AmbiencePool::Tense => TENSE_AMBIENCE.len(),
+            }
+    }
+}
+
 /// The rad klaxon runs for the whole length of a leak — forty seconds, on a
 /// seven-second loop — so it is mixed well under a one-shot. It is there to
 /// keep the room feeling wrong while you dose up, not to drown out the radio
@@ -73,6 +98,7 @@ impl Plugin for SfxPlugin {
         app.add_message::<PlaySfx>()
             .add_message::<EmitWorldSfx>()
             .add_server_message::<WorldSfx>(Channel::Ordered)
+            .add_server_message::<AmbienceCue>(Channel::Ordered)
             .init_resource::<RadioCursor>()
             .init_resource::<StabilityAudioCursor>()
             .init_resource::<AmbienceCooldown>()
@@ -109,7 +135,7 @@ impl Plugin for SfxPlugin {
                     play_radio_sfx,
                     play_ui_click_sfx,
                     play_door_sfx.run_if(is_authority),
-                    cycle_ambience,
+                    (schedule_ambience.run_if(is_authority), play_ambience).chain(),
                 )
                     .run_if(in_state(AppState::Playing)),
             );
@@ -1050,7 +1076,7 @@ fn play_ui_click_sfx(
     }
 }
 
-/// Marks whichever ambience loop is currently playing, so [`cycle_ambience`]
+/// Marks whichever ambience loop is currently playing, so [`schedule_ambience`]
 /// knows when it has ended and it is time to pick another.
 #[derive(Component)]
 struct AmbiencePlayer;
@@ -1062,7 +1088,15 @@ struct AmbiencePlayer;
 /// its `waiting`-count query — that count decides whether *the button* is
 /// live, not the general mood of the room.
 fn tense_moment(shift: &Shift, active_crises: &Query<(), With<CrisisOrder>>) -> bool {
-    !active_crises.is_empty() || (!shift.accepting_orders && !shift.called)
+    ambience_pool_for(shift, !active_crises.is_empty()) == AmbiencePool::Tense
+}
+
+fn ambience_pool_for(shift: &Shift, active_crisis: bool) -> AmbiencePool {
+    if active_crisis || (!shift.accepting_orders && !shift.called) {
+        AmbiencePool::Tense
+    } else {
+        AmbiencePool::Calm
+    }
 }
 
 /// How long the lab sits in near-silence between one ambience loop ending
@@ -1074,7 +1108,7 @@ const AMBIENCE_GAP_SECONDS: (f32, f32) = (60.0, 180.0);
 
 /// The countdown to the next ambience pick, while nothing is playing.
 /// `None` both before the first gap has been rolled and while a track is
-/// actually going — [`cycle_ambience`] rolls a fresh one the moment silence
+/// actually going — [`schedule_ambience`] rolls a fresh one the moment silence
 /// starts rather than keeping a stale countdown from the last one.
 #[derive(Resource, Default)]
 struct AmbienceCooldown(Option<Timer>);
@@ -1084,14 +1118,14 @@ struct AmbienceCooldown(Option<Timer>);
 /// just something in the room now and then. Which pool a pick draws from is
 /// decided fresh at that moment, so a track already playing is never cut off
 /// mid-loop by a mood change.
-fn cycle_ambience(
+fn schedule_ambience(
     time: Res<Time>,
-    mut commands: Commands,
-    assets: Res<SfxAssets>,
     shift: Res<Shift>,
     active_crises: Query<(), With<CrisisOrder>>,
     playing: Query<(), With<AmbiencePlayer>>,
     mut cooldown: ResMut<AmbienceCooldown>,
+    mut local: MessageWriter<AmbienceCue>,
+    mut outgoing: MessageWriter<ToClients<AmbienceCue>>,
 ) {
     if !playing.is_empty() {
         cooldown.0 = None;
@@ -1107,19 +1141,62 @@ fn cycle_ambience(
     cooldown.0 = None;
 
     let pool = if tense_moment(&shift, &active_crises) {
-        &assets.tense_ambience
+        AmbiencePool::Tense
     } else {
-        &assets.calm_ambience
+        AmbiencePool::Calm
     };
-    let Some(handle) = pool.choose(&mut rand::rng()) else {
-        return;
+    let pool_len = match pool {
+        AmbiencePool::Calm => CALM_AMBIENCE.len(),
+        AmbiencePool::Tense => TENSE_AMBIENCE.len(),
     };
-    commands.spawn((
-        AudioPlayer::new(handle.clone()),
-        PlaybackSettings::DESPAWN.with_volume(Volume::Linear(AMBIENCE_VOLUME)),
-        AmbiencePlayer,
-        crate::until_we_leave_the_lab(),
-    ));
+    let cue = AmbienceCue {
+        pool,
+        track: rand::rng().random_range(0..pool_len) as u8,
+    };
+    local.write(cue);
+    outgoing.write(ToClients {
+        targets: SendTargets::CLIENTS_ONLY,
+        message: cue,
+    });
+}
+
+fn ambience_handle(assets: &SfxAssets, cue: AmbienceCue) -> Option<&Handle<AudioSource>> {
+    if !cue.is_valid() {
+        return None;
+    }
+    let pool = match cue.pool {
+        AmbiencePool::Calm => &assets.calm_ambience,
+        AmbiencePool::Tense => &assets.tense_ambience,
+    };
+    pool.get(usize::from(cue.track))
+}
+
+/// Plays the host's cue locally on every peer. The listen host receives its
+/// local message directly while the wire targets clients only, so it never
+/// hears a doubled copy.
+fn play_ambience(
+    mut commands: Commands,
+    assets: Res<SfxAssets>,
+    mut cues: MessageReader<AmbienceCue>,
+    playing: Query<Entity, With<AmbiencePlayer>>,
+) {
+    for cue in cues.read().copied() {
+        let Some(handle) = ambience_handle(&assets, cue) else {
+            continue;
+        };
+        // Peers normally finish the identical asset together. Replacing any
+        // straggler also makes a valid later cue authoritative without ever
+        // letting two ambience beds overlap.
+        for entity in &playing {
+            commands.entity(entity).despawn();
+        }
+        commands.spawn((
+            AudioPlayer::new(handle.clone()),
+            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(AMBIENCE_VOLUME)),
+            AmbiencePlayer,
+            crate::until_we_leave_the_lab(),
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -1475,6 +1552,74 @@ mod tests {
             SendTargets::AllExcept(ClientId::Server)
         ));
         assert_eq!(remote[0].message, local[0]);
+    }
+
+    #[test]
+    fn authority_selects_one_identical_ambience_cue_for_host_and_clients() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Shift>()
+            .insert_resource(AmbienceCooldown(Some(Timer::from_seconds(
+                0.0,
+                TimerMode::Once,
+            ))))
+            .add_message::<AmbienceCue>()
+            .add_message::<ToClients<AmbienceCue>>()
+            .add_systems(Update, schedule_ambience);
+
+        app.update();
+
+        let local: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<AmbienceCue>>()
+            .drain()
+            .collect();
+        let remote: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ToClients<AmbienceCue>>>()
+            .drain()
+            .collect();
+        assert_eq!(local.len(), 1);
+        assert_eq!(remote.len(), 1);
+        assert_eq!(remote[0].message, local[0]);
+        assert!(local[0].is_valid());
+        assert!(matches!(
+            remote[0].targets,
+            SendTargets::AllExcept(ClientId::Server)
+        ));
+    }
+
+    #[test]
+    fn ambience_cues_reject_out_of_pool_indices() {
+        assert!(AmbienceCue {
+            pool: AmbiencePool::Calm,
+            track: (CALM_AMBIENCE.len() - 1) as u8,
+        }
+        .is_valid());
+        assert!(!AmbienceCue {
+            pool: AmbiencePool::Calm,
+            track: CALM_AMBIENCE.len() as u8,
+        }
+        .is_valid());
+        assert!(!AmbienceCue {
+            pool: AmbiencePool::Tense,
+            track: TENSE_AMBIENCE.len() as u8,
+        }
+        .is_valid());
+    }
+
+    #[test]
+    fn ambience_pool_tracks_the_existing_calm_and_tense_mood_rules() {
+        let mut shift = Shift {
+            accepting_orders: true,
+            ..default()
+        };
+        assert_eq!(ambience_pool_for(&shift, false), AmbiencePool::Calm);
+        assert_eq!(ambience_pool_for(&shift, true), AmbiencePool::Tense);
+        shift.accepting_orders = false;
+        assert_eq!(ambience_pool_for(&shift, false), AmbiencePool::Tense);
+        shift.called = true;
+        assert_eq!(ambience_pool_for(&shift, false), AmbiencePool::Calm);
     }
 
     #[test]

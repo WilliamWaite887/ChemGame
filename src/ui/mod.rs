@@ -18,8 +18,8 @@ use crate::audio::{PlaySfx, Sfx};
 use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::containers::{
-    Container, ContainerKind, InSlot, InSlotB, InventorySlot, SelectedInventorySlot, Stored,
-    INVENTORY_SLOTS,
+    Container, ContainerKind, InSlot, InSlotB, InSlotC, InventorySlot, SelectedInventorySlot,
+    Stored, INVENTORY_SLOTS,
 };
 use crate::crew::{AtCounter, CrewMember};
 use crate::interaction::{leave_machine, Interactable, InteractionMode, LeaveMachineRequested};
@@ -28,12 +28,12 @@ use crate::knowledge::{
     UnlockAllRequested, HINT_COST,
 };
 use crate::machines::{
-    slotted_container, slotted_container_b, stored_in, AgitateDirection, AgitateRequested,
-    AgitationRun, AnalyzeRequested, Buffer, BufferDirection, BufferTransferRequested,
-    DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested, GrindRequested, Hopper,
-    HplcReport, Machine, MachineKind, MachineSlot, PackageRequested, PurifyRequested,
-    SetHeaterPower, SetTargetTemperature, TakeRequested, Thermostat, HPLC_RECIPE_REQUIREMENT,
-    LOCKER_CAPACITY, TEMPERATURE_MAX, TEMPERATURE_MIN,
+    slotted_container, slotted_container_b, slotted_container_c, stored_in, AgitateDirection,
+    AgitateRequested, AgitationRun, AnalyzeRequested, Buffer, BufferDirection,
+    BufferTransferRequested, DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested,
+    GrindRequested, Hopper, HplcReport, Machine, MachineKind, MachineSlot, PackageRequested,
+    PurifyRequested, SetHeaterPower, SetTargetTemperature, TakeRequested, Thermostat,
+    HPLC_RECIPE_REQUIREMENT, LOCKER_CAPACITY, TEMPERATURE_MAX, TEMPERATURE_MIN,
 };
 use crate::orders::{
     reference_category, Department, DevelopmentOrder, GlasswarePackId, Order, Shift, StationData,
@@ -42,10 +42,9 @@ use crate::player::LocalPlayer;
 use crate::produce::{ProduceCatalog, ProduceId};
 use crate::radio::{RadioChannel, RadioEntry, RadioLog, RadioPriority, RadioTone};
 use crate::shift::{
-    can_afford, can_call_it, npc_can_afford, shift_report, CallItAShift, CareerStage,
-    ConditionChange, NpcRequisitionKind, NpcRequisitionRequested, OpenUpAgain, RequisitionKind,
-    RequisitionRequested, ShiftReport, ToggleAcceptingOrders, OVERCLOCK_COST,
-    PRESSURE_SPRAYER_COST, SYRINGE_GUN_COST, WATER_GUN_COST,
+    can_call_it, shift_report, CallItAShift, CareerStage, ConditionChange, NpcRequisitionKind,
+    NpcRequisitionRequested, OpenUpAgain, RequisitionKind, RequisitionRequested, ShiftReport,
+    ToggleAcceptingOrders, OVERCLOCK_COST, PRESSURE_SPRAYER_COST, SYRINGE_GUN_COST, WATER_GUN_COST,
 };
 use crate::social::{
     resident_department, ConversationHistory, FavorOutcome, PersonalHistory, PublicRelationship,
@@ -180,15 +179,19 @@ struct PanelRoot;
 #[derive(Component)]
 pub(crate) struct Selected;
 
+/// A button-shaped drag surface whose authored background is meaningful.
+/// Generic hover/pressed feedback must not repaint the entire slider track.
+#[derive(Component)]
+pub(crate) struct PreserveButtonBackground;
+
 /// What a button does when clicked.
 #[derive(Component, Clone)]
 enum PanelAction {
     SetAmount(Units),
     Dispense(ReagentId),
     UnlockAll,
-    /// Which slot to act on. Every machine but the Mixing Chamber only ever
-    /// has slot `A`; the panel bodies for those simply never build a `B`
-    /// button.
+    /// Which physical vessel to act on: mixers expose A/B and delivery
+    /// windows expose all three tray positions.
     Eject(MachineSlot),
     /// Take one named item out of the open locker. Carries the item because a
     /// locker holds many, unlike every slot in the lab, which holds one.
@@ -225,14 +228,6 @@ enum PanelAction {
     CloseSocial,
     Close,
 }
-
-/// Drawn on a [`PanelAction::Requisition`] or [`PanelAction::NpcPack`] button
-/// dimmed for insufficient standing — see `draw_department_shop`/
-/// `draw_npc_shop`. Read back at click time so a click on a dead button
-/// plays [`Sfx::UiRefused`] and sends nothing, instead of silently mailing a
-/// request the server was always going to reject.
-#[derive(Component)]
-struct Refused;
 
 /// Which of the standing board's two tabs is open.
 ///
@@ -445,6 +440,11 @@ struct PanelSignature {
     contents_b: Vec<(ReagentId, Units)>,
     profiles_b: Vec<(ReagentId, i16, i16)>,
     quality_b: Option<(i16, i16)>,
+    /// Delivery windows alone have a third tray position.
+    container_c: Option<Entity>,
+    contents_c: Vec<(ReagentId, Units)>,
+    profiles_c: Vec<(ReagentId, i16, i16)>,
+    quality_c: Option<(i16, i16)>,
     buffer: Vec<(ReagentId, Units)>,
     hopper: Vec<ProduceId>,
     /// What the open locker holds, already rendered to the lines the panel
@@ -457,6 +457,8 @@ struct PanelSignature {
     /// runs are already covered by `contents` above, which is what actually
     /// shows the batch progressing.
     reacting: bool,
+    reacting_b: bool,
+    reacting_c: bool,
     /// Replicated Mixing Chamber run, rounded to tenths so its visible timer
     /// updates smoothly without rebuilding the entire panel every frame.
     agitation: Option<(Entity, MachineSlot, i32, i32)>,
@@ -549,10 +551,16 @@ impl Default for PanelSignature {
             contents_b: Vec::new(),
             profiles_b: Vec::new(),
             quality_b: None,
+            container_c: None,
+            contents_c: Vec::new(),
+            profiles_c: Vec::new(),
+            quality_c: None,
             buffer: Vec::new(),
             hopper: Vec::new(),
             stored: Vec::new(),
             reacting: false,
+            reacting_b: false,
+            reacting_c: false,
             agitation: None,
             amount: None,
             disabled_seconds: u16::MAX,
@@ -717,6 +725,15 @@ type MachineParts<'w, 's> = Query<
 /// the container, not a separate lookup.
 type SlotContents<'w, 's> =
     Query<'w, 's, (&'static Container, Option<&'static crate::labels::Label>)>;
+
+/// All machine placement relations, bundled so the tertiary delivery tray
+/// does not push panel synchronization over Bevy's parameter ceiling.
+#[derive(SystemParam)]
+struct SlottedView<'w, 's> {
+    a: Query<'w, 's, (Entity, &'static InSlot)>,
+    b: Query<'w, 's, (Entity, &'static InSlotB)>,
+    c: Query<'w, 's, (Entity, &'static InSlotC)>,
+}
 
 /// What a locker's panel reads. Bundled because `sync_panel` is already close
 /// to Bevy's sixteen-parameter ceiling, and because these two are only ever
@@ -908,8 +925,7 @@ fn sync_panel(
     existing: Query<Entity, With<PanelRoot>>,
     modes: Query<&InteractionMode, With<LocalPlayer>>,
     machines: MachineParts,
-    slotted: Query<(Entity, &InSlot)>,
-    slotted_b: Query<(Entity, &InSlotB)>,
+    slotted: SlottedView,
     containers: SlotContents,
     storage: StorageView,
     knowledge: Res<Knowledge>,
@@ -926,17 +942,24 @@ fn sync_panel(
         InteractionMode::UsingMachine(machine) => Some(machine),
         _ => None,
     };
-    let loaded_entity = open_machine.and_then(|machine| slotted_container(machine, &slotted));
+    let loaded_entity = open_machine.and_then(|machine| slotted_container(machine, &slotted.a));
     let slot = loaded_entity.and_then(|entity| containers.get(entity).ok());
     let loaded = slot.map(|(container, _)| container);
     let marked = slot.and_then(|(_, marked)| marked);
     // The Mixing Chamber's second beaker. `slotted_container_b` simply never
     // matches for any other machine, since only the Mixing Chamber ever gets
     // an `InSlotB` in the first place.
-    let loaded_entity_b = open_machine.and_then(|machine| slotted_container_b(machine, &slotted_b));
+    let loaded_entity_b = open_machine.and_then(|machine| slotted_container_b(machine, &slotted.b));
     let loaded_b = loaded_entity_b
         .and_then(|entity| containers.get(entity).ok())
         .map(|(container, _)| container);
+    let marked_b = loaded_entity_b
+        .and_then(|entity| containers.get(entity).ok())
+        .and_then(|(_, marked)| marked);
+    let loaded_entity_c = open_machine.and_then(|machine| slotted_container_c(machine, &slotted.c));
+    let slot_c = loaded_entity_c.and_then(|entity| containers.get(entity).ok());
+    let loaded_c = slot_c.map(|(container, _)| container);
+    let marked_c = slot_c.and_then(|(_, marked)| marked);
     // Derived from the beaker and the chemistry rather than read off a marker
     // component, so a guest can answer it too. `machines::Reacting` is the
     // authority's own bookkeeping and is deliberately not on the wire; a
@@ -944,6 +967,10 @@ fn sync_panel(
     // to be told.
     let reacting =
         loaded.is_some_and(|container| chem_sim::is_reacting(&container.solution, &db.reactions));
+    let reacting_b =
+        loaded_b.is_some_and(|container| chem_sim::is_reacting(&container.solution, &db.reactions));
+    let reacting_c =
+        loaded_c.is_some_and(|container| chem_sim::is_reacting(&container.solution, &db.reactions));
     let machine_parts = open_machine.and_then(|machine| machines.get(machine).ok());
 
     // Built before the signature so both the comparison and the panel body can
@@ -989,6 +1016,14 @@ fn sync_panel(
             .map(|container| panel_profiles(&container.solution))
             .unwrap_or_default(),
         quality_b: loaded_b.map(|container| panel_quality(&container.solution)),
+        container_c: loaded_entity_c,
+        contents_c: loaded_c
+            .map(|container| container.solution.iter().collect())
+            .unwrap_or_default(),
+        profiles_c: loaded_c
+            .map(|container| panel_profiles(&container.solution))
+            .unwrap_or_default(),
+        quality_c: loaded_c.map(|container| panel_quality(&container.solution)),
         buffer: machine_parts
             .and_then(|(_, _, buffer, _, _, _, _)| buffer)
             .map(|buffer| buffer.0.iter().collect())
@@ -999,6 +1034,8 @@ fn sync_panel(
             .unwrap_or_default(),
         stored: stored.clone(),
         reacting,
+        reacting_b,
+        reacting_c,
         agitation: machine_parts
             .and_then(|(_, _, _, _, _, run, _)| run)
             .map(|run| {
@@ -1132,107 +1169,147 @@ fn sync_panel(
                     BorderColor::all(Color::srgb(0.24, 0.40, 0.50)),
                 ))
                 .with_children(|panel| {
-                    panel.spawn(heading(machine.kind.label()));
-                    if machine.disabled_for > 0.0 {
-                        panel.spawn(label(
-                            format!(
-                                "⚠ ELECTROMAGNETIC LOCKOUT — controls recovering in {:.0}s",
-                                machine.disabled_for.ceil()
-                            ),
-                            15.0,
-                            ERROR_TEXT,
-                        ));
-                    }
+                    panel
+                        .spawn(Node {
+                            width: percent(100),
+                            justify_content: JustifyContent::SpaceBetween,
+                            align_items: AlignItems::Center,
+                            ..default()
+                        })
+                        .with_children(|header| {
+                            header.spawn(heading(machine.kind.label()));
+                            header.spawn(button("Close  (Esc)", PanelAction::Close));
+                        });
+                    panel
+                        .spawn((
+                            Node {
+                                width: percent(100),
+                                max_height: vh(76),
+                                flex_direction: FlexDirection::Column,
+                                row_gap: px(10),
+                                overflow: Overflow::scroll_y(),
+                                ..default()
+                            },
+                            ScrollPosition::default(),
+                            ScrollPane,
+                        ))
+                        .with_children(|body| {
+                            if machine.disabled_for > 0.0 {
+                                body.spawn(label(
+                                    format!(
+                                        "⚠ ELECTROMAGNETIC LOCKOUT — controls recovering in {:.0}s",
+                                        machine.disabled_for.ceil()
+                                    ),
+                                    15.0,
+                                    ERROR_TEXT,
+                                ));
+                            }
 
-                    match machine.kind {
-                        MachineKind::ChemMaster5000 => {
-                            dispenser_body(
-                                panel,
-                                &db,
-                                &knowledge,
-                                amount,
-                                loaded_entity,
-                                loaded,
-                                marked,
-                                reacting,
-                                &views.icons,
-                            );
-                        }
-                        MachineKind::MixingChamber => {
-                            mixing_chamber_body(
-                                panel,
-                                &db,
-                                buffer,
-                                loaded_entity,
-                                loaded,
-                                loaded_entity_b,
-                                loaded_b,
-                                agitation,
-                            );
-                        }
-                        MachineKind::Analyzer => {
-                            analyzer_body(
-                                panel,
-                                &db,
-                                &knowledge,
-                                loaded,
-                                hplc_report,
-                                views.hplc.selected,
-                            );
-                        }
-                        MachineKind::Grinder => {
-                            grinder_body(
-                                panel,
-                                &db,
-                                catalog.as_deref(),
-                                hopper,
-                                loaded_entity,
-                                loaded,
-                                marked,
-                                reacting,
-                            );
-                        }
-                        MachineKind::DeliveryWindow => {
-                            delivery_window_body(
-                                panel,
-                                &db,
-                                loaded_entity,
-                                loaded,
-                                marked,
-                                reacting,
-                            );
-                        }
-                        MachineKind::StandingBoard => {
-                            let radio_scroll = board.radio_scroll_state();
-                            standing_board_body(
-                                panel,
-                                shift,
-                                &stage,
-                                arc.as_ref(),
-                                &board.radio,
-                                *board.tab,
-                                radio_scroll,
-                            );
-                        }
-                        MachineKind::ReactionChamber => {
-                            heater_body(
-                                panel,
-                                &db,
-                                &knowledge,
-                                thermostat,
-                                loaded_entity,
-                                loaded,
-                                reacting,
-                            );
-                        }
-                        MachineKind::Locker => {
-                            locker_body(panel, &stored);
-                        }
-                    }
-
-                    panel.spawn(row()).with_children(|row| {
-                        row.spawn(button("Close  (Esc)", PanelAction::Close));
-                    });
+                            match machine.kind {
+                                MachineKind::ChemMaster5000 => {
+                                    dispenser_body(
+                                        body,
+                                        &db,
+                                        &knowledge,
+                                        amount,
+                                        loaded_entity,
+                                        loaded,
+                                        marked,
+                                        reacting,
+                                        &views.icons,
+                                    );
+                                }
+                                MachineKind::MixingChamber => {
+                                    mixing_chamber_body(
+                                        body,
+                                        &db,
+                                        buffer,
+                                        loaded_entity,
+                                        loaded,
+                                        loaded_entity_b,
+                                        loaded_b,
+                                        agitation,
+                                    );
+                                }
+                                MachineKind::Analyzer => {
+                                    analyzer_body(
+                                        body,
+                                        &db,
+                                        &knowledge,
+                                        loaded,
+                                        hplc_report,
+                                        views.hplc.selected,
+                                    );
+                                }
+                                MachineKind::Grinder => {
+                                    grinder_body(
+                                        body,
+                                        &db,
+                                        catalog.as_deref(),
+                                        hopper,
+                                        loaded_entity,
+                                        loaded,
+                                        marked,
+                                        reacting,
+                                    );
+                                }
+                                MachineKind::DeliveryWindow => {
+                                    delivery_window_body(
+                                        body,
+                                        &db,
+                                        [
+                                            (
+                                                MachineSlot::A,
+                                                loaded_entity,
+                                                loaded,
+                                                marked,
+                                                reacting,
+                                            ),
+                                            (
+                                                MachineSlot::B,
+                                                loaded_entity_b,
+                                                loaded_b,
+                                                marked_b,
+                                                reacting_b,
+                                            ),
+                                            (
+                                                MachineSlot::C,
+                                                loaded_entity_c,
+                                                loaded_c,
+                                                marked_c,
+                                                reacting_c,
+                                            ),
+                                        ],
+                                    );
+                                }
+                                MachineKind::StandingBoard => {
+                                    let radio_scroll = board.radio_scroll_state();
+                                    standing_board_body(
+                                        body,
+                                        shift,
+                                        &stage,
+                                        arc.as_ref(),
+                                        &board.radio,
+                                        *board.tab,
+                                        radio_scroll,
+                                    );
+                                }
+                                MachineKind::ReactionChamber => {
+                                    heater_body(
+                                        body,
+                                        &db,
+                                        &knowledge,
+                                        thermostat,
+                                        loaded_entity,
+                                        loaded,
+                                        reacting,
+                                    );
+                                }
+                                MachineKind::Locker => {
+                                    locker_body(body, &stored);
+                                }
+                            }
+                        });
                 });
         });
 }
@@ -1359,11 +1436,19 @@ fn personal_history_label(history: PersonalHistory) -> &'static str {
 
 fn standing_label(standing: i32) -> &'static str {
     if standing > 0 {
-        "Good standing"
+        "Good"
     } else if standing < 0 {
-        "Strained standing"
+        "Strained"
     } else {
-        "Unproven standing"
+        "Unproven"
+    }
+}
+
+fn signed_standing(standing: i32) -> String {
+    if standing > 0 {
+        format!("+{standing}")
+    } else {
+        standing.to_string()
     }
 }
 
@@ -1496,7 +1581,7 @@ fn spawn_social_directory(
                             ..default()
                         })
                         .with_children(|columns| {
-                            social_department_sidebar(columns, view, icons);
+                            social_department_sidebar(columns, view, shift, icons);
                             social_department_page(
                                 columns, view, residents, shift, catalog, station, icons,
                             );
@@ -1508,6 +1593,7 @@ fn spawn_social_directory(
 fn social_department_sidebar(
     columns: &mut ChildSpawnerCommands,
     view: &SocialView,
+    shift: &Shift,
     icons: &BookIconAssets,
 ) {
     columns
@@ -1546,7 +1632,17 @@ fn social_department_sidebar(
                             TEXT_DIM
                         },
                     ));
-                    control.spawn(label(department.label(), 11.0, TEXT));
+                    let balance = shift.standing(department);
+                    control.spawn(label(
+                        format!(
+                            "{}  {}  {}",
+                            department.label(),
+                            signed_standing(balance),
+                            standing_label(balance)
+                        ),
+                        11.0,
+                        TEXT,
+                    ));
                 });
                 if department == view.department {
                     entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
@@ -1594,9 +1690,19 @@ fn social_department_page(
                             BOOK_ACCENT,
                         ));
                     });
-                heading_row.spawn(label(view.department.label(), 20.0, TEXT));
+                let balance = shift.standing(view.department);
                 heading_row.spawn(label(
-                    standing_label(shift.standing(view.department)),
+                    format!(
+                        "{}  {}  {}",
+                        view.department.label(),
+                        signed_standing(balance),
+                        standing_label(balance)
+                    ),
+                    20.0,
+                    TEXT,
+                ));
+                heading_row.spawn(label(
+                    "Department goodwill",
                     12.0,
                     TEXT_DIM,
                 ));
@@ -1648,7 +1754,7 @@ fn social_department_page(
                     });
             }
 
-            pane.spawn(label("DEPARTMENT SHOP", 11.0, BOOK_ACCENT));
+            pane.spawn(label("DEPARTMENT FAVORS", 11.0, BOOK_ACCENT));
             draw_department_shop(pane, shift, view.department);
             draw_department_sellers(pane, shift, view.department, catalog, station);
         });
@@ -1813,23 +1919,21 @@ fn draw_department_shop(panel: &mut ChildSpawnerCommands, shift: &Shift, departm
         panel.spawn(label("No general requisitions available.", 12.0, TEXT_DIM));
         return;
     }
+    panel.spawn(label(
+        format!(
+            "Goodwill {}  ·  call in a favor now, repay it through successful work",
+            signed_standing(shift.standing(department))
+        ),
+        12.0,
+        TEXT_DIM,
+    ));
     panel.spawn(wrap_row()).with_children(|row| {
         for &kind in &kinds {
-            let available = can_afford(shift.standing(department), kind);
-            let caption = format!("{} ({})", kind.label(), kind.cost());
-            let mut entity = row.spawn(button(caption, PanelAction::Requisition(kind)));
-            if !available {
-                entity.insert((BackgroundColor(Color::srgb(0.11, 0.12, 0.14)), Refused));
-            }
+            let caption = format!("{}  −{}", kind.label(), kind.cost());
+            row.spawn(button(caption, PanelAction::Requisition(kind)))
+                .insert(TooltipSource::new(kind.label(), kind.blurb()));
         }
     });
-    for kind in kinds {
-        panel.spawn(label(
-            format!("  {} — {}", kind.label(), kind.blurb()),
-            12.0,
-            TEXT_DIM,
-        ));
-    }
 }
 
 fn draw_department_sellers(
@@ -1955,25 +2059,23 @@ fn draw_seller_section(
     }
 
     panel.spawn(label(
-        format!("{seller_name}  ·  {}", standing_label(seller_standing)),
+        format!(
+            "{seller_name}  ·  personal goodwill {}",
+            signed_standing(seller_standing)
+        ),
         15.0,
         TEXT,
     ));
-    panel.spawn(label(seller_blurb, 12.0, TEXT_DIM));
     panel.spawn(wrap_row()).with_children(|row| {
-        for (item_label, _, cost, action) in items {
-            let available = npc_can_afford(seller_standing, *cost);
-            let caption = format!("{item_label} ({cost})");
-            let mut entity = row.spawn(button(caption, action.clone()));
-            // Same dead-button convention `draw_department_shop` uses.
-            if !available {
-                entity.insert((BackgroundColor(Color::srgb(0.11, 0.12, 0.14)), Refused));
-            }
+        for (item_label, blurb, cost, action) in items {
+            let caption = format!("{item_label}  −{cost}");
+            row.spawn(button(caption, action.clone()))
+                .insert(TooltipSource::new(
+                    item_label.clone(),
+                    format!("{blurb} {seller_blurb}"),
+                ));
         }
     });
-    for (item_label, blurb, _, _) in items {
-        panel.spawn(label(format!("  {item_label} — {blurb}"), 12.0, TEXT_DIM));
-    }
 }
 
 /// The sign, and the second stage that ends the shift.
@@ -3025,6 +3127,7 @@ fn heater_body(
                             },
                             BackgroundColor(Color::srgb(0.08, 0.09, 0.12)),
                             TempSlider,
+                            PreserveButtonBackground,
                         ))
                         .with_children(|track| {
                             track.spawn((
@@ -3376,6 +3479,7 @@ fn mixing_chamber_body(
                 match run.direction.destination() {
                     MachineSlot::A => "A",
                     MachineSlot::B => "B",
+                    MachineSlot::C => "C",
                 }
             ),
             13.0,
@@ -4169,58 +4273,128 @@ fn locker_body(panel: &mut ChildSpawnerCommands, stored: &[StoredItem]) {
 /// There are no buttons to hand anything over: the window matches on its own
 /// the moment somebody at the counter wants what is in it. So the panel's job
 /// is to say what will happen and, when nothing does, why not.
+type DeliverySlotView<'a> = (
+    MachineSlot,
+    Option<Entity>,
+    Option<&'a Container>,
+    Option<&'a crate::labels::Label>,
+    bool,
+);
+
 fn delivery_window_body(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
+    slots: [DeliverySlotView<'_>; 3],
+) {
+    panel.spawn(label(
+        "INPUT  ·  THREE-POSITION DELIVERY TRAY",
+        11.0,
+        BOOK_ACCENT,
+    ));
+    panel.spawn(label(
+        "Finished batches route automatically. Hover a control for details.",
+        13.0,
+        TEXT_DIM,
+    ));
+    panel
+        .spawn(Node {
+            width: percent(100),
+            column_gap: px(8),
+            align_items: AlignItems::Stretch,
+            ..default()
+        })
+        .with_children(|tray| {
+            for (slot, entity, loaded, marked, reacting) in slots {
+                delivery_slot_card(tray, db, slot, entity, loaded, marked, reacting);
+            }
+        });
+}
+
+fn delivery_slot_card(
+    tray: &mut ChildSpawnerCommands,
+    db: &ChemDb,
+    slot: MachineSlot,
     container_entity: Option<Entity>,
     loaded: Option<&Container>,
     marked: Option<&crate::labels::Label>,
     reacting: bool,
 ) {
-    panel.spawn(label(
-        "Anything left here goes to the next crew member at the counter who \
-         asked for something in it. No need to wait around for them.",
-        13.0,
-        TEXT_DIM,
-    ));
-
-    container_readout(panel, db, container_entity, loaded, marked, reacting, false);
-
-    let Some(container) = loaded else {
-        return;
+    let slot_name = match slot {
+        MachineSlot::A => "A",
+        MachineSlot::B => "B",
+        MachineSlot::C => "C",
     };
+    tray.spawn((
+        Node {
+            width: percent(32),
+            min_height: px(190),
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::all(px(9)),
+            row_gap: px(5),
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(6)),
+            ..default()
+        },
+        BackgroundColor(SECTION_BG),
+        BorderColor::all(Color::srgb(0.20, 0.27, 0.32)),
+    ))
+    .with_children(|card| {
+        card.spawn(label(format!("TRAY {slot_name}"), 11.0, TEXT_DIM));
+        beaker_preview(card, container_entity);
+        let Some(container) = loaded else {
+            card.spawn(label("READY", 13.0, TEXT_DIM));
+            card.spawn(label("Carry container + E", 12.0, TEXT_DIM));
+            return;
+        };
 
-    // Worst news first, same order the grading runs in.
-    let (message, color) = if container.solution.is_empty() {
-        (
-            "Empty. Put a finished batch in and it will go out on its own.".to_string(),
-            TEXT_DIM,
-        )
-    } else if reacting {
-        // The tray hands over the instant anything in the beaker matches, and
-        // a batch part-way through is half reactant and half product. So it is
-        // held back rather than sent out impure — and said out loud here,
-        // because a window that has quietly stopped working is worse than one
-        // that says why.
-        (
-            "Still reacting. It will go out as soon as the batch settles.".to_string(),
-            Color::srgb(0.95, 0.88, 0.45),
-        )
-    } else {
-        (
+        card.spawn(label(
             format!(
-                "Waiting for someone who needs {}.",
-                container
-                    .solution
-                    .iter()
-                    .map(|(reagent, _)| db.reagents.get(reagent).name.clone())
-                    .collect::<Vec<_>>()
-                    .join(" or ")
+                "{}  {} / {}",
+                container.kind.label(),
+                container.solution.total_volume(),
+                container.kind.capacity()
             ),
-            Color::srgb(0.70, 0.85, 0.60),
-        )
-    };
-    panel.spawn(label(message, 13.0, color));
+            13.0,
+            TEXT,
+        ));
+        if let Some(marked) = marked.filter(|marked| !marked.0.trim().is_empty()) {
+            card.spawn(label(format!("Marked \"{}\"", marked.0), 11.0, LABEL_INK));
+        }
+        if !container.solution.is_empty() {
+            card.spawn(label(
+                format!(
+                    "pH {:.2}  ·  {:.0}% pure",
+                    container.solution.ph(),
+                    container.solution.average_purity() * 100.0
+                ),
+                11.0,
+                Color::srgb(0.66, 0.78, 0.92),
+            ));
+        }
+        let (status, color) = if container.solution.is_empty() {
+            ("EMPTY", TEXT_DIM)
+        } else if reacting {
+            ("REACTING · HELD", Color::srgb(0.95, 0.88, 0.45))
+        } else {
+            ("WAITING FOR MATCH", GOOD_TEXT)
+        };
+        card.spawn(label(status, 11.0, color));
+
+        let contents = container
+            .solution
+            .iter()
+            .map(|(reagent, quantity)| format!("{quantity} {}", db.reagents.get(reagent).name))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if !contents.is_empty() {
+            card.spawn(label(contents, 11.0, TEXT));
+        }
+        card.spawn(button("Eject", PanelAction::Eject(slot)))
+            .insert(TooltipSource::new(
+                format!("Eject tray {slot_name}"),
+                "Return this container to the chemist without changing its contents.",
+            ));
+    });
 }
 
 /// Shared contents readout for whatever is sitting in the machine's slot.
@@ -8255,7 +8429,11 @@ pub(crate) type ChangedButtons<'w, 's> = Query<
         &'static mut BackgroundColor,
         Has<Selected>,
     ),
-    (Changed<Interaction>, With<Button>),
+    (
+        Changed<Interaction>,
+        With<Button>,
+        Without<PreserveButtonBackground>,
+    ),
 >;
 
 pub(crate) fn button_feedback(mut buttons: ChangedButtons) {
@@ -8304,8 +8482,7 @@ struct PanelMessages<'w> {
 
 #[allow(clippy::too_many_arguments)]
 fn handle_panel_clicks(
-    buttons: Query<(Entity, &Interaction, &PanelAction), Changed<Interaction>>,
-    refused: Query<(), With<Refused>>,
+    buttons: Query<(&Interaction, &PanelAction), Changed<Interaction>>,
     mut modes: Query<(Entity, &mut InteractionMode), With<LocalPlayer>>,
     mut machine_views: ParamSet<(Query<&mut Machine>, Query<(Entity, &Machine)>)>,
     mut amounts: Query<&mut DispenseAmount>,
@@ -8317,6 +8494,7 @@ fn handle_panel_clicks(
     // drawn live regardless of whether the slot is empty.
     slotted: Query<(Entity, &InSlot)>,
     slotted_b: Query<(Entity, &InSlotB)>,
+    slotted_c: Query<(Entity, &InSlotC)>,
     // No `ResMut<Knowledge>`/`Res<ChemDb>` here any more: buying a hint was the
     // only thing that needed them, and it now goes through the authority like
     // every other career-wide purchase. Holding a `ResMut` every frame for one
@@ -8340,7 +8518,7 @@ fn handle_panel_clicks(
         .find(|(_, machine)| machine.kind == MachineKind::StandingBoard)
         .map(|(entity, _)| entity);
 
-    for (entity, interaction, action) in &buttons {
+    for (interaction, action) in &buttons {
         if *interaction != Interaction::Pressed {
             continue;
         }
@@ -8414,9 +8592,7 @@ fn handle_panel_clicks(
                 return;
             }
             PanelAction::Requisition(kind) => {
-                if refused.contains(entity) {
-                    out.play.write(PlaySfx(Sfx::UiRefused));
-                } else if let Some(board) = shop_board {
+                if let Some(board) = shop_board {
                     out.requisition
                         .write(RequisitionRequested { board, kind: *kind });
                     out.play.write(PlaySfx(Sfx::RequisitionConfirm));
@@ -8424,9 +8600,7 @@ fn handle_panel_clicks(
                 continue;
             }
             PanelAction::NpcPack(kind) => {
-                if refused.contains(entity) {
-                    out.play.write(PlaySfx(Sfx::UiRefused));
-                } else if let Some(board) = shop_board {
+                if let Some(board) = shop_board {
                     out.npc_requisition
                         .write(NpcRequisitionRequested { board, kind: *kind });
                     out.play.write(PlaySfx(Sfx::RequisitionConfirm));
@@ -8460,6 +8634,7 @@ fn handle_panel_clicks(
                 let occupied = match slot {
                     MachineSlot::A => slotted_container(machine, &slotted).is_some(),
                     MachineSlot::B => slotted_container_b(machine, &slotted_b).is_some(),
+                    MachineSlot::C => slotted_container_c(machine, &slotted_c).is_some(),
                 };
                 if occupied {
                     out.eject.write(EjectRequested {
@@ -8569,6 +8744,45 @@ fn handle_panel_clicks(
 mod tests {
     use super::*;
 
+    #[test]
+    fn pressed_slider_tracks_keep_their_authored_dark_background() {
+        let track_color = Color::srgb(0.08, 0.09, 0.12);
+        let mut app = App::new();
+        app.add_systems(Update, button_feedback);
+        let slider = app
+            .world_mut()
+            .spawn((
+                Button,
+                Interaction::Pressed,
+                BackgroundColor(track_color),
+                PreserveButtonBackground,
+            ))
+            .id();
+        let ordinary = app
+            .world_mut()
+            .spawn((Button, Interaction::Pressed, BackgroundColor(BUTTON_IDLE)))
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            app.world().get::<BackgroundColor>(slider).unwrap().0,
+            track_color
+        );
+        assert_eq!(
+            app.world().get::<BackgroundColor>(ordinary).unwrap().0,
+            BUTTON_ACTIVE
+        );
+    }
+
+    #[test]
+    fn social_standing_uses_signed_balances_and_plain_statuses() {
+        assert_eq!(signed_standing(12), "+12");
+        assert_eq!(signed_standing(0), "0");
+        assert_eq!(signed_standing(-12), "-12");
+        assert_eq!(standing_label(-12), "Strained");
+    }
+
     fn spawn_social_screen_fixture(mut commands: Commands, icons: Res<BookIconAssets>) {
         let residents = crate::social::RESIDENT_NAMES
             .into_iter()
@@ -8614,7 +8828,8 @@ mod tests {
         }
         assert!(visible.contains("Dr. Vance"));
         assert!(visible.contains("Nurse Okonkwo"));
-        assert!(visible.contains("DEPARTMENT SHOP"));
+        assert!(visible.contains("DEPARTMENT FAVORS"));
+        assert!(visible.contains("Medical  0  Unproven"));
         for secret in ["ANTAGONIST", "WARM", "BLUNT", "CAUTIOUS", "EXACTING"] {
             assert!(
                 !visible.to_uppercase().contains(secret),

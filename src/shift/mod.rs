@@ -620,15 +620,6 @@ impl RequisitionKind {
 /// timer.
 pub(crate) const COMPED_PATIENCE_BONUS_SECONDS: f32 = 30.0;
 
-/// Standing is what you cash in for supplies.
-///
-/// Debt is allowed to exist — a bad run of deliveries should sting — but it
-/// cannot be spent, or a department already dug under would dig itself
-/// further.
-pub fn can_afford(standing: i32, kind: RequisitionKind) -> bool {
-    standing >= kind.cost()
-}
-
 /// Books a purchase, or does nothing at all.
 ///
 /// Returns whether it went through, so the caller never has to guess: a
@@ -660,10 +651,7 @@ pub fn apply_requisition(
     kind: RequisitionKind,
 ) -> bool {
     let department = kind.department();
-    if !can_afford(shift.standing(department), kind) {
-        return false;
-    }
-    shift.adjust(department, -kind.cost());
+    shift.spend_goodwill(department, kind.cost());
 
     match kind {
         RequisitionKind::Glassware => {
@@ -809,12 +797,6 @@ pub(crate) const SYRINGE_GUN_COST: i32 = 10;
 pub(crate) const PRESSURE_SPRAYER_COST: i32 = 6;
 pub(crate) const WATER_GUN_COST: i32 = 2;
 
-/// The same affordability rule [`can_afford`] applies, against one person's
-/// own standing instead of a department's average.
-pub fn npc_can_afford(standing: i32, cost: i32) -> bool {
-    standing >= cost
-}
-
 /// Books a purchase from one NPC's own shop, or does nothing at all — the
 /// individual-standing sibling of [`apply_requisition`], with the same
 /// "never half-apply" contract.
@@ -854,10 +836,7 @@ pub fn apply_npc_requisition(
             let Some(pack) = catalog.pack(pack_id) else {
                 return false;
             };
-            if !npc_can_afford(shift.npc_standing(owner), pack.cost) {
-                return false;
-            }
-            shift.adjust_npc(owner, -pack.cost);
+            shift.spend_npc_goodwill(owner, pack.cost);
             produce::spawn_named_delivery(commands, station, owner, pack.expand_items());
             true
         }
@@ -868,18 +847,12 @@ pub fn apply_npc_requisition(
             let Some(pack) = station.config.supply.pack(pack_id) else {
                 return false;
             };
-            if !npc_can_afford(shift.npc_standing(owner), pack.cost) {
-                return false;
-            }
-            shift.adjust_npc(owner, -pack.cost);
+            shift.spend_npc_goodwill(owner, pack.cost);
             restock::queue_glassware_purchase(pending, pack.beakers, pack.large);
             true
         }
         NpcRequisitionKind::LindqvistOverclock => {
-            if !npc_can_afford(shift.npc_standing(owner), OVERCLOCK_COST) {
-                return false;
-            }
-            shift.adjust_npc(owner, -OVERCLOCK_COST);
+            shift.spend_npc_goodwill(owner, OVERCLOCK_COST);
             if let Some(mut existing) = overclocks.iter_mut().next() {
                 existing.charges += machines::OVERCLOCK_CHARGES;
             } else {
@@ -888,18 +861,12 @@ pub fn apply_npc_requisition(
             true
         }
         NpcRequisitionKind::LindqvistSyringeGun => {
-            if !npc_can_afford(shift.npc_standing(owner), SYRINGE_GUN_COST) {
-                return false;
-            }
-            shift.adjust_npc(owner, -SYRINGE_GUN_COST);
+            shift.spend_npc_goodwill(owner, SYRINGE_GUN_COST);
             spawn_purchased_item(commands, ContainerKind::SyringeGun, delivery_station, 0.6);
             true
         }
         NpcRequisitionKind::LindqvistPressureSprayer => {
-            if !npc_can_afford(shift.npc_standing(owner), PRESSURE_SPRAYER_COST) {
-                return false;
-            }
-            shift.adjust_npc(owner, -PRESSURE_SPRAYER_COST);
+            shift.spend_npc_goodwill(owner, PRESSURE_SPRAYER_COST);
             spawn_purchased_item(
                 commands,
                 ContainerKind::PressureSprayer,
@@ -909,10 +876,7 @@ pub fn apply_npc_requisition(
             true
         }
         NpcRequisitionKind::SatoWaterGun => {
-            if !npc_can_afford(shift.npc_standing(owner), WATER_GUN_COST) {
-                return false;
-            }
-            shift.adjust_npc(owner, -WATER_GUN_COST);
+            shift.spend_npc_goodwill(owner, WATER_GUN_COST);
             spawn_purchased_item(commands, ContainerKind::WaterGun, delivery_station, 0.6);
             true
         }
@@ -1618,6 +1582,10 @@ fn load_progress(
     // deserialises to, and reading it as "shift 1" is exactly right for one.
     shift.shift_number = save.shift_number.max(1);
     shift.opened_at = save.opened_at;
+    // Saves written before the bounded scale may contain deeper favor debt or
+    // standing above the new ceiling. Normalize once on load so current values
+    // and the opening snapshot used by the debrief agree immediately.
+    shift.clamp_standing();
     shift.requisition = save.requisition;
     shift.accepting_orders = save.accepting_orders;
     shift.called = save.called;
@@ -2571,15 +2539,6 @@ mod tests {
 
     // -- requisition ----------------------------------------------------
 
-    #[test]
-    fn you_cannot_requisition_on_credit() {
-        for kind in RequisitionKind::ALL {
-            assert!(!can_afford(kind.cost() - 1, kind));
-            assert!(can_afford(kind.cost(), kind));
-            assert!(!can_afford(-10, kind));
-        }
-    }
-
     fn board(app: &mut App) -> Entity {
         app.world_mut()
             .spawn(Machine::new(MachineKind::StandingBoard))
@@ -2665,7 +2624,7 @@ mod tests {
     }
 
     #[test]
-    fn a_confrontation_item_refuses_without_enough_standing_and_spends_nothing() {
+    fn a_confrontation_item_can_be_called_in_on_personal_goodwill_debt() {
         let (mut app, board) = with_npc_standing("Tech Lindqvist", SYRINGE_GUN_COST - 1);
         npc_requisition(&mut app, board, NpcRequisitionKind::LindqvistSyringeGun);
 
@@ -2673,16 +2632,16 @@ mod tests {
             app.world()
                 .resource::<Shift>()
                 .npc_standing("Tech Lindqvist"),
-            SYRINGE_GUN_COST - 1,
-            "a refused purchase must not spend even a partial amount"
+            -1,
+            "the full favor cost should become personal goodwill debt"
         );
         let world = app.world_mut();
         let mut query = world.query::<&Container>();
         assert!(
-            !query
+            query
                 .iter(world)
                 .any(|container| container.kind == ContainerKind::SyringeGun),
-            "nothing should have spawned"
+            "the favor should still provide the item"
         );
     }
 
@@ -2710,9 +2669,7 @@ mod tests {
     }
 
     #[test]
-    fn a_requisition_can_be_bought_the_instant_standing_allows_it() {
-        // No shift boundary left to wait for — affordability is the only
-        // gate.
+    fn a_requisition_can_be_called_in_immediately() {
         let (mut app, board) = with_standing(Department::Cargo, 10);
         requisition(&mut app, board, RequisitionKind::Glassware);
 
@@ -2774,16 +2731,31 @@ mod tests {
     }
 
     #[test]
-    fn a_requisition_you_cannot_afford_changes_nothing() {
-        // Not "takes what it can" — a half-applied purchase that took the
-        // standing and delivered nothing is the worst outcome available.
+    fn a_department_requisition_records_its_full_cost_as_debt() {
         let (mut app, board) = with_standing(Department::Engineering, 1);
+        let before = app.world().resource::<Knowledge>().research_points;
         requisition(&mut app, board, RequisitionKind::ResearchGrant);
 
         let world = app.world();
         assert_eq!(
             world.resource::<Shift>().standing(Department::Engineering),
-            1
+            1 - RequisitionKind::ResearchGrant.cost()
+        );
+        assert_eq!(
+            world.resource::<Knowledge>().research_points,
+            before + RESEARCH_GRANT
+        );
+    }
+
+    #[test]
+    fn repeated_department_favors_stop_at_the_standing_floor() {
+        let (mut app, board) = with_standing(Department::Cargo, crate::orders::STANDING_FLOOR);
+        requisition(&mut app, board, RequisitionKind::Glassware);
+        requisition(&mut app, board, RequisitionKind::Glassware);
+
+        assert_eq!(
+            app.world().resource::<Shift>().standing(Department::Cargo),
+            crate::orders::STANDING_FLOOR
         );
     }
 
@@ -2802,7 +2774,7 @@ mod tests {
 
         assert_eq!(
             app.world().resource::<Shift>().standing(Department::Cargo),
-            20
+            crate::orders::STANDING_CEILING
         );
     }
 

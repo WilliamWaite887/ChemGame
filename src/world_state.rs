@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::chem_data::ChemDb;
 use crate::containers::{
-    Container, ContainerKind, HeldBy, InSlot, InSlotB, InventorySlot, SelectedInventorySlot,
-    Stored, INVENTORY_SLOTS,
+    Container, ContainerKind, HeldBy, InSlot, InSlotB, InSlotC, InventorySlot,
+    SelectedInventorySlot, Stored, INVENTORY_SLOTS,
 };
 use crate::labels::Label;
 use crate::machines::{Machine, MachineKind, Overclock};
@@ -29,7 +29,7 @@ use crate::saves::SaveSlot;
 use crate::social::{EvidenceItem, ParcelPayload, SocialParcel};
 use crate::AppState;
 
-const WORLD_FORMAT_VERSION: u32 = 3;
+const WORLD_FORMAT_VERSION: u32 = 4;
 const AUTOSAVE_SECONDS: f32 = 2.0;
 
 pub struct WorldStatePlugin;
@@ -186,6 +186,7 @@ struct MachineLocator {
 enum MachineSlot {
     Primary,
     Secondary,
+    Tertiary,
     Stored,
 }
 
@@ -483,6 +484,7 @@ fn restore_placed_items(
             match slot {
                 MachineSlot::Primary => commands.entity(item).insert(InSlot(machine)),
                 MachineSlot::Secondary => commands.entity(item).insert(InSlotB(machine)),
+                MachineSlot::Tertiary => commands.entity(item).insert(InSlotC(machine)),
                 MachineSlot::Stored => commands.entity(item).insert(Stored(machine)),
             };
         }
@@ -578,6 +580,7 @@ type ItemQuery<'w, 's> = Query<
 struct SnapshotSource<'w, 's> {
     players: PlayerQuery<'w, 's>,
     items: ItemQuery<'w, 's>,
+    slot_c: Query<'w, 's, &'static InSlotC>,
     machines: Query<'w, 's, (&'static Machine, &'static Transform)>,
 }
 
@@ -688,6 +691,13 @@ fn capture_world(source: &SnapshotSource, db: &ChemDb, pending: &PendingWorldSta
         let relation = in_slot
             .map(|slot| (slot.0, MachineSlot::Primary))
             .or_else(|| in_slot_b.map(|slot| (slot.0, MachineSlot::Secondary)))
+            .or_else(|| {
+                source
+                    .slot_c
+                    .get(_entity)
+                    .ok()
+                    .map(|slot| (slot.0, MachineSlot::Tertiary))
+            })
             .or_else(|| stored.map(|stored| (stored.0, MachineSlot::Stored)));
         let placement = relation
             .and_then(|(target, slot)| source.machines.get(target).ok().map(|m| (m, slot)))
@@ -940,6 +950,50 @@ mod tests {
             .players
             .iter()
             .all(|player| player.items.len() == 1 && player.items[0].active));
+    }
+
+    #[test]
+    fn tertiary_delivery_slot_survives_world_save_serialization() {
+        let mut world = World::new();
+        world.insert_resource(db());
+        world.insert_resource(PendingWorldState::default());
+        let window = world
+            .spawn((
+                Machine::new(MachineKind::DeliveryWindow),
+                Transform::from_xyz(4.0, 1.0, 2.0),
+            ))
+            .id();
+        world.spawn((
+            Container::new(ContainerKind::LargeBeaker),
+            Transform::from_xyz(4.6, 1.2, 2.0),
+            InSlotC(window),
+        ));
+
+        #[derive(Resource)]
+        struct Captured(WorldSave);
+        fn capture(
+            mut commands: Commands,
+            db: Res<ChemDb>,
+            pending: Res<PendingWorldState>,
+            source: SnapshotSource,
+        ) {
+            commands.insert_resource(Captured(capture_world(&source, &db, &pending)));
+        }
+        world.run_system_once(capture).unwrap();
+        world.flush();
+
+        let saved = &world.resource::<Captured>().0;
+        assert_eq!(saved.version, WORLD_FORMAT_VERSION);
+        assert!(matches!(
+            saved.placed[0].placement,
+            PlacementSave::Machine {
+                slot: MachineSlot::Tertiary,
+                ..
+            }
+        ));
+        let text = ron::ser::to_string(saved).unwrap();
+        let restored: WorldSave = ron::from_str(&text).unwrap();
+        assert_eq!(restored, *saved);
     }
 
     #[test]

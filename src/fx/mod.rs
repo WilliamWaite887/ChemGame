@@ -24,6 +24,7 @@ use crate::character_lab::{TestSubjectSurface, TestSubjectVisual};
 use crate::crew::{CrewBody, CrewSurface};
 use crate::hazards::{HazardFelt, HazardKind};
 use crate::player::{ChemistBody, ChemistSurface, LocalPlayer, PlayerCamera};
+use crate::settings::Settings;
 use crate::AppState;
 
 mod chem_particles;
@@ -320,6 +321,7 @@ fn stumble_cadence(t: f32, instability: f32) -> (f32, f32) {
 fn apply_camera_fx(
     time: Res<Time>,
     mut fx: ResMut<ScreenFx>,
+    settings: Res<Settings>,
     local: Query<&Bloodstream, With<LocalPlayer>>,
     mut cameras: Query<(&mut Transform, &mut Projection), With<PlayerCamera>>,
     mut overlay: Query<&mut BackgroundColor, With<ScreenOverlay>>,
@@ -393,10 +395,7 @@ fn apply_camera_fx(
         // widens it (fisheye speed). They already cancel on walk speed
         // (`player::walk_speed`) and cancel here for the same reason.
         if let Projection::Perspective(perspective) = projection.as_mut() {
-            let base = std::f32::consts::FRAC_PI_4;
-            let widen = 0.12 * hastened.min(2.0);
-            let narrow = 0.10 * sluggish.min(2.0);
-            perspective.fov = (base + widen - narrow).clamp(base * 0.6, base * 1.6);
+            perspective.fov = effective_fov_radians(settings.fov_degrees, sluggish, hastened);
         }
     }
 
@@ -411,6 +410,17 @@ fn apply_camera_fx(
     if let Ok(mut background) = overlay.single_mut() {
         background.0 = color.with_alpha(total_alpha);
     }
+}
+
+/// The one field-of-view calculation used by the gameplay camera.
+///
+/// Status effects are offsets around the player's selected base, never a
+/// second owner that can reset the camera to the old hard-coded 45 degrees.
+fn effective_fov_radians(base_degrees: f32, sluggish: f32, hastened: f32) -> f32 {
+    let base = base_degrees.clamp(30.0, 90.0).to_radians();
+    let widen = 0.12 * hastened.clamp(0.0, 2.0);
+    let narrow = 0.10 * sluggish.clamp(0.0, 2.0);
+    (base + widen - narrow).clamp(base * 0.6, base * 1.6)
 }
 
 // ---------------------------------------------------------------------------
@@ -761,6 +771,27 @@ mod tests {
         assert!((tinted.red - base.red).abs() < 1e-4);
         assert!((tinted.green - base.green).abs() < 1e-4);
         assert!((tinted.blue - base.blue).abs() < 1e-4);
+    }
+
+    #[test]
+    fn selected_fov_is_the_camera_base_at_every_slider_boundary() {
+        for degrees in [30.0_f32, 45.0, 90.0] {
+            let actual = effective_fov_radians(degrees, 0.0, 0.0);
+            assert!((actual - degrees.to_radians()).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn status_fov_composes_around_the_selected_base_and_cancels() {
+        for degrees in [30.0_f32, 45.0, 90.0] {
+            let base = effective_fov_radians(degrees, 0.0, 0.0);
+            assert!(effective_fov_radians(degrees, 1.0, 0.0) < base);
+            assert!(effective_fov_radians(degrees, 0.0, 1.0) > base);
+            assert!(
+                (effective_fov_radians(degrees, 1.2, 1.0) - base).abs() < 1e-6,
+                "the existing 0.10/0.12 strengths should cancel at their matching ratio"
+            );
+        }
     }
 
     #[test]

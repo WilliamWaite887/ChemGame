@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn standing_souring_again_after_redemption_brings_them_back() {
         // The reward used to be unreachable by construction: `check_redemption`
-        // spawns the `Deterrent` at `redeemed_at` (+15) and set a flag that
+        // spawns the `Deterrent` at full positive standing and set a flag that
         // stopped `schedule_rogue_encounter` forever, while the item only works
         // pointed at a live officer — which could then never exist again. Now
         // standing is the only gate in both directions, so the deterrent earned

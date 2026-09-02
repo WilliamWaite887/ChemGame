@@ -36,8 +36,8 @@ use crate::menu::{choice, menu_shell};
 use crate::net::LaunchMode;
 use crate::saves;
 use crate::ui::{
-    button, button_feedback, label, row, ScrollPane, Selected, BUTTON_ACTIVE, BUTTON_IDLE,
-    SECTION_BG, TEXT, TEXT_DIM,
+    button, button_feedback, label, row, PreserveButtonBackground, ScrollPane, Selected,
+    BUTTON_ACTIVE, BUTTON_IDLE, SECTION_BG, TEXT, TEXT_DIM,
 };
 use crate::AppState;
 
@@ -76,7 +76,6 @@ impl Plugin for SettingsPlugin {
                     sync_sliders,
                     sync_binding_rows,
                     sync_display_buttons,
-                    apply_fov,
                     apply_display_settings,
                     persist_settings,
                     // The main menu's own screens get this from `MenuPlugin`,
@@ -554,6 +553,7 @@ fn slider_row(panel: &mut ChildSpawnerCommands, knob: Knob, settings: &Settings)
             },
             BackgroundColor(SECTION_BG),
             Slider(knob),
+            PreserveButtonBackground,
         ))
         .with_children(|track| {
             track.spawn((
@@ -817,31 +817,6 @@ pub(crate) fn restore_bindings_defaults(settings: &mut Settings) {
     settings.bindings = Bindings::default();
 }
 
-/// Keeps the chemist's camera on the dialled-in field of view.
-///
-/// Its own system rather than something `player::adopt_my_chemist` sets at
-/// spawn, because it has to answer both questions: a camera that appears after
-/// the setting was chosen, and a setting changed while the camera is already
-/// looking at the room. `Changed<Projection>` on the query is what keeps it
-/// from touching the component — and so waking the render world — every frame.
-fn apply_fov(
-    settings: Res<Settings>,
-    mut cameras: Query<&mut Projection, With<crate::player::PlayerCamera>>,
-) {
-    let wanted = settings.fov_degrees.to_radians();
-    for mut projection in &mut cameras {
-        let Projection::Perspective(perspective) = &*projection else {
-            continue;
-        };
-        if (perspective.fov - wanted).abs() < f32::EPSILON {
-            continue;
-        }
-        if let Projection::Perspective(perspective) = &mut *projection {
-            perspective.fov = wanted;
-        }
-    }
-}
-
 /// Writes straight to [`Settings`] on click — the same shape [`drag_sliders`]
 /// already uses for the continuous dials, minus the drag: a display button is
 /// a discrete choice, not a range. Skips the write entirely when the clicked
@@ -921,7 +896,7 @@ fn sync_display_buttons(
 
 /// Keeps the real window on the dialled-in display mode and resolution.
 ///
-/// Mirrors [`apply_fov`]'s exact shape: bail unless [`Settings`] actually
+/// Mirrors the camera settings path's exact shape: bail unless [`Settings`] actually
 /// changed, then write only whichever of `mode`/`resolution` differs, so
 /// neither wakes the window backend every frame it happens to run.
 fn apply_display_settings(
@@ -1693,7 +1668,7 @@ mod tests {
 
     #[test]
     fn applying_display_settings_leaves_the_window_alone_once_it_matches() {
-        // Same shape `apply_fov` already relies on: a redundant write every
+        // Same shape the live camera settings path relies on: a redundant write every
         // frame would wake the window backend for nothing once the two
         // already agree — exercised by marking `Settings` changed again with
         // no value actually different, the same as a slider drag or a

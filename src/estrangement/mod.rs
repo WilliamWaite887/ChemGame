@@ -4,8 +4,7 @@
 //! `orders::Shift::npc_standing` gives every named crew member their own
 //! hidden relationship with the player, separate from their department's
 //! shared average — see `orders::Department::members`. This module is the
-//! individual-relationship sibling of `orders::STANDING_FLOOR`'s "debt can
-//! exist without being a wall" idea, but with a real consequence attached
+//! individual-relationship consequence at the bottom of the standing scale,
 //! rather than just a purchase gate — mirroring `rogue_security`'s own
 //! `hostile_below`/`redeemed_at` two-threshold hysteresis, so crossing back
 //! and forth right at a single boundary cannot flap.
@@ -42,17 +41,15 @@ impl Plugin for EstrangementPlugin {
     }
 }
 
-/// Standing below this enters estrangement. Deliberately between
-/// `orders::STANDING_FLOOR` (-25) and `rogue_security`'s own
-/// `hostile_below` (-8) — the same scale the codebase already established
-/// for "this is a serious, not cosmetic, threshold."
-pub const ESTRANGED_BELOW: i32 = -15;
+/// Reaching the −10 floor enters estrangement. The watcher uses a strict
+/// comparison, so this boundary is one point above the floor.
+pub const ESTRANGED_BELOW: i32 = -9;
 
 /// Must climb back past this, not merely above [`ESTRANGED_BELOW`], to
 /// leave — the same hysteresis gap `rogue_security`'s `hostile_below`/
 /// `redeemed_at` uses, so hovering right at one boundary cannot flap in and
 /// out every time an order resolves.
-pub const RECONCILED_AT: i32 = -8;
+pub const RECONCILED_AT: i32 = -4;
 
 /// Comparable to `antagonist::SUSPICION_PER_DELIVERY` (5) — a personal
 /// relationship burned this badly is exactly as loud, once, as one illicit

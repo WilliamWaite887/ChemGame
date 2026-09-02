@@ -498,6 +498,14 @@ pub struct InSlot(#[entities] pub Entity);
 #[derive(Component, Serialize, Deserialize)]
 pub struct InSlotB(#[entities] pub Entity);
 
+/// Sitting in this machine's third container slot.
+///
+/// Delivery windows use all three slots; other equipment never receives this
+/// relation. Keeping the relation on the item preserves the same replication
+/// and despawn behavior as [`InSlot`] and [`InSlotB`].
+#[derive(Component, Serialize, Deserialize)]
+pub struct InSlotC(#[entities] pub Entity);
+
 /// Shut away in this locker.
 ///
 /// The same shape as [`InSlot`], and for the same reason: storage is a
@@ -780,6 +788,7 @@ fn handle_pickup(
         let mut item = commands.entity(request.target);
         item.remove::<InSlot>()
             .remove::<InSlotB>()
+            .remove::<InSlotC>()
             .insert(InventorySlot {
                 owner: player,
                 slot,

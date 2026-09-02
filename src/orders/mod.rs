@@ -15,14 +15,21 @@ use serde::{Deserialize, Serialize};
 use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::chem_world::{assess_exposure, ChemicalExposure, ExposureSource};
-use crate::containers::{spawn_container, Container, ContainerKind, HeldBy, InSlot, Stored};
+use crate::containers::{
+    spawn_container, Container, ContainerKind, HeldBy, InSlot, InSlotB, InSlotC, Stored,
+};
 use crate::crew::{
     recall_resident_for_order, spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewRoute,
 };
 use crate::interaction::{InteractRequested, Interactable};
 use crate::knowledge::{research_for_delivery_at_purity, Knowledge};
 use crate::lab::{DeliveryLane, DeliveryStation, DeliveryStations, COUNTER_SPOT};
-use crate::machines::{chemist_entity, slotted_container, Machine, MachineKind};
+#[cfg(test)]
+use crate::machines::MachineSlot;
+use crate::machines::{
+    chemist_entity, slotted_container, slotted_container_b, slotted_container_c, Machine,
+    MachineKind,
+};
 use crate::net::is_authority;
 use crate::player::Chemist;
 use crate::produce::{Produce, ProduceCatalog};
@@ -101,6 +108,11 @@ pub struct OrderConfig {
     pub gap_seconds: (f32, f32),
     pub patience_seconds: (f32, f32),
     pub max_active: usize,
+    /// Chance that a request which offers both ordinary and bulk quantities
+    /// draws from its above-30u pool. Most requests have no bulk pool at all,
+    /// so the overall rate stays well below this value.
+    #[serde(default = "default_bulk_amount_chance")]
+    pub bulk_amount_chance: f64,
     /// How often the station briefing redraws. There is no shift boundary to
     /// redraw it against any more, so it runs on its own clock.
     #[serde(default = "default_forecast_seconds")]
@@ -127,6 +139,10 @@ pub struct OrderConfig {
 
 fn default_forecast_seconds() -> (f32, f32) {
     (180.0, 300.0)
+}
+
+fn default_bulk_amount_chance() -> f64 {
+    0.05
 }
 
 /// Matches `antagonist.ron`'s own default — see
@@ -1025,19 +1041,13 @@ impl Default for Shift {
     }
 }
 
-/// How far a department's opinion of the lab can sink.
+/// The shared department and personal-goodwill scale.
 ///
-/// Debt is allowed to exist — `shift::can_afford` already refuses to spend it,
-/// so a bad run costs the player their requisitions — but it used to be
-/// unbounded, and unbounded debt is not a consequence, it is a wall. Six
-/// expired orders in a row put a department at −24 and there is no faster way
-/// back up than +2 per clean delivery, so a rough patch could quietly cost
-/// dozens of deliveries of repair work with nothing on screen explaining why.
-///
-/// Well below `station.rogue_security.ron`'s `hostile_below: -8`, so the
-/// floor never makes Security's own threat thread unreachable — pinned by
-/// `the_standing_floor_leaves_room_for_security_to_turn`.
-pub const STANDING_FLOOR: i32 = -25;
+/// Keeping the stored per-person values on the same scale is important because
+/// department standing is their average. It prevents hidden debt above or below
+/// the visible bounds from making several future outcomes appear to do nothing.
+pub const STANDING_FLOOR: i32 = -10;
+pub const STANDING_CEILING: i32 = 10;
 
 impl Shift {
     /// Broad: a department-wide event (an order's outcome) moves every one
@@ -1058,21 +1068,56 @@ impl Shift {
             return 0;
         }
         let sum: i32 = members.iter().map(|name| self.npc_standing(name)).sum();
-        (sum as f32 / members.len() as f32).round() as i32
+        ((sum as f32 / members.len() as f32).round() as i32).clamp(STANDING_FLOOR, STANDING_CEILING)
     }
 
-    /// Individual: moves one named crew member's own hidden standing only —
-    /// what a personal shop purchase or other individually-targeted action
-    /// spends. Clamped at the same floor `adjust` respects.
+    /// Individual reputation movement on the same bounded scale shown for
+    /// departments.
     pub fn adjust_npc(&mut self, name: &str, delta: i32) {
         let entry = self.npc_standing.entry(name.to_string()).or_insert(0);
-        *entry = (*entry + delta).max(STANDING_FLOOR);
+        *entry = entry
+            .saturating_add(delta)
+            .clamp(STANDING_FLOOR, STANDING_CEILING);
+    }
+
+    /// Voluntarily cashes in department goodwill, stopping at the same lower
+    /// bound as every other standing change.
+    pub fn spend_goodwill(&mut self, department: Department, cost: i32) {
+        for name in department.members() {
+            self.spend_npc_goodwill(name, cost);
+        }
+    }
+
+    /// The personal-favor sibling of [`Shift::spend_goodwill`].
+    pub fn spend_npc_goodwill(&mut self, name: &str, cost: i32) {
+        debug_assert!(cost >= 0, "goodwill costs must not be negative");
+        let entry = self.npc_standing.entry(name.to_string()).or_insert(0);
+        *entry = entry
+            .saturating_sub(cost.max(0))
+            .clamp(STANDING_FLOOR, STANDING_CEILING);
     }
 
     /// One named crew member's own hidden standing. `0` for anyone not yet
     /// touched, same default `standing`/`adjust` have always used.
     pub fn npc_standing(&self, name: &str) -> i32 {
-        self.npc_standing.get(name).copied().unwrap_or(0)
+        self.npc_standing
+            .get(name)
+            .copied()
+            .unwrap_or(0)
+            .clamp(STANDING_FLOOR, STANDING_CEILING)
+    }
+
+    /// Migrates old saves or network snapshots whose values predate the
+    /// bounded standing scale.
+    pub fn clamp_standing(&mut self) {
+        for standing in self.npc_standing.values_mut() {
+            *standing = (*standing).clamp(STANDING_FLOOR, STANDING_CEILING);
+        }
+        if let Some(opened_at) = self.opened_at.as_mut() {
+            for standing in opened_at.department_standing.values_mut() {
+                *standing = (*standing).clamp(STANDING_FLOOR, STANDING_CEILING);
+            }
+        }
     }
 }
 
@@ -1094,6 +1139,7 @@ fn broadcast_shift(shift: Res<Shift>, mut outgoing: MessageWriter<ToClients<Shif
 fn apply_shift(mut shift: ResMut<Shift>, mut incoming: MessageReader<ShiftSync>) {
     for sync in incoming.read() {
         *shift = sync.0.clone();
+        shift.clamp_standing();
     }
 }
 
@@ -1174,6 +1220,38 @@ pub fn deliverable_amount(db: &ChemDb, reagent: ReagentId, asked: Units) -> Unit
         Some(threshold) => asked.min(threshold),
         None => asked,
     }
+}
+
+/// Selects the ordinary or bulk half of an authored quantity list.
+///
+/// The roll chooses a pool before the amount itself is sampled, so adding a
+/// second bulk size cannot accidentally make bulk work twice as common. If a
+/// malformed definition has no ordinary option, it remains usable rather than
+/// silently preventing that request from spawning; content validation pins the
+/// real station data to having a <=30u fallback wherever a bulk option exists.
+fn requested_amount_pool(amounts: &[u32], bulk_chance: f64, roll: f64) -> Vec<u32> {
+    let ordinary: Vec<u32> = amounts
+        .iter()
+        .copied()
+        .filter(|amount| *amount <= 30)
+        .collect();
+    let bulk: Vec<u32> = amounts
+        .iter()
+        .copied()
+        .filter(|amount| *amount > 30)
+        .collect();
+    let wants_bulk = !bulk.is_empty() && roll < bulk_chance.clamp(0.0, 1.0);
+    if wants_bulk || ordinary.is_empty() {
+        bulk
+    } else {
+        ordinary
+    }
+}
+
+fn choose_requested_amount(amounts: &[u32], bulk_chance: f64, rng: &mut impl Rng) -> Option<u32> {
+    requested_amount_pool(amounts, bulk_chance, rng.random::<f64>())
+        .choose(rng)
+        .copied()
 }
 
 /// The step size a synthesized `reagent` can actually be produced in, or
@@ -1393,7 +1471,11 @@ fn generate_orders(
         warn!("order requests unknown reagent '{}'", request.reagent);
         return;
     };
-    let Some(&asked) = request.amounts.choose(&mut rng) else {
+    let Some(asked) = choose_requested_amount(
+        &request.amounts,
+        station.config.bulk_amount_chance,
+        &mut rng,
+    ) else {
         return;
     };
     let amount = deliverable_amount(&db, reagent, Units::whole(asked as i32));
@@ -1574,7 +1656,11 @@ fn generate_specific_orders(
         warn!("order requests unknown reagent '{}'", request.reagent);
         return;
     };
-    let Some(&asked) = request.amounts.choose(&mut rng) else {
+    let Some(asked) = choose_requested_amount(
+        &request.amounts,
+        station.config.bulk_amount_chance,
+        &mut rng,
+    ) else {
         return;
     };
     let amount = deliverable_amount(&db, reagent, Units::whole(asked as i32));
@@ -2314,10 +2400,12 @@ pub fn believed_a_lie(
 fn window_recipient<'a>(
     contents: &Solution,
     waiting: impl Iterator<Item = (Entity, &'a Order, &'a CrewRoute, OrderKind)>,
+    reserved: &HashSet<Entity>,
     lane: DeliveryLane,
     db: &ChemDb,
 ) -> Option<Entity> {
     waiting
+        .filter(|(entity, ..)| !reserved.contains(entity))
         .filter(|(_, _, route, _)| route.delivery_lane == lane)
         .filter(|(_, _, route, _)| route.phase == CrewPhase::Waiting)
         .filter(|(_, order, _, kind)| container_matches(contents, order, *kind, db))
@@ -2342,6 +2430,8 @@ fn handle_window_delivery(
     mut knowledge: ResMut<Knowledge>,
     windows: Query<(Entity, &Machine, Option<&DeliveryLane>)>,
     slotted: Query<(Entity, &InSlot)>,
+    slotted_b: Query<(Entity, &InSlotB)>,
+    slotted_c: Query<(Entity, &InSlotC)>,
     containers: Query<&Container>,
     mut crew: Query<(
         Entity,
@@ -2357,93 +2447,100 @@ fn handle_window_delivery(
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
     instability: Option<Res<crate::instability::Instability>>,
 ) {
+    // `complete_delivery` removes the order through deferred commands. Keep
+    // an immediate reservation too, otherwise two tray containers that both
+    // match the same urgent request can be handed to it in this one system
+    // pass before the removal becomes visible.
+    let mut reserved_recipients = HashSet::new();
     for (window, machine, lane) in &windows {
         if machine.kind != MachineKind::DeliveryWindow {
             continue;
         }
-        let Some(container_entity) = slotted_container(window, &slotted) else {
-            continue;
-        };
-        let Ok(container) = containers.get(container_entity) else {
-            continue;
-        };
-        // A batch still running is refused: this tray hands over the instant
-        // *anything* in the beaker matches, and a rated recipe passes through
-        // a stage where it is half reactant and half product — so without
-        // this, parking a beaker here and walking away would deliver a
-        // half-made batch and grade it `Impure`, which reads as the window
-        // having stolen it early.
-        //
-        // Asked of the chemistry rather than of `machines::Reacting`, so the
-        // panel drawing the same answer on a guest and the authority acting on
-        // it here are the same question, not two that could disagree.
-        if chem_sim::is_reacting(&container.solution, &db.reactions) {
-            continue;
-        }
-
-        let candidates = crew.iter().map(
-            |(entity, _, order, route, illicit, crisis, counter, hostile, _)| {
-                (
-                    entity,
-                    order,
-                    route,
-                    OrderKind::of_with_hostile(illicit, crisis, counter.is_some(), hostile),
-                )
-            },
-        );
         let lane = lane.copied().unwrap_or(DeliveryLane::Public);
-        let Some(recipient) = window_recipient(&container.solution, candidates, lane, &db) else {
-            continue;
-        };
+        let tray = [
+            slotted_container(window, &slotted),
+            slotted_container_b(window, &slotted_b),
+            slotted_container_c(window, &slotted_c),
+        ];
+        for container_entity in tray.into_iter().flatten() {
+            let Ok(container) = containers.get(container_entity) else {
+                continue;
+            };
+            // A batch still running is refused: this tray hands over the instant
+            // *anything* in the beaker matches, and a rated recipe passes through
+            // a stage where it is half reactant and half product — so without
+            // this, parking a beaker here and walking away would deliver a
+            // half-made batch and grade it `Impure`, which reads as the window
+            // having stolen it early.
+            if chem_sim::is_reacting(&container.solution, &db.reactions) {
+                continue;
+            }
 
-        let Ok((
-            crew_entity,
-            member,
-            order,
-            mut route,
-            illicit,
-            crisis,
-            counter,
-            hostile,
-            development,
-        )) = crew.get_mut(recipient)
-        else {
-            continue;
-        };
-        let body = bodies
-            .get_mut(crew_entity)
-            .ok()
-            .map(|(b, blood)| (b.into_inner(), blood.into_inner()));
-        complete_delivery(
-            &mut commands,
-            &db,
-            &mut shift,
-            &mut resolved,
-            &mut exposures,
-            &mut knowledge,
-            instability.as_deref(),
-            Handover {
-                crew: crew_entity,
-                actor: None,
+            let candidates = crew.iter().map(
+                |(entity, _, order, route, illicit, crisis, counter, hostile, _)| {
+                    (
+                        entity,
+                        order,
+                        route,
+                        OrderKind::of_with_hostile(illicit, crisis, counter.is_some(), hostile),
+                    )
+                },
+            );
+            let Some(recipient) = window_recipient(
+                &container.solution,
+                candidates,
+                &reserved_recipients,
+                lane,
+                &db,
+            ) else {
+                continue;
+            };
+
+            let Ok((
+                crew_entity,
                 member,
                 order,
-                route: &mut route,
-                container_entity,
-                container,
-                kind: OrderKind::of_with_hostile(illicit, crisis, counter.is_some(), hostile),
-                counter: counter.copied(),
+                mut route,
+                illicit,
+                crisis,
+                counter,
+                hostile,
                 development,
-                body,
-                // The delivery window is a drop box, not a conversation.
-                // Nobody is standing there to read the bottle, and
-                // `window_recipient` already refuses to route a beaker to an
-                // order its *contents* cannot satisfy — so a label can neither
-                // fool anyone nor be caught here. Deception is deliberately a
-                // face-to-face act: it costs the walk to the counter, and it
-                // is worth something because someone looked you in the eye.
-                believed: None,
-            },
-        );
+            )) = crew.get_mut(recipient)
+            else {
+                continue;
+            };
+            reserved_recipients.insert(recipient);
+            let body = bodies
+                .get_mut(crew_entity)
+                .ok()
+                .map(|(b, blood)| (b.into_inner(), blood.into_inner()));
+            complete_delivery(
+                &mut commands,
+                &db,
+                &mut shift,
+                &mut resolved,
+                &mut exposures,
+                &mut knowledge,
+                instability.as_deref(),
+                Handover {
+                    crew: crew_entity,
+                    actor: None,
+                    member,
+                    order,
+                    route: &mut route,
+                    container_entity,
+                    container,
+                    kind: OrderKind::of_with_hostile(illicit, crisis, counter.is_some(), hostile),
+                    counter: counter.copied(),
+                    development,
+                    body,
+                    // The delivery window is a drop box, not a conversation.
+                    // Nobody is standing there to read the bottle.
+                    believed: None,
+                },
+            );
+        }
     }
 }
 
@@ -2715,6 +2812,28 @@ mod tests {
         (window, entity.id())
     }
 
+    fn add_window_container(
+        app: &mut App,
+        window: Entity,
+        contents: &[(&str, i32)],
+        slot: MachineSlot,
+    ) -> Entity {
+        let data = app.world().resource::<ChemDb>().0.clone();
+        let mut container = Container::new(ContainerKind::LargeBeaker);
+        for (key, amount) in contents {
+            let _ = container
+                .solution
+                .add(data.reagent(key), Units::whole(*amount));
+        }
+        let mut item = app.world_mut().spawn(container);
+        match slot {
+            MachineSlot::A => item.insert(InSlot(window)),
+            MachineSlot::B => item.insert(InSlotB(window)),
+            MachineSlot::C => item.insert(InSlotC(window)),
+        };
+        item.id()
+    }
+
     /// A crew member at the counter, or still on their way in.
     fn waiting_crew(
         app: &mut App,
@@ -2970,6 +3089,80 @@ mod tests {
             "the order should be closed out"
         );
         assert_eq!(app.world().resource::<Shift>().succeeded, 1);
+    }
+
+    #[test]
+    fn three_tray_positions_deliver_to_three_distinct_orders_in_one_frame() {
+        let mut app = window_app();
+        let (window, first) = window_with(&mut app, &[("dylovene", 30)]);
+        let second = add_window_container(&mut app, window, &[("kelotane", 30)], MachineSlot::B);
+        let third = add_window_container(&mut app, window, &[("bicaridine", 30)], MachineSlot::C);
+        for (name, reagent) in [
+            ("Dylovene patient", "dylovene"),
+            ("Kelotane patient", "kelotane"),
+            ("Bicaridine patient", "bicaridine"),
+        ] {
+            waiting_crew(&mut app, name, reagent, 30, 60.0, true);
+        }
+
+        app.update();
+
+        assert_eq!(outcomes(&app).len(), 3);
+        assert_eq!(app.world().resource::<Shift>().succeeded, 3);
+        for container in [first, second, third] {
+            assert!(app.world().get_entity(container).is_err());
+        }
+    }
+
+    #[test]
+    fn one_order_cannot_consume_two_matching_tray_containers_before_commands_apply() {
+        let mut app = window_app();
+        let (window, first) = window_with(&mut app, &[("dylovene", 30)]);
+        let second = add_window_container(&mut app, window, &[("dylovene", 30)], MachineSlot::B);
+        waiting_crew(&mut app, "Only patient", "dylovene", 30, 60.0, true);
+
+        app.update();
+
+        assert_eq!(outcomes(&app).len(), 1);
+        let remaining = [first, second]
+            .into_iter()
+            .filter(|entity| app.world().get_entity(*entity).is_ok())
+            .count();
+        assert_eq!(
+            remaining, 1,
+            "the unmatched spare batch must remain on its tray"
+        );
+    }
+
+    #[test]
+    fn recipient_reservation_excludes_an_order_before_deferred_removal() {
+        let db = db();
+        let reagent = db.reagent("dylovene");
+        let contents = solution_of(&db, &[("dylovene", 30)]);
+        let order = Order {
+            reagent,
+            specific: false,
+            minimum_purity: 0.0,
+            amount: Units::whole(30),
+            plea: String::new(),
+            patience: 60.0,
+            waited: 0.0,
+        };
+        let mut route = CrewRoute::arrival_for(DeliveryLane::Public, 0.0);
+        route.phase = CrewPhase::Waiting;
+        let recipient = Entity::PLACEHOLDER;
+        let reserved = HashSet::from([recipient]);
+
+        assert_eq!(
+            window_recipient(
+                &contents,
+                std::iter::once((recipient, &order, &route, OrderKind::Normal)),
+                &reserved,
+                DeliveryLane::Public,
+                &db,
+            ),
+            None
+        );
     }
 
     #[test]
@@ -3487,16 +3680,23 @@ mod tests {
     // -- standing ---------------------------------------------------------
 
     #[test]
-    fn standing_cannot_sink_below_the_floor() {
-        // Unbounded debt is not a consequence, it is a wall: a rough patch used
-        // to cost dozens of clean deliveries of repair work at +2 each, with
-        // nothing on screen saying so.
+    fn standing_scale_is_exactly_minus_ten_to_ten() {
+        assert_eq!(STANDING_FLOOR, -10);
+        assert_eq!(STANDING_CEILING, 10);
+    }
+
+    #[test]
+    fn standing_is_clamped_to_the_shared_scale() {
         let mut shift = Shift::default();
         for _ in 0..50 {
             shift.adjust(Department::Medical, -4);
         }
-
         assert_eq!(shift.standing(Department::Medical), STANDING_FLOOR);
+
+        for _ in 0..50 {
+            shift.adjust(Department::Medical, 4);
+        }
+        assert_eq!(shift.standing(Department::Medical), STANDING_CEILING);
     }
 
     #[test]
@@ -3513,10 +3713,27 @@ mod tests {
     }
 
     #[test]
-    fn the_standing_floor_leaves_room_for_security_to_turn() {
-        // `rogue_security` arms off Security standing itself. A floor at or
-        // above its `hostile_below` would make that whole thread unreachable
-        // by construction.
+    fn voluntary_goodwill_spending_stops_at_the_floor() {
+        let mut shift = Shift::default();
+        shift.spend_goodwill(Department::Cargo, 30);
+        shift.spend_goodwill(Department::Cargo, 7);
+
+        assert_eq!(shift.standing(Department::Cargo), STANDING_FLOOR);
+    }
+
+    #[test]
+    fn work_repays_goodwill_immediately_from_the_floor() {
+        let mut shift = Shift::default();
+        shift.spend_goodwill(Department::Cargo, 37);
+        shift.adjust(Department::Cargo, -4);
+        assert_eq!(shift.standing(Department::Cargo), STANDING_FLOOR);
+
+        shift.adjust(Department::Cargo, 5);
+        assert_eq!(shift.standing(Department::Cargo), STANDING_FLOOR + 5);
+    }
+
+    #[test]
+    fn rogue_security_thresholds_fit_inside_the_standing_scale() {
         let rogue: crate::rogue_security::RogueSecurityScript =
             ron::from_str(include_str!("../../assets/data/station.rogue_security.ron")).unwrap();
         assert!(
@@ -3524,6 +3741,38 @@ mod tests {
             "the floor at {STANDING_FLOOR} sits at or above Security's own \
              threshold of {}, so they could never turn",
             rogue.hostile_below
+        );
+        assert!(
+            rogue.redeemed_at <= STANDING_CEILING,
+            "redemption at {} exceeds the standing ceiling of {STANDING_CEILING}",
+            rogue.redeemed_at
+        );
+    }
+
+    #[test]
+    fn old_out_of_range_standing_is_normalized() {
+        let mut shift = Shift::default();
+        shift.npc_standing.insert("Quartermaster Reyes".into(), -40);
+        shift.npc_standing.insert("Tech Lindqvist".into(), 25);
+        shift.opened_at = Some(ShiftSnapshot {
+            department_standing: [(Department::Cargo, -40), (Department::Engineering, 25)]
+                .into_iter()
+                .collect(),
+            ..default()
+        });
+
+        shift.clamp_standing();
+
+        assert_eq!(shift.npc_standing("Quartermaster Reyes"), STANDING_FLOOR);
+        assert_eq!(shift.npc_standing("Tech Lindqvist"), STANDING_CEILING);
+        let snapshot = shift.opened_at.as_ref().unwrap();
+        assert_eq!(
+            snapshot.department_standing[&Department::Cargo],
+            STANDING_FLOOR
+        );
+        assert_eq!(
+            snapshot.department_standing[&Department::Engineering],
+            STANDING_CEILING
         );
     }
 
@@ -3656,6 +3905,27 @@ mod tests {
     }
 
     // -- order generation --------------------------------------------------
+
+    #[test]
+    fn bulk_quantities_use_their_own_five_percent_pool() {
+        let amounts = [30, 40, 50];
+        assert_eq!(requested_amount_pool(&amounts, 0.05, 0.049), [40, 50]);
+        assert_eq!(requested_amount_pool(&amounts, 0.05, 0.05), [30]);
+        assert_eq!(requested_amount_pool(&amounts, 0.05, 0.99), [30]);
+    }
+
+    #[test]
+    fn every_bulk_capable_station_request_has_an_ordinary_fallback() {
+        for request in &station_orders().requests {
+            if request.amounts.iter().any(|amount| *amount > 30) {
+                assert!(
+                    request.amounts.iter().any(|amount| *amount <= 30),
+                    "{} offers bulk quantities but no <=30u fallback",
+                    request.reagent
+                );
+            }
+        }
+    }
 
     /// Enough world to run `generate_orders` for real, headless: a fresh
     /// `Knowledge`, the real crew roster and order requests, and a spawner

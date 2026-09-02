@@ -13,6 +13,9 @@
     gap_seconds: (32.0, 58.0),
     patience_seconds: (135.0, 230.0),
     max_active: 3,
+    // Only requests which explicitly offer an amount above 30u consult this;
+    // all other amount rolls are unchanged.
+    bulk_amount_chance: 0.05,
 
     // How much rarer an "asks for it by name" order is than an ordinary
     // lenient one, multiplied onto the *current* legitimate gap above —
@@ -470,7 +473,7 @@
             // rather than a dose.
             reagent: "saline_glucose",
             themes: ["trauma", "burns"],
-            amounts: [40, 50],
+            amounts: [30, 40, 50],
             plea: "Two walking wounded and no beds. Send whatever you can spare, in bulk.",
             specific_plea: "Two walking wounded and no beds. Send saline-glucose, as much as you can spare.",
         ),
