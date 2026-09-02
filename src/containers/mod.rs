@@ -674,7 +674,11 @@ pub(crate) fn dress_containers(
 fn spawn_starting_glassware(
     mut commands: Commands,
     restored: Option<Res<crate::world_state::PendingWorldState>>,
+    kind: Option<Res<crate::session::SessionKind>>,
 ) {
+    if matches!(kind.as_deref(), Some(crate::session::SessionKind::Training)) {
+        return;
+    }
     // A world snapshot owns the complete item population. Spawning the starter
     // rack as well would duplicate every original beaker on every reload.
     if restored.is_some_and(|restored| restored.loaded_from_disk()) {

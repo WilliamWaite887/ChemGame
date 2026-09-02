@@ -90,7 +90,8 @@ impl Plugin for ArcPlugin {
                     .run_if(is_authority),
                 apply_campaign.run_if(in_state(ClientState::Connected)),
             )
-                .run_if(in_state(AppState::Playing)),
+                .run_if(in_state(AppState::Playing))
+                .run_if(crate::session::career_session),
         );
     }
 }

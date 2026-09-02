@@ -93,6 +93,7 @@ impl Plugin for HazardPlugin {
                     // hit by an incident before they have found the door.
                     (schedule_incidents, run_incidents)
                         .chain()
+                        .run_if(crate::session::career_session)
                         .run_if(is_authority)
                         .run_if(resource_exists::<MapReady>),
                     // Both presentation, so neither is authority-gated: a

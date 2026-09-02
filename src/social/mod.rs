@@ -431,7 +431,9 @@ impl Plugin for SocialPlugin {
             .add_message::<ObservedAction>()
             .add_systems(
                 OnEnter(AppState::Playing),
-                (reset_favor_clock, spawn_evidence_lockbox).run_if(is_authority),
+                (reset_favor_clock, spawn_evidence_lockbox)
+                    .run_if(is_authority)
+                    .run_if(crate::session::career_session),
             )
             .add_systems(
                 Update,
@@ -452,7 +454,8 @@ impl Plugin for SocialPlugin {
                 )
                     .chain()
                     .run_if(is_authority)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(in_state(AppState::Playing))
+                    .run_if(crate::session::career_session),
             )
             .add_systems(
                 Update,

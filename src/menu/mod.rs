@@ -39,6 +39,8 @@ pub enum MenuScreen {
     Mode,
     /// New save, or one of the existing ones.
     Save,
+    Training,
+    TrainingLessons,
     /// Which side to play a brand new save from. Only ever reached when at
     /// least one antagonist has been thwarted — see [`show_campaign_screen`].
     Campaign,
@@ -175,7 +177,7 @@ struct AddressHint;
 
 /// What a menu button does.
 #[derive(Component, Clone)]
-enum MenuAction {
+pub(crate) enum MenuAction {
     ChooseHost,
     ChooseSolo,
     ChooseJoin,
@@ -200,6 +202,7 @@ enum MenuAction {
     Cancel,
     Back,
     Quit,
+    OpenTraining,
     OpenSettings,
     OpenControls,
     /// Puts every dial and display option back where it shipped. Deliberately
@@ -219,12 +222,27 @@ enum MenuAction {
     CancelDeleteSave,
 }
 
-fn open_menu(mut commands: Commands, mut screen: ResMut<NextState<MenuScreen>>) {
+fn open_menu(
+    mut commands: Commands,
+    mut screen: ResMut<NextState<MenuScreen>>,
+    career: Option<Res<crate::tutorial::StartCareer>>,
+    lessons: Option<Res<crate::tutorial::ui::ShowLessons>>,
+    mut pending: ResMut<PendingMode>,
+) {
     // Done here rather than at startup so it happens exactly once, on the path
     // that is about to list the saves.
     saves::migrate_legacy_saves();
     commands.spawn((Camera2d, MenuCamera));
-    screen.set(MenuScreen::Mode);
+    if lessons.is_some() {
+        commands.remove_resource::<crate::tutorial::ui::ShowLessons>();
+        screen.set(MenuScreen::TrainingLessons);
+    } else if career.is_some() {
+        pending.0 = LaunchMode::Singleplayer;
+        commands.remove_resource::<crate::tutorial::StartCareer>();
+        screen.set(MenuScreen::Save);
+    } else {
+        screen.set(MenuScreen::Mode);
+    }
 }
 
 /// Opens the waiting-room screen on the way into `AppState::Connecting`.
@@ -286,6 +304,11 @@ fn show_mode_screen(mut commands: Commands, error: Res<ConnectError>) {
                 "Solo",
                 "One chemist. No networking.",
                 MenuAction::ChooseSolo,
+            ));
+            panel.spawn(choice(
+                "Training",
+                "A solo course and a laboratory for practice.",
+                MenuAction::OpenTraining,
             ));
             panel.spawn(choice(
                 "Host",
@@ -752,6 +775,7 @@ fn handle_menu_clicks(
                 screen.set(MenuScreen::Save);
             }
             MenuAction::ChooseJoin => screen.set(MenuScreen::Join),
+            MenuAction::OpenTraining => screen.set(MenuScreen::Training),
             // With nothing unlocked there is only one kind of new save, and a
             // one-option screen asking which kind you want would both waste a
             // click and imply the existence of something the player has not
@@ -933,6 +957,7 @@ fn start(
     screen: &mut NextState<MenuScreen>,
 ) {
     info!("opening save '{}'", slot.name());
+    commands.insert_resource(crate::session::SessionKind::Career);
     commands.insert_resource(slot);
     // Only for a brand new save. Loading one leaves this absent, so
     // `arc::assign_campaign` sees the campaign `shift::load_progress` restored

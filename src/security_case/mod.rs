@@ -180,9 +180,15 @@ impl Plugin for SecurityCasePlugin {
                     .chain()
                     .before(crate::orders::expire_orders)
                     .run_if(crate::net::is_authority)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(in_state(AppState::Playing))
+                    .run_if(crate::session::career_session),
             )
-            .add_systems(Update, receive_summary.run_if(in_state(AppState::Playing)))
+            .add_systems(
+                Update,
+                receive_summary
+                    .run_if(in_state(AppState::Playing))
+                    .run_if(crate::session::career_session),
+            )
             .add_plugins(ui::SecurityCaseUiPlugin);
     }
 }

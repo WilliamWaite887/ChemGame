@@ -62,7 +62,7 @@ impl Plugin for ChemWorldPlugin {
                         react_puddles.before(crate::hazards::ReactionHazards),
                         expose_bodies_to_puddles,
                         age_puddles.after(crate::hazards::ReactionHazards),
-                        respond_to_unwanted_exposure,
+                        respond_to_unwanted_exposure.run_if(crate::session::career_session),
                     )
                         .chain()
                         .run_if(is_authority),

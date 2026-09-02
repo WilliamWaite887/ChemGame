@@ -176,6 +176,9 @@ pub enum PauseScreen {
     Root,
     Settings,
     Controls,
+    Textbook,
+    TextbookArticle,
+    Training,
     /// The arc has resolved. Raised by `crate::ending`, which owns everything
     /// about what the screen says; this module only owns the fact that it is a
     /// screen, and therefore gets the freed cursor, the stopped input and the
@@ -191,7 +194,11 @@ pub enum PauseScreen {
 /// under it to step back to).
 pub(crate) fn escape_steps_pause_screen_back_to(screen: PauseScreen) -> Option<PauseScreen> {
     match screen {
-        PauseScreen::Settings | PauseScreen::Controls => Some(PauseScreen::Root),
+        PauseScreen::Settings
+        | PauseScreen::Controls
+        | PauseScreen::Textbook
+        | PauseScreen::Training => Some(PauseScreen::Root),
+        PauseScreen::TextbookArticle => Some(PauseScreen::Textbook),
         PauseScreen::Root | PauseScreen::Ending => None,
     }
 }
@@ -201,6 +208,7 @@ pub enum PauseAction {
     Resume,
     OpenSettings,
     OpenControls,
+    OpenTextbook,
     Back,
     /// Leaves the lab for the main menu. `crate::session` unwinds the world
     /// and `crate::net::close_session_transport` hangs up the socket.
@@ -232,6 +240,7 @@ fn sync_pause_overlay(
     mode: Option<Res<LaunchMode>>,
     ending: Res<crate::ending::FinishedArc>,
     roots: Query<Entity, With<PauseRoot>>,
+    kind: Option<Res<crate::session::SessionKind>>,
 ) {
     // Deliberately *not* rebuilt when `Settings` changes. It used to be, and
     // that made a draggable dial impossible: every frame of a drag writes the
@@ -262,7 +271,12 @@ fn sync_pause_overlay(
 
     let co_op = !owns_the_clock(mode.as_deref());
     match *screen {
-        PauseScreen::Root => draw_root(&mut commands, co_op),
+        PauseScreen::Root => draw_root(
+            &mut commands,
+            co_op,
+            matches!(kind.as_deref(), Some(crate::session::SessionKind::Training)),
+        ),
+        PauseScreen::Textbook | PauseScreen::TextbookArticle | PauseScreen::Training => {}
         PauseScreen::Settings => draw_settings(&mut commands, &settings),
         PauseScreen::Controls => draw_controls(&mut commands, &settings, &rebinding),
         PauseScreen::Ending => match ending.showing() {
@@ -274,12 +288,12 @@ fn sync_pause_overlay(
             // Unreachable: `ending::notice_the_ending` writes the content
             // before it selects this screen. Falling back to the ordinary
             // pause menu beats an empty screen with no way off it.
-            None => draw_root(&mut commands, co_op),
+            None => draw_root(&mut commands, co_op, false),
         },
     }
 }
 
-fn draw_root(commands: &mut Commands, co_op: bool) {
+fn draw_root(commands: &mut Commands, co_op: bool, training: bool) {
     let subtitle = if co_op {
         "The lab keeps running — you are not the only one in it."
     } else {
@@ -292,6 +306,14 @@ fn draw_root(commands: &mut Commands, co_op: bool) {
         subtitle,
         |panel| {
             panel.spawn(choice("Resume", "Back to the bench.", PauseAction::Resume));
+            panel.spawn(choice(
+                "Lab Textbook",
+                "Short explanations and help with experiments.",
+                PauseAction::OpenTextbook,
+            ));
+            if training {
+                crate::tutorial::pause_controls(panel);
+            }
             panel.spawn(choice(
                 "Settings",
                 "Look sensitivity, field of view, volume.",
@@ -772,6 +794,7 @@ fn handle_pause_clicks(
     mut settings: ResMut<Settings>,
     mut app_state: ResMut<NextState<AppState>>,
     mut quit: MessageWriter<AppExit>,
+    mut textbook: ResMut<crate::textbook::TextbookView>,
 ) {
     for (interaction, action) in &buttons {
         if *interaction != Interaction::Pressed {
@@ -784,6 +807,7 @@ fn handle_pause_clicks(
             }
             PauseAction::OpenSettings => *screen = PauseScreen::Settings,
             PauseAction::OpenControls => *screen = PauseScreen::Controls,
+            PauseAction::OpenTextbook => crate::textbook::open(&mut textbook, &mut screen),
             PauseAction::Back => *screen = PauseScreen::Root,
             PauseAction::QuitToMenu => {
                 // `OnExit(AppState::Playing)` owns the teardown — see
@@ -1363,7 +1387,7 @@ fn sync_binding_rows(
 ///
 /// `KeyCode`'s own `Debug` is close enough to be tempting and wrong enough to
 /// be embarrassing: it prints `KeyW`, `ShiftLeft`, `Digit1`.
-fn key_label(key: KeyCode) -> String {
+pub(crate) fn key_label(key: KeyCode) -> String {
     let raw = format!("{key:?}");
     if let Some(letter) = raw.strip_prefix("Key") {
         return letter.to_string();

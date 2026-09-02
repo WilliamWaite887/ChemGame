@@ -83,9 +83,15 @@ impl Plugin for CultPlugin {
                 // authored consequence may fall back to the old lab-local
                 // coordinates while that registry is incomplete.
                 .run_if(resource_exists::<MapReady>)
-                .run_if(in_state(AppState::Playing)),
+                .run_if(in_state(AppState::Playing))
+                .run_if(crate::session::career_session),
         );
-        app.add_systems(Update, dress_incidents.run_if(in_state(AppState::Playing)));
+        app.add_systems(
+            Update,
+            dress_incidents
+                .run_if(in_state(AppState::Playing))
+                .run_if(crate::session::career_session),
+        );
     }
 }
 

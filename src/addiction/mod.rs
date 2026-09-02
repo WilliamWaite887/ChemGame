@@ -88,7 +88,8 @@ impl Plugin for AddictionPlugin {
             )
                 .chain()
                 .run_if(is_authority)
-                .run_if(in_state(AppState::Playing)),
+                .run_if(in_state(AppState::Playing))
+                .run_if(crate::session::career_session),
         );
     }
 }

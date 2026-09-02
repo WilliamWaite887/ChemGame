@@ -596,7 +596,10 @@ impl Plugin for LabPlugin {
             // the replacement floor plan has produced a graph.
             .add_systems(OnExit(AppState::Playing), clear_map_runtime);
         #[cfg(not(feature = "trenchbroom"))]
-        app.add_systems(OnEnter(AppState::Playing), seed_legacy_map_runtime);
+        app.add_systems(
+            OnEnter(AppState::Playing),
+            seed_legacy_map_runtime.run_if(crate::session::career_session),
+        );
 
         // The room itself is scenery: identical on both ends, derived from
         // constants, and nothing about it is worth a packet. Under the
@@ -607,6 +610,7 @@ impl Plugin for LabPlugin {
             OnEnter(AppState::Playing),
             (spawn_shell, spawn_fixtures)
                 .chain()
+                .run_if(crate::session::career_session)
                 .after(load_machine_assets),
         );
 
@@ -1675,7 +1679,7 @@ fn spawn_fixtures(mut commands: Commands, assets: Res<MachineAssets>) {
 
 /// Authority-local identity used to reconcile hot-reloaded map markers.
 #[derive(Component, Debug)]
-struct MachineSpotId(String);
+pub(crate) struct MachineSpotId(pub String);
 
 /// Creates one machine and its equipment-specific state. Authority only.
 /// Presentation remains local to each peer through [`dress_machines`].

@@ -45,7 +45,8 @@ impl Plugin for InstabilityPlugin {
                         .run_if(is_authority),
                     apply_band.run_if(in_state(ClientState::Connected)),
                 )
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(in_state(AppState::Playing))
+                    .run_if(crate::session::career_session),
             );
     }
 }

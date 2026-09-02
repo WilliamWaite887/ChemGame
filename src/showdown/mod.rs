@@ -84,7 +84,8 @@ impl Plugin for ShowdownPlugin {
                     // otherwise.
                     dress_breach,
                 )
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(in_state(AppState::Playing))
+                    .run_if(crate::session::career_session),
             );
     }
 }

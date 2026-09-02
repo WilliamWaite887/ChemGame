@@ -2432,6 +2432,8 @@ pub(crate) fn handle_analyze(
 /// a hidden dice roll.
 fn handle_purify(
     mut commands: Commands,
+    training: Option<Res<crate::session::SessionKind>>,
+    calibrated: Query<(), With<crate::tutorial::TrainingCalibrated>>,
     db: Res<ChemDb>,
     knowledge: Res<Knowledge>,
     mut requests: MessageReader<FromClient<PurifyRequested>>,
@@ -2444,10 +2446,14 @@ fn handle_purify(
     mut containers: Query<&mut Container>,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
-    if knowledge.known_count() < HPLC_RECIPE_REQUIREMENT {
-        return;
-    }
     for request in requests.read() {
+        if !crate::tutorial::hplc_available(
+            knowledge.known_count(),
+            training.as_deref(),
+            calibrated.contains(request.machine),
+        ) {
+            continue;
+        }
         if authorized_machine_actor(
             request.client_id,
             machines.get(request.machine).ok(),
@@ -2664,7 +2670,7 @@ fn handle_grind(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! Headless tests for the machine wiring: message in, state out, no
     //! window and no renderer. They cover the paths a player can only reach by
     //! clicking, which is exactly where manual testing is least reliable.
@@ -2673,7 +2679,7 @@ mod tests {
     use crate::containers::ContainerKind;
     use chem_sim::ChemData;
 
-    fn test_app() -> App {
+    pub(crate) fn test_app() -> App {
         let data = ChemData::from_ron(
             include_str!("../../assets/data/chem.reagents.ron"),
             include_str!("../../assets/data/chem.reactions.ron"),

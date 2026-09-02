@@ -102,7 +102,7 @@ impl Plugin for BodyPlugin {
                         forward_body_reactions.before(crate::hazards::ReactionHazards),
                         handle_chemical_incapacitation,
                         handle_collapse,
-                        run_medbay_retrieval,
+                        run_medbay_retrieval.run_if(crate::session::career_session),
                     )
                         .chain()
                         .run_if(is_authority),
@@ -959,6 +959,7 @@ fn close_panel_on_collapse(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn handle_collapse(
     mut commands: Commands,
+    session: Option<Res<crate::session::SessionKind>>,
     mut shift: ResMut<crate::orders::Shift>,
     mut radio: ResMut<crate::radio::RadioLog>,
     bodies: Query<(Entity, &Body), (Changed<Body>, With<Chemist>)>,
@@ -997,6 +998,9 @@ fn handle_collapse(
         commands
             .entity(player)
             .insert(MedbayRetrieval(MEDBAY_SECONDS));
+        if session.as_deref() == Some(&crate::session::SessionKind::Training) {
+            continue;
+        }
         shift.adjust(crate::orders::Department::Medical, COLLAPSE_PENALTY);
         radio.push(
             crate::radio::RadioEntry::new(

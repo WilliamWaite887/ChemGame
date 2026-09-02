@@ -52,6 +52,7 @@ impl Plugin for RestockPlugin {
             )
                 .chain()
                 .run_if(in_state(AppState::Playing))
+                .run_if(crate::session::career_session)
                 .run_if(is_authority),
         );
     }

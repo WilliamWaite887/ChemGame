@@ -68,17 +68,17 @@ impl Plugin for CrewPlugin {
                     // (metabolism, smoke, a delivered dose), so it belongs on
                     // the same side.
                     (
-                        start_crew_at_their_department,
+                        start_crew_at_their_department.run_if(crate::session::career_session),
                         react_to_chemical_statuses,
                         sync_medical_evacuation_prompt,
-                        handle_medical_evacuation,
-                        ambient_behaviour,
+                        handle_medical_evacuation.run_if(crate::session::career_session),
+                        ambient_behaviour.run_if(crate::session::career_session),
                         walk_route,
                         // After `walk_route`, so an errand set in reaction to
                         // an arrival this frame starts walking on the next one
                         // rather than half a frame late.
-                        run_errands,
-                        handle_crew_collapse,
+                        run_errands.run_if(crate::session::career_session),
+                        handle_crew_collapse.run_if(crate::session::career_session),
                     )
                         .chain()
                         .run_if(is_authority)
@@ -103,6 +103,7 @@ impl Plugin for CrewPlugin {
                     // `CrewRoute`; `walk_route` (still gated on `MapReady`
                     // above) resolves the real path once nav is ready.
                     populate_departments
+                        .run_if(crate::session::career_session)
                         .run_if(resource_exists_and_changed::<Departments>)
                         .run_if(is_authority),
                     // Runs everywhere: a crew member who arrived by

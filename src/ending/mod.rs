@@ -36,7 +36,8 @@ impl Plugin for EndingPlugin {
             Update,
             (notice_the_ending, watch_for_crew_collapse)
                 .chain()
-                .run_if(in_state(AppState::Playing)),
+                .run_if(in_state(AppState::Playing))
+                .run_if(crate::session::career_session),
         );
     }
 }

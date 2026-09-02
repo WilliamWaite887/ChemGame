@@ -50,7 +50,8 @@ impl Plugin for QuackPlugin {
                 .after(threat::PromoteScripts)
                 .run_if(is_authority)
                 // No `arc::is_active` gate, unlike a main antagonist.
-                .run_if(in_state(AppState::Playing)),
+                .run_if(in_state(AppState::Playing))
+                .run_if(crate::session::career_session),
         );
     }
 }

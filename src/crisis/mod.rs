@@ -69,7 +69,8 @@ impl Plugin for CrisisPlugin {
                 .chain()
                 .after(threat::PromoteScripts)
                 .run_if(is_authority)
-                .run_if(in_state(AppState::Playing)),
+                .run_if(in_state(AppState::Playing))
+                .run_if(crate::session::career_session),
         )
         // Presentation, not state — runs on every peer. Whether a crisis
         // is live is read straight off `CrisisOrder`, which replicates
@@ -78,7 +79,9 @@ impl Plugin for CrisisPlugin {
         // without a bespoke sync message.
         .add_systems(
             Update,
-            pulse_alert_lighting.run_if(in_state(AppState::Playing)),
+            pulse_alert_lighting
+                .run_if(in_state(AppState::Playing))
+                .run_if(crate::session::career_session),
         );
     }
 }

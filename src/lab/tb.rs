@@ -254,6 +254,7 @@ fn collect_loaded_map(
     crisis_spots: Query<(&CrisisSpot, &Transform)>,
     door_spots: Query<(&DoorSpot, &Transform)>,
     point_lights: Query<&PointLight>,
+    training_points: Query<(&TrainingSpot, &Transform)>,
 ) {
     // WorldInstanceReady is global. Other scenes must never replace station
     // resources just because they contain similarly-shaped components.
@@ -261,6 +262,7 @@ fn collect_loaded_map(
         return;
     }
 
+    let mut training = crate::tutorial::TrainingSpots::default();
     let mut areas = WalkableAreas::default();
     let mut machines = MachineSpots::default();
     let mut departments = Departments::default();
@@ -269,6 +271,9 @@ fn collect_loaded_map(
     let mut doors = DoorSpots::default();
 
     for entity in spawner.iter_instance_entities(ready.instance_id) {
+        if let Ok((spot, transform)) = training_points.get(entity) {
+            training.0.insert(spot.id.clone(), *transform);
+        }
         if let Ok((walkable, footprints)) = walkables.get(entity) {
             let room = (!walkable.room.trim().is_empty()).then(|| walkable.room.trim().to_string());
             let bridge_id = walkable
@@ -369,6 +374,7 @@ fn collect_loaded_map(
     // live. Drop the gate in the same command batch as the replacements; nav
     // will restore it only after rebuilding from these areas.
     commands.remove_resource::<MapReady>();
+    commands.insert_resource(training);
     commands.insert_resource(areas);
     commands.insert_resource(machines);
     commands.insert_resource(departments);
@@ -1921,6 +1927,12 @@ pub struct EscapePod;
 #[derive(Debug, Clone, Default)]
 pub struct ChemistStart;
 
+#[point_class(classname("training_spot"), base(Transform), color(80 255 160), size(-8 -8 0, 8 8 32))]
+#[derive(Debug, Clone, Default)]
+pub struct TrainingSpot {
+    pub id: String,
+}
+
 pub struct LabTrenchBroomPlugin;
 
 impl Plugin for LabTrenchBroomPlugin {
@@ -1940,6 +1952,7 @@ impl Plugin for LabTrenchBroomPlugin {
             .register_type::<MachineSpot>()
             .register_type::<QueuePoint>()
             .register_type::<ChemistStart>()
+            .register_type::<TrainingSpot>()
             .register_type::<Walkable>()
             .register_type::<DepartmentSpot>()
             .register_type::<CrewPost>()
@@ -1996,10 +2009,20 @@ fn reset_map_runtime(mut commands: Commands) {
     commands.insert_resource(Departments::default());
 }
 
-fn spawn_lab_map(mut commands: Commands, assets: Res<AssetServer>) {
+fn spawn_lab_map(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    kind: Res<crate::session::SessionKind>,
+) {
     commands.spawn((
         LabMapRoot,
-        WorldAssetRoot(assets.load("maps/lab.map#Scene")),
+        WorldAssetRoot(
+            assets.load(if *kind == crate::session::SessionKind::Training {
+                "maps/tutorial.map#Scene"
+            } else {
+                "maps/lab.map#Scene"
+            }),
+        ),
         crate::until_we_leave_the_lab(),
     ));
 

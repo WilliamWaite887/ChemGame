@@ -57,7 +57,9 @@ mod showdown;
 mod smuggler;
 mod social;
 mod speech;
+mod textbook;
 mod threat;
+mod tutorial;
 mod ui;
 mod world_state;
 
@@ -264,6 +266,8 @@ fn main() {
             // Unwinds a session on the way out, so quitting to the menu
             // and opening another save does not inherit this one's career.
             session::SessionPlugin,
+            textbook::TextbookPlugin,
+            tutorial::TutorialPlugin,
             // Reads `Settings::master_volume` and every other module's
             // state/messages; nothing reads it back. Goes last for that
             // reason, not because build order matters — every plugin

@@ -73,16 +73,16 @@ impl Plugin for OrderPlugin {
                     // Crew arrive continuously — the only gate left is the
                     // player's own "not accepting requests" toggle, checked
                     // inside `generate_orders` itself against `Shift`.
-                    generate_orders,
+                    generate_orders.run_if(crate::session::career_session),
                     // Its rarer, exact-asking sibling — same sign, same
                     // queue cap, its own much slower clock.
-                    generate_specific_orders,
+                    generate_specific_orders.run_if(crate::session::career_session),
                     // Deliberately not gated the same way: the sign stops new
                     // arrivals, not the clock on whoever is already waiting.
-                    expire_orders,
+                    expire_orders.run_if(crate::session::career_session),
                     handle_delivery,
                     handle_window_delivery,
-                    leave_sample_vials,
+                    leave_sample_vials.run_if(crate::session::career_session),
                     broadcast_shift,
                 )
                     .chain()
@@ -1868,6 +1868,9 @@ fn adjust_for_role(
     instability: Option<&crate::instability::Instability>,
 ) {
     let Some(department) = Department::from_role(role) else {
+        if role == "Training" {
+            return;
+        }
         warn!("order resolved for unrecognised department role '{role}'");
         return;
     };
@@ -1916,7 +1919,7 @@ fn misdelivered(
 const MISDELIVERY_CHANCE: f64 = 0.15;
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn handle_delivery(
+pub(crate) fn handle_delivery(
     mut commands: Commands,
     db: Res<ChemDb>,
     mut requests: MessageReader<FromClient<InteractRequested>>,
@@ -2096,6 +2099,35 @@ fn complete_delivery(
         db,
     );
     outcome = enforce_minimum_purity(outcome, matched, order.minimum_purity, &container.solution);
+
+    if member.name == "Practice Customer" {
+        let delivered = crate::tutorial::DeliveryEvidence {
+            request: 0,
+            container: container_entity,
+            kind: container.kind,
+            actual: container.solution.clone(),
+            outcome,
+        };
+        commands.queue(move |world: &mut World| {
+            if world.get_resource::<crate::session::SessionKind>()
+                != Some(&crate::session::SessionKind::Training)
+            {
+                return;
+            }
+            let Some(context) = world.get::<crate::order_intake::RequestContext>(crew) else {
+                return;
+            };
+            let request = context.id;
+            if let Some(mut messages) =
+                world.get_resource_mut::<Messages<crate::tutorial::DeliveryEvidence>>()
+            {
+                messages.write(crate::tutorial::DeliveryEvidence {
+                    request,
+                    ..delivered
+                });
+            }
+        });
+    }
 
     // They read the bottle, believed it, and are grading what they think they
     // were given. Nothing about the *contents* has changed — the real solution

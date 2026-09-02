@@ -288,6 +288,7 @@ fn clear_frame_reservations(mut state: ResMut<IntakeState>) {
 #[allow(clippy::too_many_arguments)]
 fn update_pending(
     mut commands: Commands,
+    session: Option<Res<crate::session::SessionKind>>,
     time: Res<Time>,
     script: Option<Res<Script>>,
     campaign: Option<Res<Campaign>>,
@@ -357,7 +358,11 @@ fn update_pending(
         if !arrived && !request.greeted {
             continue;
         }
-        request.waited += time.delta_secs();
+        if session.as_deref() != Some(&crate::session::SessionKind::Training)
+            || request.context.id & crate::tutorial::TRAINING_REQUEST_BIT == 0
+        {
+            request.waited += time.delta_secs();
+        }
         let remind = request.waited >= REMINDER_SECONDS && !request.reminded;
         if !request.greeted || remind {
             if let Some(script) = script.as_deref() {

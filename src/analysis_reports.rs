@@ -137,7 +137,7 @@ impl Plugin for AnalysisReportPlugin {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scan(
+pub(crate) fn scan(
     mut commands: Commands,
     db: Res<ChemDb>,
     time: Res<Time>,

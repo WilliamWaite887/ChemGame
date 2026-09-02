@@ -943,6 +943,7 @@ fn sync_panel(
     arc_script: Option<Res<crate::arc::Script>>,
     board: BoardView,
     previous: ResMut<LastPanel>,
+    training: crate::tutorial::TrainingEquipment,
 ) {
     let shift = &board.shift;
     let mode = modes.iter().next().copied().unwrap_or_default();
@@ -1284,6 +1285,9 @@ fn sync_panel(
                                     }
                                     analyzer_body(
                                         body,
+                                        training.kind.as_deref(),
+                                        open_machine
+                                            .is_some_and(|e| training.calibrated.contains(e)),
                                         &db,
                                         &knowledge,
                                         loaded,
@@ -3726,13 +3730,16 @@ fn hplc_graph(
 
 fn analyzer_body(
     panel: &mut ChildSpawnerCommands,
+    training: Option<&crate::session::SessionKind>,
+    training_calibrated: bool,
     db: &ChemDb,
     knowledge: &Knowledge,
     loaded: Option<&Container>,
     report: Option<&HplcReport>,
     requested_selection: Option<ReagentId>,
 ) {
-    let calibrated = knowledge.known_count() >= HPLC_RECIPE_REQUIREMENT;
+    let calibrated =
+        crate::tutorial::hplc_available(knowledge.known_count(), training, training_calibrated);
     let selected = loaded
         .and_then(|container| selected_hplc_reagent(&container.solution, requested_selection));
 
@@ -3764,9 +3771,9 @@ fn analyzer_body(
                     .as_deref()
                     .and_then(|key| db.reagents.id_of(key))
                     .map(|recovered| {
-                        format!("Start recovery → {}", db.reagents.get(recovered).name)
+                        format!("Recover {}", db.reagents.get(recovered).name)
                     })
-                    .unwrap_or_else(|| format!("Start purification → {}", definition.name));
+                    .unwrap_or_else(|| format!("Purify {}", definition.name));
                 header.spawn(button(text, PanelAction::Purify(reagent)));
             }
         });
@@ -3905,8 +3912,8 @@ fn analyzer_body(
                 })
                 .count();
             section.spawn(row()).with_children(|row| {
-                row.spawn(button("Identify methods", PanelAction::Analyze));
-                row.spawn(button("Eject sample", PanelAction::Eject(MachineSlot::A)));
+                row.spawn(button("Analyze", PanelAction::Analyze));
+                row.spawn(button("Eject", PanelAction::Eject(MachineSlot::A)));
                 row.spawn(label(
                     if unknown == 0 {
                         "No unrecorded signatures".to_string()
@@ -6599,16 +6606,26 @@ fn accepting_banner_line(shift: &Shift) -> String {
     format!("SHIFT {}  |  {state}{souring}", shift.shift_number)
 }
 
-fn update_phase_banner(shift: Res<Shift>, banner: BannerText) {
-    let line = accepting_banner_line(&shift);
+fn update_phase_banner(
+    shift: Res<Shift>,
+    banner: BannerText,
+    session: Option<Res<crate::session::SessionKind>>,
+) {
+    let line = if session.as_deref() == Some(&crate::session::SessionKind::Training) {
+        "TRAINING | UNTIMED PRACTICE".to_string()
+    } else {
+        accepting_banner_line(&shift)
+    };
     let mut banner = banner.into_inner();
     if banner.0 != line {
         banner.0 = line;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_order_queue(
     db: Res<ChemDb>,
+    settings: Option<Res<crate::settings::Settings>>,
     shift: Res<Shift>,
     orders: Query<(
         &CrewMember,
@@ -6642,6 +6659,13 @@ fn update_order_queue(
                 if *held {
                     return format!(
                         "{}  |  SECURITY HOLD\n{}",
+                        member.name,
+                        crate::order_intake::requirements(order, &db)
+                    );
+                }
+                if member.name == "Practice Customer" {
+                    return format!(
+                        "{} | UNTIMED PRACTICE\n{}",
                         member.name,
                         crate::order_intake::requirements(order, &db)
                     );
@@ -6698,13 +6722,18 @@ fn update_order_queue(
     }
     let extra = accepted.len().saturating_sub(ORDER_SLOTS);
     let summary = format!(
-        "{} accepted{}  |  Tab: Orders\nDelivered {}   /   Botched {}",
+        "{} accepted{}  |  {}: Orders\nDelivered {}   /   Botched {}",
         accepted.len(),
         if extra > 0 {
             format!(" (+{extra} more)")
         } else {
             String::new()
         },
+        crate::settings::key_label(
+            settings
+                .as_deref()
+                .map_or(KeyCode::Tab, |settings| settings.bindings.social)
+        ),
         shift.succeeded,
         shift.botched
     );

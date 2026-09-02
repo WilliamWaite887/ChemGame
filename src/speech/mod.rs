@@ -145,16 +145,16 @@ impl Plugin for SpeechPlugin {
                 // here, and no client reads them. See `RoomMemory`.
                 (
                     remember_rooms,
-                    notice_arrivals,
-                    notice_errands,
-                    notice_resolutions,
+                    notice_arrivals.run_if(crate::session::career_session),
+                    notice_errands.run_if(crate::session::career_session),
+                    notice_resolutions.run_if(crate::session::career_session),
                     // Answering a question outranks every unprompted bark:
                     // last writer wins on one body, and a greeting landing on
                     // top of the answer you just asked for is the one ordering
                     // the player would actually notice.
-                    start_exchanges,
-                    deliver_remarks,
-                    handle_talk,
+                    start_exchanges.run_if(crate::session::career_session),
+                    deliver_remarks.run_if(crate::session::career_session),
+                    handle_talk.run_if(crate::session::career_session),
                     // Last, so a line said this frame gets its full dwell
                     // rather than being aged by the tick that preceded it.
                     expire_speech,

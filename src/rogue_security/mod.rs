@@ -101,7 +101,8 @@ impl Plugin for RogueSecurityPlugin {
                 // pickable thing in the lab already uses.
                 dress_deterrent,
             )
-                .run_if(in_state(AppState::Playing)),
+                .run_if(in_state(AppState::Playing))
+                .run_if(crate::session::career_session),
         );
     }
 }

@@ -76,7 +76,8 @@ impl Plugin for ShiftPlugin {
                     handle_open_up_again,
                 )
                     .run_if(is_authority)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(in_state(AppState::Playing))
+                    .run_if(crate::session::career_session),
             );
     }
 }
@@ -1344,12 +1345,15 @@ impl Plugin for ProgressPlugin {
         app.init_resource::<PersistedProgress>()
             .add_systems(
                 OnEnter(AppState::Playing),
-                load_progress.run_if(is_authority),
+                load_progress
+                    .run_if(is_authority)
+                    .run_if(crate::session::career_session),
             )
             .add_systems(
                 Update,
                 (persist_progress, record_thwarting)
                     .run_if(in_state(AppState::Playing))
+                    .run_if(crate::session::career_session)
                     .run_if(is_authority),
             );
     }

@@ -92,7 +92,8 @@ impl<T: Asset + for<'de> Deserialize<'de>> Plugin for ScriptPlugin<T> {
                     // replaces. Verified before the swap: no non-authority
                     // system reads any thread's script resource.
                     .run_if(is_authority)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(in_state(AppState::Playing))
+                    .run_if(crate::session::career_session),
             );
     }
 }

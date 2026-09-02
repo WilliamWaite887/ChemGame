@@ -296,11 +296,17 @@ fn draw(
 fn countdowns(
     orders: Query<(&Order, Has<crate::security_case::OrderHold>)>,
     mut labels: Query<(&Countdown, &mut Text)>,
+    session: Option<Res<crate::session::SessionKind>>,
 ) {
     for (countdown, mut label) in &mut labels {
         if let Ok((order, held)) = orders.get(countdown.0) {
             let seconds = order.remaining() as u32;
-            let next = if held {
+            let next = if matches!(
+                session.as_deref(),
+                Some(crate::session::SessionKind::Training)
+            ) {
+                "Practice request - untimed".into()
+            } else if held {
                 "Security hold — visit Bex at Security".into()
             } else {
                 format!("Remaining  {}:{:02}", seconds / 60, seconds % 60)

@@ -31,9 +31,26 @@ use crate::AppState;
 
 pub struct SessionPlugin;
 
+/// Training shares the simulation, but never a career or network session.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionKind {
+    #[default]
+    Career,
+    Training,
+}
+
+pub fn career_session(kind: Option<Res<SessionKind>>) -> bool {
+    !matches!(kind.as_deref(), Some(SessionKind::Training))
+}
+
+pub fn training_session(kind: Option<Res<SessionKind>>) -> bool {
+    matches!(kind.as_deref(), Some(SessionKind::Training))
+}
+
 impl Plugin for SessionPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnExit(AppState::Playing), clear_session_state);
+        app.init_resource::<SessionKind>()
+            .add_systems(OnExit(AppState::Playing), clear_session_state);
     }
 }
 
@@ -49,6 +66,8 @@ impl Plugin for SessionPlugin {
 ///   roll a new one, so resetting it to some default would silently keep every
 ///   later save on the first one's antagonist.
 pub(crate) fn clear_session_state(world: &mut World) {
+    world.insert_resource(SessionKind::Career);
+    crate::tutorial::clear_session(world);
     // -- reset: read non-optionally somewhere ------------------------------
     reset::<crate::orders::Shift>(world);
     reset::<crate::order_intake::IntakeState>(world);

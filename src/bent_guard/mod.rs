@@ -82,7 +82,8 @@ impl Plugin for BentGuardPlugin {
                 .run_if(is_authority)
                 // No `arc::is_active` gate — a department minor runs in every
                 // save, same as the other four.
-                .run_if(in_state(AppState::Playing)),
+                .run_if(in_state(AppState::Playing))
+                .run_if(crate::session::career_session),
         );
     }
 }
