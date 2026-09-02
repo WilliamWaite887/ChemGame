@@ -237,6 +237,7 @@ fn seed(world: &mut World) -> Option<Fixture> {
         .unwrap()
         .id;
     world.write_message(crate::machines::ReactionsFired {
+        source: None,
         container: batch,
         reactions: vec![reaction],
         effects: vec![],

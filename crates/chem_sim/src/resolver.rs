@@ -23,6 +23,7 @@ pub struct ReactionEvent {
 /// What happened during a call to [`resolve`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResolveReport {
+    pub materials: Vec<crate::MaterialEvent>,
     pub events: Vec<ReactionEvent>,
     /// True if the resolver stopped at [`MAX_ITERATIONS`] with reactions still
     /// pending — almost always a cycle in the data.
@@ -43,8 +44,27 @@ pub struct ResolveReport {
 }
 
 impl ResolveReport {
+    /// Separate material effects from recipe-discovery batching. They scale with
+    /// actual progress and must be delivered now, not banked until a fuel runs out.
+    pub fn take_material_report(&mut self) -> Self {
+        let materials = std::mem::take(&mut self.materials);
+        let mut effects = Vec::new();
+        for event in &materials {
+            for effect in crate::material::effects(event) {
+                if let Some(index) = self.effects.iter().position(|e| *e == effect) {
+                    effects.push(self.effects.remove(index));
+                }
+            }
+        }
+        Self {
+            materials,
+            effects,
+            distinct_reagents: self.distinct_reagents,
+            ..Default::default()
+        }
+    }
     pub fn reacted(&self) -> bool {
-        !self.events.is_empty()
+        !self.events.is_empty() || !self.materials.is_empty()
     }
 
     /// Distinct reactions that fired, in order of first firing. This is the
@@ -68,11 +88,9 @@ impl ResolveReport {
 /// [`ReactionProcess::Agitated`] are invisible here; use
 /// [`resolve_with_activation`] with provenance captured before mixing them.
 ///
-/// Ignores [`Reaction::rate`] entirely: this is the "no clock" resolution, and
-/// it is what reagents reacting *inside a body* want — a bloodstream is not
-/// somewhere a chemist can stand and watch a beaker. See [`resolve_step`] for
-/// the timed ambient form and [`resolve_step_with_activation`] for a Mixing
-/// Chamber batch.
+/// Ignores authored reaction rates for tools and offline chemistry queries.
+/// Live bodies use [`resolve_in_environment`] with their finite metabolism beat;
+/// live containers use [`resolve_step`] or [`resolve_step_with_activation`].
 pub fn resolve(solution: &mut Solution, reactions: &ReactionSet) -> ResolveReport {
     resolve_step_inner(solution, reactions, f32::INFINITY, None)
 }
@@ -132,6 +150,23 @@ fn resolve_step_inner(
     dt: f32,
     activation: Option<&ReactionActivation>,
 ) -> ResolveReport {
+    resolve_in_environment(
+        solution,
+        reactions,
+        dt,
+        activation,
+        &mut crate::ReactionEnvironment::room(dt),
+    )
+}
+
+/// Shared chemistry entry point. The caller owns finite environmental contact budgets.
+pub fn resolve_in_environment(
+    solution: &mut Solution,
+    reactions: &ReactionSet,
+    dt: f32,
+    activation: Option<&ReactionActivation>,
+    environment: &mut crate::ReactionEnvironment,
+) -> ResolveReport {
     let mut report = ResolveReport {
         distinct_reagents: solution.len(),
         ..Default::default()
@@ -140,10 +175,29 @@ fn resolve_step_inner(
     // Without it a rate-capped reaction would simply be picked again on the
     // next pass and run its whole allowance up to `MAX_ITERATIONS` times over.
     let mut spent: Vec<(ReactionId, Units)> = Vec::new();
+    let mut material_spent = Vec::new();
 
     for _ in 0..MAX_ITERATIONS {
+        if let Some(event) =
+            reactions
+                .materials
+                .advance(solution, dt, environment, &mut material_spent, false)
+        {
+            report.effects.extend(crate::material::effects(&event));
+            report.materials.push(event);
+            continue;
+        }
         let Some((reaction, scale)) = best_reaction(solution, reactions, dt, &spent, activation)
         else {
+            if let Some(event) =
+                reactions
+                    .materials
+                    .advance(solution, dt, environment, &mut material_spent, true)
+            {
+                report.effects.extend(crate::material::effects(&event));
+                report.materials.push(event);
+                continue;
+            }
             return report;
         };
         match spent.iter_mut().find(|(id, _)| *id == reaction.id) {
@@ -202,6 +256,7 @@ fn resolve_step_inner(
                     ));
                 }
                 ReactionEffect::Smoke(_)
+                | ReactionEffect::Burn(_)
                 | ReactionEffect::Explosion(_)
                 | ReactionEffect::Pulse { .. }
                 | ReactionEffect::Emp(_)
@@ -231,7 +286,7 @@ fn resolve_step_inner(
     }
 
     // Fell out of the loop still having work to do.
-    report.hit_iteration_cap = best_reaction(solution, reactions, dt, &spent, activation).is_some();
+    report.hit_iteration_cap = true;
     report
 }
 
@@ -267,11 +322,12 @@ fn is_reacting_inner(
     reactions: &ReactionSet,
     activation: Option<&ReactionActivation>,
 ) -> bool {
-    reactions.iter().any(|reaction| {
-        process_allows(reaction, activation)
-            && reaction.rate.is_some()
-            && reaction.max_scale(solution).is_some()
-    })
+    reactions.materials.active(solution)
+        || reactions.iter().any(|reaction| {
+            process_allows(reaction, activation)
+                && reaction.rate.is_some()
+                && reaction.max_scale(solution).is_some()
+        })
 }
 
 /// Highest-priority applicable reaction, ties broken by definition order so
@@ -322,6 +378,9 @@ fn best_reaction<'a>(
 }
 
 fn process_allows(reaction: &Reaction, activation: Option<&ReactionActivation>) -> bool {
+    if reaction.material_only {
+        return false;
+    }
     match reaction.process {
         ReactionProcess::Ambient => true,
         ReactionProcess::Agitated { .. } => activation.is_some_and(|it| it.contains(reaction.id)),

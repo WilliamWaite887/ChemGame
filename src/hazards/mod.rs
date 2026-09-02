@@ -43,6 +43,25 @@ const SMOKE_LIFETIME: f32 = 12.0;
 /// How much of its payload a cloud presses onto each body in it, per tick.
 const SMOKE_DOSE: Units = Units::whole(3);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReactionSource {
+    Container,
+    Buffer,
+    Stomach,
+    Blood,
+    Puddle,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ReactionOrigin {
+    pub kind: ReactionSource,
+    pub position: Vec3,
+    pub owner: Option<Entity>,
+}
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ReactionHazards;
+
 pub struct HazardPlugin;
 
 impl Plugin for HazardPlugin {
@@ -60,7 +79,7 @@ impl Plugin for HazardPlugin {
                 Update,
                 (
                     (
-                        spawn_hazards,
+                        spawn_hazards.in_set(ReactionHazards),
                         apply_electrical_pulses,
                         apply_chemical_impulses,
                         expose_to_smoke,
@@ -524,6 +543,7 @@ fn container_context(
 struct ReactionSolutions<'w, 's> {
     containers: Query<'w, 's, &'static mut Container>,
     buffers: Query<'w, 's, &'static mut crate::machines::Buffer>,
+    puddles: Query<'w, 's, &'static mut crate::chem_world::ChemicalPuddle>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -565,8 +585,10 @@ fn spawn_hazards(
         let mut concuss_power: f32 = 0.0;
         let mut emp_power: f32 = 0.0;
         let mut arc_power: f32 = 0.0;
+        let mut burn_power: f32 = 0.0;
         for effect in &report.effects {
             match effect {
+                ReactionEffect::Burn(strength) => burn_power += strength,
                 ReactionEffect::Smoke(spread) => radius = radius.max(*spread),
                 ReactionEffect::Explosion(strength) => power += strength,
                 ReactionEffect::Pulse {
@@ -591,17 +613,50 @@ fn spawn_hazards(
             }
         }
 
-        let Some((origin, operator)) = container_context(
-            report.container,
-            &transforms,
-            &held,
-            &slots,
-            &slots_b,
-            &machines,
-            &armed,
-        ) else {
+        let context = report.source.map(|s| (s.position, s.owner)).or_else(|| {
+            container_context(
+                report.container,
+                &transforms,
+                &held,
+                &slots,
+                &slots_b,
+                &machines,
+                &armed,
+            )
+        });
+        let Some((origin, operator)) = context else {
             continue;
         };
+        let kind = report.source.map_or_else(
+            || {
+                if solutions.buffers.contains(report.container) {
+                    ReactionSource::Buffer
+                } else {
+                    ReactionSource::Container
+                }
+            },
+            |s| s.kind,
+        );
+
+        if burn_power > 0.0 {
+            for (entity, mut body, mut blood, _) in &mut bodies {
+                let Ok(transform) = transforms.get(entity) else {
+                    continue;
+                };
+                let distance = transform.translation.distance(origin);
+                if distance > 1.5 {
+                    continue;
+                }
+                let previous = body.0.collapsed;
+                body.0.apply(chem_sim::Damage::of(
+                    chem_sim::DamageKind::Burn,
+                    Units::from_f64((burn_power * (1.0 - distance / 1.5)) as f64),
+                ));
+                if let Some(blood) = blood.as_deref_mut() {
+                    blood.0.reconcile_collapse(&mut body.0, previous);
+                }
+            }
+        }
 
         if radius > 0.0 {
             // The cloud takes a share of the batch with it.
@@ -610,6 +665,14 @@ fn spawn_hazards(
                 container.mutate(&db, |s| s.split(SMOKE_PAYLOAD)).0
             } else if let Ok(mut buffer) = solutions.buffers.get_mut(report.container) {
                 buffer.0.split(SMOKE_PAYLOAD)
+            } else if let Ok(mut puddle) = solutions.puddles.get_mut(report.container) {
+                puddle.solution.split(SMOKE_PAYLOAD)
+            } else if let Ok((_, _, Some(mut blood), _)) = bodies.get_mut(report.container) {
+                match kind {
+                    ReactionSource::Stomach => blood.0.stomach.split(SMOKE_PAYLOAD),
+                    ReactionSource::Blood => blood.0.blood.split(SMOKE_PAYLOAD),
+                    _ => Solution::unbounded(),
+                }
             } else {
                 Solution::unbounded()
             };
@@ -640,14 +703,20 @@ fn spawn_hazards(
         }
 
         if power > 0.0 {
-            if let Some(sounds) = &mut sounds {
-                sounds.write(EmitWorldSfx::new(Sfx::HazardExplosion, origin));
+            if power >= 1.0 {
+                if let Some(sounds) = &mut sounds {
+                    sounds.write(EmitWorldSfx::new(Sfx::HazardExplosion, origin));
+                }
             }
             // Glassware is destroyed; a fixed machine loses only its batch.
-            if let Ok(mut buffer) = solutions.buffers.get_mut(report.container) {
-                buffer.0.clear();
-            } else if let Ok(mut entity) = commands.get_entity(report.container) {
-                entity.despawn();
+            if kind == ReactionSource::Buffer && power >= 1.0 {
+                if let Ok(mut buffer) = solutions.buffers.get_mut(report.container) {
+                    buffer.0.clear();
+                }
+            } else if kind == ReactionSource::Container && power >= 1.0 {
+                if let Ok(mut entity) = commands.get_entity(report.container) {
+                    entity.despawn();
+                }
             }
 
             let reach = blast_radius(power);
@@ -695,14 +764,18 @@ fn spawn_hazards(
                         .insert(crate::door::Corroded { strength: 5.0 });
                 }
             }
-            radio.push(
-                RadioEntry::new(
-                    crate::radio::RadioChannel::Lab,
-                    "Was that a bang? Chemistry, report.",
-                )
-                .negative()
-                .urgent(),
-            );
+            // Trace reactions already have a quiet reaction cue. Do not turn
+            // a slow trickle into a station-wide emergency every quantum.
+            if power >= 1.0 {
+                radio.push(
+                    RadioEntry::new(
+                        crate::radio::RadioChannel::Lab,
+                        "Was that a bang? Chemistry, report.",
+                    )
+                    .negative()
+                    .urgent(),
+                );
+            }
         }
 
         let strongest_pulse = push_power.max(pull_power).max(concuss_power);
@@ -1161,6 +1234,79 @@ mod tests {
     }
 
     /// A beaker sitting on a bench at `position`, holding `contents`.
+    #[test]
+    fn sb14_internal_explosion_keeps_patient_and_applies_point_blank_damage_once() {
+        let mut app = test_app();
+        app.add_systems(
+            Update,
+            crate::body::forward_body_reactions.before(spawn_hazards),
+        );
+        let victim = chemist_at(&mut app, Vec3::ZERO);
+        let bystander = crew_at(&mut app, Vec3::X);
+        let db = app.world().resource::<ChemDb>().0.clone();
+        let mut blood = chem_sim::Bloodstream::default();
+        let mut vitals = chem_sim::Vitals::default();
+        let mut dose = Solution::unbounded();
+        let _ = dose.add(db.reagent("potassium"), Units::whole(6));
+        let _ = dose.add(db.reagent("water"), Units::whole(6));
+        blood.receive(&mut dose, Route::Injected, &mut vitals, &db);
+        app.world_mut()
+            .entity_mut(victim)
+            .insert((Bloodstream(blood), Body(vitals)));
+        app.update();
+        let expected = explosion_damage(12.0, 0.0);
+        assert_eq!(app.world().get::<Body>(victim).unwrap().0.damage, expected);
+        assert!(app.world().get::<Body>(victim).unwrap().0.collapsed);
+        assert_eq!(
+            app.world().get::<Body>(bystander).unwrap().0.damage,
+            explosion_damage(12.0, 1.0)
+        );
+        app.update();
+        assert_eq!(app.world().get::<Body>(victim).unwrap().0.damage, expected);
+    }
+
+    #[test]
+    fn sb15_puddle_smoke_moves_payload_without_duplication() {
+        let mut app = test_app();
+        let water = app.world().resource::<ChemDb>().reagent("water");
+        let mut s = Solution::unbounded();
+        let _ = s.add(water, Units::whole(20));
+        let puddle = app
+            .world_mut()
+            .spawn((
+                crate::chem_world::ChemicalPuddle::from_solution(s, None),
+                Transform::default(),
+            ))
+            .id();
+        app.world_mut().write_message(ReactionsFired {
+            source: Some(ReactionOrigin {
+                kind: ReactionSource::Puddle,
+                position: Vec3::ZERO,
+                owner: None,
+            }),
+            container: puddle,
+            effects: vec![ReactionEffect::Smoke(2.0)],
+            reactions: Vec::new(),
+            distinct_reagents: 1,
+        });
+        app.update();
+        let left = app
+            .world()
+            .get::<crate::chem_world::ChemicalPuddle>(puddle)
+            .unwrap()
+            .solution
+            .total_volume();
+        let carried: Units = app
+            .world_mut()
+            .query::<&SmokePayload>()
+            .iter(app.world())
+            .map(|s| s.0.total_volume())
+            .sum();
+        assert_eq!(left, Units::whole(10));
+        assert_eq!(left + carried, Units::whole(20));
+    }
+
+    /// A beaker sitting on a bench at `position`, holding `contents`.
     fn beaker_at(app: &mut App, position: Vec3, contents: &[(&str, i32)]) -> Entity {
         let db = app.world().resource::<ChemDb>().0.clone();
         let mut container = Container::new(ContainerKind::LargeBeaker);
@@ -1206,6 +1352,7 @@ mod tests {
 
     fn report(app: &mut App, container: Entity, effects: Vec<ReactionEffect>) {
         app.world_mut().write_message(ReactionsFired {
+            source: None,
             reactions: Vec::new(),
             container,
             effects,

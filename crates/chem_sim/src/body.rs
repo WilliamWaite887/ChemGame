@@ -13,7 +13,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::effect::{Damage, DamageKind, ReagentEffect, Route, StatusKind};
 use crate::reagent::ReagentId;
-use crate::resolver::{resolve, ResolveReport};
+use crate::resolver::{resolve_in_environment, ResolveReport};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyCompartment {
+    Stomach,
+    Blood,
+}
 use crate::solution::Solution;
 use crate::units::Units;
 use crate::ChemData;
@@ -126,6 +132,9 @@ pub struct StatusState {
 /// Everything currently inside a person.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Bloodstream {
+    /// Transient authority outbox. Never saved or replicated, preventing replay on load/join.
+    #[serde(skip)]
+    pending_reactions: Vec<(BodyCompartment, ResolveReport)>,
     /// Absorbed and active. A [`Solution`], so it reacts.
     pub blood: Solution,
     /// Swallowed but not absorbed yet. This is the whole of "ingest is slow".
@@ -142,6 +151,7 @@ pub struct Bloodstream {
 impl Default for Bloodstream {
     fn default() -> Self {
         Bloodstream {
+            pending_reactions: Vec::new(),
             blood: Solution::unbounded(),
             stomach: Solution::unbounded(),
             statuses: Vec::new(),
@@ -151,6 +161,17 @@ impl Default for Bloodstream {
 }
 
 impl Bloodstream {
+    pub fn drain_reactions(
+        &mut self,
+    ) -> impl Iterator<Item = (BodyCompartment, ResolveReport)> + '_ {
+        self.pending_reactions.drain(..)
+    }
+
+    fn queue_reaction(&mut self, compartment: BodyCompartment, report: &ResolveReport) {
+        if report.reacted() || !report.effects.is_empty() {
+            self.pending_reactions.push((compartment, report.clone()));
+        }
+    }
     pub fn new() -> Self {
         Bloodstream::default()
     }
@@ -416,9 +437,20 @@ impl Bloodstream {
         let absorbed = dose.transfer_to(destination, landing);
         dose.clear();
 
-        // Only blood reacts. The stomach is a holding pen, and a reaction in
-        // there would fire before the dose had a chance to be a mistake.
-        let reactions = resolve(&mut self.blood, &data.reactions);
+        // Swallowed doses wait for the digestion beat. Direct blood dosing only
+        // runs immediate chemistry; it cannot mint another body-water budget.
+        let reactions = if route.digested() {
+            ResolveReport::default()
+        } else {
+            resolve_in_environment(
+                &mut self.blood,
+                &data.reactions,
+                0.0,
+                None,
+                &mut crate::ReactionEnvironment::body(0.0),
+            )
+        };
+        self.queue_reaction(BodyCompartment::Blood, &reactions);
 
         self.reconcile_collapse(vitals, was_collapsed);
 
@@ -661,7 +693,7 @@ fn purge_targets(
 ///
 /// The order is fixed and load-bearing:
 ///
-/// 1. stomach into blood, proportionally, up to [`DIGESTION_RATE`]
+/// 1. react the stomach, then absorb proportionally up to [`DIGESTION_RATE`]
 /// 2. resolve the blood — reagents react inside you
 /// 3. per reagent in id order: `effects`, plus `overdose_effects` past the
 ///    threshold, plus `critical_effects` past the critical threshold; purge
@@ -679,13 +711,30 @@ pub fn metabolise(vitals: &mut Vitals, blood: &mut Bloodstream, data: &ChemData)
     let existing_damage = vitals.damage;
     let mut report = TickReport::default();
 
-    // 1. Digestion.
+    // One contact budget is shared by both compartments, once per beat.
+    let mut environment = crate::ReactionEnvironment::body(TICK_SECONDS);
+    let stomach_report = resolve_in_environment(
+        &mut blood.stomach,
+        &data.reactions,
+        TICK_SECONDS,
+        None,
+        &mut environment,
+    );
+    blood.queue_reaction(BodyCompartment::Stomach, &stomach_report);
+    // 1. Digestion, after stomach reactions.
     if !blood.stomach.is_empty() {
         let _ = blood.stomach.transfer_to(&mut blood.blood, DIGESTION_RATE);
     }
 
     // 2. Reagents react in you.
-    report.reactions = resolve(&mut blood.blood, &data.reactions);
+    report.reactions = resolve_in_environment(
+        &mut blood.blood,
+        &data.reactions,
+        TICK_SECONDS,
+        None,
+        &mut environment,
+    );
+    blood.queue_reaction(BodyCompartment::Blood, &report.reactions);
 
     // 3. Per-reagent effects.
     blood.advance_exposure_ticks();

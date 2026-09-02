@@ -39,6 +39,7 @@ struct Scenario {
 }
 pub(super) fn install(app: &mut App) {
     app.replicate::<Fixture>()
+        .replicate::<SandboxFixture>()
         .init_resource::<Scenario>()
         .add_systems(
             Update,
@@ -46,6 +47,130 @@ pub(super) fn install(app: &mut App) {
                 .run_if(in_state(AppState::Playing))
                 .run_if(resource_exists::<crate::lab::MapReady>),
         );
+}
+
+/// Spawned before the co-op client connects: validates late-join chemistry state.
+#[derive(Component, Clone, Serialize, Deserialize, MapEntities)]
+struct SandboxFixture {
+    #[entities]
+    patient: Entity,
+    #[entities]
+    residue: Entity,
+}
+
+fn sandbox_check(world: &mut World) -> bool {
+    let authority = !matches!(world.resource::<LaunchMode>(), LaunchMode::Join(_));
+    let fixture = world.query::<&SandboxFixture>().iter(world).next().cloned();
+    let Some(mut fixture) = fixture else {
+        if !authority {
+            return false;
+        }
+        let db = world.resource::<ChemDb>().0.clone();
+        let make = |key: &str, amount: i32| {
+            let mut solution = Solution::unbounded();
+            let _ = solution.add(db.reagent(key), Units::whole(amount));
+            solution
+        };
+        // Isolated off-station fixtures cannot injure a player or ordinary NPC.
+        let origin = Vec3::new(150.0, 0.018, 150.0);
+        let residue = world
+            .spawn((
+                Replicated,
+                crate::chem_world::ChemicalPuddle::from_solution(make("potassium", 5), None),
+                Transform::from_translation(origin),
+                Visibility::default(),
+                crate::until_we_leave_the_lab(),
+            ))
+            .id();
+        world.spawn((
+            Replicated,
+            crate::chem_world::ChemicalPuddle::from_solution(make("water", 5), None),
+            Transform::from_translation(origin + Vec3::X * 0.2),
+            Visibility::default(),
+            crate::until_we_leave_the_lab(),
+        ));
+        let mut blood = chem_sim::Bloodstream::default();
+        let mut vitals = chem_sim::Vitals::default();
+        blood.receive(
+            &mut make("potassium", 20),
+            chem_sim::Route::Ingested,
+            &mut vitals,
+            &db,
+        );
+        blood.receive(
+            &mut make("water", 20),
+            chem_sim::Route::Ingested,
+            &mut vitals,
+            &db,
+        );
+        let patient = world
+            .spawn((
+                Replicated,
+                crate::body::Body(vitals),
+                crate::body::Bloodstream(blood),
+                Transform::from_translation(origin + Vec3::X * 20.0),
+                crate::until_we_leave_the_lab(),
+            ))
+            .id();
+        world.spawn((
+            Replicated,
+            SandboxFixture { patient, residue },
+            crate::until_we_leave_the_lab(),
+        ));
+        info!("sandbox chemistry fixture seeded before client arrival");
+        return false;
+    };
+    // Keep the test's floor result available throughout the longer workstation scenario.
+    if authority {
+        if world
+            .get::<crate::chem_world::ChemicalPuddle>(fixture.residue)
+            .is_none()
+        {
+            let survivor = world
+                .query::<(Entity, &Transform, &crate::chem_world::ChemicalPuddle)>()
+                .iter(world)
+                .find(|(_, t, _)| t.translation.distance(Vec3::new(150.0, 0.018, 150.0)) < 1.0)
+                .map(|(e, _, _)| e);
+            if let Some(survivor) = survivor {
+                fixture.residue = survivor;
+                if let Some(mut record) =
+                    world.query::<&mut SandboxFixture>().iter_mut(world).next()
+                {
+                    record.residue = survivor;
+                }
+            }
+        }
+        if let Some(mut puddle) =
+            world.get_mut::<crate::chem_world::ChemicalPuddle>(fixture.residue)
+        {
+            puddle.remaining = 300.0;
+        }
+    }
+    let ash = world.resource::<ChemDb>().reagent("ash");
+    let mut expected_vitals = chem_sim::Vitals::default();
+    expected_vitals.apply(chem_sim::explosion_damage(24.0, 0.0));
+    let ready = world
+        .get::<crate::chem_world::ChemicalPuddle>(fixture.residue)
+        .is_some_and(|p| p.solution.volume_of(ash) == Units::whole(10))
+        && world
+            .get::<crate::body::Body>(fixture.patient)
+            .is_some_and(|b| b.0 == expected_vitals);
+    if ready {
+        let message = "Sandbox chemistry: merged Ash and intact collapsed body verified";
+        if !world
+            .resource::<Scenario>()
+            .checks
+            .iter()
+            .any(|s| s == message)
+        {
+            world.resource_mut::<Scenario>().checks.push(message.into());
+            let output = path(world);
+            let _ = std::fs::create_dir_all(&output);
+            let _ = std::fs::write(output.join("sandbox-ready.txt"), message);
+            info!("{message}");
+        }
+    }
+    ready
 }
 fn path(world: &World) -> std::path::PathBuf {
     let role = match world.resource::<LaunchMode>() {
@@ -196,6 +321,7 @@ fn seed(world: &mut World) -> Option<Fixture> {
 }
 
 fn drive(world: &mut World) {
+    let sandbox_ready = sandbox_check(world);
     let Some(local) = world
         .query_filtered::<Entity, With<LocalPlayer>>()
         .iter(world)
@@ -616,6 +742,9 @@ fn drive(world: &mut World) {
             }
         }
         _ => {
+            if !sandbox_ready {
+                return;
+            }
             if once(world, &f, 0) {
                 let output = path(world);
                 let _ = std::fs::create_dir_all(&output);
@@ -629,7 +758,15 @@ fn drive(world: &mut World) {
                     ),
                 );
             }
-            if !authority || age > 3.0 {
+            if once(world, &f, 1) {
+                world
+                    .entity_mut(local)
+                    .insert(InteractionMode::ReadingBook(None));
+            }
+            if age > 0.75 {
+                shot(world, "recipe-book");
+            }
+            if age > if authority { 3.0 } else { 2.0 } {
                 world.write_message(AppExit::Success);
             }
         }

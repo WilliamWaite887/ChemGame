@@ -28,6 +28,37 @@ in this file.
    in the book, but a timed request will not rely on it until the relevant
    produce or extracted reagent is physically in the lab.
 
+## Chemistry beyond the beaker
+
+Compatible chemicals can react in glassware, inside a body, or when floor pools
+touch. The same material rules apply, but swallowed chemistry waits for the next
+digestion beat. Ordinary supplies remain stable; room air supports an ignited
+fuel rather than quietly spoiling it.
+
+- **Water reactivity:** Raw Potassium reacts with water and leaves Ash. Small
+  amounts have smaller effects. A body supplies limited water, so swallowing
+  potassium alone can hurt; adding water can accelerate it. Finished Dylovene
+  does not inherit its potassium ingredient's reactivity.
+- **Neutralization:** Sulphuric Acid or Nitric Acid consumes Lye and leaves
+  Neutralized Salts. Extra acid or base remains. Inspect composition, not only pH.
+- **Ignition:** Heated fuel burns; explicit Oxygen or Hydrogen Peroxide speeds
+  an activated fire. Oil begins this behavior at 480K. Existing extinguisher
+  chemistry cools affected floor mixtures; no atmospheric controls are needed.
+- **Spills:** Touching pools mix as a whole. Walls and different floor levels
+  keep them apart. New products can change a pool's color and effects.
+- **Ash is residue:** Burning and destructive reactions can leave the existing,
+  reusable Ash reagent. Its many production routes no longer occupy separate
+  recipe cards or earn research. Relevant hazards appear with the source chemical.
+
+The analyzer describes supported properties after identifying a sample. A label
+is not a measurement. No extra pressure, sealing, humidity, or organ controls are
+required. Dilution does not erase a dangerous dose, and hazardous mixtures do
+not promise time to escape. Stop exposure and use established trauma/burn care
+and Medical recovery after injuries; there is no new stomach-purge action.
+
+Authors can use the [tutorial scenarios](chemistry-tutorial-scenarios.md) and
+[simulation reference](chemistry-simulation.md) for exact setups and checks.
+
 ## Your first shift
 
 ### Use the four-slot hotbar
@@ -484,7 +515,8 @@ their remaining electromagnetic lockout time.
 ### Energetic synthesis ladder
 
 1. Make Oil from Welding Fuel + Carbon + Hydrogen.
-2. Heat Oil to make Ash.
+2. Heat Oil above 480K to make Ash. Room air supports a slow burn; explicit
+   Oxygen accelerates it. Collect the cooled residue for the next step.
 3. Make Saltpetre from 3 Oxygen + Potassium + Nitrogen.
 4. Make Multiver from 2 Sodium Chloride + 2 Ash at 380–410K.
 5. Combine Multiver + Saltpetre + Sulfur for Gunpowder.
@@ -625,7 +657,8 @@ before delivery.
 
 Common causes are missing Stabilizing Agent, crossing an overheat threshold,
 making too large an exothermic batch, heating an energetic product to its
-activation temperature, or mixing an authored incompatibility. Rebuild at a
+activation temperature, mixing water-reactive material with water, or mixing an
+incompatibility. Rebuild at a
 smaller scale and leave thermal headroom.
 
 ## Mastery checklist

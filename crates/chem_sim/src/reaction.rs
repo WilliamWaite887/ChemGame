@@ -67,6 +67,8 @@ pub enum ReactionEffect {
     Electric(f32),
     /// Batch-scaled electrical output authored in reaction data.
     ElectricProfile { strength: f32, modifier: f32 },
+    /// Material combustion: proportional burn energy, never a glass-destroying blast.
+    Burn(f32),
 }
 
 /// How a recipe is allowed to begin in the lab.
@@ -142,6 +144,9 @@ impl ReactionActivation {
 /// A reaction as written in `assets/data/reactions.ron`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReactionDef {
+    /// Legacy recipe identity retained for saved knowledge; material families perform it.
+    #[serde(default)]
+    pub material_only: bool,
     pub id: String,
     /// Consumed, in ratio. `("oxygen", 1)` means one part oxygen.
     pub reactants: Vec<(String, Units)>,
@@ -208,6 +213,8 @@ pub struct ReactionDef {
 /// A reaction with its reagent names resolved to ids.
 #[derive(Clone, Debug)]
 pub struct Reaction {
+    pub material_only: bool,
+    pub residue: bool,
     pub id: ReactionId,
     pub key: String,
     pub reactants: Vec<(ReagentId, Units)>,
@@ -396,6 +403,7 @@ impl Reaction {
 #[derive(Clone, Debug, Default)]
 pub struct ReactionSet {
     reactions: Vec<Reaction>,
+    pub(crate) materials: crate::material::MaterialCatalog,
 }
 
 impl ReactionSet {
@@ -469,6 +477,10 @@ impl ReactionSet {
 
         let id = ReactionId(self.reactions.len() as u32);
         self.reactions.push(Reaction {
+            material_only: def.material_only,
+            residue: products
+                .first()
+                .is_some_and(|(id, _)| reagents.get(*id).material.residue),
             id,
             key: def.id,
             reactants,
@@ -495,6 +507,10 @@ impl ReactionSet {
 
     pub fn get(&self, id: ReactionId) -> &Reaction {
         &self.reactions[id.index()]
+    }
+
+    pub fn recipe_count(&self) -> usize {
+        self.reactions.iter().filter(|r| !r.residue).count()
     }
 
     pub fn len(&self) -> usize {

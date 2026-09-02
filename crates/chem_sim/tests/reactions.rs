@@ -1558,6 +1558,9 @@ fn every_medicine_is_reachable_from_the_dispenser() {
 
     loop {
         let mut grew = false;
+        for product in data.material_products_from(&reachable) {
+            grew |= reachable.insert(product);
+        }
         for reaction in data.reactions.iter() {
             let inputs_available = reaction
                 .reactants

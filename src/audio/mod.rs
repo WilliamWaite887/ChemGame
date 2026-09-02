@@ -587,6 +587,7 @@ fn sync_master_volume(settings: Res<Settings>, mut global_volume: ResMut<GlobalV
 /// `ReactionsFired` is authority-only. It becomes an [`EmitWorldSfx`] here,
 /// then [`fanout_world_sfx`] selects one variant and forwards it to every
 /// remote listener through the shared positional-audio path.
+#[allow(clippy::too_many_arguments)]
 fn play_reaction_sfx(
     mut fired: MessageReader<ReactionsFired>,
     transforms: Query<&Transform>,
@@ -594,8 +595,25 @@ fn play_reaction_sfx(
     slots: Query<&InSlot>,
     slots_b: Query<&InSlotB>,
     mut play: MessageWriter<EmitWorldSfx>,
+    time: Res<Time>,
+    mut last: Local<std::collections::HashMap<Entity, f32>>,
 ) {
+    last.retain(|entity, _| transforms.contains(*entity));
     for report in fired.read() {
+        if report.reactions.is_empty() {
+            let now = time.elapsed_secs();
+            if last
+                .get(&report.container)
+                .is_some_and(|then| now - then < 0.75)
+            {
+                continue;
+            }
+            last.insert(report.container, now);
+        }
+        if let Some(origin) = report.source {
+            play.write(EmitWorldSfx::new(Sfx::ReactionOccurred, origin.position));
+            continue;
+        }
         let source = held
             .get(report.container)
             .ok()

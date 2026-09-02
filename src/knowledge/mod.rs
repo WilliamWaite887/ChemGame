@@ -197,6 +197,7 @@ pub struct RecipeDiscovered {
 
 #[derive(Resource, Default)]
 pub struct Knowledge {
+    residue_reactions: HashSet<ReactionId>,
     entries: HashMap<ReactionId, Entry>,
     pub research_points: u32,
     /// Historical save field from the retired dispenser upgrade track.
@@ -209,7 +210,7 @@ impl Knowledge {
     pub fn new(data: &ChemData) -> Self {
         let mut entries = HashMap::new();
         for reaction in data.reactions.iter() {
-            let known = STARTING_RECIPES.contains(&reaction.key.as_str());
+            let known = reaction.residue || STARTING_RECIPES.contains(&reaction.key.as_str());
             entries.insert(
                 reaction.id,
                 if known {
@@ -222,6 +223,12 @@ impl Knowledge {
             );
         }
         Knowledge {
+            residue_reactions: data
+                .reactions
+                .iter()
+                .filter(|r| r.residue)
+                .map(|r| r.id)
+                .collect(),
             entries,
             research_points: 0,
             dispenser_tier: 0,
@@ -241,8 +248,8 @@ impl Knowledge {
 
     pub fn known_count(&self) -> usize {
         self.entries
-            .values()
-            .filter(|entry| **entry == Entry::Known)
+            .iter()
+            .filter(|(id, entry)| **entry == Entry::Known && !self.residue_reactions.contains(id))
             .count()
     }
 
@@ -402,6 +409,9 @@ impl Knowledge {
         // appears rather than making a single pass.
         loop {
             let mut grew = false;
+            for product in data.material_products_from(&available) {
+                grew |= available.insert(product);
+            }
             for reaction in data.reactions.iter() {
                 if !self.is_known(reaction.id) {
                     continue;
@@ -586,7 +596,7 @@ fn initialise_knowledge(mut commands: Commands, db: Res<ChemDb>, slot: Option<Re
             info!(
                 "resumed: {} of {} recipes, {} research",
                 loaded.known_count(),
-                db.reactions.len(),
+                db.reactions.recipe_count(),
                 loaded.research_points
             );
             loaded
@@ -596,7 +606,7 @@ fn initialise_knowledge(mut commands: Commands, db: Res<ChemDb>, slot: Option<Re
             info!(
                 "new chemist: knows {} of {} recipes",
                 fresh.known_count(),
-                db.reactions.len()
+                db.reactions.recipe_count()
             );
             fresh
         }
@@ -853,7 +863,7 @@ mod tests {
 
         assert_eq!(knowledge.research_points, 7);
         assert_eq!(knowledge.next_upgrade_cost(), None);
-        assert_eq!(knowledge.known_count(), data.reactions.len());
+        assert_eq!(knowledge.known_count(), data.reactions.recipe_count());
         assert!(data
             .reagents
             .dispensable()
@@ -932,6 +942,7 @@ mod tests {
             .id;
 
         app.world_mut().write_message(ReactionsFired {
+            source: None,
             reactions: vec![bicaridine],
             container: Entity::PLACEHOLDER,
             effects: Vec::new(),
@@ -944,6 +955,7 @@ mod tests {
         );
 
         app.world_mut().write_message(ReactionsFired {
+            source: None,
             reactions: vec![dexalin],
             container: Entity::PLACEHOLDER,
             effects: Vec::new(),
@@ -1001,10 +1013,10 @@ mod tests {
         let mut knowledge = Knowledge::new(&data);
         let milestones = [
             STARTING_RECIPES.len(),
-            12.min(data.reactions.len()),
-            24.min(data.reactions.len()),
-            36.min(data.reactions.len()),
-            data.reactions.len(),
+            12.min(data.reactions.recipe_count()),
+            24.min(data.reactions.recipe_count()),
+            36.min(data.reactions.recipe_count()),
+            data.reactions.recipe_count(),
         ];
 
         for target in milestones {
@@ -1015,7 +1027,7 @@ mod tests {
                     panic!(
                         "career stalled at {} of {} recorded methods",
                         knowledge.known_count(),
-                        data.reactions.len()
+                        data.reactions.recipe_count()
                     )
                 });
                 knowledge.learn(next);
@@ -1024,7 +1036,7 @@ mod tests {
             let saved = ron::ser::to_string(&knowledge.to_save(&data)).unwrap();
             knowledge = Knowledge::from_save(&data, ron::from_str(&saved).unwrap());
             assert_eq!(knowledge.known_count(), target);
-            if target < data.reactions.len() {
+            if target < data.reactions.recipe_count() {
                 assert!(
                     !knowledge.frontier(&data).is_empty(),
                     "save at {target} methods has no next frontier"
@@ -1032,7 +1044,7 @@ mod tests {
             }
         }
 
-        assert_eq!(knowledge.known_count(), data.reactions.len());
+        assert_eq!(knowledge.known_count(), data.reactions.recipe_count());
         assert!(knowledge.frontier(&data).is_empty());
     }
 

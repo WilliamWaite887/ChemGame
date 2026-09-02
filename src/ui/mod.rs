@@ -992,7 +992,7 @@ fn sync_panel(
     let career_stage = CareerStage::from_progress(
         board.shift.succeeded,
         knowledge.known_count(),
-        db.reactions.len(),
+        db.reactions.recipe_count(),
     );
     let social_residents = board.social_snapshot();
 
@@ -1160,16 +1160,7 @@ fn sync_panel(
                 width: percent(100),
                 height: percent(100),
                 justify_content: JustifyContent::Center,
-                align_items: if machine.kind == MachineKind::MixingChamber {
-                    AlignItems::Start
-                } else {
-                    AlignItems::Center
-                },
-                padding: if machine.kind == MachineKind::MixingChamber {
-                    UiRect::top(px(12))
-                } else {
-                    UiRect::ZERO
-                },
+                align_items: AlignItems::Center,
                 ..default()
             },
             GlobalZIndex(30),
@@ -2420,7 +2411,11 @@ fn dispenser_body(
             strip,
             icons,
             BookIcon::Recorded,
-            format!("{}/{}", knowledge.known_count(), db.reactions.len()),
+            format!(
+                "{}/{}",
+                knowledge.known_count(),
+                db.reactions.recipe_count()
+            ),
             "Recorded methods",
             "Methods currently documented in the chemistry field manual.",
             GOOD_TEXT,
@@ -2516,7 +2511,7 @@ fn dispenser_body(
                             // game rather than the playtest shortcut it looks
                             // like.
                             #[cfg(debug_assertions)]
-                            if knowledge.known_count() < db.reactions.len() {
+                            if knowledge.known_count() < db.reactions.recipe_count() {
                                 section.spawn(button(
                                     "PLAYTEST: unlock all chemistry",
                                     PanelAction::UnlockAll,
@@ -3892,6 +3887,10 @@ fn analyzer_body(
                             ));
                             row.spawn(hplc_cell(profile.label(), 130.0, 12.0, profile.color()));
                         });
+                        let material = definition.material.description();
+                        if !material.is_empty() {
+                            table.spawn(label(material, 12.0, HPLC_IMPURITY));
+                        }
                     }
                 });
 
@@ -4524,7 +4523,11 @@ fn spawn_reference_book(
                             strip,
                             icons,
                             BookIcon::Recorded,
-                            format!("{} / {}", knowledge.known_count(), db.reactions.len()),
+                            format!(
+                                "{} / {}",
+                                knowledge.known_count(),
+                                db.reactions.recipe_count()
+                            ),
                             "Methods recorded",
                             "Complete methods currently written in this career's notebook.",
                             GOOD_TEXT,
@@ -5777,6 +5780,13 @@ fn render_recipe_node(
         });
 
         if depth == 0 {
+            if let Some(product) = product {
+                let properties = product.material.description();
+                if !properties.is_empty() { entry.spawn(label(properties, 13.0, TEXT_DIM)); }
+                for behavior in db.reactions.iter().filter(|r| r.residue && !r.material_only && r.reactants.iter().any(|(id,_)| *id == product.id)) {
+                    entry.spawn(label(format!("Reaction hazard: {}", behavior.hints.first().map_or("Leaves residue.", String::as_str)), 12.0, HPLC_IMPURITY));
+                }
+            }
             if let Some(treats) = product.and_then(|p| p.treats.as_ref()) {
                 entry.spawn(label(treats.clone(), 15.0, TEXT_DIM));
             }
@@ -6024,6 +6034,7 @@ fn recipes_in<'a>(
     let mut recipes: Vec<&chem_sim::Reaction> = db
         .reactions
         .iter()
+        .filter(|reaction| !reaction.residue)
         .filter(|reaction| match category {
             Some(category) => reaction_categories(db, reaction.id).contains(&category),
             None => true,
@@ -9200,6 +9211,26 @@ mod tests {
     }
 
     #[test]
+    fn sb16_residue_reactions_do_not_occupy_cards_or_research_progress() {
+        let (db, knowledge) = book_fixture();
+        let cards = recipes_in(&db, &knowledge, None);
+        assert!(cards.iter().all(|r| !r.residue));
+        assert_eq!(db.reactions.len() - cards.len(), 17);
+        assert_eq!(knowledge.known_count(), 3);
+        let ash = db.reagent("ash");
+        assert!(knowledge.available_reagents(&db).contains(&ash));
+        assert!(db
+            .reactions
+            .iter()
+            .filter(|r| r.residue)
+            .all(|r| knowledge.is_known(r.id)));
+        assert!(db
+            .reactions
+            .iter()
+            .any(|r| !r.residue && r.reactants.iter().any(|(id, _)| *id == ash)));
+    }
+
+    #[test]
     fn every_recipe_is_reachable_from_some_tab() {
         // The "All" tab is a convenience, not the only way in. A recipe that
         // appears under no heading is one a player browsing by ailment can
@@ -9212,7 +9243,7 @@ mod tests {
             }
         }
 
-        for reaction in db.reactions.iter() {
+        for reaction in db.reactions.iter().filter(|r| !r.residue) {
             assert!(
                 filed.contains(&reaction.key.as_str()),
                 "'{}' appears under no heading",
@@ -9247,7 +9278,7 @@ mod tests {
         let (db, knowledge) = book_fixture();
         let (known, total) = category_counts(&db, &knowledge, None);
 
-        assert_eq!(total, db.reactions.len());
+        assert_eq!(total, db.reactions.recipe_count());
         assert_eq!(known, knowledge.known_count());
     }
 
@@ -9292,18 +9323,23 @@ mod tests {
         .map(|state| {
             db.reactions
                 .iter()
-                .filter(|reaction| progress.state(&knowledge, reaction) == state)
+                .filter(|reaction| {
+                    !reaction.residue && progress.state(&knowledge, reaction) == state
+                })
                 .count()
         });
 
-        assert_eq!(counts.into_iter().sum::<usize>(), db.reactions.len());
+        assert_eq!(
+            counts.into_iter().sum::<usize>(),
+            db.reactions.recipe_count()
+        );
         assert_eq!(counts[0], knowledge.known_count());
     }
 
     #[test]
     fn book_pages_never_grow_back_into_an_unbounded_list() {
         let (db, _) = book_fixture();
-        let total = db.reactions.len();
+        let total = db.reactions.recipe_count();
         let (page, pages, first, last) = book_page_window(total, usize::MAX);
         assert_eq!(pages, total.div_ceil(BOOK_PAGE_SIZE));
         assert_eq!(
@@ -9381,8 +9417,8 @@ mod tests {
     fn every_authored_recipe_reaches_the_visual_presentation_model() {
         let (db, _) = book_fixture();
         assert_eq!(
-            db.reactions.len(),
-            162,
+            db.reactions.recipe_count(),
+            145,
             "update the visual audit when recipe breadth changes"
         );
 

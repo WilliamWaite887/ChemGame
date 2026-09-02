@@ -26,6 +26,7 @@
 
 pub mod body;
 pub mod effect;
+pub mod material;
 pub mod reaction;
 pub mod reagent;
 pub mod resolver;
@@ -41,6 +42,9 @@ pub use body::{
     RECOVER, STABILIZED_COLLAPSE_BONUS, TICK_SECONDS,
 };
 pub use effect::{Damage, DamageKind, ReagentEffect, Route, StatusKind, WorldEffect};
+pub use material::{
+    MaterialEvent, MaterialFamily, MaterialProperties, MaterialReaction, ReactionEnvironment,
+};
 pub use reaction::{
     ChemDataError, PulseKind, Reaction, ReactionActivation, ReactionDef, ReactionEffect,
     ReactionId, ReactionProcess, ReactionProcessDef, ReactionSet,
@@ -49,6 +53,7 @@ pub use reagent::{
     Category, ChemFamily, ExplosiveProfile, Reagent, ReagentDef, ReagentId, ReagentRegistry,
     DEFAULT_METABOLISM,
 };
+pub use resolver::resolve_in_environment;
 pub use resolver::{
     is_reacting, is_reacting_with_activation, resolve, resolve_step, resolve_step_with_activation,
     resolve_with_activation, ReactionEvent, ResolveReport, MAX_ITERATIONS,
@@ -65,6 +70,34 @@ pub struct ChemData {
 }
 
 impl ChemData {
+    /// Family products reachable from a set of material sources. Explicit family
+    /// partners must be reachable too; environmental water/air only assist hazards.
+    pub fn material_products_from(&self, available: &HashSet<ReagentId>) -> Vec<ReagentId> {
+        let mut products = Vec::new();
+        for reagent in self.reagents.iter().filter(|r| available.contains(&r.id)) {
+            let p = &reagent.material;
+            for rule in p.water_reactive.iter().chain(p.fuel.iter()) {
+                if let Some(id) = self.reagents.id_of(&rule.product) {
+                    products.push(id);
+                }
+            }
+            if p.acid_base > 0.0
+                && self
+                    .reagents
+                    .iter()
+                    .any(|r| available.contains(&r.id) && r.material.acid_base < 0.0)
+            {
+                if let Some(id) = p
+                    .neutral_product
+                    .as_deref()
+                    .and_then(|key| self.reagents.id_of(key))
+                {
+                    products.push(id);
+                }
+            }
+        }
+        products
+    }
     pub fn from_defs(
         reagent_defs: Vec<ReagentDef>,
         reaction_defs: Vec<ReactionDef>,
@@ -130,6 +163,7 @@ impl ChemData {
             }
         }
         let mut reactions = ReactionSet::new();
+        reactions.materials = material::MaterialCatalog::load(&reagents)?;
         for def in reaction_defs {
             reactions.insert(def, &reagents)?;
         }
@@ -158,6 +192,9 @@ impl ChemData {
         reachable.extend(inventory);
         loop {
             let mut grew = false;
+            for product in self.material_products_from(&reachable) {
+                grew |= reachable.insert(product);
+            }
             for reaction in self.reactions.iter() {
                 if reaction
                     .reactants
@@ -199,6 +236,9 @@ fn validate_reagent_def(def: &ReagentDef) -> Result<(), ChemDataError> {
         reagent: def.id.clone(),
         field,
     };
+    if !def.material.validate() {
+        return Err(invalid("material properties"));
+    }
     if def.id.trim().is_empty() {
         return Err(invalid("id"));
     }
@@ -324,6 +364,7 @@ fn validate_reaction_def(def: &ReactionDef) -> Result<(), ChemDataError> {
     }
     let valid_effects = def.effects.iter().all(|effect| match *effect {
         ReactionEffect::Heat(value) => value.is_finite(),
+        ReactionEffect::Burn(value) => value.is_finite() && value > 0.0,
         ReactionEffect::Smoke(value) | ReactionEffect::Explosion(value) => {
             value.is_finite() && value > 0.0
         }

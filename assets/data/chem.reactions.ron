@@ -654,7 +654,7 @@
 
     // ---- Dangerous chemistry progression --------------------------------
     (
-        id: "ash", reactants: [("oil", 1)], products: [("ash", 1)],
+        id: "ash", material_only: true, reactants: [("oil", 1)], products: [("ash", 1)],
         min_temp: Some((480.0)), priority: 18,
         hints: ["One industrial precursor, heated nearly to ignition.", "Bake oil above 480K."],
     ),

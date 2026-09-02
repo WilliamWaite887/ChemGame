@@ -95,7 +95,7 @@ impl Plugin for MachinePlugin {
                         // is what carries whatever that change *started* forward
                         // in time. Running it first would step a batch before the
                         // frame's pours had gone in.
-                        tick_reactions,
+                        tick_reactions.before(crate::hazards::ReactionHazards),
                     )
                         .chain()
                         // Authority: server, listen server, or singleplayer.
@@ -506,6 +506,7 @@ pub struct DispenseRequested {
 /// parallel plumbing of their own.
 #[derive(Message)]
 pub struct ReactionsFired {
+    pub source: Option<crate::hazards::ReactionOrigin>,
     pub reactions: Vec<chem_sim::ReactionId>,
     /// Where it happened, so a blast lands in the right part of the room.
     pub container: Entity,
@@ -529,6 +530,7 @@ impl ReactionsFired {
             return None;
         }
         Some(ReactionsFired {
+            source: None,
             reactions: report.fired_reactions(),
             container,
             effects: report.effects.clone(),
@@ -1203,11 +1205,25 @@ fn accumulate_reaction_report(
     changed
 }
 
+fn dispatch_material_report(
+    entity: Entity,
+    report: &mut chem_sim::ResolveReport,
+    fired: &mut MessageWriter<ReactionsFired>,
+) -> bool {
+    let material = report.take_material_report();
+    if let Some(message) = ReactionsFired::from_report(entity, &material) {
+        fired.write(message);
+        return true;
+    }
+    false
+}
+
 fn step_agitation(
     solution: &mut Solution,
     state: &mut AgitationRun,
     dt: f32,
     db: &ChemDb,
+    fired: &mut MessageWriter<ReactionsFired>,
 ) -> (bool, bool) {
     state.elapsed_secs += dt;
     state.chemistry_accumulator_secs += dt;
@@ -1218,12 +1234,13 @@ fn step_agitation(
     {
         state.chemistry_accumulator_secs =
             (state.chemistry_accumulator_secs - CHEMISTRY_QUANTUM_SECS).max(0.0);
-        let report = chem_sim::resolve_step_with_activation(
+        let mut report = chem_sim::resolve_step_with_activation(
             solution,
             &db.reactions,
             CHEMISTRY_QUANTUM_SECS,
             &state.activation,
         );
+        changed |= dispatch_material_report(state.destination, &mut report, fired);
         changed |= accumulate_reaction_report(&mut state.reactions, &mut state.effects, report);
         finished =
             !chem_sim::is_reacting_with_activation(solution, &db.reactions, &state.activation);
@@ -1231,6 +1248,7 @@ fn step_agitation(
     (changed, finished)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tick_reactions(
     mut commands: Commands,
     time: Res<Time>,
@@ -1238,9 +1256,10 @@ fn tick_reactions(
     mut fired: MessageWriter<ReactionsFired>,
     mut agitations: Query<(Entity, &mut AgitationRun)>,
     mut containers: Query<(Entity, &mut Container, Option<&mut Reacting>)>,
-    mut buffers: Query<&mut Buffer>,
+    mut buffers: Query<(Entity, &mut Buffer)>,
+    mut buffer_clocks: Local<std::collections::HashMap<Entity, f32>>,
 ) {
-    let dt = time.delta_secs();
+    let dt = time.delta_secs().min(2.0);
     if dt <= 0.0 {
         return;
     }
@@ -1255,12 +1274,13 @@ fn tick_reactions(
         agitated_destinations.push(destination);
         let displayed_tenths_before = (run.elapsed_secs * 10.0).floor() as i32;
         let result = if run.direction == AgitateDirection::ToMixer {
-            buffers.get_mut(destination).ok().map(|mut buffer| {
+            buffers.get_mut(destination).ok().map(|(_, mut buffer)| {
                 let result = step_agitation(
                     &mut buffer.bypass_change_detection().0,
                     run.bypass_change_detection(),
                     dt,
                     &db,
+                    &mut fired,
                 );
                 if result.0 {
                     buffer.set_changed();
@@ -1277,6 +1297,7 @@ fn tick_reactions(
                         run.bypass_change_detection(),
                         dt,
                         &db,
+                        &mut fired,
                     );
                     if result.0 {
                         container.set_changed();
@@ -1302,6 +1323,7 @@ fn tick_reactions(
         if finished {
             if !run.reactions.is_empty() || !run.effects.is_empty() {
                 fired.write(ReactionsFired {
+                    source: None,
                     reactions: std::mem::take(&mut run.reactions),
                     container: destination,
                     effects: std::mem::take(&mut run.effects),
@@ -1325,11 +1347,13 @@ fn tick_reactions(
             // recipe. A raw solution can reach this system in tests/tools;
             // normal gameplay mutations already perform the same zero-step.
             let solution = &mut container.bypass_change_detection().solution;
-            let report = chem_sim::resolve_step(solution, &db.reactions, 0.0);
+            let mut report = chem_sim::resolve_step(solution, &db.reactions, 0.0);
+            let material_changed = dispatch_material_report(entity, &mut report, &mut fired);
             let distinct_reagents = report.distinct_reagents;
             let mut reactions = Vec::new();
             let mut effects = Vec::new();
-            let mut changed = accumulate_reaction_report(&mut reactions, &mut effects, report);
+            let mut changed =
+                material_changed | accumulate_reaction_report(&mut reactions, &mut effects, report);
             let mut accumulator = dt;
             let mut still_reacting = chem_sim::is_reacting(solution, &db.reactions);
 
@@ -1337,8 +1361,9 @@ fn tick_reactions(
                 && accumulator + CHEMISTRY_QUANTUM_EPSILON >= CHEMISTRY_QUANTUM_SECS
             {
                 accumulator = (accumulator - CHEMISTRY_QUANTUM_SECS).max(0.0);
-                let report =
+                let mut report =
                     chem_sim::resolve_step(solution, &db.reactions, CHEMISTRY_QUANTUM_SECS);
+                changed |= dispatch_material_report(entity, &mut report, &mut fired);
                 changed |= accumulate_reaction_report(&mut reactions, &mut effects, report);
                 still_reacting = chem_sim::is_reacting(solution, &db.reactions);
             }
@@ -1355,6 +1380,7 @@ fn tick_reactions(
                 });
             } else if !reactions.is_empty() || !effects.is_empty() {
                 fired.write(ReactionsFired {
+                    source: None,
                     reactions,
                     container: entity,
                     effects,
@@ -1370,6 +1396,7 @@ fn tick_reactions(
         if container.solution.is_empty() {
             if !run.reactions.is_empty() || !run.effects.is_empty() {
                 fired.write(ReactionsFired {
+                    source: None,
                     reactions: std::mem::take(&mut run.reactions),
                     container: entity,
                     effects: std::mem::take(&mut run.effects),
@@ -1389,7 +1416,9 @@ fn tick_reactions(
         {
             run.chemistry_accumulator_secs =
                 (run.chemistry_accumulator_secs - CHEMISTRY_QUANTUM_SECS).max(0.0);
-            let report = chem_sim::resolve_step(solution, &db.reactions, CHEMISTRY_QUANTUM_SECS);
+            let mut report =
+                chem_sim::resolve_step(solution, &db.reactions, CHEMISTRY_QUANTUM_SECS);
+            changed |= dispatch_material_report(entity, &mut report, &mut fired);
             let state: &mut Reacting = &mut run;
             changed |= accumulate_reaction_report(&mut state.reactions, &mut state.effects, report);
             still_reacting = chem_sim::is_reacting(solution, &db.reactions);
@@ -1403,6 +1432,7 @@ fn tick_reactions(
 
         if !run.reactions.is_empty() || !run.effects.is_empty() {
             fired.write(ReactionsFired {
+                source: None,
                 reactions: std::mem::take(&mut run.reactions),
                 container: entity,
                 effects: std::mem::take(&mut run.effects),
@@ -1410,6 +1440,58 @@ fn tick_reactions(
             });
         }
         commands.entity(entity).remove::<Reacting>();
+    }
+    // Keep this in the same pass: even a just-finished agitation already spent
+    // this frame's allowance before its deferred component removal.
+    step_idle_buffers(
+        dt,
+        &db,
+        &agitated_destinations,
+        &mut buffers,
+        &mut buffer_clocks,
+        &mut fired,
+    );
+}
+
+/// Internal reservoirs are mixtures too, including while nobody operates the machine.
+fn step_idle_buffers(
+    dt: f32,
+    db: &ChemDb,
+    agitated: &[Entity],
+    buffers: &mut Query<(Entity, &mut Buffer)>,
+    clocks: &mut std::collections::HashMap<Entity, f32>,
+    fired: &mut MessageWriter<ReactionsFired>,
+) {
+    clocks.retain(|entity, _| buffers.contains(*entity));
+    for (entity, mut buffer) in buffers.iter_mut() {
+        if agitated.contains(&entity) || buffer.0.is_empty() {
+            clocks.remove(&entity);
+            continue;
+        }
+        let clock = clocks.entry(entity).or_default();
+        *clock = (*clock + dt).min(2.0);
+        let steps =
+            ((*clock + CHEMISTRY_QUANTUM_EPSILON) / CHEMISTRY_QUANTUM_SECS).floor() as usize;
+        *clock = (*clock - steps as f32 * CHEMISTRY_QUANTUM_SECS).max(0.0);
+        let mut changed = false;
+        for step in 0..=steps {
+            let report = chem_sim::resolve_step(
+                &mut buffer.bypass_change_detection().0,
+                &db.reactions,
+                if step == 0 {
+                    0.0
+                } else {
+                    CHEMISTRY_QUANTUM_SECS
+                },
+            );
+            changed |= report.reacted();
+            if let Some(message) = ReactionsFired::from_report(entity, &report) {
+                fired.write(message);
+            }
+        }
+        if changed {
+            buffer.set_changed();
+        }
     }
 }
 
@@ -2331,6 +2413,7 @@ pub(crate) fn handle_analyze(
             // deliberately exempts this from the crowd-threshold check in
             // `learn_from_experiments` — see `ReactionsFired::distinct_reagents`.
             fired.write(ReactionsFired {
+                source: None,
                 reactions: identified,
                 container: target,
                 effects: Vec::new(),
@@ -2570,6 +2653,7 @@ fn handle_grind(
 
         if !reactions.is_empty() || !effects.is_empty() {
             fired.write(ReactionsFired {
+                source: None,
                 reactions,
                 container: target,
                 effects,
@@ -2656,6 +2740,40 @@ mod tests {
                     .chain(),
             );
         app
+    }
+
+    #[test]
+    fn sb18_idle_buffers_share_chemistry_without_replaying_effects() {
+        let mut app = test_app();
+        let db = app.world().resource::<ChemDb>();
+        let ash = db.reagent("ash");
+        let mut solution = Solution::unbounded();
+        let _ = solution.add(db.reagent("potassium"), Units::whole(5));
+        let _ = solution.add(db.reagent("water"), Units::whole(5));
+        let buffer = app.world_mut().spawn(Buffer(solution)).id();
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(100));
+        app.update();
+        assert_eq!(
+            app.world().get::<Buffer>(buffer).unwrap().0.volume_of(ash),
+            Units::whole(10)
+        );
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<ReactionsFired>>()
+                .drain()
+                .count(),
+            1
+        );
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<ReactionsFired>>()
+                .drain()
+                .count(),
+            0
+        );
     }
 
     #[test]

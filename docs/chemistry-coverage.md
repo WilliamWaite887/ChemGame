@@ -1,5 +1,17 @@
 # Chemistry Guide Coverage
 
+## Sandbox material layer
+
+Water reactivity, acid/base neutralization, and activated fuel/oxidizer reactions
+share the resolver used by containers, body compartments, and touching floor
+pools. Ash is a reusable byproduct; 17 residue-producing internal reactions no
+longer consume recipe-book cards or research progression. Stable reaction
+identities remain for old saves.
+
+See the [simulation reference](chemistry-simulation.md) and the
+[tutorial scenarios](chemistry-tutorial-scenarios.md). Automated verification and
+rendered/manual acceptance are recorded separately.
+
 This ledger maps ChemGame's supported scope to the checked-in TG Station
 `Guide to chemistry` and `Chemical recipes` snapshots. `Implemented` means the
 chemical has an obtainable recipe/source, a player-facing identity, a useful

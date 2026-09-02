@@ -7,6 +7,8 @@
 //! and puddle systems all write the same record, so consent and station
 //! consequences do not depend on which delivery mechanic happened to be used.
 
+mod reactions;
+use reactions::*;
 use std::collections::HashSet;
 
 use bevy::prelude::*;
@@ -49,14 +51,17 @@ impl Plugin for ChemWorldPlugin {
                 Update,
                 (
                     (
+                        seat_puddles,
                         initialize_puddle_profile,
                         extinguish_with_new_puddles,
                         clean_with_new_puddles,
                         affect_world_with_new_puddles,
                         spread_puddle_ignition,
+                        finish_activations,
                         merge_puddles,
+                        react_puddles.before(crate::hazards::ReactionHazards),
                         expose_bodies_to_puddles,
-                        age_puddles,
+                        age_puddles.after(crate::hazards::ReactionHazards),
                         respond_to_unwanted_exposure,
                     )
                         .chain()
@@ -75,7 +80,10 @@ impl Plugin for ChemWorldPlugin {
 }
 
 /// Persistent, replicated chemistry on the floor.
-#[derive(Component, Clone, Debug, Serialize, Deserialize)]
+/// Required locally as well as on the authority: replicated puddles must be
+/// valid visibility parents before their liquid and particle children spawn.
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[require(Visibility)]
 pub struct ChemicalPuddle {
     pub solution: Solution,
     pub radius: f32,
@@ -367,7 +375,7 @@ pub fn spawn_puddle(
                 puddle,
                 // Puddles belong to the floor even if the camera ray hit a
                 // wall or a person's upper body.
-                Transform::from_xyz(point.x, 0.018, point.z),
+                Transform::from_translation(point),
                 Visibility::default(),
                 Replicated,
                 crate::until_we_leave_the_lab(),
@@ -385,18 +393,27 @@ fn radius_for(volume: Units) -> f32 {
 fn initialize_puddle_profile(
     mut commands: Commands,
     db: Res<ChemDb>,
-    mut puddles: Query<(Entity, &Transform, &mut ChemicalPuddle), Added<ChemicalPuddle>>,
+    mut puddles: Query<
+        (
+            Entity,
+            &Transform,
+            &mut ChemicalPuddle,
+            Option<&PuddleActivation>,
+        ),
+        Or<(Added<ChemicalPuddle>, With<PuddleActivation>)>,
+    >,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
-    for (entity, transform, mut puddle) in &mut puddles {
-        let contents: Vec<_> = puddle.solution.iter().collect();
+    for (entity, transform, mut puddle, fresh) in &mut puddles {
+        let active = fresh.map_or_else(|| puddle.solution.clone(), |fresh| fresh.0.clone());
+        let contents: Vec<_> = active.iter().collect();
         let mut smoke_radius: f32 = 0.0;
         let mut smoke_seconds: f32 = 0.0;
         let mut is_cleaner = false;
         let mut ignited_here = false;
 
         for (reagent, amount) in contents {
-            let purity = puddle.solution.purity_of(reagent).clamp(0.0, 1.0);
+            let purity = active.purity_of(reagent).clamp(0.0, 1.0);
             for effect in &db.reagents.get(reagent).world_effects {
                 match *effect {
                     WorldEffect::Clean { strength } => {
@@ -515,7 +532,15 @@ fn initialize_puddle_profile(
 fn extinguish_with_new_puddles(
     db: Res<ChemDb>,
     mut sets: ParamSet<(
-        Query<(Entity, &Transform, &ChemicalPuddle), Added<ChemicalPuddle>>,
+        Query<
+            (
+                Entity,
+                &Transform,
+                &ChemicalPuddle,
+                Option<&PuddleActivation>,
+            ),
+            Or<(Added<ChemicalPuddle>, With<PuddleActivation>)>,
+        >,
         Query<(Entity, &Transform, &mut ChemicalPuddle)>,
     )>,
     mut bodies: Query<(&Transform, &mut Bloodstream)>,
@@ -523,11 +548,12 @@ fn extinguish_with_new_puddles(
     let sources: Vec<(Entity, Vec3, f32, f32)> = sets
         .p0()
         .iter()
-        .filter_map(|(entity, transform, puddle)| {
+        .filter_map(|(entity, transform, puddle, fresh)| {
+            let active = fresh.map_or(&puddle.solution, |fresh| &fresh.0);
             let mut radius = 0.0f32;
             let mut seconds = 0.0f32;
-            for (reagent, _) in puddle.solution.iter() {
-                let purity = puddle.solution.purity_of(reagent).clamp(0.0, 1.0);
+            for (reagent, _) in active.iter() {
+                let purity = active.purity_of(reagent).clamp(0.0, 1.0);
                 for effect in &db.reagents.get(reagent).world_effects {
                     if let WorldEffect::Extinguish {
                         radius: authored_radius,
@@ -553,6 +579,9 @@ fn extinguish_with_new_puddles(
             if entity != source && horizontal_distance(position, transform.translation) <= radius {
                 puddle.ignited = false;
                 puddle.ignition_intensity = 0.0;
+                // A game extinguisher removes the heat sustaining this fire;
+                // otherwise the shared material step reignites it immediately.
+                puddle.solution.temperature.0 = puddle.solution.temperature.0.min(293.15);
             }
         }
         for (transform, mut blood) in &mut bodies {
@@ -571,19 +600,27 @@ fn extinguish_with_new_puddles(
 fn clean_with_new_puddles(
     db: Res<ChemDb>,
     mut sets: ParamSet<(
-        Query<(Entity, &Transform, &ChemicalPuddle), Added<ChemicalPuddle>>,
+        Query<
+            (
+                Entity,
+                &Transform,
+                &ChemicalPuddle,
+                Option<&PuddleActivation>,
+            ),
+            Or<(Added<ChemicalPuddle>, With<PuddleActivation>)>,
+        >,
         Query<(Entity, &Transform, &mut ChemicalPuddle)>,
     )>,
 ) {
     let cleaners: Vec<(Entity, Vec3, f32)> = sets
         .p0()
         .iter()
-        .filter_map(|(entity, transform, puddle)| {
-            let strength = puddle
-                .solution
+        .filter_map(|(entity, transform, puddle, fresh)| {
+            let active = fresh.map_or(&puddle.solution, |fresh| &fresh.0);
+            let strength = active
                 .iter()
                 .filter_map(|(id, _)| {
-                    let purity = puddle.solution.purity_of(id).clamp(0.0, 1.0);
+                    let purity = active.purity_of(id).clamp(0.0, 1.0);
                     db.reagents
                         .get(id)
                         .world_effects
@@ -626,7 +663,10 @@ fn clean_with_new_puddles(
 fn affect_world_with_new_puddles(
     mut commands: Commands,
     db: Res<ChemDb>,
-    puddles: Query<(&Transform, &ChemicalPuddle), Added<ChemicalPuddle>>,
+    puddles: Query<
+        (&Transform, &ChemicalPuddle, Option<&PuddleActivation>),
+        Or<(Added<ChemicalPuddle>, With<PuddleActivation>)>,
+    >,
     mut doors: Query<
         (Entity, &Transform, Option<&mut crate::door::Corroded>),
         With<crate::door::Door>,
@@ -638,11 +678,12 @@ fn affect_world_with_new_puddles(
     mut bodies: Query<(&Transform, &mut Bloodstream)>,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
-    for (transform, puddle) in &puddles {
+    for (transform, puddle, fresh) in &puddles {
+        let active = fresh.map_or(&puddle.solution, |fresh| &fresh.0);
         let mut corrosion_heard = false;
         let mut flash_heard = false;
-        for (reagent, _) in puddle.solution.iter() {
-            let purity = puddle.solution.purity_of(reagent).clamp(0.0, 1.0);
+        for (reagent, _) in active.iter() {
+            let purity = active.purity_of(reagent).clamp(0.0, 1.0);
             for effect in &db.reagents.get(reagent).world_effects {
                 match *effect {
                     WorldEffect::Corrode { strength } => {
@@ -718,24 +759,26 @@ fn affect_world_with_new_puddles(
 /// Fire propagates deterministically to overlapping fuel. No random ignition
 /// roll means the same spill layout behaves identically for every host.
 fn spread_puddle_ignition(
-    mut puddles: Query<(&Transform, &mut ChemicalPuddle)>,
+    mut puddles: Query<(Entity, &Transform, &mut ChemicalPuddle)>,
+    solids: Query<(Entity, &Transform, &crate::lab::Solid)>,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
-    let flames: Vec<(Vec3, f32)> = puddles
+    let flames: Vec<(Entity, Vec3, f32)> = puddles
         .iter()
-        .filter(|(_, puddle)| puddle.ignited)
-        .map(|(transform, puddle)| (transform.translation, puddle.radius))
+        .filter(|(_, _, puddle)| puddle.ignited)
+        .map(|(entity, transform, puddle)| (entity, transform.translation, puddle.radius))
         .collect();
     if flames.is_empty() {
         return;
     }
-    for (transform, mut puddle) in &mut puddles {
+    for (entity, transform, mut puddle) in &mut puddles {
         if puddle.ignited || puddle.flammable_remaining <= 0.0 {
             continue;
         }
-        if flames.iter().any(|(position, radius)| {
-            horizontal_distance(*position, transform.translation)
-                <= *radius + puddle.radius + MERGE_PADDING
+        if flames.iter().any(|(source, position, radius)| {
+            connected(*position, transform.translation, &solids, *source, entity)
+                && horizontal_distance(*position, transform.translation)
+                    <= *radius + puddle.radius + MERGE_PADDING
         }) {
             puddle.ignited = true;
             puddle.ignition_intensity = puddle.ignition_intensity.max(puddle.flammable_intensity);
@@ -749,6 +792,7 @@ fn spread_puddle_ignition(
 /// being consumed a second time before deferred commands apply.
 fn merge_puddles(
     mut commands: Commands,
+    solids: Query<(Entity, &Transform, &crate::lab::Solid)>,
     mut puddles: Query<(Entity, &Transform, &mut ChemicalPuddle)>,
 ) {
     let mut snapshot: Vec<(Entity, Vec3, f32, bool)> = puddles
@@ -770,6 +814,7 @@ fn merge_puddles(
                 .find(|(right, position, radius, cleaner)| {
                     !*cleaner
                         && !merged.contains(right)
+                        && connected(left_position, *position, &solids, left, *right)
                         && horizontal_distance(left_position, *position)
                             <= left_radius + *radius + MERGE_PADDING
                 })
@@ -781,14 +826,6 @@ fn merge_puddles(
         else {
             continue;
         };
-        let left_volume = keep.solution.total_volume().as_f32();
-        let right_volume = consume.solution.total_volume().as_f32();
-        let total_volume = left_volume + right_volume;
-        if total_volume > 0.0 {
-            keep.solution.temperature.0 = (keep.solution.temperature.0 * left_volume
-                + consume.solution.temperature.0 * right_volume)
-                / total_volume;
-        }
         let amount = consume.solution.total_volume();
         consume.solution.transfer_to(&mut keep.solution, amount);
         keep.radius = radius_for(keep.solution.total_volume());
@@ -850,8 +887,17 @@ fn expose_bodies_to_puddles(
             continue;
         }
         for (target, body_transform, mut body, mut blood) in &mut bodies {
-            if horizontal_distance(puddle_transform.translation, body_transform.translation)
-                > puddle.radius
+            if (puddle_transform.translation.y
+                - (body_transform.translation.y
+                    - if chemists.contains(target) {
+                        crate::player::EYE_HEIGHT
+                    } else {
+                        0.0
+                    }))
+            .abs()
+                > 0.8
+                || horizontal_distance(puddle_transform.translation, body_transform.translation)
+                    > puddle.radius
             {
                 continue;
             }
@@ -1240,6 +1286,7 @@ mod tests {
         let mut burning = ChemicalPuddle::from_solution(solution(&db, "oil", 10), None);
         burning.ignited = true;
         burning.ignition_intensity = 2.0;
+        burning.solution.temperature.0 = 700.0;
         let fire = app
             .world_mut()
             .spawn((burning, Transform::from_xyz(1.0, 0.0, 0.0)))
@@ -1255,11 +1302,24 @@ mod tests {
             Transform::default(),
         ));
         app.insert_resource(db)
-            .add_systems(Update, extinguish_with_new_puddles);
+            .init_resource::<Time>()
+            .add_message::<crate::machines::ReactionsFired>()
+            .add_systems(Update, (extinguish_with_new_puddles, react_puddles).chain());
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(100));
 
         app.update();
 
-        assert!(!app.world().get::<ChemicalPuddle>(fire).unwrap().ignited);
+        let cooled = app.world().get::<ChemicalPuddle>(fire).unwrap();
+        assert!(!cooled.ignited);
+        assert_eq!(cooled.solution.total_volume(), Units::whole(10));
+        assert!(app
+            .world_mut()
+            .resource_mut::<Messages<crate::machines::ReactionsFired>>()
+            .drain()
+            .next()
+            .is_none());
         assert_eq!(
             app.world()
                 .get::<Bloodstream>(body)

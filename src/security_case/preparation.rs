@@ -203,6 +203,7 @@ mod tests {
             .unwrap()
             .id;
         app.world_mut().write_message(ReactionsFired {
+            source: None,
             container: stock,
             reactions: vec![reaction],
             effects: vec![],
@@ -211,6 +212,7 @@ mod tests {
         app.update();
         assert!(app.world().resource::<PreparedBatches>().0.is_empty());
         app.world_mut().write_message(ReactionsFired {
+            source: None,
             container: fresh,
             reactions: vec![reaction],
             effects: vec![],

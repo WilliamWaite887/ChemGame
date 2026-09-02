@@ -255,6 +255,10 @@ impl Solution {
         if !moving.is_positive() {
             return Units::ZERO;
         }
+        let old_volume = other.total_volume().as_f32();
+        other.temperature.0 = (other.temperature.0 * old_volume
+            + self.temperature.0 * moving.as_f32())
+            / (old_volume + moving.as_f32());
 
         // Each reagent's share, floored. Flooring loses under one raw unit per
         // reagent, so the shares can sum to slightly less than requested.

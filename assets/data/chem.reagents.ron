@@ -43,8 +43,8 @@
     // from. See `every_starting_ingredient_is_unlocked_free`.
     (id: "carbon",     name: "Carbon",     color: (0.12, 0.12, 0.13), dispensable: true, family: GasNonmetal),
     (id: "nitrogen",   name: "Nitrogen",   color: (0.62, 0.70, 0.86), dispensable: true, family: GasNonmetal),
-    (id: "oxygen",     name: "Oxygen",     color: (0.60, 0.80, 1.00), dispensable: true, family: GasNonmetal),
-    (id: "potassium",  name: "Potassium",  color: (0.86, 0.84, 0.72), dispensable: true, family: Metal),
+    (id: "oxygen", material: (oxidizer: true),     name: "Oxygen",     color: (0.60, 0.80, 1.00), dispensable: true, family: GasNonmetal),
+    (id: "potassium", material: (water_reactive: Some((product: "ash", activation_temp: 250.0, rate: None, energy: 2.0))),  name: "Potassium",  color: (0.86, 0.84, 0.72), dispensable: true, family: Metal),
     (id: "silicon",    name: "Silicon",    color: (0.66, 0.68, 0.72), dispensable: true, family: GasNonmetal),
     (
         id: "sugar",
@@ -80,7 +80,7 @@
         effects: [Heal(Oxygen, 1)],
     ),
     (
-        id: "sodium",
+        id: "sodium", material: (water_reactive: Some((product: "lye", activation_temp: 250.0, rate: Some(1.0), energy: 0.5))),
         name: "Sodium",
         color: (0.90, 0.88, 0.82),
         dispensable: true,
@@ -88,7 +88,7 @@
         tier: 1,
     ),
     (
-        id: "water",
+        id: "water", material: (water: true),
         name: "Water",
         color: (0.55, 0.72, 0.90),
         ph: 7.0,
@@ -145,7 +145,7 @@
         effects: [Harm(Brute, 1)],
     ),
     (
-        id: "ethanol",
+        id: "ethanol", material: (fuel: Some((product: "ash", activation_temp: 600.0, rate: Some(4.0), energy: 2.0))),
         name: "Ethanol",
         color: (0.85, 0.85, 0.80),
         dispensable: true,
@@ -192,7 +192,7 @@
         effects: [Harm(Toxin, 2)],
     ),
     (
-        id: "lithium",
+        id: "lithium", material: (water_reactive: Some((product: "ash", activation_temp: 250.0, rate: Some(0.5), energy: 0.4))),
         name: "Lithium",
         color: (0.66, 0.68, 0.74),
         dispensable: true,
@@ -201,7 +201,7 @@
         effects: [Status(kind: Unsteady, seconds: 4.0, intensity: 1.0)],
     ),
     (
-        id: "welding_fuel",
+        id: "welding_fuel", material: (fuel: Some((product: "ash", activation_temp: 500.0, rate: Some(4.0), energy: 4.0))),
         name: "Welding Fuel",
         color: (0.58, 0.44, 0.18),
         dispensable: true,
@@ -430,7 +430,7 @@
     // `treats` still carries their book line — it is the entry text, whatever
     // its polarity.
     (
-        id: "sulphuric_acid",
+        id: "sulphuric_acid", material: (acid_base: 1.0, neutral_product: Some("neutralized_salts")),
         name: "Sulphuric Acid",
         color: (0.86, 0.82, 0.30),
         ph: 1.0,
@@ -602,7 +602,7 @@
         effects: [Counter(kind: Burning, seconds: 5.0, intensity: 1.0)],
     ),
     (
-        id: "oil",
+        id: "oil", material: (fuel: Some((product: "ash", activation_temp: 480.0, rate: Some(4.0), energy: 3.0))),
         name: "Oil",
         color: (0.20, 0.18, 0.16),
         treats: Some("Nothing. Flammable, and the base of two worse things."),
@@ -614,7 +614,7 @@
         ],
     ),
     (
-        id: "hydrogen_peroxide",
+        id: "hydrogen_peroxide", material: (oxidizer: true),
         name: "Hydrogen Peroxide",
         color: (0.88, 0.94, 0.98),
         ph: 6.0,
@@ -903,8 +903,8 @@
     (id: "basic_buffer", name: "Basic Buffer", color: (0.34, 0.50, 0.90), ph: 14.0, dispensable: true, family: AcidBaseBuffer),
 
     // ---- Dangerous chemistry backbone ----------------------------------
-    (id: "corn_oil", name: "Corn Oil", color: (0.86, 0.72, 0.24), from_produce: true, world_effects: [Slippery(seconds: 24.0), Flammable(intensity: 0.8, seconds: 20.0)]),
-    (id: "ash", name: "Ash", color: (0.28, 0.28, 0.28), ph: 10.5, treats: Some("A basic industrial precursor left by extreme heat."), categories: [Precursors], intentionally_inert: true),
+    (id: "corn_oil", material: (fuel: Some((product: "ash", activation_temp: 500.0, rate: Some(4.0), energy: 2.0))), name: "Corn Oil", color: (0.86, 0.72, 0.24), from_produce: true, world_effects: [Slippery(seconds: 24.0), Flammable(intensity: 0.8, seconds: 20.0)]),
+    (id: "ash", material: (residue: true), name: "Ash", color: (0.28, 0.28, 0.28), ph: 10.5, treats: Some("A basic industrial precursor left by extreme heat."), categories: [Precursors], intentionally_inert: true),
     (id: "saltpetre", name: "Saltpetre", color: (0.90, 0.90, 0.84), treats: Some("An oxidizing precursor used in propellants."), categories: [Precursors], intentionally_inert: true),
     (
         id: "multiver", name: "Multiver", color: (0.42, 0.78, 0.62), ph: 9.0,
@@ -919,10 +919,10 @@
         treats: Some("A low explosive that initiates when heated to 474K."), categories: [Pyrotechnics],
         effects: [Harm(Toxin, 0.5)],
     ),
-    (id: "acetone", name: "Acetone", color: (0.82, 0.82, 0.76), treats: Some("A volatile solvent and explosive precursor."), categories: [Precursors], world_effects: [Flammable(intensity: 1.0, seconds: 15.0)]),
+    (id: "acetone", material: (fuel: Some((product: "ash", activation_temp: 550.0, rate: Some(4.0), energy: 3.0))), name: "Acetone", color: (0.82, 0.82, 0.76), treats: Some("A volatile solvent and explosive precursor."), categories: [Precursors], world_effects: [Flammable(intensity: 1.0, seconds: 15.0)]),
     (id: "phenol", name: "Phenol", color: (0.72, 0.68, 0.56), ph: 5.5, treats: Some("A toxic aromatic precursor."), categories: [Precursors, Poisons], effects: [Harm(Toxin, 1), Contact(Burn, 1)]),
     (id: "fluorosulfuric_acid", name: "Fluorosulfuric Acid", color: (0.82, 0.90, 0.44), ph: 0.2, treats: Some("A superacid used in advanced energetic chemistry."), categories: [Precursors, Poisons], effects: [Harm(Toxin, 2), Contact(Burn, 4)], world_effects: [Corrode(strength: 3.5)]),
-    (id: "nitric_acid", name: "Nitric Acid", color: (0.90, 0.82, 0.42), ph: 0.5, treats: Some("A strong oxidizing acid used in nitration."), categories: [Precursors, Poisons], effects: [Harm(Toxin, 1), Contact(Burn, 3)], world_effects: [Corrode(strength: 2.5)]),
+    (id: "nitric_acid", material: (acid_base: 1.0, neutral_product: Some("neutralized_salts")), name: "Nitric Acid", color: (0.90, 0.82, 0.42), ph: 0.5, treats: Some("A strong oxidizing acid used in nitration."), categories: [Precursors, Poisons], effects: [Harm(Toxin, 1), Contact(Burn, 3)], world_effects: [Corrode(strength: 2.5)]),
     (id: "glycerol", name: "Glycerol", color: (0.76, 0.72, 0.62), treats: Some("A viscous component for advanced explosives."), categories: [Precursors], world_effects: [Slippery(seconds: 30.0)]),
     (id: "acetone_oxide", name: "Acetone Oxide", color: (0.92, 0.88, 0.72), treats: Some("A shock-sensitive peroxide intermediate."), categories: [Precursors, Pyrotechnics], effects: [Contact(Burn, 4)]),
     (
@@ -939,7 +939,7 @@
     ),
 
     // ---- Component and medicine expansion -------------------------------
-    (id: "lye", name: "Lye", color: (0.80, 0.82, 0.72), ph: 13.0, treats: Some("A caustic base used by medicines and cleaners."), categories: [Precursors, Poisons], effects: [Contact(Burn, 2)], world_effects: [Corrode(strength: 1.0)]),
+    (id: "lye", material: (acid_base: -1.0, neutral_product: Some("neutralized_salts")), name: "Lye", color: (0.80, 0.82, 0.72), ph: 13.0, treats: Some("A caustic base used by medicines and cleaners."), categories: [Precursors, Poisons], effects: [Contact(Burn, 2)], world_effects: [Corrode(strength: 1.0)]),
     (id: "formaldehyde", name: "Formaldehyde", color: (0.76, 0.72, 0.70), ph: 4.0, treats: Some("A preservative and specialized synthesis component."), categories: [Precursors, Poisons], effects: [Harm(Toxin, 1)]),
     (id: "diethylamine", name: "Diethylamine", color: (0.72, 0.76, 0.58), ph: 11.0, treats: Some("An alkaline component used throughout advanced medicine."), categories: [Precursors], effects: [Harm(Toxin, 0.5)]),
     (id: "salicylic_acid", name: "Salicylic Acid", color: (0.92, 0.86, 0.82), ph: 3.0, overdose: Some(25), treats: Some("Reliable treatment for moderate physical trauma."), categories: [Trauma], potency: 2, effects: [Heal(Brute, 2)], overdose_effects: [Harm(Toxin, 1)]),
@@ -1966,4 +1966,6 @@
             Status(kind: Pacified, seconds: 4.0, intensity: 1.0),
         ],
     ),
+    // Inspectable family products, not substitutes for named recipe ingredients.
+    (id: "neutralized_salts", material: (residue: true), name: "Neutralized Salts", color: (0.83, 0.83, 0.78), ph: 7.0, intentionally_inert: true, categories: [Utility], treats: Some("Residue from neutralization. Not a substitute for a named recipe ingredient.")),
 ]

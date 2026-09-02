@@ -1,12 +1,20 @@
 # Chemistry Roadmap Gap Audit
 
+The sandbox extension adds shared property-driven reactions in containers,
+stomach/blood compartments and merging spills. Ash is common residue rather than
+17 separate recipe-book entries. See [simulation rules](chemistry-simulation.md)
+and [tutorial fixtures](chemistry-tutorial-scenarios.md) for behavior, deliberate
+simplifications, and verification. This does not add full atmospheric chemistry,
+fluid dynamics, organs, permanent death or gibbing.
+
 This is a static coverage audit of the checked-in `Guide to chemistry` and
 `Chemical recipes` TG Station snapshots against ChemGame's current RON data and
 gameplay systems. The executable data and validation tests remain
 authoritative. This document records absent guide entries and adaptation
 decisions that are too detailed for the high-level coverage summary.
 
-Audit baseline: 162 reaction definitions and 196 reagent definitions in
+Current catalog: 162 internal reaction definitions (145 recipe-book methods) and
+197 reagent definitions in
 `assets/data/chem.reactions.ron` and `assets/data/chem.reagents.ron`.
 
 ## State definitions

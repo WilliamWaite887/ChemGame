@@ -246,6 +246,8 @@ impl ReagentId {
 /// A reagent as written in `assets/data/reagents.ron`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReagentDef {
+    #[serde(default)]
+    pub material: crate::material::MaterialProperties,
     /// Stable identifier used by reactions and save files.
     pub id: String,
     /// Name shown to the player.
@@ -376,6 +378,7 @@ pub struct ReagentDef {
 /// A loaded reagent.
 #[derive(Clone, Debug)]
 pub struct Reagent {
+    pub material: crate::material::MaterialProperties,
     pub id: ReagentId,
     pub key: String,
     pub name: String,
@@ -418,7 +421,8 @@ impl Reagent {
     /// True for anything with a harmful effect *or* an overdose threshold — a
     /// medicine you can overdose on is not safe to hand someone unasked.
     pub fn is_harmful(&self) -> bool {
-        self.overdose.is_some()
+        self.material.water_reactive.is_some()
+            || self.overdose.is_some()
             || self
                 .effects
                 .iter()
@@ -434,7 +438,8 @@ impl Reagent {
     /// volume. Unlike [`Self::is_harmful`], a medicine's mere ability to
     /// overdose does not make a therapeutic dose a purge target.
     pub fn is_harmful_at(&self, volume: Units) -> bool {
-        self.effects.iter().any(|effect| effect.is_harmful())
+        self.material.water_reactive.is_some()
+            || self.effects.iter().any(|effect| effect.is_harmful())
             || self.after_effects.iter().any(|effect| effect.is_harmful())
             || !self.targeted_purges.is_empty()
             || matches!(self.overdose, Some(threshold) if volume > threshold)
@@ -471,6 +476,7 @@ impl ReagentRegistry {
         let id = ReagentId(self.reagents.len() as u32);
         self.by_key.insert(def.id.clone(), id);
         self.reagents.push(Reagent {
+            material: def.material,
             id,
             key: def.id,
             name: def.name,

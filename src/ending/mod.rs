@@ -220,7 +220,7 @@ fn notice_the_ending(
         delivered: shift.succeeded,
         botched: shift.botched,
         recipes: knowledge.known_count(),
-        total_recipes: db.reactions.len(),
+        total_recipes: db.reactions.recipe_count(),
         unlocked: campaign.mode == Mode::Chemist
             && campaign.player_won() == Some(true)
             && !thwarted.0.contains(&campaign.antag),
@@ -284,7 +284,7 @@ fn watch_for_crew_collapse(
         delivered: shift.succeeded,
         botched: shift.botched,
         recipes: knowledge.known_count(),
-        total_recipes: db.reactions.len(),
+        total_recipes: db.reactions.recipe_count(),
         unlocked: false,
         evacuated: true,
     });

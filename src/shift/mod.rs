@@ -2274,7 +2274,7 @@ mod tests {
             (10, 12, CareerStage::Intermediate),
             (30, 24, CareerStage::Advanced),
             (60, 36, CareerStage::Expert),
-            (80, chemistry.reactions.len(), CareerStage::Mastery),
+            (80, chemistry.reactions.recipe_count(), CareerStage::Mastery),
         ];
         let mut previous_pool = 0;
 
@@ -2295,7 +2295,7 @@ mod tests {
                 CareerStage::from_progress(
                     successes,
                     knowledge.known_count(),
-                    chemistry.reactions.len()
+                    chemistry.reactions.recipe_count()
                 ),
                 expected_stage
             );

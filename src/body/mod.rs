@@ -99,6 +99,7 @@ impl Plugin for BodyPlugin {
                         handle_apply_held,
                         handle_consume,
                         run_metabolism,
+                        forward_body_reactions.before(crate::hazards::ReactionHazards),
                         handle_chemical_incapacitation,
                         handle_collapse,
                         run_medbay_retrieval,
@@ -814,6 +815,50 @@ fn run_metabolism(
         }
         for _ in 0..ticks {
             metabolise(&mut body.0, &mut blood.0, &db);
+        }
+    }
+}
+
+/// Deliver every route through one transient, compartment-aware effect outbox.
+pub(crate) fn forward_body_reactions(
+    mut bodies: Query<(Entity, &Transform, &mut Bloodstream)>,
+    mut reports: MessageWriter<ReactionsFired>,
+    mut exposures: MessageReader<ChemicalExposure>,
+    mut owners: Local<std::collections::HashMap<Entity, Option<Entity>>>,
+) {
+    owners.retain(|entity, _| bodies.contains(*entity));
+    for exposure in exposures.read() {
+        owners
+            .entry(exposure.target)
+            .and_modify(|owner| {
+                if *owner != exposure.actor {
+                    *owner = None;
+                }
+            })
+            .or_insert(exposure.actor);
+    }
+    for (entity, transform, mut blood) in &mut bodies {
+        // The outbox is transient; draining it must not wake network replication.
+        for (compartment, report) in blood.bypass_change_detection().0.drain_reactions() {
+            if let Some(mut message) = ReactionsFired::from_report(entity, &report) {
+                message.source = Some(crate::hazards::ReactionOrigin {
+                    kind: match compartment {
+                        chem_sim::body::BodyCompartment::Stomach => {
+                            crate::hazards::ReactionSource::Stomach
+                        }
+                        chem_sim::body::BodyCompartment::Blood => {
+                            crate::hazards::ReactionSource::Blood
+                        }
+                    },
+                    position: transform.translation,
+                    // A patient's location never implies responsibility for dosing them.
+                    owner: owners.get(&entity).copied().flatten(),
+                });
+                reports.write(message);
+            }
+        }
+        if blood.0.blood.is_empty() && blood.0.stomach.is_empty() {
+            owners.remove(&entity);
         }
     }
 }
