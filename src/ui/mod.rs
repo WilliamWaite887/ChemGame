@@ -51,6 +51,7 @@ use crate::social::{
 use crate::AppState;
 
 mod book;
+mod bookmarks;
 mod icons;
 pub(crate) mod mixing;
 mod tooltip;
@@ -106,6 +107,7 @@ impl Plugin for UiPlugin {
                 spawn_vitals_panel,
                 spawn_hotbar,
                 spawn_room_label,
+                bookmarks::spawn_bookmarks,
                 reset_social_view,
             ),
         )
@@ -115,7 +117,18 @@ impl Plugin for UiPlugin {
                 handle_panel_clicks,
                 drag_thermostat_slider,
                 button_feedback,
+                // Before `sync_panel`: it reads `BookmarkFlight` to decide
+                // whether the screen a tab is turning into may draw yet, and a
+                // frame-stale answer there shows the panel one frame early.
+                (
+                    bookmarks::update_bookmark_keys,
+                    bookmarks::animate_bookmarks,
+                ),
                 sync_panel,
+                // After the spawn, so a panel drawn this frame takes its first
+                // entrance step now rather than flashing at full size for one
+                // frame — the same reason `sync_thermostat_slider` sits here.
+                bookmarks::animate_panel_entrance,
                 finish_radio_auto_scroll,
                 // After the rebuild, so a track drawn this frame has its fill
                 // patched in this frame rather than sitting one frame stale —
@@ -125,11 +138,8 @@ impl Plugin for UiPlugin {
                 animate_beaker_previews,
                 update_phase_banner,
                 update_order_queue,
-                update_vitals_panel,
-                update_hotbar,
-                update_room_label,
-                update_radio_dispatch,
-                animate_radio_dispatch,
+                (update_vitals_panel, update_hotbar, update_room_label),
+                (update_radio_dispatch, animate_radio_dispatch),
                 scroll_active_pane,
                 announce_discoveries,
                 announce_accepting_toggle,
@@ -927,6 +937,23 @@ fn stored_items(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Whether these two modes are the *same screen*, for entrance purposes.
+///
+/// Coarser than `==`: a chemist opening the book over a machine and one opening
+/// it on the floor are the same screen arriving, and the crew directory stepping
+/// to its own order list is not a new arrival either. Only a change of screen
+/// replays the entrance animation.
+fn same_screen(before: InteractionMode, after: InteractionMode) -> bool {
+    fn screen(mode: InteractionMode) -> u8 {
+        match mode {
+            InteractionMode::ReadingBook(_) => 1,
+            InteractionMode::Social { .. } | InteractionMode::OrderDirectory { .. } => 2,
+            _ => 0,
+        }
+    }
+    screen(before) == screen(after)
+}
+
 fn sync_panel(
     mut commands: Commands,
     db: Res<ChemDb>,
@@ -1110,6 +1137,15 @@ fn sync_panel(
     if signature == previous.0 {
         return;
     }
+    // An arrival, not a rebuild: the screen changed, so this panel is the one a
+    // bookmark tab has just finished handing off to and should fade up. A page
+    // turn or a live readout tick leaves the mode alone and must not replay the
+    // entrance — `sync_panel` rebuilds far more often than the screen changes.
+    let entrance = if same_screen(previous.0.mode, mode) {
+        bookmarks::PanelEntrance::settled()
+    } else {
+        bookmarks::PanelEntrance::arriving()
+    };
     previous.into_inner().0 = signature;
 
     for panel in &existing {
@@ -1129,6 +1165,7 @@ fn sync_panel(
             career_stage,
             board.shift.succeeded,
             &views.icons,
+            entrance,
         );
         return;
     }
@@ -1141,6 +1178,7 @@ fn sync_panel(
             catalog.as_deref(),
             board.station.as_deref(),
             &views.icons,
+            entrance,
         );
         return;
     }
@@ -1524,6 +1562,8 @@ fn spawn_social_directory(
     catalog: Option<&ProduceCatalog>,
     station: Option<&StationData>,
     icons: &BookIconAssets,
+    // See `spawn_reference_book`: the same handoff, on the same shell.
+    entrance: bookmarks::PanelEntrance,
 ) {
     let heard_lines: usize = residents
         .iter()
@@ -1541,6 +1581,7 @@ fn spawn_social_directory(
             },
             BackgroundColor(Color::srgba(0.015, 0.02, 0.025, 0.72)),
             PanelRoot,
+            entrance,
             crate::until_we_leave_the_lab(),
         ))
         .with_children(|screen| {
@@ -4438,6 +4479,9 @@ fn spawn_reference_book(
     career_stage: CareerStage,
     successes: u32,
     icons: &BookIconAssets,
+    // Fades and settles the shell when a bookmark tab just handed off to it;
+    // `settled` for an ordinary rebuild, which must not replay the entrance.
+    entrance: bookmarks::PanelEntrance,
 ) {
     commands
         .spawn((
@@ -4451,6 +4495,7 @@ fn spawn_reference_book(
             },
             BackgroundColor(Color::srgba(0.015, 0.02, 0.025, 0.72)),
             PanelRoot,
+            entrance,
             crate::until_we_leave_the_lab(),
         ))
         .with_children(|screen| {
@@ -8718,6 +8763,9 @@ mod tests {
             None,
             None,
             &icons,
+            // This fixture asserts on the finished screen's contents, not on
+            // how it arrives, so it starts settled.
+            bookmarks::PanelEntrance::settled(),
         );
     }
 
