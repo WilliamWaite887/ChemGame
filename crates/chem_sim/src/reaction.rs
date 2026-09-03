@@ -708,7 +708,7 @@ impl std::fmt::Display for ChemDataError {
             }
             ChemDataError::UnreachableReactionProduct { reagent } => write!(
                 f,
-                "reaction product '{reagent}' is unreachable from dispenser or produce sources (check for a circular dependency)"
+                "reaction product '{reagent}' is unreachable from ChemMaster 5000 or produce sources (check for a circular dependency)"
             ),
             ChemDataError::UnknownReagent { reaction, reagent } => {
                 write!(

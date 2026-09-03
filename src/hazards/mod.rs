@@ -1146,8 +1146,8 @@ fn build_smoke_visuals(
 /// Marks the sphere drawn for an [`ActiveHazard`].
 ///
 /// Excluded from the interaction raycast for exactly the reason `SmokeVisual`
-/// is: the rad leak is a 4.5m sphere centred on the dispenser, so without this
-/// an incident would make the dispenser — and half the hall behind it —
+/// is: the rad leak is a 4.5m sphere centred on the ChemMaster 5000, so without this
+/// an incident would make the ChemMaster 5000 — and half the hall behind it —
 /// unusable for the whole forty seconds it runs.
 #[derive(Component)]
 pub struct HazardVisual;

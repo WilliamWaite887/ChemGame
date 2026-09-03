@@ -1430,12 +1430,16 @@ fn legacy_machine_spots() -> MachineSpots {
     let mut spots = MachineSpots::default();
     for (id, kind, transform) in [
         (
-            "dispenser.a",
+            "chemmaster5000.a",
             MachineKind::ChemMaster5000,
             north(hall, -5.4),
         ),
         ("mixer.a", MachineKind::MixingChamber, north(hall, -2.2)),
-        ("dispenser.b", MachineKind::ChemMaster5000, north(hall, 1.4)),
+        (
+            "chemmaster5000.b",
+            MachineKind::ChemMaster5000,
+            north(hall, 1.4),
+        ),
         // Nudged east of the nominal 4.6 m lane centre so its casing and
         // standing point clear the authored Chemistry fume hood and island.
         ("mixer.b", MachineKind::MixingChamber, north(hall, 5.4)),
@@ -1969,11 +1973,11 @@ mod tests {
         );
         assert!(
             world.get::<Solid>(arrived).is_some(),
-            "the chemist would walk through the dispenser"
+            "the chemist would walk through the ChemMaster 5000"
         );
         assert!(
             world.get::<ContainerSlot>(arrived).is_some(),
-            "a dispenser with no slot cannot be loaded with a beaker"
+            "a ChemMaster 5000 with no slot cannot be loaded with a beaker"
         );
     }
 
@@ -2249,11 +2253,11 @@ mod tests {
 
         let (original, _, _, _) = placed
             .iter()
-            .find(|(_, id, _, _)| id == "dispenser.a")
-            .expect("first dispenser");
+            .find(|(_, id, _, _)| id == "chemmaster5000.a")
+            .expect("first ChemMaster 5000");
         let moved = placement_transform(Vec3::new(-6.2, 0.0, -5.05), Vec3::X);
         app.world_mut().resource_mut::<MachineSpots>().insert(
-            "dispenser.a",
+            "chemmaster5000.a",
             MachineKind::ChemMaster5000,
             moved,
         );
@@ -2263,9 +2267,9 @@ mod tests {
             .world_mut()
             .query::<(Entity, &MachineSpotId, &Transform)>()
             .iter(app.world())
-            .find(|(_, id, _)| id.0 == "dispenser.a")
+            .find(|(_, id, _)| id.0 == "chemmaster5000.a")
             .map(|(entity, _, transform)| (entity, *transform))
-            .expect("moved dispenser");
+            .expect("moved ChemMaster 5000");
         assert_eq!(
             same.0, *original,
             "moving a spot should preserve machine state"

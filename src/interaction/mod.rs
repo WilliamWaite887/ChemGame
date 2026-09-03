@@ -200,6 +200,16 @@ impl Plugin for InteractionPlugin {
 #[derive(Resource, Default)]
 pub(crate) struct CursorReleased(bool);
 
+impl CursorReleased {
+    /// Whether the cursor is currently free to click things.
+    ///
+    /// Read by `ui::bookmarks::click_bookmarks`, which may only act on a press
+    /// when there is a real pointer to press with.
+    pub(crate) fn get(&self) -> bool {
+        self.0
+    }
+}
+
 /// Closes whatever panel `player` has open and releases their claim on it.
 ///
 /// Shared by the Escape key and the panel's own Close button so the two can
@@ -209,7 +219,7 @@ pub(crate) struct CursorReleased(bool);
 /// UI instant; the message is what actually frees the machine, because on a
 /// client the claim lives in the server's copy of `Machine` and clearing the
 /// replicated one here is only a prediction. Without it a client walking away
-/// from the dispenser would lock it against the other chemist for the rest of
+/// from the machine would lock it against the other chemist for the rest of
 /// the shift.
 pub fn leave_machine(
     player: Entity,
@@ -344,7 +354,7 @@ pub(crate) fn panel_input(
     for (player, mut mode) in &mut players {
         // The book opens and closes on the same key from anywhere it can be
         // read: on the floor, or over an open machine panel. Looking a recipe
-        // up mid-batch is the common case, and having to close the dispenser
+        // up mid-batch is the common case, and having to close the machine panel
         // to do it — losing the claim, and the beaker's place in the queue —
         // was the wrong answer.
         // Not while the label field is open: `b` is a letter there, and the
@@ -441,7 +451,7 @@ pub enum InteractionMode {
     /// have — otherwise the view keeps turning while you read.
     ///
     /// Carries the machine it was opened over, if any. A chemist checking a
-    /// recipe halfway through a batch has not walked away from the dispenser,
+    /// recipe halfway through a batch has not walked away from the machine,
     /// so the claim is deliberately kept while they read and the book closes
     /// back onto the panel they came from.
     ReadingBook(Option<Entity>),
@@ -650,8 +660,8 @@ fn update_focus(
         // block whatever the player is deliberately aiming at behind it.
         // A smoke cloud is a sphere metres wide and would block the entire room
         // for as long as it hung there — and a hazard sphere is bigger still,
-        // 4.5m centred on the dispenser for a rad leak, so it would take the
-        // dispenser and half the hall with it. Everything else stays in the
+        // 4.5m centred on the ChemMaster 5000 for a rad leak, so it would take the
+        // ChemMaster 5000 and half the hall with it. Everything else stays in the
         // cast, so walls and benches still occlude properly.
         let filter = |entity: Entity| {
             !has_ancestor(entity, &held, &parents)
@@ -1123,7 +1133,7 @@ mod tests {
 
     #[test]
     fn the_book_key_returns_a_chemist_to_wherever_they_opened_it() {
-        let dispenser = Entity::from_raw_u32(7).unwrap();
+        let machine = Entity::from_raw_u32(7).unwrap();
 
         // From the floor, and back to it.
         let reading = InteractionMode::Roaming.toggled_book();
@@ -1132,11 +1142,11 @@ mod tests {
 
         // From a machine, and back to that same machine rather than to the
         // floor — the claim was never released, so dropping the player out to
-        // roaming here would leave them standing at a dispenser the server
+        // roaming here would leave them standing at a machine the server
         // still believes they are working.
-        let at_machine = InteractionMode::UsingMachine(dispenser);
+        let at_machine = InteractionMode::UsingMachine(machine);
         let reading = at_machine.toggled_book();
-        assert_eq!(reading, InteractionMode::ReadingBook(Some(dispenser)));
+        assert_eq!(reading, InteractionMode::ReadingBook(Some(machine)));
         assert_eq!(reading.toggled_book(), at_machine);
     }
 
@@ -1144,16 +1154,16 @@ mod tests {
     fn a_book_open_over_a_machine_still_counts_as_holding_it() {
         // Every release path keys off this, so a `None` here would strand the
         // machine in use for the rest of the shift.
-        let dispenser = Entity::from_raw_u32(7).unwrap();
+        let machine = Entity::from_raw_u32(7).unwrap();
         assert_eq!(
-            InteractionMode::ReadingBook(Some(dispenser)).claimed_machine(),
-            Some(dispenser)
+            InteractionMode::ReadingBook(Some(machine)).claimed_machine(),
+            Some(machine)
         );
         assert_eq!(InteractionMode::ReadingBook(None).claimed_machine(), None);
         assert_eq!(InteractionMode::Roaming.claimed_machine(), None);
         assert_eq!(
-            InteractionMode::UsingMachine(dispenser).claimed_machine(),
-            Some(dispenser)
+            InteractionMode::UsingMachine(machine).claimed_machine(),
+            Some(machine)
         );
     }
 

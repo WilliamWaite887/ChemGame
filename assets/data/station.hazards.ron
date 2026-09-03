@@ -17,13 +17,13 @@
     incidents: [
         (
             id: "rad_leak",
-            // Roughly where the radium stock sits, on the dispenser side of the
+            // Roughly where the radium stock sits, on the ChemMaster 5000 side of the
             // mixing hall.
             spot: "hazard.rad_leak",
             radius: 4.5,
             duration: 40.0,
             warning: "Radiation alarm on the chem lab sensor. Dose up or clear the area.",
-            onset: "The counter by the dispenser starts clicking.",
+            onset: "The counter by the ChemMaster 5000 starts clicking.",
             // Intensity of the Irradiated status applied per metabolism tick to
             // anyone inside the radius. Hyronalin counters 1.0 per tick and
             // arithrazine 3.0, so standing in it costs you a steady drip of one

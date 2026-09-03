@@ -1,7 +1,12 @@
 //! Short, spoiler-free system reference. Reading never touches Knowledge.
 use crate::{
     settings::{PauseScreen, Paused, Settings},
-    ui::{button, label, row, ScrollPane, PANEL_BG, SECTION_BG, TEXT, TEXT_DIM},
+    ui::{
+        icon_image, icons::BookIcon, icons::BookIconAssets, button, label, row, ScrollPane,
+        BOOK_ACCENT, BUTTON_IDLE, FONT_SIZE_BODY, FONT_SIZE_CAPTION, FONT_SIZE_LABEL_SMALL,
+        FONT_SIZE_TITLE, GOOD_TEXT, PANEL_BG, SECTION_BG, TEXT, TEXT_DIM, TIP_BG, TIP_BORDER,
+        WARNING_BG, WARNING_BORDER,
+    },
     AppState,
 };
 use bevy::{
@@ -24,6 +29,13 @@ pub struct Article {
     pub diagram: String,
     pub related: Vec<String>,
     pub source: String,
+    /// A [`BookIcon`] slug (e.g. `"temperature"`) picking the icon shown on
+    /// this article's index card and title. Empty means [`icon_for`] should
+    /// pick a sensible default from the article's group/id instead — most
+    /// entries leave this empty; only set it where the group default would be
+    /// wrong or bland.
+    #[serde(default)]
+    pub icon: String,
 }
 #[derive(Resource)]
 pub struct Textbook(pub Vec<Article>);
@@ -38,6 +50,48 @@ impl Default for Textbook {
         Self(articles)
     }
 }
+/// The icon shown on an article's index card and title: an explicit
+/// `icon:` slug from the RON entry if it set one, otherwise a sensible
+/// default guessed from its group (with a few per-id refinements for
+/// articles a bare group icon would leave bland or ambiguous).
+fn icon_for(article: &Article) -> BookIcon {
+    if !article.icon.is_empty() {
+        if let Some(icon) = BookIcon::ALL.into_iter().find(|i| i.slug() == article.icon) {
+            return icon;
+        }
+    }
+    match article.id.as_str() {
+        "chemmaster5000" => return BookIcon::Inputs,
+        "chamber" => return BookIcon::ReactionChamber,
+        "mixer" => return BookIcon::MixingChamber,
+        "analyzer" => return BookIcon::Research,
+        "grinder" => return BookIcon::Utility,
+        "hplc" => return BookIcon::Purity,
+        "storage" => return BookIcon::RawReagent,
+        "temperature" => return BookIcon::Temperature,
+        "buffers" => return BookIcon::Ph,
+        "purity" => return BookIcon::Purity,
+        "catalysts" => return BookIcon::Catalyst,
+        "agitation" => return BookIcon::Agitate,
+        "dose" => return BookIcon::Heal,
+        "hazards" | "materials" => return BookIcon::Harm,
+        "glossary" => return BookIcon::Key,
+        _ => {}
+    }
+    group_icon(&article.group)
+}
+/// The icon shown beside a section header in the index.
+fn group_icon(group: &str) -> BookIcon {
+    match group {
+        "Getting started" => BookIcon::Book,
+        "Equipment" => BookIcon::ChemMaster,
+        "Chemistry concepts" => BookIcon::Research,
+        "Delivery and recovery" => BookIcon::Orders,
+        "Reference" => BookIcon::Key,
+        _ => BookIcon::Book,
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct TextbookView {
     pub article: Option<usize>,
@@ -190,6 +244,123 @@ fn matches(article: &Article, query: &str) -> bool {
         .all(|word| haystack.contains(&word.to_lowercase()))
 }
 
+/// A small bordered square holding one icon, tinted `color` — the badge used
+/// beside section headers, article titles, and callout boxes.
+fn icon_chip(icons: &BookIconAssets, icon: BookIcon, color: Color, border: Color) -> impl Bundle {
+    (
+        Node {
+            width: px(30),
+            height: px(30),
+            min_width: px(30),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(6)),
+            ..default()
+        },
+        BackgroundColor(SECTION_BG),
+        BorderColor::all(border),
+        children![icon_image(icons, icon, 17.0, color)],
+    )
+}
+/// A group heading in the index: an icon chip beside an accent-colored label,
+/// replacing the old bare dim-gray text so groups read as distinct sections
+/// rather than more list text.
+fn section_header(parent: &mut ChildSpawnerCommands, icons: &BookIconAssets, group: &str) {
+    parent
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: px(8),
+            margin: UiRect::top(px(6)),
+            ..default()
+        })
+        .with_children(|header| {
+            header.spawn(icon_chip(
+                icons,
+                group_icon(group),
+                BOOK_ACCENT,
+                Color::srgba(0.25, 0.31, 0.38, 0.78),
+            ));
+            header.spawn(label(group, 18.0, BOOK_ACCENT));
+        });
+}
+/// One topic in the index (or a "Read: ..." related link): a bordered card
+/// with the article's icon and title, replacing the flat gray `button()`.
+/// Carries the same `Action::Article` component the click handler expects.
+fn topic_card(
+    parent: &mut ChildSpawnerCommands,
+    icons: &BookIconAssets,
+    index: usize,
+    article: &Article,
+    visited: bool,
+) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: px(10),
+                padding: UiRect::axes(px(12), px(10)),
+                margin: UiRect::all(px(3)),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(BUTTON_IDLE),
+            BorderColor::all(Color::srgba(0.25, 0.31, 0.38, 0.78)),
+            Action::Article(index),
+        ))
+        .with_children(|card| {
+            card.spawn(icon_image(icons, icon_for(article), 20.0, BOOK_ACCENT));
+            card.spawn(label(&article.title, FONT_SIZE_TITLE, TEXT));
+            if visited {
+                card.spawn(label("Read", FONT_SIZE_CAPTION, GOOD_TEXT));
+            }
+        });
+}
+/// A tinted, bordered box for a "pay attention" or "worth trying" aside —
+/// gives `Watch:`/`Try this:` a distinct look instead of plain body text.
+fn callout(
+    parent: &mut ChildSpawnerCommands,
+    icons: &BookIconAssets,
+    icon: BookIcon,
+    heading: &str,
+    body: String,
+    bg: Color,
+    border: Color,
+) {
+    parent
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::FlexStart,
+                column_gap: px(10),
+                padding: UiRect::all(px(12)),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(bg),
+            BorderColor::all(border),
+        ))
+        .with_children(|c| {
+            c.spawn(icon_image(icons, icon, 18.0, border));
+            c.spawn(Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(2),
+                flex_grow: 1.0,
+                min_width: px(0),
+                ..default()
+            })
+            .with_children(|col| {
+                col.spawn(label(heading, FONT_SIZE_CAPTION, border));
+                col.spawn(label(body, FONT_SIZE_BODY, TEXT));
+            });
+        });
+}
+
 type DrawSignature = (PauseScreen, u64, Option<usize>, bool);
 #[allow(clippy::too_many_arguments)]
 fn draw(
@@ -199,6 +370,7 @@ fn draw(
     mut view: ResMut<TextbookView>,
     book: Res<Textbook>,
     settings: Res<Settings>,
+    icons: Res<BookIconAssets>,
     mode: Option<Res<crate::net::LaunchMode>>,
     roots: Query<Entity, With<TextbookRoot>>,
     mut previous: Local<Option<DrawSignature>>,
@@ -310,36 +482,91 @@ fn draw(
                     .with_children(|body| {
                         if let Some(index) = selected {
                             let a = &book.0[index];
-                            body.spawn(label(&a.title, 22.0, TEXT));
-                            body.spawn(label(expand(&a.summary, &settings), 17.0, TEXT));
-                            for (i, step) in a.steps.iter().enumerate() {
-                                body.spawn(label(
-                                    format!("{}. {}", i + 1, expand(step, &settings)),
-                                    16.0,
-                                    TEXT,
+                            body.spawn(row()).with_children(|title_row| {
+                                title_row.spawn(icon_chip(
+                                    &icons,
+                                    icon_for(a),
+                                    BOOK_ACCENT,
+                                    Color::srgba(0.25, 0.31, 0.38, 0.78),
                                 ));
-                            }
-                            body.spawn(label(
-                                format!("Watch: {}", expand(&a.watch, &settings)),
-                                16.0,
-                                TEXT,
-                            ));
-                            if !a.experiment.is_empty() {
-                                body.spawn(label(
-                                    format!("Try this: {}", expand(&a.experiment, &settings)),
-                                    16.0,
-                                    TEXT,
-                                ));
-                            }
-                            if !a.diagram.is_empty() {
+                                title_row.spawn(label(&a.title, 22.0, TEXT));
+                            });
+                            body.spawn(label(expand(&a.summary, &settings), FONT_SIZE_TITLE, TEXT));
+                            if !a.steps.is_empty() {
                                 body.spawn((
                                     Node {
-                                        padding: UiRect::all(px(14)),
+                                        flex_direction: FlexDirection::Column,
+                                        row_gap: px(8),
+                                        padding: UiRect::all(px(12)),
+                                        border_radius: BorderRadius::all(px(6)),
                                         ..default()
                                     },
                                     BackgroundColor(SECTION_BG),
                                 ))
+                                .with_children(|steps| {
+                                    for (i, step) in a.steps.iter().enumerate() {
+                                        steps.spawn(row()).with_children(|r| {
+                                            r.spawn((
+                                                Node {
+                                                    width: px(22),
+                                                    height: px(22),
+                                                    min_width: px(22),
+                                                    justify_content: JustifyContent::Center,
+                                                    align_items: AlignItems::Center,
+                                                    border_radius: BorderRadius::all(px(11)),
+                                                    ..default()
+                                                },
+                                                BackgroundColor(BOOK_ACCENT),
+                                                children![label(
+                                                    (i + 1).to_string(),
+                                                    FONT_SIZE_LABEL_SMALL,
+                                                    PANEL_BG
+                                                )],
+                                            ));
+                                            r.spawn(label(
+                                                expand(step, &settings),
+                                                FONT_SIZE_BODY,
+                                                TEXT,
+                                            ));
+                                        });
+                                    }
+                                });
+                            }
+                            callout(
+                                body,
+                                &icons,
+                                BookIcon::Critical,
+                                "Watch",
+                                expand(&a.watch, &settings),
+                                WARNING_BG,
+                                WARNING_BORDER,
+                            );
+                            if !a.experiment.is_empty() {
+                                callout(
+                                    body,
+                                    &icons,
+                                    BookIcon::Research,
+                                    "Try this",
+                                    expand(&a.experiment, &settings),
+                                    TIP_BG,
+                                    TIP_BORDER,
+                                );
+                            }
+                            if !a.diagram.is_empty() {
+                                body.spawn((
+                                    Node {
+                                        flex_direction: FlexDirection::Column,
+                                        row_gap: px(4),
+                                        padding: UiRect::all(px(14)),
+                                        border: UiRect::all(px(1)),
+                                        border_radius: BorderRadius::all(px(6)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(SECTION_BG),
+                                    BorderColor::all(Color::srgba(0.25, 0.31, 0.38, 0.78)),
+                                ))
                                 .with_children(|d| {
+                                    d.spawn(label("Flow", FONT_SIZE_CAPTION, TEXT_DIM));
                                     d.spawn(label(&a.diagram, 18.0, TEXT));
                                 });
                             }
@@ -347,10 +574,8 @@ fn draw(
                                 if let Some((i, related)) =
                                     book.0.iter().enumerate().find(|(_, p)| &p.id == id)
                                 {
-                                    body.spawn(button(
-                                        format!("Read: {}", related.title),
-                                        Action::Article(i),
-                                    ));
+                                    let visited = view.visited.contains(&related.id);
+                                    topic_card(body, &icons, i, related, visited);
                                 }
                             }
                         } else {
@@ -380,9 +605,10 @@ fn draw(
                                 found = true;
                                 if group != a.group {
                                     group = &a.group;
-                                    body.spawn(label(group, 18.0, TEXT_DIM));
+                                    section_header(body, &icons, group);
                                 }
-                                body.spawn(button(&a.title, Action::Article(i)));
+                                let visited = view.visited.contains(&a.id);
+                                topic_card(body, &icons, i, a, visited);
                             }
                             if !found {
                                 body.spawn(label(
@@ -422,6 +648,50 @@ mod tests {
                 assert!(ids.contains(id), "bad link {id}");
             }
             assert!(!text.contains("{unknown}"));
+            assert!(
+                a.icon.is_empty() || BookIcon::ALL.into_iter().any(|i| i.slug() == a.icon),
+                "unknown icon slug {:?} on {}",
+                a.icon,
+                a.id
+            );
+        }
+    }
+    #[test]
+    fn every_article_resolves_an_icon() {
+        // icon_for must never panic and should honor an explicit override.
+        for a in &Textbook::default().0 {
+            let icon = icon_for(a);
+            if !a.icon.is_empty() {
+                assert_eq!(icon.slug(), a.icon, "override ignored on {}", a.id);
+            }
+        }
+    }
+    /// Actually runs the `draw` system for the index and for every article in
+    /// turn, headless. This is the system that spawns the styled UI, so it's
+    /// the one place a bad bundle (e.g. two `Node`s spawned in one tuple)
+    /// would panic — a bug the other tests here, which only inspect `Article`
+    /// data, cannot catch.
+    #[test]
+    fn drawing_the_index_and_every_article_does_not_panic() {
+        let mut app = App::new();
+        app.add_plugins((TaskPoolPlugin::default(), AssetPlugin::default()))
+            .init_asset::<Image>()
+            .init_resource::<BookIconAssets>()
+            .init_resource::<Textbook>()
+            .init_resource::<TextbookView>()
+            .init_resource::<Settings>()
+            .insert_resource(Paused(true))
+            .insert_resource(PauseScreen::Textbook)
+            .add_systems(Update, draw);
+        app.update();
+
+        let article_count = app.world().resource::<Textbook>().0.len();
+        for index in 0..article_count {
+            let mut view = app.world_mut().resource_mut::<TextbookView>();
+            view.article = Some(index);
+            view.revision += 1;
+            *app.world_mut().resource_mut::<PauseScreen>() = PauseScreen::TextbookArticle;
+            app.update();
         }
     }
     #[test]

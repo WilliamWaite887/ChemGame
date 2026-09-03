@@ -25,8 +25,10 @@ impl Plugin for OrderConversationUiPlugin {
             .init_resource::<Signature>()
             .add_systems(
                 Update,
-                (opened, buttons, draw, countdowns)
-                    .chain()
+                (
+                    (opened, buttons, draw, countdowns).chain(),
+                    crate::ui::button_feedback,
+                )
                     .run_if(in_state(AppState::Playing)),
             );
     }
@@ -101,7 +103,7 @@ fn button(value: &str, action: Action) -> impl Bundle {
             border_radius: BorderRadius::all(px(5)),
             ..default()
         },
-        BackgroundColor(Color::srgb(0.14, 0.32, 0.43)),
+        BackgroundColor(crate::ui::BUTTON_IDLE),
         action,
         children![(
             Text::new(value),
@@ -211,7 +213,7 @@ fn draw(
                         .with_children(|p| {
                             p.spawn(text(&request.explanation, 20.0, color));
                         });
-                    panel.spawn(text("REQUEST", 12.0, muted));
+                    panel.spawn(text("ORDER REQUEST", 12.0, muted));
                     panel.spawn(text(&request.requirements, 19.0, color));
                     panel.spawn(text(
                         format!(

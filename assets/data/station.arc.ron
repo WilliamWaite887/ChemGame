@@ -64,7 +64,7 @@
         hit_every_seconds: 3.0,
         hit_brute: 12,
         // Under the chemist's own 2.1 m/s: you can back away from it, but not
-        // while also standing at a dispenser.
+        // while also standing at a ChemMaster 5000.
         speed: 1.55,
     ),
 

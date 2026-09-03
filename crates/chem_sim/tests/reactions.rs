@@ -1546,13 +1546,13 @@ fn all_nine_order_medicines_declare_the_expected_preparation_sides() {
 }
 
 #[test]
-fn every_medicine_is_reachable_from_the_dispenser() {
+fn every_medicine_is_reachable_from_the_chemmaster5000() {
     // A recipe whose ingredients can never all be obtained is a dead end the
     // player can never solve. Cheaper to catch here than in playtesting.
     //
     // Seeded from `raw()` rather than `dispensable()`: grind-only reagents are
     // roots of the graph too. They come out of produce instead of the
-    // dispenser, but they are still obtainable without a reaction.
+    // ChemMaster 5000, but they are still obtainable without a reaction.
     let data = data();
     let mut reachable: HashSet<ReagentId> = data.reagents.raw().map(|r| r.id).collect();
 
@@ -1695,7 +1695,7 @@ fn every_reaction_files_under_a_heading() {
 
 #[test]
 fn every_dispensable_reagent_names_a_chemical_family() {
-    // The base dispenser grid groups its ~30 chemicals under a family
+    // The base ChemMaster 5000 grid groups its ~30 chemicals under a family
     // header instead of one long alphabetised list. A dispensable reagent
     // left at the `Unclassified` default falls into a leftover "Other"
     // bucket nobody authored on purpose, so this catches it before the

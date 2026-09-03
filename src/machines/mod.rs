@@ -141,7 +141,7 @@ pub enum MachineKind {
 
 impl MachineKind {
     /// Every equipment kind. Authored map spots may repeat a kind (the paired
-    /// dispenser/mixer lanes do); this list is the code-owned catalogue used
+    /// ChemMaster 5000/mixer lanes do); this list is the code-owned catalogue used
     /// for geometry, fittings and legacy placement coverage.
     pub const ALL: [MachineKind; 8] = [
         MachineKind::ChemMaster5000,
@@ -263,7 +263,7 @@ const CHEMISTRY_QUANTUM_EPSILON: f32 = 0.000_001;
 /// A machine's shared state.
 ///
 /// `in_use_by` exists from the start on purpose: two chemists reaching for the
-/// dispenser is the normal case in co-op, not an edge case.
+/// ChemMaster 5000 is the normal case in co-op, not an edge case.
 #[derive(Component, Debug, Serialize, Deserialize)]
 pub struct Machine {
     pub kind: MachineKind,
@@ -455,7 +455,7 @@ pub struct Buffer(pub Solution);
 #[derive(Component, Default, Serialize, Deserialize)]
 pub struct Hopper(pub Vec<ProduceId>);
 
-/// How much a dispenser gives per press. Persists between visits.
+/// How much a ChemMaster 5000 gives per press. Persists between visits.
 #[derive(Component, Serialize, Deserialize)]
 pub struct DispenseAmount(pub Units);
 
@@ -721,7 +721,7 @@ pub fn slotted_container_c(machine: Entity, slotted: &Query<(Entity, &InSlotC)>)
 ///
 /// Produce follows the same rule but only at the grinder. Loading keys off
 /// *what* is in hand rather than merely that something is, because a plant
-/// dropped into the dispenser's beaker slot would sit there doing nothing with
+/// dropped into the ChemMaster 5000's beaker slot would sit there doing nothing with
 /// no way to tell the player why.
 type MachineSockets<'w, 's> = Query<
     'w,
@@ -889,7 +889,7 @@ fn handle_machine_interact(
 ///
 /// The server's own copy of `InteractionMode` is cleared alongside the
 /// machine: leaving them to disagree would mean a chemist the server still
-/// believes is at the dispenser, unable to open anything else.
+/// believes is at the ChemMaster 5000, unable to open anything else.
 fn handle_leave_machine(
     mut requests: MessageReader<FromClient<LeaveMachineRequested>>,
     mut machines: Query<&mut Machine>,
@@ -2692,7 +2692,7 @@ pub(crate) mod tests {
             &data.reagents,
         );
 
-        // All authored dispenser bases are available from the start; research
+        // All authored ChemMaster 5000 bases are available from the start; research
         // now advances recipe knowledge and machinery instead of stock access.
         let knowledge = Knowledge::new(&data);
 
@@ -3178,12 +3178,12 @@ pub(crate) mod tests {
     #[test]
     fn dispensing_the_right_ratio_produces_medicine() {
         let mut app = test_app();
-        let dispenser = app.world_mut().spawn(DispenseAmount(Units::whole(15))).id();
+        let chemmaster5000 = app.world_mut().spawn(DispenseAmount(Units::whole(15))).id();
         let beaker = app
             .world_mut()
             .spawn((
                 Container::new(ContainerKind::LargeBeaker),
-                InSlot(dispenser),
+                InSlot(chemmaster5000),
             ))
             .id();
 
@@ -3193,7 +3193,7 @@ pub(crate) mod tests {
             app.world_mut().write_message(FromClient {
                 client_id: ClientId::Server,
                 message: DispenseRequested {
-                    machine: dispenser,
+                    machine: chemmaster5000,
                     reagent,
                 },
             });
@@ -3214,7 +3214,7 @@ pub(crate) mod tests {
     fn dispensing_sounds_once_only_after_an_accepted_transfer() {
         let mut app = test_app();
         let origin = Vec3::new(4.0, 0.5, -2.0);
-        let dispenser = app
+        let chemmaster5000 = app
             .world_mut()
             .spawn((
                 DispenseAmount(Units::whole(15)),
@@ -3223,14 +3223,14 @@ pub(crate) mod tests {
             .id();
         app.world_mut().spawn((
             Container::new(ContainerKind::LargeBeaker),
-            InSlot(dispenser),
+            InSlot(chemmaster5000),
         ));
         let oxygen = reagent(&app, "oxygen");
 
         app.world_mut().write_message(FromClient {
             client_id: ClientId::Server,
             message: DispenseRequested {
-                machine: dispenser,
+                machine: chemmaster5000,
                 reagent: oxygen,
             },
         });
@@ -3272,12 +3272,12 @@ pub(crate) mod tests {
         let data = app.world().resource::<ChemDb>().0.clone();
         app.insert_resource(Knowledge::new(&data));
 
-        let dispenser = app.world_mut().spawn(DispenseAmount(Units::whole(15))).id();
+        let chemmaster5000 = app.world_mut().spawn(DispenseAmount(Units::whole(15))).id();
         let beaker = app
             .world_mut()
             .spawn((
                 Container::new(ContainerKind::LargeBeaker),
-                InSlot(dispenser),
+                InSlot(chemmaster5000),
             ))
             .id();
 
@@ -3285,7 +3285,7 @@ pub(crate) mod tests {
         app.world_mut().write_message(FromClient {
             client_id: ClientId::Server,
             message: DispenseRequested {
-                machine: dispenser,
+                machine: chemmaster5000,
                 reagent: hydrogen,
             },
         });
@@ -3299,12 +3299,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn direct_dispenser_combination_cannot_start_an_agitated_recipe() {
+    fn direct_chemmaster5000_combination_cannot_start_an_agitated_recipe() {
         let mut app = test_app();
-        let dispenser = app.world_mut().spawn(DispenseAmount(Units::whole(15))).id();
+        let chemmaster5000 = app.world_mut().spawn(DispenseAmount(Units::whole(15))).id();
         app.world_mut().spawn((
             Container::new(ContainerKind::LargeBeaker),
-            InSlot(dispenser),
+            InSlot(chemmaster5000),
         ));
 
         // Oxygen, sugar, then a double helping of carbon: inaprovaline forms,
@@ -3314,7 +3314,7 @@ pub(crate) mod tests {
             app.world_mut().write_message(FromClient {
                 client_id: ClientId::Server,
                 message: DispenseRequested {
-                    machine: dispenser,
+                    machine: chemmaster5000,
                     reagent,
                 },
             });
@@ -4248,12 +4248,12 @@ pub(crate) mod tests {
 
     #[test]
     fn produce_cannot_be_loaded_into_a_machine_that_is_not_the_grinder() {
-        // Without the guard, holding a plant and pressing E on the dispenser
+        // Without the guard, holding a plant and pressing E on the ChemMaster 5000
         // parks it in the beaker slot, where it does nothing and blocks the
         // slot with no way to tell the player why.
         let mut app = test_app();
         let poppy = produce(&app, "Poppy");
-        let dispenser = app
+        let chemmaster5000 = app
             .world_mut()
             .spawn((
                 Machine::new(MachineKind::ChemMaster5000),
@@ -4274,7 +4274,7 @@ pub(crate) mod tests {
 
         app.world_mut().write_message(FromClient {
             client_id: client,
-            message: InteractRequested { target: dispenser },
+            message: InteractRequested { target: chemmaster5000 },
         });
         app.update();
 
@@ -4284,7 +4284,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             *app.world().get::<InteractionMode>(chemist).unwrap(),
-            InteractionMode::UsingMachine(dispenser),
+            InteractionMode::UsingMachine(chemmaster5000),
             "it should just open the panel instead"
         );
     }
@@ -4615,7 +4615,7 @@ pub(crate) mod tests {
     #[test]
     fn leaving_releases_a_machine_still_held_under_the_reference_book() {
         // Opening the book at a machine keeps the claim on purpose — a chemist
-        // checking a recipe mid-batch has not walked away from the dispenser —
+        // checking a recipe mid-batch has not walked away from the ChemMaster 5000 —
         // so every release path has to recognise that shape too. A bare
         // `UsingMachine` check here would leave the machine in use for the
         // rest of the shift the moment somebody closed out from the book.
@@ -4657,7 +4657,7 @@ pub(crate) mod tests {
         assert_eq!(
             app.world().get::<Machine>(machine).unwrap().in_use_by,
             None,
-            "the dispenser must not stay locked against the other chemist"
+            "the ChemMaster 5000 must not stay locked against the other chemist"
         );
         assert_eq!(
             *app.world().get::<InteractionMode>(chemist).unwrap(),

@@ -513,7 +513,7 @@ pub struct ShowdownTuning {
     pub hit_brute: i32,
     /// Assailant: metres per second. Below the chemist's own walk speed on
     /// purpose — you can back away from it, but not indefinitely, and not
-    /// while also standing at a dispenser.
+    /// while also standing at a ChemMaster 5000.
     pub speed: f32,
 }
 

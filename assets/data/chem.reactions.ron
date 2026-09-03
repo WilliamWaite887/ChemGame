@@ -916,7 +916,7 @@
         // cannot have this intermediate steal their oxygen, potassium and
         // sugar before their intended reactions resolve.
         rate: Some(1), priority: 4,
-        hints: ["A disorienting three-part intermediate made from ordinary dispenser stock.", "Equal parts oxygen, potassium, and sugar between pH 5 and 9."],
+        hints: ["A disorienting three-part intermediate made from ordinary ChemMaster 5000 stock.", "Equal parts oxygen, potassium, and sugar between pH 5 and 9."],
     ),
     (
         id: "rezadone", reactants: [("carpotoxin", 1), ("cryptobiolin", 1), ("copper", 1)], products: [("rezadone", 3)],
@@ -1429,7 +1429,7 @@
     (
         id: "sonic_powder",
         // Cola is outside the scoped food/drink system. Sugar retains the
-        // recipe's carbonated-carrier role using a standard dispenser input.
+        // recipe's carbonated-carrier role using a standard ChemMaster 5000 input.
         reactants: [("oxygen", 1), ("sugar", 1), ("phosphorus", 1)],
         catalysts: [("stabilizing_agent", 1)], products: [("sonic_powder", 3)],
         priority: 37,
@@ -1456,7 +1456,7 @@
         reactants: [("carbon", 1), ("mercury", 1), ("nitrogen", 1), ("oxygen", 1)],
         catalysts: [("stabilizing_agent", 1)], products: [("sorium", 4)], priority: 38,
         hints: [
-            "Four dispenser reagents make a radial repulsion agent only while a stabilizer is present.",
+            "Four ChemMaster 5000 reagents make a radial repulsion agent only while a stabilizer is present.",
             "Combine equal Carbon, Mercury, Nitrogen, and Oxygen over Stabilizing Agent. Heat the product to 474K to activate it.",
         ],
     ),

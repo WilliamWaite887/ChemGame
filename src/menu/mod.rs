@@ -586,9 +586,9 @@ fn show_join_screen(mut commands: Commands, mut input: ResMut<AddressInput>) {
         &mut commands,
         MenuRoot,
         "Join a lab",
-        "For a host running chemgame --host on the same network. \
-         A host who clicked Host in the menu is using Steam, not this — \
-         accept their overlay invite instead.",
+        "For a host who started their game from a terminal on your local network. \
+         If your host instead clicked Host in the menu, they're using Steam, so \
+         accept their overlay invite instead of typing an address here.",
         |panel| {
             panel
                 .spawn((

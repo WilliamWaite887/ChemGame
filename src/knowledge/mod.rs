@@ -338,18 +338,18 @@ impl Knowledge {
             .collect()
     }
 
-    /// Whether the dispenser will actually hand this over right now.
+    /// Whether the ChemMaster 5000 will actually hand this over right now.
     pub fn is_reagent_unlocked(&self, data: &ChemData, reagent: ReagentId) -> bool {
         data.reagents.get(reagent).dispensable
     }
 
-    /// Research points to upgrade the dispenser to its next tier, or `None`
+    /// Research points to upgrade the ChemMaster 5000 to its next tier, or `None`
     /// if it is already at the highest tier.
     pub fn next_upgrade_cost(&self) -> Option<u32> {
         None
     }
 
-    /// Exposes every dispenser reagent and recipe without spending research.
+    /// Exposes every ChemMaster 5000 reagent and recipe without spending research.
     /// Intended for the labelled playtest control, not normal progression.
     pub fn unlock_all(&mut self, data: &ChemData) {
         self.dispenser_tier = DISPENSER_TIER_COSTS.len() as u32;
@@ -364,7 +364,7 @@ impl Knowledge {
         self.available_reagents_at_tier(data, self.dispenser_tier)
     }
 
-    /// What can be made from dispenser stock plus chemistry physically in the
+    /// What can be made from ChemMaster 5000 stock plus chemistry physically in the
     /// lab right now.
     ///
     /// The book intentionally treats produce as a discoverable root, but a
@@ -391,7 +391,7 @@ impl Knowledge {
     fn available_reagents_at_tier(&self, data: &ChemData, tier: u32) -> HashSet<ReagentId> {
         let _ = tier;
         // External grinder inputs are roots of the same dependency graph as
-        // dispenser stock. Omitting them here made produce-backed recipes
+        // ChemMaster 5000 stock. Omitting them here made produce-backed recipes
         // physically craftable but invisible to frontier badges and order
         // reachability — exactly the progression systems that are supposed
         // to teach the player where those ingredients come from.
@@ -884,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn external_sources_advance_the_same_dependency_frontier_as_dispenser_stock() {
+    fn external_sources_advance_the_same_dependency_frontier_as_chemmaster5000_stock() {
         let data = data();
         let mut knowledge = Knowledge::new(&data);
         let carpotoxin = data.reagent("carpotoxin");

@@ -52,13 +52,13 @@ use crate::AppState;
 
 mod book;
 mod bookmarks;
-mod icons;
+pub(crate) mod icons;
 pub(crate) mod mixing;
 mod tooltip;
 
 use accesskit::Role;
 use book::{ProfileCoverage, RecipePresentation};
-use icons::{icon_image, BookIcon, BookIconAssets};
+pub(crate) use icons::{icon_image, BookIcon, BookIconAssets};
 use tooltip::{accessibility_label, TooltipSource, TooltipState};
 
 /// How many orders the queue can show at once.
@@ -93,7 +93,34 @@ pub(crate) const BUTTON_IDLE: Color = Color::srgb(0.17, 0.19, 0.23);
 const BUTTON_HOVER: Color = Color::srgb(0.25, 0.29, 0.35);
 /// The "this is the one that is currently set" tint, shared by the dispense
 /// amount row, the book's open tab and the settings screen's presets.
-pub(crate) const BUTTON_ACTIVE: Color = Color::srgb(0.20, 0.45, 0.62);
+///
+/// Darker than it looks like it should be: at the lighter blue this used to be,
+/// `TEXT` on top of it only hit 4.10:1 contrast, under the 4.5:1 WCAG AA floor
+/// for normal-size text. This value keeps it reading as "the blue one" next to
+/// `BUTTON_HOVER`/`BUTTON_IDLE` while landing at 7.78:1.
+pub(crate) const BUTTON_ACTIVE: Color = Color::srgb(0.10, 0.28, 0.40);
+
+/// Low-alpha tint pair for a "pay attention" callout box (a safety warning),
+/// built from [`ERROR_TEXT`] so the tint and the icon/border read as the same
+/// color family without the body text itself needing to turn red.
+pub(crate) const WARNING_BG: Color = Color::srgba(0.85, 0.35, 0.35, 0.12);
+pub(crate) const WARNING_BORDER: Color = Color::srgba(0.85, 0.35, 0.35, 0.5);
+/// The same shape as [`WARNING_BG`]/[`WARNING_BORDER`], tinted toward
+/// [`BOOK_ACCENT`]-family blue instead, for a "worth trying" callout rather
+/// than a caution.
+pub(crate) const TIP_BG: Color = Color::srgba(0.34, 0.66, 0.82, 0.12);
+pub(crate) const TIP_BORDER: Color = Color::srgba(0.34, 0.66, 0.82, 0.5);
+
+/// Named type scale, so a call site picks a size that means something instead
+/// of a bare float. Not retrofitted across every existing `label()` call in
+/// this file (that's a purely mechanical follow-up); used for new/changed
+/// call sites going forward, starting with the ones fixed alongside it.
+pub(crate) const FONT_SIZE_HEADING: f32 = 22.0;
+pub(crate) const FONT_SIZE_TITLE: f32 = 17.0;
+pub(crate) const FONT_SIZE_BODY: f32 = 16.0;
+pub(crate) const FONT_SIZE_LABEL: f32 = 14.0;
+pub(crate) const FONT_SIZE_CAPTION: f32 = 13.0;
+pub(crate) const FONT_SIZE_LABEL_SMALL: f32 = 12.0;
 
 pub struct UiPlugin;
 
@@ -121,6 +148,7 @@ impl Plugin for UiPlugin {
                 // whether the screen a tab is turning into may draw yet, and a
                 // frame-stale answer there shows the panel one frame early.
                 (
+                    bookmarks::click_bookmarks,
                     bookmarks::update_bookmark_keys,
                     bookmarks::animate_bookmarks,
                 ),
@@ -1273,7 +1301,7 @@ fn sync_panel(
 
                             match machine.kind {
                                 MachineKind::ChemMaster5000 => {
-                                    dispenser_body(
+                                    chemmaster5000_body(
                                         body,
                                         &db,
                                         &knowledge,
@@ -1848,7 +1876,7 @@ fn social_department_page(
             } else {
                 pane.spawn((section(), BackgroundColor(BOOK_INSET)))
                     .with_children(|card| {
-                        card.spawn(label("SELECT A CREW MEMBER", 11.0, BOOK_ACCENT));
+                        card.spawn(label("SELECT A CREW MEMBER", 13.0, BOOK_ACCENT));
                         card.spawn(label(
                             "Choose a resident above to review your relationship and the dialogue heard in this save.",
                             13.0,
@@ -1857,7 +1885,7 @@ fn social_department_page(
                     });
             }
 
-            pane.spawn(label("DEPARTMENT FAVORS", 11.0, BOOK_ACCENT));
+            pane.spawn(label("DEPARTMENT FAVORS", 13.0, BOOK_ACCENT));
             draw_department_shop(pane, shift, view.department);
             draw_department_sellers(pane, shift, view.department, catalog, station);
         });
@@ -1897,7 +1925,7 @@ fn draw_resident_record(panel: &mut ChildSpawnerCommands, resident: &ResidentSoc
                 12.0,
                 TEXT_DIM,
             ));
-            record.spawn(label("REMEMBERED DIALOGUE", 10.0, BOOK_ACCENT));
+            record.spawn(label("REMEMBERED DIALOGUE", 13.0, BOOK_ACCENT));
             if resident.history.lines.is_empty() {
                 record.spawn(label(
                     "No conversation with this resident has been recorded in this save.",
@@ -2411,7 +2439,7 @@ fn base_stock_groups(db: &ChemDb) -> Vec<(&'static str, Vec<GridChip<PanelAction
 }
 
 #[allow(clippy::too_many_arguments)]
-fn dispenser_body(
+fn chemmaster5000_body(
     panel: &mut ChildSpawnerCommands,
     db: &ChemDb,
     knowledge: &Knowledge,
@@ -2431,7 +2459,7 @@ fn dispenser_body(
             BookIcon::ChemMaster,
             "CM-5000",
             "ChemMaster compounder",
-            "Station reagent dispenser and live sample workstation.",
+            "Station reagent supply and live sample workstation.",
             BOOK_ACCENT,
         );
         fact_chip(
@@ -2611,7 +2639,7 @@ fn instrument_card(
                     badge.spawn(icon_image(icons, icon, 19.0, BOOK_ACCENT));
                 });
             heading.spawn(label(title, 12.0, Color::srgb(0.66, 0.82, 0.94)));
-            heading.spawn(label(explanation, 10.0, TEXT_DIM));
+            heading.spawn(label(explanation, 12.0, TEXT_DIM));
         });
     panel
         .spawn((
@@ -2645,7 +2673,7 @@ fn chemmaster_sample_card(
         icons,
         BookIcon::MixingChamber,
         "LIVE SAMPLE",
-        "The vessel is the primary ChemMaster instrument.",
+        "The vessel is the primary ChemMaster 5000 instrument.",
         |section| {
             section
                 .spawn(Node {
@@ -2661,7 +2689,7 @@ fn chemmaster_sample_card(
             let Some(container) = loaded else {
                 section.spawn(label("NO VESSEL LOADED", 14.0, TEXT_DIM));
                 section.spawn(label(
-                    "Carry a beaker to the ChemMaster and press E.",
+                    "Carry a beaker to the ChemMaster 5000 and press E.",
                     11.0,
                     TEXT_DIM,
                 ));
@@ -2716,7 +2744,7 @@ fn chemmaster_sample_card(
             if container.solution.is_empty() {
                 section.spawn(label("VESSEL EMPTY", 12.0, TEXT_DIM));
             } else {
-                section.spawn(label("REAGENT PROFILE", 10.0, TEXT_DIM));
+                section.spawn(label("REAGENT PROFILE", 12.0, TEXT_DIM));
                 for (reagent, quantity) in container.solution.iter() {
                     let definition = db.reagents.get(reagent);
                     let [r, g, b] = definition.color;
@@ -2742,7 +2770,7 @@ fn chemmaster_sample_card(
                     ))
                     .with_children(|status| {
                         status.spawn(icon_image(icons, BookIcon::DirectMix, 18.0, GOOD_TEXT));
-                        status.spawn(label("PROCESSING", 11.0, GOOD_TEXT));
+                        status.spawn(label("PROCESSING", 13.0, GOOD_TEXT));
                     });
             }
 
@@ -3195,7 +3223,7 @@ fn heater_body(
                     BackgroundColor(SECTION_BG),
                 ))
                 .with_children(|thermal| {
-                    thermal.spawn(label("THERMAL CONTROL", 11.0, TEXT_DIM));
+                    thermal.spawn(label("THERMAL CONTROL", 13.0, TEXT_DIM));
                     thermal
                         .spawn(Node {
                             width: percent(100),
@@ -3252,7 +3280,7 @@ fn heater_body(
                         });
                     thermal.spawn(label(
                         format!("{TEMPERATURE_MIN:.0} K                                    {TEMPERATURE_MAX:.0} K"),
-                        10.0,
+                        12.0,
                         TEXT_DIM,
                     ));
                 });
@@ -3271,7 +3299,7 @@ fn heater_body(
                     BackgroundColor(SECTION_BG),
                 ))
                 .with_children(|quality| {
-                    quality.spawn(label("SOLUTION CONTROL", 11.0, TEXT_DIM));
+                    quality.spawn(label("SOLUTION CONTROL", 13.0, TEXT_DIM));
                     if let Some(container) = loaded {
                         let ph = container.solution.ph();
                         quality.spawn(label(
@@ -3285,16 +3313,16 @@ fn heater_body(
                         ));
                         ph_gauge(quality, ph, forecast.as_ref().and_then(|f| f.ph_target));
                         let guidance = buffer_guidance(forecast.as_ref(), ph);
-                        quality.spawn(label(guidance, 11.0, TEXT_DIM));
+                        quality.spawn(label(guidance, 13.0, TEXT_DIM));
                         quality.spawn(label(
                             "Acidic/basic buffer is added to the beaker as reagent.",
-                            10.0,
+                            12.0,
                             TEXT_DIM,
                         ));
                     } else {
                         quality.spawn(label("pH  —       purity  —", 15.0, TEXT_DIM));
                         ph_gauge(quality, 7.0, None);
-                        quality.spawn(label("Load a beaker to begin monitoring.", 11.0, TEXT_DIM));
+                        quality.spawn(label("Load a beaker to begin monitoring.", 13.0, TEXT_DIM));
                     }
                 });
         });
@@ -3310,9 +3338,9 @@ fn heater_body(
                     ..default()
                 })
                 .with_children(|header| {
-                    header.spawn(hplc_cell("METHOD", 220.0, 10.0, TEXT_DIM));
-                    header.spawn(hplc_cell("STATUS", 100.0, 10.0, TEXT_DIM));
-                    header.spawn(hplc_cell("TARGET", 330.0, 10.0, TEXT_DIM));
+                    header.spawn(hplc_cell("METHOD", 220.0, 12.0, TEXT_DIM));
+                    header.spawn(hplc_cell("STATUS", 100.0, 12.0, TEXT_DIM));
+                    header.spawn(hplc_cell("TARGET", 330.0, 12.0, TEXT_DIM));
                 });
             match loaded {
                 Some(container) => {
@@ -3453,7 +3481,7 @@ fn heater_body(
                             beaker.spawn(label("Carry a beaker over and press E.", 12.0, TEXT_DIM));
                         }
                         if reacting {
-                            beaker.spawn(label("◌ Reaction in progress", 11.0, GOOD_TEXT));
+                            beaker.spawn(label("◌ Reaction in progress", 13.0, GOOD_TEXT));
                         }
                     });
             });
@@ -3646,7 +3674,7 @@ fn hplc_graph(
         .with_children(|graph| {
             graph.spawn((
                 Text::new("ABSORBANCE"),
-                TextFont::from_font_size(10.0),
+                TextFont::from_font_size(12.0),
                 TextColor(TEXT_DIM),
                 Node {
                     position_type: PositionType::Absolute,
@@ -3657,7 +3685,7 @@ fn hplc_graph(
             ));
             graph.spawn((
                 Text::new("RETENTION  →"),
-                TextFont::from_font_size(10.0),
+                TextFont::from_font_size(12.0),
                 TextColor(TEXT_DIM),
                 Node {
                     position_type: PositionType::Absolute,
@@ -3752,7 +3780,7 @@ fn hplc_graph(
                 }
                 graph.spawn((
                     Text::new((index + 1).to_string()),
-                    TextFont::from_font_size(10.0),
+                    TextFont::from_font_size(12.0),
                     TextColor(if reagent == selected {
                         HPLC_CLEAN
                     } else {
@@ -3860,7 +3888,7 @@ fn analyzer_body(
                     ("■ recoverable inverse", HPLC_INVERSE),
                     ("▯ selected band", Color::srgb(0.45, 0.95, 0.68)),
                 ] {
-                    legend.spawn(label(name, 11.0, color));
+                    legend.spawn(label(name, 12.0, color));
                 }
             });
 
@@ -3871,10 +3899,10 @@ fn analyzer_body(
                     ..default()
                 })
                 .with_children(|row| {
-                    row.spawn(hplc_cell("BAND / REAGENT", 250.0, 11.0, TEXT_DIM));
-                    row.spawn(hplc_cell("VOLUME", 100.0, 11.0, TEXT_DIM));
-                    row.spawn(hplc_cell("PURITY", 90.0, 11.0, TEXT_DIM));
-                    row.spawn(hplc_cell("PROFILE", 130.0, 11.0, TEXT_DIM));
+                    row.spawn(hplc_cell("BAND / REAGENT", 250.0, 12.0, TEXT_DIM));
+                    row.spawn(hplc_cell("VOLUME", 100.0, 12.0, TEXT_DIM));
+                    row.spawn(hplc_cell("PURITY", 90.0, 12.0, TEXT_DIM));
+                    row.spawn(hplc_cell("PROFILE", 130.0, 12.0, TEXT_DIM));
                 });
 
             section
@@ -4182,7 +4210,7 @@ fn delivery_slot_card(
         BorderColor::all(Color::srgb(0.20, 0.27, 0.32)),
     ))
     .with_children(|card| {
-        card.spawn(label(format!("TRAY {slot_name}"), 11.0, TEXT_DIM));
+        card.spawn(label(format!("TRAY {slot_name}"), 13.0, TEXT_DIM));
         beaker_preview(card, container_entity);
         let Some(container) = loaded else {
             card.spawn(label("READY", 13.0, TEXT_DIM));
@@ -4201,7 +4229,7 @@ fn delivery_slot_card(
             TEXT,
         ));
         if let Some(marked) = marked.filter(|marked| !marked.0.trim().is_empty()) {
-            card.spawn(label(format!("Marked \"{}\"", marked.0), 11.0, LABEL_INK));
+            card.spawn(label(format!("Marked \"{}\"", marked.0), 13.0, LABEL_INK));
         }
         if !container.solution.is_empty() {
             card.spawn(label(
@@ -4210,7 +4238,7 @@ fn delivery_slot_card(
                     container.solution.ph(),
                     container.solution.average_purity() * 100.0
                 ),
-                11.0,
+                13.0,
                 Color::srgb(0.66, 0.78, 0.92),
             ));
         }
@@ -4221,7 +4249,7 @@ fn delivery_slot_card(
         } else {
             ("WAITING FOR MATCH", GOOD_TEXT)
         };
-        card.spawn(label(status, 11.0, color));
+        card.spawn(label(status, 13.0, color));
 
         let contents = container
             .solution
@@ -4230,7 +4258,7 @@ fn delivery_slot_card(
             .collect::<Vec<_>>()
             .join(" · ");
         if !contents.is_empty() {
-            card.spawn(label(contents, 11.0, TEXT));
+            card.spawn(label(contents, 13.0, TEXT));
         }
         card.spawn(button("Eject", PanelAction::Eject(slot)))
             .insert(TooltipSource::new(
@@ -4340,7 +4368,7 @@ fn container_readout(
 // Reference book
 // ---------------------------------------------------------------------------
 
-const BOOK_ACCENT: Color = Color::srgb(0.34, 0.66, 0.82);
+pub(crate) const BOOK_ACCENT: Color = Color::srgb(0.34, 0.66, 0.82);
 const BOOK_PAPER: Color = Color::srgba(0.10, 0.12, 0.14, 0.98);
 const BOOK_INSET: Color = Color::srgba(0.075, 0.085, 0.105, 0.96);
 
@@ -4419,7 +4447,7 @@ fn status_seal(parent: &mut ChildSpawnerCommands, icons: &BookIconAssets, state:
         .spawn(icon_badge(state.label(), state.explanation(), 34.0))
         .with_children(|seal| {
             seal.spawn(icon_image(icons, state.icon(), 19.0, state.color()));
-            seal.spawn(label(state.label(), 10.0, state.color()));
+            seal.spawn(label(state.label(), 13.0, state.color()));
         });
 }
 
@@ -4474,7 +4502,7 @@ fn spawn_reference_book(
     view: &BookView,
     // Opened over a machine panel, which the same key closes back onto. Only
     // the header line differs, but it is the line that tells the player they
-    // have not just walked away from the dispenser.
+    // have not just walked away from the machine.
     at_machine: bool,
     career_stage: CareerStage,
     successes: u32,
@@ -4527,7 +4555,7 @@ fn spawn_reference_book(
                         header.spawn(row()).with_children(|title| {
                             title.spawn(icon_image(icons, BookIcon::Book, 30.0, BOOK_ACCENT));
                             title.spawn(heading("CHEMISTRY FIELD MANUAL"));
-                            title.spawn(label("STATION ISSUE  /  LAB COPY", 10.0, TEXT_DIM));
+                            title.spawn(label("LAB COPY", 12.0, TEXT_DIM));
                         });
                         header.spawn(button(
                             if at_machine {
@@ -4699,7 +4727,7 @@ fn book_sidebar(
                             TEXT_DIM
                         },
                     ));
-                    control.spawn(label(format!("{known}/{total}"), 10.0, TEXT));
+                    control.spawn(label(format!("{known}/{total}"), 12.0, TEXT));
                 });
                 // Same marker the dispense-amount row uses, so `button_feedback`
                 // colours the open tab with no extra code.
@@ -4888,7 +4916,7 @@ fn book_entries(
                 ))
                 .with_children(|next| {
                     next.spawn(icon_image(icons, state.icon(), 24.0, state.color()));
-                    next.spawn(label("NEXT EXPERIMENT", 10.0, state.color()));
+                    next.spawn(label("NEXT EXPERIMENT", 13.0, state.color()));
                     next.spawn(label(product_name(db, reaction.id), 15.0, TEXT));
                     next.spawn(label(guidance, 12.0, TEXT_DIM));
                 });
@@ -4921,7 +4949,7 @@ fn book_entries(
                                 TEXT_DIM
                             },
                         ));
-                        control.spawn(label(count.to_string(), 11.0, TEXT));
+                        control.spawn(label(count.to_string(), 12.0, TEXT));
                     });
                     if filter == view.filter {
                         entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
@@ -5234,7 +5262,7 @@ fn section_header(
             .with_children(|badge| {
                 badge.spawn(icon_image(icons, icon, 20.0, BOOK_ACCENT));
             });
-        header.spawn(label(title, 11.0, Color::srgb(0.60, 0.74, 0.92)));
+        header.spawn(label(title, 13.0, Color::srgb(0.60, 0.74, 0.92)));
     });
 }
 
@@ -5309,7 +5337,7 @@ fn formula_strip(
                             Color::srgb(0.82, 0.70, 0.38),
                         ));
                     });
-                catalysts.spawn(label("NOT CONSUMED", 10.0, Color::srgb(0.82, 0.70, 0.38)));
+                catalysts.spawn(label("NOT CONSUMED", 12.0, Color::srgb(0.82, 0.70, 0.38)));
                 for &(reagent, amount) in &reaction.catalysts {
                     reagent_token(catalysts, db, reagent, amount);
                 }
@@ -5407,7 +5435,7 @@ fn process_dashboard(
         });
 
         if let chem_sim::ReactionProcess::Agitated { side_a, side_b } = &reaction.process {
-            process.spawn(label("PREPARE SEPARATELY", 10.0, TEXT_DIM));
+            process.spawn(label("PREPARE SEPARATELY", 12.0, TEXT_DIM));
             process.spawn(wrap_row()).with_children(|sides| {
                 sides.spawn(label("A", 13.0, BOOK_ACCENT));
                 for &(reagent, amount) in side_a {
@@ -5451,7 +5479,7 @@ fn profile_fact(
                 ..default()
             })
             .with_children(|text| {
-                text.spawn(label(title, 10.0, color));
+                text.spawn(label(title, 13.0, color));
                 text.spawn(label(value, 12.0, TEXT));
             });
         });
@@ -5645,7 +5673,7 @@ fn effects_dashboard(
             }
         });
 
-        effects.spawn(label("WORLD BEHAVIOR", 10.0, Color::srgb(0.60, 0.74, 0.92)));
+        effects.spawn(label("WORLD BEHAVIOR", 13.0, Color::srgb(0.60, 0.74, 0.92)));
         effects.spawn(wrap_row()).with_children(|world| {
             if coverage.world_effects == 0 {
                 fact_chip(
@@ -5997,7 +6025,7 @@ fn render_ingredient_node(
             let mut note = section();
             note.margin.left = px(depth as f32 * TREE_INDENT);
             pane.spawn(note).with_children(|entry| {
-                entry.spawn(label("catalyst, not consumed:", 11.0, TEXT_DIM));
+                entry.spawn(label("catalyst, not consumed:", 13.0, TEXT_DIM));
             });
         }
         render_recipe_node(
@@ -6064,7 +6092,7 @@ fn render_ingredient_node(
                     Color::srgb(0.80, 0.60, 0.45),
                 ));
                 locked.spawn(label(
-                    format!("locked at dispenser  /  tier {}", definition.tier),
+                    format!("locked at ChemMaster 5000  /  tier {}", definition.tier),
                     12.0,
                     Color::srgb(0.80, 0.60, 0.45),
                 ));
@@ -6202,7 +6230,7 @@ fn preparation_line(db: &ChemDb, reaction: &chem_sim::Reaction) -> String {
                 "Workstation: Reaction Chamber; ordinary container mixing is allowed once the temperature is valid."
                     .to_string()
             } else {
-                "Workstation: ordinary container or ChemMaster; combines on contact.".to_string()
+                "Workstation: ordinary container or ChemMaster 5000; combines on contact.".to_string()
             }
         }
         chem_sim::ReactionProcess::Agitated { side_a, side_b } => format!(
@@ -7073,7 +7101,7 @@ fn spawn_hotbar(mut commands: Commands) {
                     .with_children(|cell| {
                         cell.spawn((
                             Text::new(""),
-                            TextFont::from_font_size(11.0),
+                            TextFont::from_font_size(12.0),
                             TextColor(TEXT_DIM),
                             HotbarText::Key(slot),
                         ));
@@ -7085,7 +7113,7 @@ fn spawn_hotbar(mut commands: Commands) {
                         ));
                         cell.spawn((
                             Text::new(""),
-                            TextFont::from_font_size(11.0),
+                            TextFont::from_font_size(12.0),
                             TextColor(TEXT_DIM),
                             HotbarText::Amount(slot),
                         ));
@@ -8160,7 +8188,7 @@ fn normalize_changed_ui_text(mut text: Query<&mut Text, Changed<Text>>) {
 pub(crate) fn heading(text: impl Into<String>) -> impl Bundle {
     (
         Text::new(font_safe_text(text.into())),
-        TextFont::from_font_size(22.0),
+        TextFont::from_font_size(FONT_SIZE_HEADING),
         TextColor(TEXT),
     )
 }
@@ -8219,7 +8247,7 @@ pub(crate) fn button<A: Component>(text: impl Into<String>, action: A) -> impl B
         action,
         children![(
             Text::new(font_safe_text(text.into())),
-            TextFont::from_font_size(14.0),
+            TextFont::from_font_size(FONT_SIZE_LABEL),
             TextColor(TEXT),
         )],
     )
@@ -8299,7 +8327,7 @@ fn chip_button<A: Component>(
 
 /// A same-width grid of swatch-and-label buttons, split into labelled
 /// sub-groups — the shape every "pick one of many named, colour-coded
-/// things" picker in the lab wants. Built for the base dispenser's chemical
+/// things" picker in the lab wants. Built for the ChemMaster 5000's chemical
 /// list, but kept generic so another panel can group the same way later.
 /// Empty groups are skipped rather than printing a bare heading over
 /// nothing.
@@ -8312,7 +8340,7 @@ fn chip_grid<A: Component>(
         if chips.is_empty() {
             continue;
         }
-        panel.spawn(label(heading, 11.0, TEXT_DIM));
+        panel.spawn(label(heading, 13.0, TEXT_DIM));
         panel.spawn(wrap_row()).with_children(|row| {
             for chip in chips {
                 let mut entity = row.spawn(chip_button(

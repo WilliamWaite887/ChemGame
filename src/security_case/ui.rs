@@ -14,8 +14,10 @@ impl Plugin for SecurityCaseUiPlugin {
             .add_systems(OnExit(AppState::Playing), reset)
             .add_systems(
                 Update,
-                (opened, buttons, draw, dress_locker)
-                    .chain()
+                (
+                    (opened, buttons, draw, dress_locker).chain(),
+                    crate::ui::button_feedback,
+                )
                     .run_if(in_state(AppState::Playing)),
             );
     }
@@ -180,7 +182,7 @@ fn draw(
                                     padding: UiRect::axes(px(16), px(12)),
                                     ..default()
                                 },
-                                BackgroundColor(Color::srgb(0.14, 0.32, 0.43)),
+                                BackgroundColor(crate::ui::BUTTON_IDLE),
                             ))
                             .with_children(|button| {
                                 button.spawn((

@@ -318,9 +318,9 @@ mod tests {
     #[test]
     fn marker_follows_dropped_glassware_then_points_to_its_destination() {
         let (mut world, stage) = setup("bearings", Goal::Load);
-        let dispenser = world
+        let chemmaster5000 = world
             .spawn((
-                crate::lab::MachineSpotId("training.dispenser".into()),
+                crate::lab::MachineSpotId("training.chemmaster5000".into()),
                 Transform::from_xyz(4.0, 1.0, 0.0),
             ))
             .id();
@@ -342,9 +342,9 @@ mod tests {
         let carrying = target(&mut world, &stage, Vec3::ZERO).unwrap();
         assert_eq!(
             carrying.0.x,
-            world.get::<Transform>(dispenser).unwrap().translation.x
+            world.get::<Transform>(chemmaster5000).unwrap().translation.x
         );
-        assert!(carrying.1.starts_with("Use Chemical Dispenser"));
+        assert!(carrying.1.starts_with("Use ChemMaster 5000"));
         let other = world.spawn(Transform::from_xyz(6.0, 1.0, 0.0)).id();
         world
             .entity_mut(beaker)

@@ -10,7 +10,7 @@ tests. Amounts below are in-game units, not real-world instructions.
 
 ## Lesson 1 — Reliable preparation and inspection
 
-- **Prerequisites:** Dispenser, beaker and analyzer; ordinary starting stock.
+- **Prerequisites:** ChemMaster 5000, beaker and analyzer; ordinary starting stock.
 - **Setup/actions:** Add 5u each Silicon, Nitrogen and Potassium. Inspect the
   finished mixture. Prepare Inaprovaline separately from 5u each Oxygen, Carbon
   and Sugar.
@@ -23,7 +23,7 @@ tests. Amounts below are in-game units, not real-world instructions.
 
 ## Lesson 2 — A small mistake versus a substantial mixture
 
-- **Prerequisites:** Safe test scene, dispenser, analyzer and two beakers.
+- **Prerequisites:** Safe test scene, ChemMaster 5000, analyzer and two beakers.
 - **Setup/actions:** Compare 1u Potassium + 1u Water against 10u of each. In a
   separate 100u Large Beaker add 80u inert Nitrogen before repeating the latter
   mixture (100u total).
@@ -120,7 +120,7 @@ Validation date: 2026-09-02.
 
 - `cargo test --workspace --offline`: 1,316 passed, zero failed or ignored.
   This includes 196 simulation tests, 1,115 game tests and five doctests. All
-  `sb01`�`sb19` guards pass, alongside existing medicine, staged processing,
+  `sb01`�`sb19` guards pass, alongside existing medicine, staged processing,
   orders, progression, recovery and serialization coverage.
 - `cargo clippy --workspace --all-targets --offline`: completed successfully.
   Warnings remain, chiefly ECS query complexity and argument counts; this is

@@ -2484,7 +2484,7 @@
 {
 "classname" "machine_spot"
 "origin" "202 216 0"
-"id" "dispenser.a"
+"id" "chemmaster5000.a"
 "kind" "ChemMaster5000"
 "angles" "0 0 0"
 }
@@ -2500,7 +2500,7 @@
 {
 "classname" "machine_spot"
 "origin" "202 -56 0"
-"id" "dispenser.b"
+"id" "chemmaster5000.b"
 "kind" "ChemMaster5000"
 "angles" "0 0 0"
 }

@@ -1198,7 +1198,7 @@ mod tests {
     #[test]
     fn dressing_happens_once_per_container() {
         // `Added` fires on arrival, not on every contents change — a beaker
-        // being filled at the dispenser changes `Container` constantly, and
+        // being filled at the ChemMaster 5000 changes `Container` constantly, and
         // re-dressing would pile up a new liquid child each time.
         let mut app = App::new();
         app.add_plugins((TaskPoolPlugin::default(), AssetPlugin::default()))
@@ -1214,7 +1214,7 @@ mod tests {
             .id();
         app.update();
 
-        // Something changes the contents, as the dispenser would.
+        // Something changes the contents, as the ChemMaster 5000 would.
         let _ = app
             .world_mut()
             .get_mut::<Container>(beaker)

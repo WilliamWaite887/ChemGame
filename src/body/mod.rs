@@ -67,7 +67,7 @@ fn emit_world_sfx(sounds: &mut Option<ResMut<Messages<EmitWorldSfx>>>, sound: Sf
 ///
 /// This is the anti-softlock, and singleplayer needs it: a chemist who goes
 /// down alone with brute damage cannot walk, cannot drink, and cannot reach the
-/// dispenser to make the thing that would fix them. In co-op the other chemist
+/// ChemMaster 5000 to make the thing that would fix them. In co-op the other chemist
 /// can beat this clock with a syringe, which is the best reason the game has
 /// for a second person being in the room.
 const MEDBAY_SECONDS: f32 = 25.0;
@@ -930,7 +930,7 @@ fn handle_chemical_incapacitation(
 /// The server released their claim in [`handle_collapse`]; this is the other
 /// half, and it has to be local because `InteractionMode` is. Runs everywhere
 /// rather than under authority, so a collapsed client is not left reading the
-/// dispenser from the floor.
+/// machine panel from the floor.
 fn close_panel_on_collapse(
     mut players: Query<
         (

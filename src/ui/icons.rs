@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use chem_sim::Category;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum BookIcon {
+pub(crate) enum BookIcon {
     All,
     Trauma,
     Burns,
@@ -73,7 +73,7 @@ pub(super) enum BookIcon {
 }
 
 impl BookIcon {
-    pub(super) const ALL: [Self; 58] = [
+    pub(crate) const ALL: [Self; 58] = [
         Self::All,
         Self::Trauma,
         Self::Burns,
@@ -134,7 +134,7 @@ impl BookIcon {
         Self::Key,
     ];
 
-    pub(super) fn slug(self) -> &'static str {
+    pub(crate) fn slug(self) -> &'static str {
         match self {
             Self::All => "all",
             Self::Trauma => "trauma",
@@ -216,7 +216,7 @@ impl BookIcon {
 }
 
 #[derive(Resource)]
-pub(super) struct BookIconAssets(HashMap<BookIcon, Handle<Image>>);
+pub(crate) struct BookIconAssets(HashMap<BookIcon, Handle<Image>>);
 
 impl FromWorld for BookIconAssets {
     fn from_world(world: &mut World) -> Self {
@@ -231,7 +231,7 @@ impl FromWorld for BookIconAssets {
 }
 
 impl BookIconAssets {
-    pub(super) fn image(&self, icon: BookIcon) -> Handle<Image> {
+    pub(crate) fn image(&self, icon: BookIcon) -> Handle<Image> {
         self.0
             .get(&icon)
             .cloned()
@@ -239,7 +239,7 @@ impl BookIconAssets {
     }
 }
 
-pub(super) fn icon_image(
+pub(crate) fn icon_image(
     assets: &BookIconAssets,
     icon: BookIcon,
     size: f32,

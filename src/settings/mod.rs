@@ -459,7 +459,7 @@ struct ResolutionChoice(u32, u32);
 
 /// The only resolutions offered on screen. There is no dropdown or free-form
 /// numeric entry widget anywhere in this UI — every discrete choice here is a
-/// button row, same as the dispense-amount buttons in `ui::dispenser_body`.
+/// button row, same as the dispense-amount buttons in `ui::chemmaster5000_body`.
 const RESOLUTION_PRESETS: [(u32, u32); 4] = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)];
 
 /// Shared by both ways of reaching Settings — the pause-reached screen and the

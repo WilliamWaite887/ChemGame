@@ -11,7 +11,7 @@ in this file.
 
 ## The short version
 
-1. All standard dispenser reagents are available from the start.
+1. All standard ChemMaster 5000 reagents are available from the start.
 2. Progression comes from learning methods, making intermediates, controlling
    temperature and pH, preserving purity, and finding external ingredients.
 3. A recipe ratio scales. `1:1 -> 2` means 5u + 5u makes 10u just as readily as
@@ -110,11 +110,11 @@ reaction and small enough that a mistake does not waste a whole beaker.
 
 ## Equipment
 
-### Dispenser
+### ChemMaster 5000
 
-The dispenser supplies every standard base reagent from a fresh save. It does
-not supply completed medicines, most intermediates, or physical ingredients
-that belong to Botany, Cargo, minerals, or salvage.
+The ChemMaster 5000 supplies every standard base reagent from a fresh save. It
+does not supply completed medicines, most intermediates, or physical
+ingredients that belong to Botany, Cargo, minerals, or salvage.
 
 Use small dispense steps for final corrections. Large buttons are for measured
 bulk stock, not pH tuning.

@@ -204,7 +204,7 @@
 {
 "classname" "machine_spot"
 "origin" "120 200 0"
-"id" "training.dispenser"
+"id" "training.chemmaster5000"
 "kind" "ChemMaster5000"
 "angles" "0 0 0"
 }

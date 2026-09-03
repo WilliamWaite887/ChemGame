@@ -45,7 +45,7 @@ and never name unmeasured ingredients.
 |---|---|---|
 | bearings | Meet instructor; pick up, select, load and retrieve glassware; read textbook | docs/chemistry-player-guide.md (first shift); containers, interaction, textbook |
 | request | Hear, accept, and review a 10u Kelotane request | conversation-first-orders.md; order_intake and order directory |
-| batch | Consult book and prepare clean 10u Kelotane | docs/chemistry-player-guide.md (foundation medicines); chemistry data and dispenser |
+| batch | Consult book and prepare clean 10u Kelotane | docs/chemistry-player-guide.md (foundation medicines); chemistry data and ChemMaster 5000 |
 | delivery | Analyze, bottle, inspect and successfully deliver 10u | label-first-chemistry-plan.md; analyzer, mixer, inspection and actual delivery grading |
 | mistake | Analyze the labelled sample; recover clean medicine by correction, separation or replacement | docs/chemistry-player-guide.md (troubleshooting); labels and actual chemistry |
 | independent | Prepare and verify 20u; fulfil two successive 10u bottle requests with a visible current objective | Same real preparation and delivery path |
@@ -90,9 +90,9 @@ control tokens. A glossary and symptom search links provide alternate entry poin
 
 | Page IDs | Source material | Current gameplay authority |
 |---|---|---|
-| handling, ratios, experiments | chemistry-player-guide.md: first shift, short version | containers, knowledge, dispenser and chem_sim |
+| handling, ratios, experiments | chemistry-player-guide.md: first shift, short version | containers, knowledge, ChemMaster 5000 and chem_sim |
 | labels | label-first-chemistry-plan.md: inspection | inspection and labels |
-| dispenser, chamber, mixer | docs/chemistry-player-guide.md (equipment) | machines and UI |
+| chemmaster5000, chamber, mixer | docs/chemistry-player-guide.md (equipment) | machines and UI |
 | analyzer | label-first-chemistry-plan.md: reports | analysis_reports |
 | grinder, storage | docs/chemistry-player-guide.md (equipment); NPC RPG integration plan | Current produce catalogue, shift requisitions and storage |
 | hplc, purity | docs/chemistry-player-guide.md (HPLC and quality) | Actual purification, retained volume and rejection rules |

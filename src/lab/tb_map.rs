@@ -4576,7 +4576,7 @@ fn common_area_wayfinding_marks_the_crossroads_and_every_department() {
 fn the_map_still_places_every_machine() {
     const EXPECTED: &[(&str, MachineKind, Vec3)] = &[
         (
-            "dispenser.a",
+            "chemmaster5000.a",
             MachineKind::ChemMaster5000,
             Vec3::new(-5.4, 0.0, -5.05),
         ),
@@ -4586,7 +4586,7 @@ fn the_map_still_places_every_machine() {
             Vec3::new(-2.2, 0.0, -5.05),
         ),
         (
-            "dispenser.b",
+            "chemmaster5000.b",
             MachineKind::ChemMaster5000,
             Vec3::new(1.4, 0.0, -5.05),
         ),
@@ -4758,7 +4758,7 @@ fn core_lanes_clear_the_authored_chemistry_furniture() {
             max_z: 0.7711,
         },
     ];
-    const CORE_IDS: &[&str] = &["dispenser.a", "mixer.a", "dispenser.b", "mixer.b"];
+    const CORE_IDS: &[&str] = &["chemmaster5000.a", "mixer.a", "chemmaster5000.b", "mixer.b"];
 
     let overlaps = |a: Bounds, b: Bounds| {
         a.min_x < b.max_x && a.max_x > b.min_x && a.min_z < b.max_z && a.max_z > b.min_z

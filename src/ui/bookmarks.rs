@@ -12,11 +12,16 @@
 //! stripe down the spine. Pressing its key slides it toward the centre and
 //! expands it into a panel-shaped rectangle, which the real panel then covers.
 //!
-//! Deliberately **visual only**. The cursor is grabbed while roaming (see
-//! `interaction::free_the_cursor`), so a click target here would be dead
-//! weight; these carry `Pickable::IGNORE` and never touch `InteractionMode`.
-//! [`panel_input`](crate::interaction::panel_input) remains the only thing that
-//! opens either screen.
+//! **Clickable exactly when there is a cursor to click with.** While roaming,
+//! the pointer is grabbed and locked to the centre of the window (see
+//! `interaction::free_the_cursor`), so the tabs are a pure affordance: they
+//! name the key and nothing more. From inside either screen or a machine
+//! panel the cursor is free, and a tab can be pressed as well — opening,
+//! closing, or swapping straight from one screen to the other.
+//!
+//! Clicks go through [`InteractionMode`]'s own toggles, the same ones the
+//! keybinds use, so a press keeps a machine claim and restores whatever was
+//! underneath exactly as the key would.
 
 use bevy::prelude::*;
 
@@ -68,10 +73,19 @@ const HANDOFF_START: f32 = 0.0;
 const HANDOFF_END: f32 = 0.45;
 
 /// At rest the tabs sit above the training HUD (`10`) and below the hotbar
-/// (`20`); in flight they rise above the hotbar but stay under the panel
-/// (`30`) they are turning into.
+/// (`20`).
 const REST_Z: i32 = 15;
-const FLIGHT_Z: i32 = 25;
+
+/// In flight they rise above the machine panel (`30`) they are flying over.
+///
+/// Both bookmark screens can be opened while operating a machine — the claim is
+/// deliberately kept, so a chemist can look a recipe up mid-batch — which means
+/// the tab is animating on top of that machine's panel. Below it the flight
+/// would slide behind the dispenser and simply not be visible.
+///
+/// Still under the label field (`50`) and everything above it: those are modal
+/// in a way a machine panel is not.
+const FLIGHT_Z: i32 = 35;
 
 /// Which screen a tab stands for.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
@@ -162,14 +176,26 @@ fn is_active(bookmark: Bookmark, mode: InteractionMode) -> bool {
     }
 }
 
-/// A screen neither tab stands for is up, so both should stay out of sight.
+/// A screen is up that the tabs must stay out of the way of entirely.
 ///
-/// Only ever true for something a tab is *not* going to become — a machine
-/// panel, a label field, a conversation. Deliberately not "anything non-roaming":
-/// the book and crew screens are exactly what the tabs turn into, and hiding a
-/// tab because its own screen is open is what left them stuck invisible.
-fn covered_by_a_machine(mode: InteractionMode) -> bool {
-    !mode.is_roaming() && !Bookmark::ALL.iter().any(|b| is_active(*b, mode))
+/// Deliberately narrow. Operating a machine is *not* one of these: both
+/// bookmark screens can be opened over a machine panel without giving up the
+/// claim — looking a recipe up mid-batch is the common case — so the tabs stay
+/// offered there, and their flight is drawn over the panel ([`FLIGHT_Z`]).
+///
+/// What does hide them is a screen that owns the keyboard or the whole frame: a
+/// label field, where the tab's own key is a letter being typed, and the
+/// conversations, which are modal. The book and crew screens never hide a tab —
+/// they are what the tabs turn into, and hiding a tab because its own screen is
+/// open is what once left them stuck invisible.
+fn tabs_are_unavailable(mode: InteractionMode) -> bool {
+    matches!(
+        mode,
+        InteractionMode::Labelling(_)
+            | InteractionMode::Inspecting { .. }
+            | InteractionMode::OrderConversation(..)
+            | InteractionMode::SecurityConversation
+    )
 }
 
 /// One frame of travel, clamped to `[0, 1]`.
@@ -234,6 +260,25 @@ pub(super) struct BookmarkTab {
 // state; the panel now spawns the moment the mode says so, exactly as it always
 // did, and merely fades in underneath the arriving tab.
 
+/// Everything on a tab root that [`animate_bookmarks`] drives each frame.
+type TabChrome = (
+    &'static mut BookmarkTab,
+    &'static mut Node,
+    &'static mut GlobalZIndex,
+    &'static mut Visibility,
+    &'static BookmarkTint,
+    &'static mut BackgroundColor,
+    &'static mut BorderColor,
+    &'static Interaction,
+);
+
+/// A node whose background carries a tint.
+type TintedBackground = (&'static BookmarkTint, &'static mut BackgroundColor);
+
+/// Key chips alone. Excludes the tab roots, whose `BackgroundColor` the main
+/// loop already holds mutably.
+type ChipsOnly = (With<BookmarkChip>, Without<BookmarkTab>);
+
 /// Everything inside a tab that fades with it, bundled so `animate_bookmarks`
 /// stays within a readable argument count — the same device `PanelViews` uses.
 #[derive(bevy::ecs::system::SystemParam)]
@@ -241,14 +286,7 @@ pub(super) struct TabContents<'w, 's> {
     text: Query<'w, 's, (&'static BookmarkTint, &'static mut TextColor)>,
     images: Query<'w, 's, (&'static BookmarkTint, &'static mut ImageNode)>,
     /// The key chip's own inset panel, and only that — see [`BookmarkChip`].
-    /// `Without<BookmarkTab>` as well, since the tab root's `BackgroundColor`
-    /// is already held mutably by the main loop.
-    chips: Query<
-        'w,
-        's,
-        (&'static BookmarkTint, &'static mut BackgroundColor),
-        (With<BookmarkChip>, Without<BookmarkTab>),
-    >,
+    chips: Query<'w, 's, TintedBackground, ChipsOnly>,
 }
 
 /// A panel that should fade and scale up as the tab hands off to it.
@@ -375,13 +413,25 @@ pub(super) fn spawn_bookmarks(mut commands: Commands, icons: Res<BookIconAssets>
                 BorderColor::all(accent),
                 BookmarkTint(bookmark, background),
                 GlobalZIndex(REST_Z),
+                // Clickable whenever the cursor is free — that is, from inside
+                // either screen or a machine panel. While roaming the cursor is
+                // grabbed, so there is nothing to click with and the tab is a
+                // pure affordance; `click_bookmarks` gates on exactly that.
+                Button,
+                // Not `Pickable::IGNORE` any more, but the tab must still not
+                // swallow clicks meant for the panel underneath it: it only
+                // occupies the strip it actually draws on.
+                Pickable::default(),
+                // The generic hover/press repaint must not touch a tab: its
+                // background is the ribbon's own colour, faded every frame by
+                // `animate_bookmarks`, and `button_feedback` would flatten it
+                // to the standard button grey the moment the pointer crossed.
+                super::PreserveButtonBackground,
                 BookmarkTab {
                     bookmark,
                     progress: 0.0,
                     retreat: 0.0,
                 },
-                // Visual only. Must not shadow anything behind it.
-                Pickable::IGNORE,
                 crate::until_we_leave_the_lab(),
             ))
             .with_children(|tab| {
@@ -422,7 +472,7 @@ pub(super) fn spawn_bookmarks(mut commands: Commands, icons: Res<BookIconAssets>
                         .with_children(|chip| {
                             chip.spawn((
                                 Text::new(""),
-                                TextFont::from_font_size(11.0),
+                                TextFont::from_font_size(12.0),
                                 TextColor(TEXT_DIM),
                                 BookmarkTint(bookmark, TEXT_DIM),
                                 BookmarkKeyText(bookmark),
@@ -430,6 +480,57 @@ pub(super) fn spawn_bookmarks(mut commands: Commands, icons: Res<BookIconAssets>
                         });
                 });
             });
+    }
+}
+
+/// Opens, closes or swaps a screen when its tab is clicked.
+///
+/// Only while the cursor is actually free — inside either screen, or over a
+/// machine panel. While roaming the cursor is grabbed and locked to the centre
+/// of the window (`interaction::free_the_cursor`), so a click there is a
+/// look-around, not a press, and the tab stays a pure affordance.
+///
+/// Never while paused: the pause overlay owns the screen, and a stray press
+/// landing on a tab underneath it would open a screen behind the menu.
+///
+/// Deliberately reuses [`InteractionMode`]'s own toggles rather than assigning
+/// a mode directly, so a click goes through exactly the transitions the
+/// keybinds do — including keeping a machine claim, and restoring the screen
+/// underneath on close.
+pub(super) fn click_bookmarks(
+    mut modes: Query<&mut InteractionMode, With<LocalPlayer>>,
+    paused: Option<Res<crate::settings::Paused>>,
+    released: Option<Res<crate::interaction::CursorReleased>>,
+    tabs: Query<(&Interaction, &BookmarkTab), Changed<Interaction>>,
+    mut play: MessageWriter<crate::audio::PlaySfx>,
+) {
+    if paused.is_some_and(|paused| paused.0) {
+        return;
+    }
+    let Some(mut mode) = modes.iter_mut().next() else {
+        return;
+    };
+    // The cursor is free exactly when a screen is open or it was released by
+    // hand — the same condition `panel_input` hands to `free_the_cursor`.
+    let clickable = !mode.is_roaming() || released.is_some_and(|released| released.get());
+    if !clickable {
+        return;
+    }
+
+    for (interaction, tab) in &tabs {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        // Clicking the tab of the screen already open closes it; clicking the
+        // other one swaps straight to it. `toggled_social`/`toggled_book`
+        // already do both — from inside the crew screen the book toggle steps
+        // to the book, and vice versa — so there is no separate swap path.
+        *mode = match tab.bookmark {
+            Bookmark::Manual => mode.toggled_book(),
+            Bookmark::Crew => mode.toggled_social(),
+        };
+        play.write(crate::audio::PlaySfx(crate::audio::Sfx::UiClick));
+        return;
     }
 }
 
@@ -454,29 +555,25 @@ pub(super) fn animate_bookmarks(
     time: Res<Time>,
     modes: Query<&InteractionMode, With<LocalPlayer>>,
     paused: Option<Res<crate::settings::Paused>>,
-    mut tabs: Query<(
-        &mut BookmarkTab,
-        &mut Node,
-        &mut GlobalZIndex,
-        &mut Visibility,
-        &BookmarkTint,
-        &mut BackgroundColor,
-        &mut BorderColor,
-    )>,
+    mut tabs: Query<TabChrome>,
     mut contents: TabContents,
 ) {
     let mode = modes.iter().next().copied().unwrap_or_default();
     let paused = paused.is_some_and(|paused| paused.0);
-    // Any screen at all is up — including a machine panel, which neither tab
-    // stands for. A ribbon floating over the dispenser is noise.
+    // One of the two bookmark screens is up. Not "any panel": a machine panel
+    // leaves both tabs sitting normally on the edge, still offered, because
+    // either screen can be opened over a machine without dropping the claim.
     let any_open = Bookmark::ALL.iter().any(|b| is_active(*b, mode));
     let delta = time.delta_secs();
     // Each tab's fade, indexed the same way `Bookmark::ALL` is, so the second
     // pass over the children can look one up without walking the hierarchy.
     let mut alphas = [1.0f32; Bookmark::ALL.len()];
 
-    for (mut tab, mut node, mut z, mut visibility, tint, mut background, mut border) in &mut tabs {
+    for (mut tab, mut node, mut z, mut visibility, tint, mut background, mut border, interaction) in
+        &mut tabs
+    {
         let active = is_active(tab.bookmark, mode);
+        let hovered = *interaction != Interaction::None;
         tab.progress = stepped(tab.progress, active, delta);
         let progress = tab.progress;
         let eased = ease_out_cubic(progress);
@@ -491,12 +588,13 @@ pub(super) fn animate_bookmarks(
         tab.retreat = stepped(tab.retreat, any_open && !active, delta);
         let retreat = ease_out_cubic(tab.retreat);
 
-        // Hidden behind the pause overlay, and while a machine panel — a screen
-        // neither tab stands for — is up. Never mid-flight or mid-retreat, or a
-        // tab would vanish on its way home, and never merely because the *other*
+        // Hidden behind the pause overlay, and under a screen that owns the
+        // keyboard or the whole frame. Never at a machine — both screens can be
+        // read while operating one — never mid-flight or mid-retreat, or a tab
+        // would vanish on its way home, and never merely because the *other*
         // tab's screen is open: that case is the retreat above, which slides it
         // off the edge and can always slide it back.
-        let hidden = progress <= 0.0 && retreat <= 0.0 && (paused || covered_by_a_machine(mode));
+        let hidden = progress <= 0.0 && retreat <= 0.0 && (paused || tabs_are_unavailable(mode));
         let wanted = if hidden {
             Visibility::Hidden
         } else {
@@ -538,7 +636,12 @@ pub(super) fn animate_bookmarks(
         // the retreat fade when stepping aside for the other screen.
         let alpha = ghost_alpha(eased) * (1.0 - retreat);
         alphas[tab.bookmark.slot()] = alpha;
-        background.0 = tint.1.with_alpha(tint.1.alpha() * alpha);
+        // Hovering lifts the ribbon a little brighter, standing in for the
+        // generic button repaint this node opts out of. Only at rest: a tab
+        // mid-flight is already the loudest thing on screen.
+        let lit = hovered && progress <= 0.0 && retreat <= 0.0;
+        let base = if lit { tint.1.lighter(0.06) } else { tint.1 };
+        background.0 = base.with_alpha(tint.1.alpha() * alpha);
         // The spine tracks the panel's own frame colour as it lands, so the
         // ghost and the thing replacing it are not two different rectangles.
         let frame = Color::srgb(0.24, 0.40, 0.50);
@@ -693,29 +796,38 @@ mod tests {
         assert_eq!(ghost_alpha(1.0), 0.0);
     }
 
-    /// The tabs are only hidden outright by something they cannot become. An
-    /// earlier cut hid a tab whenever the mode was not `Roaming`, which meant
-    /// opening either screen hid *both* — and the retreat, derived from the
-    /// wrong axis, then drew them at zero alpha rather than sliding them aside.
-    /// Between them the tabs could disappear and not come back.
+    /// The tabs are only hidden by a screen that owns the keyboard or the frame.
+    ///
+    /// Two earlier cuts got this wrong in opposite directions: one hid a tab
+    /// whenever the mode was not `Roaming`, which hid *both* whenever either
+    /// screen opened; the other kept hiding them at a machine, even though both
+    /// screens can be opened over a machine panel without dropping the claim.
     #[test]
-    fn only_a_screen_the_tabs_cannot_become_hides_them() {
+    fn only_a_modal_screen_hides_the_tabs() {
         let machine = machine();
+        // A label field owns the letter keys — including the book's own — and
+        // the conversations own the frame.
         for mode in [
-            InteractionMode::UsingMachine(machine),
             InteractionMode::Labelling(machine),
             InteractionMode::SecurityConversation,
+            InteractionMode::OrderConversation(machine, 1),
+            InteractionMode::Inspecting {
+                item: machine,
+                machine: None,
+            },
         ] {
-            assert!(covered_by_a_machine(mode), "{mode:?} should hide the tabs");
+            assert!(tabs_are_unavailable(mode), "{mode:?} should hide the tabs");
         }
-        // Roaming, and every screen a tab turns into, leave them on screen —
-        // the open one has flown out, the other slides aside under `retreat`.
+
+        // Operating a machine keeps them offered: that is the whole point of
+        // being able to look a recipe up mid-batch.
         for mode in [
             InteractionMode::Roaming,
+            InteractionMode::UsingMachine(machine),
             InteractionMode::ReadingBook(None),
             InteractionMode::ReadingBook(Some(machine)),
             InteractionMode::Social {
-                machine: None,
+                machine: Some(machine),
                 return_to_book: false,
             },
             InteractionMode::OrderDirectory {
@@ -724,10 +836,42 @@ mod tests {
             },
         ] {
             assert!(
-                !covered_by_a_machine(mode),
-                "{mode:?} must not hide the tabs outright"
+                !tabs_are_unavailable(mode),
+                "{mode:?} must leave the tabs on screen"
             );
         }
+    }
+
+    /// A tab's flight has to draw over the machine panel it is opened above.
+    #[test]
+    fn a_flying_tab_clears_the_machine_panel_beneath_it() {
+        /// `GlobalZIndex` of an open machine panel — see `sync_panel`.
+        const MACHINE_PANEL_Z: i32 = 30;
+        /// The label field, which is genuinely modal and stays on top.
+        const LABEL_FIELD_Z: i32 = 50;
+        const { assert!(FLIGHT_Z > MACHINE_PANEL_Z) };
+        const { assert!(FLIGHT_Z < LABEL_FIELD_Z) };
+        // At rest they stay tucked below the hotbar as ordinary HUD furniture.
+        const { assert!(REST_Z < 20) };
+    }
+
+    /// Swapping screens closes one tab as it opens the other, in one motion.
+    #[test]
+    fn switching_screens_crosses_the_two_tabs() {
+        let social = InteractionMode::Social {
+            machine: None,
+            return_to_book: false,
+        };
+        // Pressing Tab while the manual is open: the manual is no longer active
+        // and heads home, the crew tab becomes active and flies out. Both move
+        // on the same frame, so the two cross rather than queueing.
+        assert!(!is_active(Bookmark::Manual, social));
+        assert!(is_active(Bookmark::Crew, social));
+
+        let manual_going_home = stepped(1.0, false, 0.016);
+        let crew_flying_out = stepped(0.0, true, 0.016);
+        assert!(manual_going_home < 1.0, "the open tab must start closing");
+        assert!(crew_flying_out > 0.0, "the other must start opening");
     }
 
     /// Retreat is its own axis. Derived from the open progress, an idle tab
@@ -794,6 +938,42 @@ mod tests {
                 bookmark.title()
             );
         }
+    }
+
+    /// Clicking a tab goes through the same toggles the keybinds do, so every
+    /// case the keys handle — closing, swapping, keeping a machine claim — is
+    /// handled identically by a press.
+    #[test]
+    fn clicking_a_tab_matches_what_its_key_would_do() {
+        let machine = machine();
+
+        // From a machine panel: the claim survives, exactly as the key does it.
+        assert_eq!(
+            InteractionMode::UsingMachine(machine).toggled_book(),
+            InteractionMode::ReadingBook(Some(machine))
+        );
+
+        // Clicking the open screen's own tab closes it back to the machine.
+        assert_eq!(
+            InteractionMode::ReadingBook(Some(machine)).toggled_book(),
+            InteractionMode::UsingMachine(machine)
+        );
+
+        // Clicking the *other* tab while one is open swaps to it, and closing
+        // that one returns to the screen it was opened over.
+        let swapped = InteractionMode::ReadingBook(Some(machine)).toggled_social();
+        assert_eq!(
+            swapped,
+            InteractionMode::Social {
+                machine: Some(machine),
+                return_to_book: true,
+            }
+        );
+        assert_eq!(
+            swapped.toggled_social(),
+            InteractionMode::ReadingBook(Some(machine)),
+            "closing the swapped-to screen returns to the book underneath"
+        );
     }
 
     #[test]

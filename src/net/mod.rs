@@ -1317,7 +1317,7 @@ mod tests {
         assert_eq!(
             machines.len(),
             1,
-            "the dispenser must arrive: {machine} on the server"
+            "the ChemMaster 5000 must arrive: {machine} on the server"
         );
         assert!(
             client
@@ -1326,7 +1326,7 @@ mod tests {
                 .is_some_and(|children| children
                     .iter()
                     .any(|child| client.world().get::<WorldAssetRoot>(child).is_some())),
-            "the replicated dispenser must receive its authored GLB visual",
+            "the replicated ChemMaster 5000 must receive its authored GLB visual",
         );
 
         let mut beakers = client.world_mut().query::<(&Container, &Mesh3d)>();

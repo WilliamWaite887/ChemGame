@@ -177,7 +177,7 @@ impl Category {
 /// this" (a single fact, true even for raw elements that never get a book
 /// entry at all).
 ///
-/// Exists so the base dispenser's ~30 stock chemicals can be grouped under a
+/// Exists so the base ChemMaster 5000's ~30 stock chemicals can be grouped under a
 /// heading instead of forced into one long alphabetised list. Only
 /// `dispensable` reagents are expected to name one explicitly — everything
 /// else defaults to `Unclassified` rather than demanding an editor tag all
@@ -275,7 +275,7 @@ pub struct ReagentDef {
     /// any dose.
     #[serde(default)]
     pub overdose: Option<Units>,
-    /// Whether the base chemical dispenser can produce it directly.
+    /// Whether the base ChemMaster 5000 can produce it directly.
     #[serde(default)]
     pub dispensable: bool,
     /// The dispenser upgrade tier this reagent requires, `0` meaning
@@ -286,7 +286,7 @@ pub struct ReagentDef {
     /// `Knowledge::upgrade_dispenser`.
     #[serde(default)]
     pub tier: u32,
-    /// Whether it comes out of ground produce rather than the dispenser.
+    /// Whether it comes out of ground produce rather than the ChemMaster 5000.
     ///
     /// The sibling of `dispensable`: both mean "obtainable without a
     /// reaction", which is what stops the reachability guardrail flagging it
@@ -529,7 +529,7 @@ impl ReagentRegistry {
         self.reagents.iter()
     }
 
-    /// Everything the base dispenser can produce.
+    /// Everything the base ChemMaster 5000 can produce.
     pub fn dispensable(&self) -> impl Iterator<Item = &Reagent> {
         self.reagents.iter().filter(|r| r.dispensable)
     }

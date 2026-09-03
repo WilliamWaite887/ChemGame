@@ -13,7 +13,7 @@
 //!   and vents a harmful payload on a beat, through the **entirely unmodified**
 //!   `hazards::SmokeCloud` pipeline, and periodically claims a machine through
 //!   the same `Machine::in_use_by` field co-op already uses for two chemists
-//!   reaching for the dispenser. You beat it by handing it enough of the
+//!   reaching for the ChemMaster 5000. You beat it by handing it enough of the
 //!   authored counter-agent.
 //! - [`ShowdownForm::Assailant`] — a body walks in and comes for you. Spawned
 //!   through `spawn_crew_member` from a synthetic `CrewDef`, exactly like
@@ -448,7 +448,7 @@ fn run_siege(
 // through `Machine::in_use_by`, to make the lab stop feeling like somewhere
 // calm to work. It is deliberately **not** built: that field is released by the
 // chemist who took it, so a claim made on behalf of an entity that is about to
-// be despawned has nothing to release it, and the failure mode is a dispenser
+// be despawned has nothing to release it, and the failure mode is a ChemMaster 5000
 // that is locked for the rest of the career. The gas and the clock are pressure
 // enough, and they cannot strand anything.
 

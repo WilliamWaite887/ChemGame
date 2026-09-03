@@ -4,67 +4,67 @@
     .f{fill:#fff;stroke:none}
   </style>
   <!-- Row 1: all, trauma, burns, antitoxins, airloss, radiation, stimulants, poisons -->
-  <g transform="translate(0 0)" class="i"><circle cx="32" cy="32" r="21"/><path d="M21 24h22M21 32h22M21 40h22"/></g>
+  <g transform="translate(0 0)" class="i"><rect x="10" y="10" width="19" height="19" rx="3"/><rect x="35" y="10" width="19" height="19" rx="3"/><rect x="10" y="35" width="19" height="19" rx="3"/><rect x="35" y="35" width="19" height="19" rx="3"/></g>
   <g transform="translate(64 0)" class="i"><path d="M18 26h10V16h8v10h10v8H36v10h-8V34H18z"/><path d="M14 50l36-36"/></g>
   <g transform="translate(128 0)" class="i"><path d="M33 10c4 10-4 13 2 20 4 5 10 3 11-3 6 8 6 17 0 23-8 8-23 7-29-2-7-10 1-20 8-25-1 8 4 11 8 7 5-5-1-12 0-20z"/></g>
-  <g transform="translate(192 0)" class="i"><path d="M32 10l19 8v13c0 12-8 20-19 24-11-4-19-12-19-24V18z"/><path d="M24 33l6 6 11-14"/></g>
-  <g transform="translate(256 0)" class="i"><path d="M29 14v16c-8-8-16-4-16 7 0 11 7 17 16 11V30M35 14v16c8-8 16-4 16 7 0 11-7 17-16 11V30"/></g>
-  <g transform="translate(320 0)" class="i"><circle cx="32" cy="32" r="5"/><path d="M32 27c-4-12-13-13-18-8l9 12M37 35c11 6 18 0 17-7l-15 1M27 36c-8 10-3 18 4 20l6-14"/></g>
+  <g transform="translate(192 0)" class="i"><path d="M32 10l19 8v13c0 12-8 20-19 24-11-4-19-12-19-24V18z"/><path d="M32 22c4 6 8 10 8 14a8 8 0 01-16 0c0-4 4-8 8-14z"/></g>
+  <g transform="translate(256 0)" class="i"><path d="M32 8v20M24 20h16"/><path d="M30 28c0-6-6-9-11-5-4 3-6 10-6 18 0 8 3 12 8 12 5 0 9-4 9-11z"/><path d="M34 28c0-6 6-9 11-5 4 3 6 10 6 18 0 8-3 12-8 12-5 0-9-4-9-11z"/></g>
+  <g transform="translate(320 0)"><circle class="f" cx="32" cy="32" r="6"/><path class="f" d="M32 6a26 26 0 0122 12l-13 8A11 11 0 0032 21z"/><path class="f" d="M54 44a26 26 0 01-22 14v-15a11 11 0 009-6z"/><path class="f" d="M10 44a26 26 0 010-26l13 8a11 11 0 000 10z"/></g>
   <g transform="translate(384 0)" class="i"><path d="M36 8L18 35h12l-3 21 19-30H34z"/></g>
   <g transform="translate(448 0)" class="i"><path d="M17 25c0-10 7-16 15-16s15 6 15 16c0 7-3 11-8 14v9H25v-9c-5-3-8-7-8-14z"/><circle cx="27" cy="27" r="2" class="f"/><circle cx="37" cy="27" r="2" class="f"/><path d="M28 48v7M36 48v7M29 38h6"/></g>
   <!-- Row 2: pyrotechnics, precursors, utility, illicit, recorded, ready, frontier, locked -->
-  <g transform="translate(0 64)" class="i"><path d="M32 9v11M32 44v11M9 32h11M44 32h11M16 16l8 8M40 40l8 8M48 16l-8 8M24 40l-8 8"/><circle cx="32" cy="32" r="7"/></g>
-  <g transform="translate(64 64)" class="i"><circle cx="20" cy="32" r="8"/><circle cx="44" cy="20" r="8"/><circle cx="44" cy="44" r="8"/><path d="M27 28l9-5M27 36l9 5"/></g>
-  <g transform="translate(128 64)" class="i"><path d="M14 43l18-29 18 29z"/><circle cx="32" cy="36" r="4"/><path d="M32 14v18"/></g>
+  <g transform="translate(0 64)" class="i"><path d="M32 6c7 8 10 16 10 24v6H22v-6c0-8 3-16 10-24z"/><path d="M22 30l-8 8v8l8-6M42 30l8 8v8l-8-6"/><path d="M27 44c2 6 3 10 5 14 2-4 3-8 5-14"/><circle cx="32" cy="22" r="4"/></g>
+  <g transform="translate(64 64)" class="i"><circle cx="14" cy="16" r="6"/><circle cx="14" cy="40" r="6"/><path d="M22 18l10 8M22 38l10-8"/><path d="M32 26h18M42 18l8 8-8 8"/></g>
+  <g transform="translate(128 64)" class="i"><path d="M43 9a13 13 0 00-15 20L12 45l7 7 16-16a13 13 0 0020-15l-9 9-8-2-2-8z"/></g>
   <g transform="translate(192 64)" class="i"><path d="M22 28v-7a10 10 0 0120 0v7M17 28h30v25H17z"/><path d="M32 36v9"/><path d="M13 13l38 38"/></g>
-  <g transform="translate(256 64)" class="i"><circle cx="32" cy="32" r="22"/><path d="M20 32l8 8 17-19"/></g>
-  <g transform="translate(320 64)" class="i"><path d="M17 51h30M23 51l3-25h12l3 25M24 26l5-13h6l5 13"/><path d="M27 39h10"/></g>
+  <g transform="translate(256 64)" class="i"><path d="M16 8h32v48H16z"/><path d="M16 20h-6M16 32h-6M16 44h-6"/><path d="M24 22h16M24 32h16M24 42h10"/></g>
+  <g transform="translate(320 64)" class="i"><rect x="14" y="27" width="32" height="26" rx="3"/><path d="M40 27v-7a10 10 0 00-20 0v2"/><path d="M30 37v7"/></g>
   <g transform="translate(384 64)" class="i"><path d="M10 48l18-35 8 18 8-8 10 25z"/><path d="M28 13l1 9 7 9"/></g>
   <g transform="translate(448 64)" class="i"><rect x="16" y="27" width="32" height="26" rx="3"/><path d="M22 27v-7a10 10 0 0120 0v7M32 37v7"/></g>
   <!-- Row 3: machines and chemistry constraints -->
   <g transform="translate(0 128)" class="i"><rect x="13" y="11" width="38" height="43" rx="4"/><rect x="20" y="18" width="24" height="13"/><path d="M20 39h7M37 39h7M20 47h24"/></g>
   <g transform="translate(64 128)" class="i"><rect x="13" y="11" width="38" height="43" rx="4"/><path d="M23 18h18l-3 28H26zM23 31h18"/></g>
   <g transform="translate(128 128)" class="i"><rect x="10" y="11" width="44" height="43" rx="4"/><path d="M17 20h12l-2 22H19zM35 20h12l-2 22h-8zM27 32h10"/></g>
-  <g transform="translate(192 128)" class="i"><path d="M13 24h14l5 8 5-8h14M13 40h14l5-8 5 8h14"/><circle cx="32" cy="32" r="4"/></g>
-  <g transform="translate(256 128)" class="i"><path d="M13 20c10-8 28-8 38 0M13 44c10 8 28 8 38 0"/><path d="M18 15l-5 5 5 5M46 39l5 5-5 5"/><circle cx="32" cy="32" r="6"/></g>
-  <g transform="translate(320 128)" class="i"><path d="M33 9c4 10-4 13 2 20 4 5 10 3 11-3 6 8 6 17 0 23-8 8-23 7-29-2-7-10 1-20 8-25-1 8 4 11 8 7 5-5-1-12 0-20z"/><path d="M32 37v12"/></g>
-  <g transform="translate(384 128)" class="i"><circle cx="32" cy="32" r="8"/><path d="M10 32h14M40 32h14M32 10v14M32 40v14"/><circle cx="32" cy="32" r="20" stroke-dasharray="4 7"/></g>
+  <g transform="translate(192 128)"><path class="i" d="M16 12h32l-5 40a5 5 0 01-5 4H26a5 5 0 01-5-4zM12 12h40"/><circle class="f" cx="26" cy="34" r="5"/><circle class="f" cx="38" cy="34" r="5"/><circle class="f" cx="32" cy="45" r="5"/></g>
+  <g transform="translate(256 128)" class="i"><path d="M18 10h28l-3 42a5 5 0 01-5 4H26a5 5 0 01-5-4z"/><path d="M23 26c5-5 13 5 18 0M22 39c5-5 13 5 18 0"/></g>
+  <g transform="translate(320 128)" class="i"><path d="M23 9h18M26 9v14L16 39h32L38 23V9"/><path d="M18 54c3-4 7-4 10 0M36 54c3-4 7-4 10 0"/></g>
+  <g transform="translate(384 128)"><circle class="f" cx="32" cy="17" r="7"/><path class="i" d="M8 40h44M42 32l10 8-10 8"/></g>
   <g transform="translate(448 128)" class="i"><path d="M27 10h10v30a12 12 0 11-10 0zM32 18v27"/><path d="M27 29h10"/></g>
   <!-- Row 4: pH, purity, duration, research, inputs, controlled, explosive, overdose -->
-  <g transform="translate(0 192)" class="i"><path d="M15 46V18M15 32h12M27 18v28M36 22h8a8 8 0 010 16h-8v12"/></g>
-  <g transform="translate(64 192)" class="i"><path d="M32 9s17 19 17 30a17 17 0 01-34 0C15 28 32 9 32 9z"/><path d="M22 41c5 5 15 6 21-1"/></g>
+  <g transform="translate(0 192)" class="i"><path d="M20 6c5 7 10 12 10 17a10 10 0 01-20 0c0-5 5-10 10-17z"/><rect x="38" y="8" width="16" height="48" rx="3"/><path d="M38 24h16M38 40h16"/></g>
+  <g transform="translate(64 192)"><path class="i" d="M32 9s17 19 17 30a17 17 0 01-34 0C15 28 32 9 32 9z"/><path class="f" d="M15.6 43a17 17 0 0032.8 0z"/></g>
   <g transform="translate(128 192)" class="i"><circle cx="32" cy="34" r="20"/><path d="M32 14V8M25 8h14M32 34l9-8M32 34v-13"/></g>
-  <g transform="translate(192 192)" class="i"><path d="M32 9l6 15 16 1-12 10 4 16-14-9-14 9 4-16-12-10 16-1z"/></g>
+  <g transform="translate(192 192)" class="i"><circle cx="27" cy="27" r="17"/><path d="M39 39l14 14"/><circle cx="21" cy="23" r="4"/><circle cx="33" cy="31" r="4"/><path d="M25 25l4 4"/></g>
   <g transform="translate(256 192)" class="i"><circle cx="17" cy="32" r="7"/><circle cx="32" cy="19" r="7"/><circle cx="47" cy="32" r="7"/><path d="M23 28l4-4M37 24l4 4"/></g>
   <g transform="translate(320 192)" class="i"><path d="M15 12h34v40H15zM22 21h20M22 30h20M22 39h12"/><path d="M40 39l6 6"/></g>
-  <g transform="translate(384 192)" class="i"><path d="M32 8l5 13 14-3-7 12 10 10-14 2-1 14-10-10-12 7 3-14-13-5 12-7-3-14 13 6z"/></g>
-  <g transform="translate(448 192)" class="i"><circle cx="32" cy="32" r="21"/><path d="M32 19v16M32 43h.1"/></g>
+  <g transform="translate(384 192)"><path class="f" d="M30 4l6 11 10-6-2 12 12 1-9 8 10 7-12 3 4 11-12-4-5 11-5-11-12 4 4-11-12-3 10-7-9-8 12-1-2-12 10 6z"/><path class="i" d="M14 56h36"/></g>
+  <g transform="translate(448 192)"><path class="i" d="M22 22h20v28a6 6 0 01-6 6h-8a6 6 0 01-6-6z"/><path class="i" d="M18 22h28"/><path class="f" d="M22 32h20v18a6 6 0 01-6 6h-8a6 6 0 01-6-6z"/><path class="i" d="M32 16V4M26 10l6-6 6 6"/></g>
   <!-- Row 5: critical, aftereffect, routes, heal, harm, status -->
   <g transform="translate(0 256)" class="i"><path d="M32 8l24 43H8zM32 23v12M32 43h.1"/></g>
   <g transform="translate(64 256)" class="i"><path d="M14 36a18 18 0 103-19M17 17H8M17 17v9"/><path d="M32 22v11l8 5"/></g>
   <g transform="translate(128 256)" class="i"><path d="M13 45l24-24 10 10-24 24zM37 21l5-5 6 6-5 5M17 41l6 6"/></g>
-  <g transform="translate(192 256)" class="i"><path d="M32 10s15 16 15 27a15 15 0 01-30 0C17 26 32 10 32 10z"/><path d="M25 37h14"/></g>
-  <g transform="translate(256 256)" class="i"><rect x="12" y="22" width="40" height="22" rx="4"/><path d="M22 22v22M42 22v22M26 33h12"/></g>
-  <g transform="translate(320 256)" class="i"><path d="M11 39l31-19 6 10-31 19zM42 20l6-4 5 9-5 5"/><path d="M18 32l5 9M51 15l4-4M54 27h6"/></g>
-  <g transform="translate(384 256)" class="i"><path d="M12 42c9-4 14-10 19-20 6 8 11 12 21 15M12 42h40"/><circle cx="22" cy="23" r="3"/><circle cx="43" cy="19" r="3"/></g>
-  <g transform="translate(448 256)" class="i"><path d="M18 42c-5-8 1-16 9-14-4-8 3-17 12-12 7-4 15 4 10 11 9 2 9 14 1 17-8 4-24 3-32-2z"/><path d="M24 52h1M36 54h1M47 51h1"/></g>
+  <g transform="translate(192 256)" class="i"><rect x="24" y="6" width="16" height="26" rx="8"/><path d="M24 19h16"/><path d="M8 42h48M12 42c4 8 11 13 20 13s16-5 20-13z"/></g>
+  <g transform="translate(256 256)"><rect class="i" x="10" y="10" width="44" height="44" rx="6"/><path class="i" d="M24 10v44M40 10v44"/><circle class="f" cx="28" cy="26" r="2"/><circle class="f" cx="36" cy="26" r="2"/><circle class="f" cx="28" cy="38" r="2"/><circle class="f" cx="36" cy="38" r="2"/></g>
+  <g transform="translate(320 256)"><path class="i" d="M14 24h16a5 5 0 015 5v22a5 5 0 01-5 5H14a5 5 0 01-5-5V29a5 5 0 015-5z"/><path class="i" d="M16 24v-8h12M28 16h8v6"/><circle class="f" cx="46" cy="14" r="2.5"/><circle class="f" cx="57" cy="10" r="2.5"/><circle class="f" cx="47" cy="27" r="2.5"/><circle class="f" cx="58" cy="26" r="2.5"/><circle class="f" cx="46" cy="40" r="2.5"/><circle class="f" cx="57" cy="42" r="2.5"/></g>
+  <g transform="translate(384 256)" class="i"><path d="M32 8c5 8 10 13 10 18a10 10 0 01-20 0c0-5 5-10 10-18z"/><path d="M8 46h48"/><path d="M18 38l-5 6M46 38l5 6M32 40v6"/></g>
+  <g transform="translate(448 256)" class="i"><path d="M12 50h40"/><path d="M20 42c-6-5 0-10-6-15s0-11-6-15M34 42c-6-6 0-11-6-16s0-12-6-16M48 42c-6-5 0-10-6-15s0-11-6-15"/></g>
   <!-- Row 6: heal, harm, status, purge, clean, corrode, ignite, slippery -->
   <g transform="translate(0 320)" class="i"><path d="M32 52S12 40 12 24c0-13 16-17 20-6 4-11 20-7 20 6 0 16-20 28-20 28z"/><path d="M25 33h14M32 26v14"/></g>
-  <g transform="translate(64 320)" class="i"><path d="M32 8l6 16 17 1-13 11 5 17-15-10-15 10 5-17L9 25l17-1z"/><path d="M24 32h16"/></g>
+  <g transform="translate(64 320)" class="i"><path d="M32 52S12 40 12 24c0-13 16-17 20-6 4-11 20-7 20 6 0 16-20 28-20 28z"/><path d="M34 16l-8 12h11l-8 13"/></g>
   <g transform="translate(128 320)" class="i"><circle cx="32" cy="32" r="21"/><path d="M20 32h7l4-10 6 20 4-10h5"/></g>
   <g transform="translate(192 320)" class="i"><path d="M14 20h36M20 20l3 34h18l3-34M26 13h12"/><path d="M27 32l10 10M37 32L27 42"/></g>
   <g transform="translate(256 320)" class="i"><path d="M15 39l18-18 14 14-18 18zM33 21l7-7 10 10-7 7"/><path d="M12 19h8M16 15v8M45 48h8M49 44v8"/></g>
   <g transform="translate(320 320)" class="i"><path d="M13 16h38v32H13zM19 22l26 20M45 22L19 42"/><path d="M25 12h14"/></g>
-  <g transform="translate(384 320)" class="i"><path d="M33 10c4 10-4 13 2 20 4 5 10 3 11-3 6 8 6 17 0 23-8 8-23 7-29-2-7-10 1-20 8-25-1 8 4 11 8 7 5-5-1-12 0-20z"/></g>
+  <g transform="translate(384 320)" class="i"><path d="M33 5c4 8-4 11 2 17 3 4 8 2 9-3 5 7 5 15 0 20-7 6-19 5-24-2-6-8 1-17 6-21-1 7 4 9 7 6 4-4-1-10 0-17z"/><path d="M10 52h44"/><path d="M14 41l7 4M50 41l-7 4"/></g>
   <g transform="translate(448 320)" class="i"><path d="M11 45c11-5 18-3 25 0 7 3 12 3 18 0M15 34c8-4 15-3 22 0"/><path d="M22 15l9 10-8 8"/></g>
   <!-- Row 7: flammable, chill, flash, foam, extinguish, dependency, raw reagent, orders -->
-  <g transform="translate(0 384)" class="i"><path d="M33 10c4 10-4 13 2 20 4 5 10 3 11-3 6 8 6 17 0 23-8 8-23 7-29-2-7-10 1-20 8-25-1 8 4 11 8 7 5-5-1-12 0-20z"/><path d="M12 54h40"/></g>
-  <g transform="translate(64 384)" class="i"><path d="M32 9v46M12 20l40 24M52 20L12 44M25 14l7 7 7-7M25 50l7-7 7 7"/></g>
-  <g transform="translate(128 384)" class="i"><path d="M32 8v15M32 41v15M8 32h15M41 32h15M15 15l11 11M38 38l11 11M49 15L38 26M26 38L15 49"/><circle cx="32" cy="32" r="5"/></g>
+  <g transform="translate(0 384)" class="i"><path d="M32 6l26 26-26 26L6 32z"/><path d="M33 17c3 7-2 9 1 13 2 3 6 2 7-2 4 5 4 11 0 15-5 5-14 4-18-1-4-6 1-12 5-15-1 5 2 7 5 4 3-3-1-7 0-14z"/></g>
+  <g transform="translate(64 384)" class="i"><path d="M32 7v50M10 19l44 26M54 19L10 45"/><path d="M25 13l7 6 7-6M25 51l7-6 7 6"/><path d="M14 15l1 8M14 15l8 1M50 49l-1-8M50 49l-8-1M14 49l1-8M14 49l8-1M50 15l-1 8M50 15l-8 1"/></g>
+  <g transform="translate(128 384)"><circle class="f" cx="32" cy="32" r="9"/><path class="i" d="M32 6v9M32 49v9M6 32h9M49 32h9M14 14l7 7M43 43l7 7M50 14l-7 7M21 43l-7 7"/></g>
   <g transform="translate(192 384)" class="i"><circle cx="20" cy="38" r="10"/><circle cx="34" cy="30" r="13"/><circle cx="47" cy="40" r="9"/><path d="M14 49h38"/></g>
   <g transform="translate(256 384)" class="i"><path d="M32 10s15 16 15 27a15 15 0 01-30 0C17 26 32 10 32 10z"/><path d="M19 49l30-30"/></g>
-  <g transform="translate(320 384)" class="i"><circle cx="17" cy="32" r="7"/><circle cx="47" cy="18" r="7"/><circle cx="47" cy="46" r="7"/><path d="M24 29l16-8M24 35l16 8"/></g>
-  <g transform="translate(384 384)" class="i"><path d="M23 11h18l-3 13H26zM26 24l-5 28h22l-5-28"/><path d="M24 37h16"/></g>
+  <g transform="translate(320 384)" class="i"><rect x="8" y="22" width="26" height="20" rx="10"/><rect x="30" y="22" width="26" height="20" rx="10"/></g>
+  <g transform="translate(384 384)" class="i"><path d="M22 8h20v7H22z"/><path d="M25 15h14a8 8 0 018 8v25a6 6 0 01-6 6H23a6 6 0 01-6-6V23a8 8 0 018-8z"/><path d="M17 34h30"/></g>
   <g transform="translate(448 384)" class="i"><path d="M13 16h38v36H13zM20 24h24M20 32h24M20 40h15"/><circle cx="45" cy="45" r="8"/></g>
   <!-- Row 8: book and key. Remaining cells intentionally blank. -->
   <g transform="translate(0 448)" class="i"><path d="M10 15h18c4 0 4 4 4 7v34c0-4-3-7-8-7H10zM54 15H36c-4 0-4 4-4 7v34c0-4 3-7 8-7h14z"/></g>

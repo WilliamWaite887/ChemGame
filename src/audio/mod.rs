@@ -872,7 +872,7 @@ struct RadiationAlarm;
 /// once and a leak already running when they join does not re-announce.
 ///
 /// Distinct from [`Sfx::RadiationPulse`], which is the geiger counter by the
-/// dispenser — positional, per metabolism tick, and about *where* the source
+/// ChemMaster 5000 — positional, per metabolism tick, and about *where* the source
 /// is. This is the room's alarm, and is deliberately not spatial.
 fn sync_radiation_alarm(
     mut commands: Commands,

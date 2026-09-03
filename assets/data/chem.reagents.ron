@@ -1,4 +1,4 @@
-// Reagents. `dispensable: true` means the base chemical dispenser produces it
+// Reagents. `dispensable: true` means the base ChemMaster 5000 produces it
 // directly; everything else has to be made.
 //
 // `overdose` is the dose above which the reagent harms rather than helps.
@@ -11,7 +11,7 @@
 // types. Raw materials leave it empty because they never get an entry;
 // anything craftable must name at least one, which a test enforces.
 //
-// `family` groups a chemical for the base dispenser's stock grid — see
+// `family` groups a chemical for the base ChemMaster 5000's stock grid — see
 // `ChemFamily`. Only reagents marked `dispensable: true` need one; everything
 // else is fine leaving it unset (defaults to `Unclassified`), which a test
 // enforces the other way around: every dispensable reagent must name one.
@@ -26,7 +26,7 @@
 // A note for editors: RON will not coerce an integer into the `f32` inside
 // `boils_at`. Write `Some((323.15))`, never `Some((323))`.
 [
-    // ---- Base reagents: straight from the dispenser -----------------------
+    // ---- Base reagents: straight from the ChemMaster 5000 -----------------------
     //
     // Most of these do nothing at all in a body, which is canon and also
     // useful: a chemist who drinks the oxygen supply learns something cheap.
@@ -174,7 +174,7 @@
         dispensable: true,
         family: GasNonmetal,
         tier: 4,
-        // The most poisonous thing the dispenser will hand you, and it boils
+        // The most poisonous thing the ChemMaster 5000 will hand you, and it boils
         // off at 50°C — so heating a beaker to run a hot recipe can quietly
         // cost you the catalyst that recipe needed.
         boils_at: Some((323.15)),
@@ -208,7 +208,7 @@
         family: Industrial,
         tier: 5,
         // Drinkable in the sense that a mouthful will not kill you outright.
-        // It is still the worst decision available at the dispenser.
+        // It is still the worst decision available at the ChemMaster 5000.
         effects: [Harm(Toxin, 1)],
     ),
 
@@ -554,7 +554,7 @@
     // ---- Precursors -------------------------------------------------------
     //
     // The industrial tier: nothing here is worth making for its own sake, and
-    // three of them are the only use the dispenser's duller reagents have ever
+    // three of them are the only use the ChemMaster 5000's duller reagents have ever
     // had. Sodium, aluminium and welding fuel were dead content before this.
     (
         id: "ammonia",
@@ -893,7 +893,7 @@
     ),
 
     // ---- Expanded base stock --------------------------------------------
-    // The dispenser is complete from a fresh save. Difficulty now lives in
+    // The ChemMaster 5000 is complete from a fresh save. Difficulty now lives in
     // synthesis, control, equipment and external ingredient sources.
     (id: "bromine", name: "Bromine", color: (0.55, 0.18, 0.10), ph: 5.5, dispensable: true, family: Halogen, effects: [Harm(Toxin, 0.5)]),
     (id: "silver", name: "Silver", color: (0.78, 0.80, 0.84), dispensable: true, family: Metal),
@@ -1396,7 +1396,7 @@
         targeted_purges: [("happiness", 5), ("psicodine", 5)],
     ),
     (
-        // Coffee is deliberately botanical rather than dispenser stock. It is
+        // Coffee is deliberately botanical rather than ChemMaster 5000 stock. It is
         // useful by itself, but cleaning the fibre out of a ground batch is
         // the quality-control lesson before committing it to Pump-Up.
         id: "coffee", name: "Coffee", color: (0.36, 0.18, 0.08), ph: 5.0,
@@ -1560,7 +1560,7 @@
     ),
     (
         // Lead is ordinary mineral chemistry, so it joins the append-only
-        // base dispenser roster instead of becoming an arbitrary late lock.
+        // base ChemMaster 5000 roster instead of becoming an arbitrary late lock.
         id: "lead", name: "Lead", color: (0.34, 0.37, 0.42), ph: 7.0,
         dispensable: true,
         family: Metal,

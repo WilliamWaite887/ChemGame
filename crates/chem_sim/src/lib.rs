@@ -174,7 +174,7 @@ impl ChemData {
         })
     }
 
-    /// Everything physically synthesizable from dispenser stock plus the
+    /// Everything physically synthesizable from ChemMaster 5000 stock plus the
     /// supplied station inventory, without considering recipe knowledge.
     ///
     /// Hidden antagonist requests use this view: their customer may know a
