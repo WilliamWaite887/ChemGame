@@ -12,7 +12,7 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::chem_world::PuddleVisual;
-use crate::containers::{Container, ContainerKind, HeldBy};
+use crate::containers::{Container, ContainerKind, HeldBy, InSlot};
 use crate::crew::{EvacuateCrewRequested, NeedsMedicalEvacuation};
 use crate::hazards::{HazardVisual, SmokeVisual};
 use crate::machines::Machine;
@@ -499,14 +499,23 @@ impl InteractionMode {
             InteractionMode::ReadingBook(from) => {
                 from.map_or(InteractionMode::Roaming, InteractionMode::UsingMachine)
             }
-            InteractionMode::Social { .. } => self,
+            // Crosses straight to the book, mirroring the way `toggled_social`
+            // crosses the other way. The two screens are peers: whichever is
+            // open, asking for the other swaps to it rather than doing nothing.
+            //
+            // This used to answer `self` — the book key was simply dead while
+            // the crew directory was up — which left the manual's own bookmark
+            // inert when clicked from inside that screen.
+            InteractionMode::Social { machine, .. }
+            | InteractionMode::OrderDirectory { machine, .. } => {
+                InteractionMode::ReadingBook(machine)
+            }
             // Unreachable in practice — `panel_input` does not offer the book
             // key while the label field is open, because a `b` belongs in the
             // word being typed. Answering "no change" rather than panicking
             // keeps that a presentation decision rather than an invariant.
             InteractionMode::Inspecting { .. } => self,
             InteractionMode::SecurityConversation | InteractionMode::OrderConversation(..) => self,
-            InteractionMode::OrderDirectory { .. } => self,
             InteractionMode::Labelling(container) => InteractionMode::Labelling(container),
         }
     }
@@ -800,6 +809,7 @@ fn update_prompt(
     players: Query<(Entity, &Focus), With<LocalPlayer>>,
     interactables: Query<&Interactable>,
     machines: Query<&Machine>,
+    slotted: Query<&InSlot>,
     held: Query<(&HeldBy, &Container)>,
     containers: Query<(), With<Container>>,
     bodies: Query<(), With<crate::body::Body>>,
@@ -820,7 +830,7 @@ fn update_prompt(
                     return Some(if waiting.arrived {
                         format!("[E]  speak to {name}")
                     } else {
-                        format!("{name} — heading to the window")
+                        format!("{name} - heading to the window")
                     });
                 }
                 // Occupied machines still show a prompt, just an unusable one,
@@ -828,12 +838,15 @@ fn update_prompt(
                 // mysterious.
                 Some(match machines.get(target) {
                     Ok(machine) if !machine.available_to(player) => {
-                        format!("{label} — in use")
+                        format!("{label} - in use")
+                    }
+                    Ok(_) if !empty_handed && slotted.iter().any(|slot| slot.0 == target) => {
+                        format!("[E]  {label} - vessel loaded; open to eject")
                     }
                     // An empty hand aimed at a person is the one press nothing
                     // else in the game claims, and `speech::handle_talk` takes
                     // it. Saying so here is what makes the mechanic findable:
-                    // the label alone ("Dr. Vance — Medical") reads as an
+                    // the label alone ("Dr. Vance - Medical") reads as an
                     // affordance the player has no reason to think does
                     // anything without a beaker in hand.
                     _ => match crew.get(target) {
@@ -1187,6 +1200,46 @@ mod tests {
         assert_eq!(
             from_book.toggled_social(),
             InteractionMode::ReadingBook(Some(machine))
+        );
+    }
+
+    /// The two screens are peers: whichever is open, asking for the other
+    /// crosses straight to it.
+    ///
+    /// The book direction used to be a no-op — `toggled_book` answered `self`
+    /// from the crew directory — so the manual's bookmark did nothing when
+    /// clicked from inside that screen, while the crew bookmark worked from
+    /// inside the book. The two now mirror each other.
+    #[test]
+    fn either_screen_swaps_straight_to_the_other() {
+        let machine = Entity::from_raw_u32(7).expect("a valid test entity id");
+
+        // Crew directory to book, from the floor and over a machine, with the
+        // claim carried across in both cases.
+        let social = InteractionMode::Roaming.toggled_social();
+        assert_eq!(social.toggled_book(), InteractionMode::ReadingBook(None));
+
+        let social_at_machine = InteractionMode::UsingMachine(machine).toggled_social();
+        let crossed = social_at_machine.toggled_book();
+        assert_eq!(crossed, InteractionMode::ReadingBook(Some(machine)));
+        assert_eq!(crossed.claimed_machine(), Some(machine));
+
+        // And the order directory, reached from inside the crew screen, crosses
+        // to the book too rather than sitting inert.
+        let orders = InteractionMode::OrderDirectory {
+            machine: Some(machine),
+            return_to_book: false,
+        };
+        assert_eq!(
+            orders.toggled_book(),
+            InteractionMode::ReadingBook(Some(machine))
+        );
+
+        // Closing the book after crossing returns to the machine, not to the
+        // crew screen: crossing over is a swap, not a stack.
+        assert_eq!(
+            crossed.toggled_book(),
+            InteractionMode::UsingMachine(machine)
         );
     }
 }

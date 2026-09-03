@@ -2,7 +2,7 @@
 use crate::{
     settings::{PauseScreen, Paused, Settings},
     ui::{
-        icon_image, icons::BookIcon, icons::BookIconAssets, button, label, row, ScrollPane,
+        button, icon_image, icons::BookIcon, icons::BookIconAssets, label, row, ScrollPane,
         BOOK_ACCENT, BUTTON_IDLE, FONT_SIZE_BODY, FONT_SIZE_CAPTION, FONT_SIZE_LABEL_SMALL,
         FONT_SIZE_TITLE, GOOD_TEXT, PANEL_BG, SECTION_BG, TEXT, TEXT_DIM, TIP_BG, TIP_BORDER,
         WARNING_BG, WARNING_BORDER,

@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use chem_sim::{Solution, Units};
 
+use crate::containers::{Container, InSlot, InSlotB, InSlotC};
 use crate::interaction::Interactable;
 use crate::machines::{
     Buffer, ContainerSlot, ContainerSlotB, ContainerSlotC, DispenseAmount, Facing, Hopper, Machine,
@@ -631,8 +632,11 @@ impl Plugin for LabPlugin {
             // clients rather than deriving placement from machine kind.
             .add_systems(
                 Update,
-                dress_machines
-                    .after(reconcile_machine_spots)
+                (
+                    dress_machines.after(reconcile_machine_spots),
+                    align_slotted_items.after(dress_machines),
+                )
+                    .chain()
                     .run_if(in_state(AppState::Playing)),
             );
     }
@@ -1902,6 +1906,80 @@ pub(crate) fn dress_machines(
     }
 }
 
+/// Keeps a machine's logical slot relation and the item's world position in
+/// agreement.
+///
+/// Loading already puts a beaker at the socket, but world restoration stores
+/// the relation and transform independently. A moved map fixture or an older
+/// save can therefore restore an item which occupies `InSlot` while drawing
+/// somewhere else (or inside the casing). The machine then correctly refuses
+/// a second beaker, but looks empty to the player. Re-applying the current
+/// authored socket makes restored state visible and keeps hot-reloaded machine
+/// placements safe as well.
+type MachineSocketGeometry<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Transform,
+        Option<&'static ContainerSlot>,
+        Option<&'static ContainerSlotB>,
+        Option<&'static ContainerSlotC>,
+    ),
+    With<Machine>,
+>;
+
+type SlottedItemTransforms<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Transform,
+        Option<&'static InSlot>,
+        Option<&'static InSlotB>,
+        Option<&'static InSlotC>,
+    ),
+    (With<Container>, Without<Machine>),
+>;
+
+fn align_slotted_items(machines: MachineSocketGeometry, mut items: SlottedItemTransforms) {
+    for (mut transform, slot_a, slot_b, slot_c) in &mut items {
+        let socket = slot_a
+            .and_then(|slot| {
+                machines
+                    .get(slot.0)
+                    .ok()
+                    .and_then(|(machine, socket, _, _)| {
+                        socket.map(|socket| machine.translation + socket.offset)
+                    })
+            })
+            .or_else(|| {
+                slot_b.and_then(|slot| {
+                    machines
+                        .get(slot.0)
+                        .ok()
+                        .and_then(|(machine, _, socket, _)| {
+                            socket.map(|socket| machine.translation + socket.offset)
+                        })
+                })
+            })
+            .or_else(|| {
+                slot_c.and_then(|slot| {
+                    machines
+                        .get(slot.0)
+                        .ok()
+                        .and_then(|(machine, _, _, socket)| {
+                            socket.map(|socket| machine.translation + socket.offset)
+                        })
+                })
+            });
+        let Some(socket) = socket else {
+            continue;
+        };
+        if transform.translation != socket {
+            transform.translation = socket;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1918,7 +1996,7 @@ mod tests {
             .init_asset::<StandardMaterial>()
             .init_asset::<WorldAsset>()
             .add_systems(Startup, load_machine_assets)
-            .add_systems(Update, dress_machines);
+            .add_systems(Update, (dress_machines, align_slotted_items).chain());
         app
     }
 
@@ -1978,6 +2056,43 @@ mod tests {
         assert!(
             world.get::<ContainerSlot>(arrived).is_some(),
             "a ChemMaster 5000 with no slot cannot be loaded with a beaker"
+        );
+    }
+
+    #[test]
+    fn a_restored_beaker_is_snapped_to_the_reactor_side_chemmaster_socket() {
+        // This is the exact authored machine implicated by the live save: its
+        // logical InSlot relation survived, but an independently restored
+        // transform could leave it invisible while still blocking insertion.
+        let mut app = client_lab();
+        let placement = legacy_machine_spots()
+            .get("chemmaster5000.a")
+            .expect("reactor-side ChemMaster placement")
+            .clone();
+        let machine = app
+            .world_mut()
+            .spawn((
+                Machine::new(MachineKind::ChemMaster5000),
+                MachineFit::from_placement(placement.kind, placement.transform).root_transform(),
+            ))
+            .id();
+        let restored = app
+            .world_mut()
+            .spawn((
+                Container::new(crate::containers::ContainerKind::LargeBeaker),
+                Transform::from_xyz(50.0, -20.0, 80.0),
+                InSlot(machine),
+            ))
+            .id();
+
+        app.update();
+
+        let machine_transform = app.world().get::<Transform>(machine).unwrap();
+        let socket = app.world().get::<ContainerSlot>(machine).unwrap();
+        assert_eq!(
+            app.world().get::<Transform>(restored).unwrap().translation,
+            machine_transform.translation + socket.offset,
+            "a logically loaded beaker must be visible at the current socket"
         );
     }
 

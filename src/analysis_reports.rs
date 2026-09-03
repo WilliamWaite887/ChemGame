@@ -1,7 +1,9 @@
 //! Immutable measurements on physical paper. Claims (Label) never enter a scan.
 use crate::{
     chem_data::ChemDb,
-    containers::{Container, HeldBy, InSlot, InventorySlot},
+    containers::{
+        free_inventory_slot, Container, HeldBy, InSlot, InventorySlot, SelectedInventorySlot,
+    },
     machines::{Machine, MachineKind},
     net::is_authority,
     AppState,
@@ -230,8 +232,13 @@ fn print(
     blood: Query<&crate::body::Bloodstream>,
     samples: Query<(&Container, &InSlot)>,
     outputs: Query<&ReportOutput>,
+    inventory: Query<&InventorySlot>,
+    held: Query<&HeldBy>,
+    selected: Query<&SelectedInventorySlot>,
 ) {
     let mut occupied: std::collections::HashSet<_> = outputs.iter().map(|o| o.0).collect();
+    // Two prints in one frame must not both claim the same inventory cell.
+    let mut reserved: Vec<(Entity, u8)> = Vec::new();
     for request in requests.read() {
         if occupied.contains(&request.machine) {
             continue;
@@ -240,18 +247,16 @@ fn print(
         else {
             continue;
         };
-        if crate::machines::authorized_machine_actor(
+        let Some(player) = crate::machines::authorized_machine_actor(
             request.client_id,
             Some(machine),
             &[MachineKind::Analyzer],
             &chemists,
             &bodies,
             &blood,
-        )
-        .is_none()
-        {
+        ) else {
             continue;
-        }
+        };
         let Ok((sample, slot)) = samples.get(snapshot.item) else {
             continue;
         };
@@ -263,10 +268,33 @@ fn print(
         }
         let position = crate::machines::front_of(transform, solid, facing, 0.02);
         let report = spawn(&mut commands, snapshot.report.clone(), position);
-        commands
-            .entity(report)
-            .insert(ReportOutput(request.machine));
-        occupied.insert(request.machine);
+
+        // Straight into a free hand where there is one, exactly as packaging
+        // does. Paper left on the floor beside the machine is easy to walk
+        // away from without noticing.
+        let preferred = selected.get(player).map_or(0, |s| s.0);
+        if held.iter().any(|holder| holder.0 == player) {
+            reserved.push((player, preferred));
+        }
+        let cell = free_inventory_slot(player, preferred, &inventory, &reserved);
+        if let Some(slot) = cell {
+            reserved.push((player, slot));
+        }
+        crate::machines::place_output(
+            &mut commands,
+            report,
+            player,
+            cell.map(|slot| (slot, preferred)),
+            position,
+        );
+        // An uncollected sheet still blocks a reprint; one that went straight
+        // into a pocket is already collected, so the machine is free again.
+        if cell.is_none() {
+            commands
+                .entity(report)
+                .insert(ReportOutput(request.machine));
+            occupied.insert(request.machine);
+        }
     }
 }
 fn clear_output(
@@ -410,19 +438,50 @@ mod tests {
         let measurement = analyze(&mut app, machine, client);
         assert_eq!(measurement.sample, 123);
         assert_eq!(measurement.case, Some(456));
-        request_print(&mut app, machine, measurement.id, client);
-        request_print(&mut app, machine, measurement.id, client);
-        app.update();
-        let papers = reports(&mut app);
-        assert_eq!(papers.len(), 1);
-        assert_eq!(papers[0].1, measurement);
         let player = app
             .world()
             .get::<Machine>(machine)
             .unwrap()
             .in_use_by
             .unwrap();
-        app.world_mut().entity_mut(papers[0].0).insert((
+
+        // A printed sheet goes straight into a free pocket, so it is collected
+        // the moment it exists and never blocks the next print.
+        request_print(&mut app, machine, measurement.id, client);
+        app.update();
+        let papers = reports(&mut app);
+        assert_eq!(papers.len(), 1);
+        assert_eq!(papers[0].1, measurement);
+        assert_eq!(
+            app.world()
+                .get::<InventorySlot>(papers[0].0)
+                .map(|s| s.owner),
+            Some(player),
+            "a printed report must land in the chemist's hands, not on the floor"
+        );
+        assert!(app.world().get::<ReportOutput>(papers[0].0).is_none());
+
+        // Fill every pocket: the next sheet has nowhere to go but the floor,
+        // and that one *does* hold the output until it is picked up.
+        for slot in 0..crate::containers::INVENTORY_SLOTS {
+            app.world_mut().spawn(InventorySlot {
+                owner: player,
+                slot,
+            });
+        }
+        request_print(&mut app, machine, measurement.id, client);
+        request_print(&mut app, machine, measurement.id, client);
+        app.update();
+        let papers = reports(&mut app);
+        assert_eq!(papers.len(), 2, "the blocked machine must print only once");
+        let dropped = papers
+            .iter()
+            .find(|(entity, _)| app.world().get::<ReportOutput>(*entity).is_some())
+            .expect("the uncollected sheet keeps its output marker");
+        assert!(app.world().get::<InventorySlot>(dropped.0).is_none());
+
+        // Collecting it frees the machine to print again.
+        app.world_mut().entity_mut(dropped.0).insert((
             InventorySlot {
                 owner: player,
                 slot: 0,
@@ -431,8 +490,9 @@ mod tests {
         ));
         request_print(&mut app, machine, measurement.id, client);
         app.update();
-        assert_eq!(reports(&mut app).len(), 2);
+        assert_eq!(reports(&mut app).len(), 3);
         assert!(reports(&mut app).iter().all(|(_, r)| *r == measurement));
+        let papers = reports(&mut app);
         app.world_mut()
             .get_mut::<Container>(sample)
             .unwrap()

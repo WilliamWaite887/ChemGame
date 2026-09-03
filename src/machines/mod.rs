@@ -1600,7 +1600,16 @@ fn handle_dispense(
                 Units::ZERO
             }
             "acidic_buffer" | "basic_buffer" => amount.0,
-            _ => solution.add_profiled(request.reagent, amount.0, 1.0, reagent.ph),
+            // Stock quality is the ChemMaster's upgrade track. Nothing
+            // downstream needs to know: `product_purity` inherits whatever the
+            // reactants carry, so a dirty base reagent degrades every step
+            // built on it without any chemistry change.
+            _ => solution.add_profiled(
+                request.reagent,
+                amount.0,
+                knowledge.dispense_purity(),
+                reagent.ph,
+            ),
         });
         if let Some(message) = ReactionsFired::from_report(target, &report) {
             fired.write(message);
@@ -2442,6 +2451,8 @@ fn handle_purify(
     bodies: Query<&crate::body::Body>,
     bloodstreams: Query<&crate::body::Bloodstream>,
     transforms: Query<&Transform>,
+    solids: Query<&Solid>,
+    facings: Query<&Facing>,
     slotted: Query<(Entity, &InSlot)>,
     mut containers: Query<&mut Container>,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
@@ -2542,10 +2553,19 @@ fn handle_purify(
         commands.entity(request.machine).insert(report);
 
         if !rejects.is_empty() {
-            let drop_at = transforms
-                .get(request.machine)
-                .map(|transform| transform.translation + Vec3::new(0.45, 0.95, 0.35))
-                .unwrap_or(Vec3::ZERO);
+            // The same set-down spot ejection uses. The old hardcoded offset
+            // put the reject beaker at the machine's own origin height, which
+            // left it hanging in the air beside the casing rather than resting
+            // on the floor where the player could see it was a second vessel.
+            let drop_at = match (transforms.get(request.machine), solids.get(request.machine)) {
+                (Ok(transform), Ok(solid)) => front_of(
+                    transform,
+                    solid,
+                    facings.get(request.machine).ok(),
+                    ContainerKind::LargeBeaker.dimensions().1 * 0.5,
+                ),
+                _ => Vec3::ZERO,
+            };
             let reject = spawn_container(&mut commands, ContainerKind::LargeBeaker, drop_at);
             commands.queue(move |world: &mut World| {
                 if let Some(mut container) = world.get_mut::<Container>(reject) {
@@ -3061,6 +3081,90 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn purifying_keeps_the_loaded_beaker_and_rests_the_rejects_on_the_floor() {
+        // The loaded beaker is the one that stays in the machine holding the
+        // product; the rejects are what leaves. Getting that backwards reads
+        // in-game as the analyzer duplicating a beaker and ejecting the wrong
+        // one, and it left the spare hanging in mid-air beside the casing.
+        let mut app = test_app();
+        let medicine = reagent(&app, "libital");
+        let filler = reagent(&app, "plant_fibre");
+        let chemistry = app.world().resource::<ChemDb>().0.clone();
+        app.world_mut()
+            .resource_mut::<Knowledge>()
+            .unlock_all(&chemistry);
+        let (client, owner) = chemist(&mut app);
+        let mut state = Machine::new(MachineKind::Analyzer);
+        state.in_use_by = Some(owner);
+        let machine = app
+            .world_mut()
+            .spawn((
+                state,
+                Transform::from_translation(Vec3::new(2.0, 0.6, -1.0)),
+                Solid {
+                    half_extents: Vec3::new(0.4, 0.6, 0.35),
+                },
+                Facing(Vec3::NEG_Z),
+            ))
+            .id();
+
+        let mut sample = Container::new(ContainerKind::LargeBeaker);
+        let _ = sample
+            .solution
+            .add_profiled(medicine, Units::whole(20), 0.60, 7.0);
+        let _ = sample
+            .solution
+            .add_profiled(filler, Units::whole(10), 0.60, 7.0);
+        let loaded = app.world_mut().spawn((sample, InSlot(machine))).id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: PurifyRequested {
+                machine,
+                reagent: medicine,
+            },
+        });
+        app.update();
+
+        // The beaker that was loaded is still the loaded one, and it is what
+        // holds the purified product.
+        assert_eq!(
+            app.world().get::<InSlot>(loaded).map(|slot| slot.0),
+            Some(machine),
+            "the original beaker must stay in the machine"
+        );
+        let kept = app.world().get::<Container>(loaded).unwrap();
+        assert!(kept.solution.volume_of(medicine).is_positive());
+        assert!(
+            kept.solution.purity_of(medicine) > 0.60,
+            "the retained beaker is the purified one"
+        );
+        assert!(!kept.solution.volume_of(filler).is_positive());
+
+        // Exactly one new beaker exists, it carries the contaminant, it is
+        // not in the machine, and it is resting on the floor rather than
+        // floating at the machine's own origin height.
+        let spares: Vec<_> = app
+            .world_mut()
+            .query::<(Entity, &Container, &Transform)>()
+            .iter(app.world())
+            .filter(|(entity, ..)| *entity != loaded)
+            .map(|(entity, container, transform)| {
+                (entity, container.solution.clone(), transform.translation)
+            })
+            .collect();
+        assert_eq!(spares.len(), 1, "purifying must not duplicate the sample");
+        let (reject, solution, position) = &spares[0];
+        assert!(app.world().get::<InSlot>(*reject).is_none());
+        assert!(solution.volume_of(filler).is_positive());
+        let floor = 0.6 - 0.6;
+        assert!(
+            (position.y - (floor + ContainerKind::LargeBeaker.dimensions().1 * 0.5)).abs() < 0.001,
+            "the reject beaker must rest on the floor, not float: {position}"
+        );
+    }
+
+    #[test]
     fn a_peer_can_only_purify_its_claimed_analyzer() {
         let mut app = test_app();
         let inverse = reagent(&app, "libitoil");
@@ -3208,6 +3312,75 @@ pub(crate) mod tests {
             "reactions must run as part of dispensing, not only on demand"
         );
         assert_eq!(container.solution.len(), 1, "reagents should be consumed");
+    }
+
+    #[test]
+    fn dispensed_purity_follows_the_chemmaster_tier_and_carries_into_products() {
+        let mut app = test_app();
+        let chemmaster5000 = app.world_mut().spawn(DispenseAmount(Units::whole(15))).id();
+        let beaker = app
+            .world_mut()
+            .spawn((
+                Container::new(ContainerKind::LargeBeaker),
+                InSlot(chemmaster5000),
+            ))
+            .id();
+
+        let tier_zero = app.world().resource::<Knowledge>().dispense_purity();
+        assert_eq!(tier_zero, crate::knowledge::DISPENSE_PURITY[0]);
+
+        for key in ["oxygen", "carbon", "sugar"] {
+            let reagent = reagent(&app, key);
+            app.world_mut().write_message(FromClient {
+                client_id: ClientId::Server,
+                message: DispenseRequested {
+                    machine: chemmaster5000,
+                    reagent,
+                },
+            });
+            app.update();
+        }
+
+        // The product inherits the stock it was built from: `product_purity`
+        // carries `input_purity` forward and can only ever lower it, which is
+        // what makes one number at the dispenser reach the whole recipe tree.
+        let inaprovaline = reagent(&app, "inaprovaline");
+        let made = app.world().get::<Container>(beaker).unwrap();
+        assert_eq!(made.solution.volume_of(inaprovaline), Units::whole(45));
+        assert!(
+            made.solution.purity_of(inaprovaline) <= tier_zero + f32::EPSILON,
+            "a product must never be cleaner than the stock it came from"
+        );
+
+        // Buying the whole column makes stock clean, and the same build now
+        // comes out clean too.
+        {
+            let mut knowledge = app.world_mut().resource_mut::<Knowledge>();
+            knowledge.award_research(1000);
+            while knowledge.buy_upgrade() {}
+            assert_eq!(knowledge.dispense_purity(), 1.0);
+        }
+        let fresh = app
+            .world_mut()
+            .spawn((
+                Container::new(ContainerKind::LargeBeaker),
+                InSlot(chemmaster5000),
+            ))
+            .id();
+        app.world_mut().entity_mut(beaker).remove::<InSlot>();
+        for key in ["oxygen", "carbon", "sugar"] {
+            let reagent = reagent(&app, key);
+            app.world_mut().write_message(FromClient {
+                client_id: ClientId::Server,
+                message: DispenseRequested {
+                    machine: chemmaster5000,
+                    reagent,
+                },
+            });
+            app.update();
+        }
+        let clean = app.world().get::<Container>(fresh).unwrap();
+        assert_eq!(clean.solution.purity_of(inaprovaline), 1.0);
     }
 
     #[test]
@@ -4274,7 +4447,9 @@ pub(crate) mod tests {
 
         app.world_mut().write_message(FromClient {
             client_id: client,
-            message: InteractRequested { target: chemmaster5000 },
+            message: InteractRequested {
+                target: chemmaster5000,
+            },
         });
         app.update();
 

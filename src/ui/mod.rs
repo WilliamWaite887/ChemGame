@@ -25,7 +25,7 @@ use crate::crew::CrewMember;
 use crate::interaction::{leave_machine, Interactable, InteractionMode, LeaveMachineRequested};
 use crate::knowledge::{
     product_name, reaction_categories, BuyHintRequested, Knowledge, RecipeDiscovered,
-    UnlockAllRequested, HINT_COST,
+    UnlockAllRequested, UpgradeDispenserRequested, DISPENSE_PURITY, HINT_COST,
 };
 use crate::machines::{
     slotted_container, slotted_container_b, slotted_container_c, stored_in, AgitateDirection,
@@ -64,7 +64,7 @@ use tooltip::{accessibility_label, TooltipSource, TooltipState};
 /// How many orders the queue can show at once.
 ///
 /// Must be at least the highest `max_active` the difficulty ramp can reach, not
-/// the base value in `station.orders.ron` — a queue shorter than the ramp hides
+/// the base value in `station.orders.ron` - a queue shorter than the ramp hides
 /// the order that is about to expire, which is the one the player most needs.
 /// `the_order_queue_has_a_slot_for_every_concurrent_order` holds the two together.
 pub(crate) const ORDER_SLOTS: usize = 5;
@@ -77,13 +77,13 @@ pub(crate) const SECTION_BG: Color = Color::srgba(0.12, 0.13, 0.16, 0.9);
 pub(crate) const TEXT: Color = Color::srgb(0.88, 0.90, 0.94);
 pub(crate) const TEXT_DIM: Color = Color::srgb(0.55, 0.59, 0.66);
 /// A failed connection attempt, shown on the mode screen after a bounce back
-/// from `AppState::Connecting` — the one place in the menu that needs to say
+/// from `AppState::Connecting` - the one place in the menu that needs to say
 /// something went wrong out loud rather than staying silent.
 pub(crate) const ERROR_TEXT: Color = Color::srgb(0.85, 0.35, 0.35);
 /// The counterpart to [`ERROR_TEXT`], for the one notice on the standing board
 /// that can carry good news: an arc that ended with the station still standing.
 pub(crate) const GOOD_TEXT: Color = Color::srgb(0.45, 0.80, 0.50);
-/// Whatever the player wrote on a bottle themselves — see [`crate::labels`].
+/// Whatever the player wrote on a bottle themselves - see [`crate::labels`].
 ///
 /// Its own colour, and warmer than anything the readouts use, because a label
 /// is the one piece of text in this UI the *game* did not write. Every number
@@ -155,11 +155,11 @@ impl Plugin for UiPlugin {
                 sync_panel,
                 // After the spawn, so a panel drawn this frame takes its first
                 // entrance step now rather than flashing at full size for one
-                // frame — the same reason `sync_thermostat_slider` sits here.
+                // frame - the same reason `sync_thermostat_slider` sits here.
                 bookmarks::animate_panel_entrance,
                 finish_radio_auto_scroll,
                 // After the rebuild, so a track drawn this frame has its fill
-                // patched in this frame rather than sitting one frame stale —
+                // patched in this frame rather than sitting one frame stale -
                 // the same ordering `settings::sync_sliders` uses and for the
                 // same reason.
                 sync_thermostat_slider,
@@ -179,7 +179,7 @@ impl Plugin for UiPlugin {
                 .run_if(in_state(AppState::Playing)),
         )
         // Reuses the one scroll idiom above for the main menu's own
-        // Settings/Controls screens — see `ScrollPane`'s doc comment. A
+        // Settings/Controls screens - see `ScrollPane`'s doc comment. A
         // separate registration rather than widening the chain above's
         // `run_if`: everything else in that chain is Playing-only gameplay
         // presentation with no business running in the menu at all.
@@ -259,6 +259,7 @@ enum PanelAction {
     },
     TogglePower,
     BuyHint(ReactionId),
+    UpgradeDispenser,
     ShowCategory(Option<Category>),
     ShowBookFilter(BookFilter),
     SetBookPage(usize),
@@ -444,7 +445,7 @@ struct PanelViews<'w, 's> {
 /// Rebuilding is driven by comparing this against last frame's rather than by
 /// change-detection filters. Change detection here has to span the mode, the
 /// machine, a container that can be swapped out from under the panel, and the
-/// buffer — and a missed signal shows the player stale contents, which in a
+/// buffer - and a missed signal shows the player stale contents, which in a
 /// chemistry game means dosing off numbers that are no longer true. The
 /// comparison is a few dozen integers; correctness is worth far more.
 /// The last signature [`sync_panel`] drew, so an unchanged panel is not
@@ -514,13 +515,13 @@ struct PanelSignature {
     book_category: Option<Category>,
     book_filter: BookFilter,
     book_page: usize,
-    /// The recipe whose tree screen is open, if any — same rationale as
+    /// The recipe whose tree screen is open, if any - same rationale as
     /// `book_category`: opening or closing it changes what the panel shows.
     book_recipe: Option<ReactionId>,
     /// The standing board draws entirely from these, so without them its
     /// panel would freeze on whatever it happened to show first.
     department_standing: Vec<(Department, i32)>,
-    /// Botanist Ivy's own individual standing — what her personal shop's
+    /// Botanist Ivy's own individual standing - what her personal shop's
     /// affordability dimming reads. Almost always moves in step with
     /// `department_standing`'s Service entry (an individual delta moves that
     /// department's shown average too), but tracked explicitly rather than
@@ -528,7 +529,7 @@ struct PanelSignature {
     /// from the plot number it is derived from.
     ivy_standing: i32,
     accepting_orders: bool,
-    /// Which of the board's two tabs is open — same rationale as
+    /// Which of the board's two tabs is open - same rationale as
     /// `book_category`: switching tab changes what the panel shows, so it
     /// rebuilds the panel.
     /// Local social-directory navigation and the public, qualitative snapshot
@@ -540,15 +541,20 @@ struct PanelSignature {
     radio_sequence: Option<u64>,
     /// Which of the board's three stages is drawn: open, wrapping up, or
     /// debriefing. Carries the whole report rather than just the flag, because
-    /// the numbers on a debrief keep moving — the other chemist can still be
-    /// delivering while this one reads it — and a stale debrief is exactly the
+    /// the numbers on a debrief keep moving - the other chemist can still be
+    /// delivering while this one reads it - and a stale debrief is exactly the
     /// stale readout this signature exists to prevent.
     board: BoardStage,
     research_points: u32,
+    /// The ChemMaster's purity tier. Without it the stock-purity readout and
+    /// the recalibrate button would both freeze at whatever they showed when
+    /// the panel opened - the upgrade lands in `Knowledge`, which nothing else
+    /// in this signature tracks.
+    dispenser_tier: u32,
     /// What the standing board says about the campaign. Same reasoning as
     /// `department_standing`: the board draws from it, so without it here the
     /// board would freeze on whatever the arc happened to be when it first
-    /// opened. Deliberately *not* the plot number — that is never shown, and
+    /// opened. Deliberately *not* the plot number - that is never shown, and
     /// tracking it would rebuild the panel every time the meter ticked.
     arc: Option<ArcHeadline>,
     /// Chamber state. The sample's temperature is **rounded to 5K** for exactly
@@ -557,7 +563,7 @@ struct PanelSignature {
     /// frame with it. Five kelvin is fine enough to watch a batch climb and
     /// coarse enough to cost one rebuild every second or so.
     ///
-    /// The *target* is deliberately **not** here any more — it used to be,
+    /// The *target* is deliberately **not** here any more - it used to be,
     /// rounded the same way, but that meant every ~5K of dragging the slider
     /// rebuilt the whole panel out from under the mouse. The live target is
     /// patched in place by `sync_thermostat_slider` instead, the same
@@ -578,7 +584,7 @@ impl Default for PanelSignature {
             // Deliberately unreachable: the default must differ from any real
             // state, or the first frame with no panel open would compare equal
             // and skip the despawn of a panel left over from last frame. A
-            // placeholder machine is the one mode no player can ever be in —
+            // placeholder machine is the one mode no player can ever be in -
             // `ReadingBook(None)` is a real state a chemist can start a frame
             // in, so it would not do.
             mode: InteractionMode::UsingMachine(Entity::PLACEHOLDER),
@@ -617,7 +623,7 @@ impl Default for PanelSignature {
             ivy_standing: i32::MIN,
             // Neither `true` nor `false` alone is guaranteed to differ from
             // the first real frame's value, so the vector above carries the
-            // "never compared yet" signal on its own — this field just needs
+            // "never compared yet" signal on its own - this field just needs
             // *a* starting value.
             accepting_orders: false,
             // Same reasoning again: the vector above is what guarantees a
@@ -627,6 +633,7 @@ impl Default for PanelSignature {
             radio_sequence: None,
             board: BoardStage::Open,
             research_points: u32::MAX,
+            dispenser_tier: u32::MAX,
             arc: None,
             temperature: Some(i32::MAX),
             powered: true,
@@ -639,8 +646,8 @@ impl Default for PanelSignature {
 /// Which of the standing board's three stages is showing.
 ///
 /// The board is the only place a shift can be ended, and ending one is two
-/// deliberate steps: put the sign down, then — once whoever is still at the
-/// counter has been served or has given up — call it. Modelling that as one
+/// deliberate steps: put the sign down, then - once whoever is still at the
+/// counter has been served or has given up - call it. Modelling that as one
 /// value rather than a pair of booleans read at three call sites is what keeps
 /// the panel, the signature and the click handler from ever disagreeing about
 /// which buttons exist.
@@ -668,7 +675,7 @@ enum BoardStage {
 /// this one.
 #[derive(PartialEq, Eq, Clone)]
 pub(crate) struct ArcHeadline {
-    /// `None` until [`Reveal::Named`] — before that the board can say
+    /// `None` until [`Reveal::Named`] - before that the board can say
     /// something is wrong, but not what.
     pub(crate) name: Option<String>,
     /// Counter-track progress, once the track has opened.
@@ -763,7 +770,7 @@ type MachineParts<'w, 's> = Query<
 ///
 /// `crate::labels::Label` rides along here rather than as a seventeenth
 /// `sync_panel` parameter, which Bevy's sixteen-parameter ceiling has no room
-/// for — and it belongs here anyway: a container's label is part of reading
+/// for - and it belongs here anyway: a container's label is part of reading
 /// the container, not a separate lookup.
 type SlotContents<'w, 's> =
     Query<'w, 's, (&'static Container, Option<&'static crate::labels::Label>)>;
@@ -792,8 +799,8 @@ struct StorageView<'w, 's> {
 
 /// What the standing board reads on top of [`Shift`] itself.
 ///
-/// Bundled for the same reason [`StorageView`] is — `sync_panel` is one
-/// parameter off Bevy's sixteen-parameter ceiling — and because the query
+/// Bundled for the same reason [`StorageView`] is - `sync_panel` is one
+/// parameter off Bevy's sixteen-parameter ceiling - and because the query
 /// exists solely to answer the board's one extra question: is anyone still
 /// waiting at the counter?
 #[derive(SystemParam)]
@@ -802,7 +809,7 @@ struct BoardView<'w, 's> {
     security: Option<Res<'w, crate::security_case::SecurityCaseSummary>>,
     /// Sato's/Lindqvist's own personal-pack catalogs live off `StationData.
     /// config.supply`, not a promoted resource of their own the way produce
-    /// packs are — folded in here for the same "one off the ceiling" reason
+    /// packs are - folded in here for the same "one off the ceiling" reason
     /// `radio`/`tab` already are.
     station: Option<Res<'w, StationData>>,
     /// Crew who walked in and are still holding an order. Residents are
@@ -818,11 +825,11 @@ struct BoardView<'w, 's> {
             crate::crew::NotResident,
         ),
     >,
-    /// The full chatter history, for the board's own scrollable section —
+    /// The full chatter history, for the board's own scrollable section -
     /// folded in here rather than added to `sync_panel` directly, which is
     /// already at Bevy's sixteen-parameter ceiling.
     radio: Res<'w, RadioLog>,
-    /// Which of the board's two tabs is open — same reason `radio` is here
+    /// Which of the board's two tabs is open - same reason `radio` is here
     /// rather than a bare `sync_panel` parameter.
     radio_scroll:
         Query<'w, 's, (&'static ScrollPosition, &'static ComputedNode), With<RadioHistoryPane>>,
@@ -896,7 +903,7 @@ struct RadioScrollState {
 ///
 /// `clear` comes from `shift::can_call_it` rather than from a local
 /// `waiting == 0` so the button and the authority's own check are the same
-/// rule — a button that lights up on a condition the server then refuses reads
+/// rule - a button that lights up on a condition the server then refuses reads
 /// as the game being broken.
 ///
 /// Pure, and separate from [`BoardView::stage`], so the three-stage rule can be
@@ -927,7 +934,7 @@ struct StoredItem {
 ///
 /// Glassware is the one special case, because "Beaker" on its own is useless
 /// when there are six of them on the shelf. Everything else falls back to the
-/// `Interactable` label it already needed to be pickable at all — so a new kind
+/// `Interactable` label it already needed to be pickable at all - so a new kind
 /// of item shows up here correctly named without this function learning
 /// anything about it.
 fn stored_items(
@@ -1038,7 +1045,7 @@ fn sync_panel(
     let machine_parts = open_machine.and_then(|machine| machines.get(machine).ok());
 
     // Built before the signature so both the comparison and the panel body can
-    // read it — the signature itself is moved into `previous` on the way past.
+    // read it - the signature itself is moved into `previous` on the way past.
     let arc = campaign
         .as_deref()
         .and_then(|campaign| arc_headline(campaign, arc_script.as_deref().map(|s| &s.0)));
@@ -1145,6 +1152,7 @@ fn sync_panel(
         radio_sequence: board.radio.entries.back().map(|entry| entry.sequence),
         board: stage.clone(),
         research_points: knowledge.research_points,
+        dispenser_tier: knowledge.dispenser_tier(),
         arc: arc.clone(),
         // Only tracked while a chamber panel is open, so no other machine pays
         // for the extra comparison.
@@ -1168,7 +1176,7 @@ fn sync_panel(
     // An arrival, not a rebuild: the screen changed, so this panel is the one a
     // bookmark tab has just finished handing off to and should fade up. A page
     // turn or a live readout tick leaves the mode alone and must not replay the
-    // entrance — `sync_panel` rebuilds far more often than the screen changes.
+    // entrance - `sync_panel` rebuilds far more often than the screen changes.
     let entrance = if same_screen(previous.0.mode, mode) {
         bookmarks::PanelEntrance::settled()
     } else {
@@ -1291,7 +1299,7 @@ fn sync_panel(
                             if machine.disabled_for > 0.0 {
                                 body.spawn(label(
                                     format!(
-                                        "⚠ ELECTROMAGNETIC LOCKOUT — controls recovering in {:.0}s",
+                                        "⚠ ELECTROMAGNETIC LOCKOUT - controls recovering in {:.0}s",
                                         machine.disabled_for.ceil()
                                     ),
                                     15.0,
@@ -1956,7 +1964,7 @@ fn draw_resident_record(panel: &mut ChildSpawnerCommands, resident: &ResidentSoc
         });
 }
 
-/// The station's radio history, oldest first — the same order the small
+/// The station's radio history, oldest first - the same order the small
 /// always-on HUD feed reads, just the whole log instead of its last few
 /// lines.
 ///
@@ -2128,7 +2136,7 @@ fn draw_department_sellers(
                     panel,
                     "Miner Sato",
                     shift.npc_standing("Miner Sato"),
-                    "Sells glassware directly, off his own trust — faster than waiting on the deficit check.",
+                    "Sells glassware directly, off his own trust - faster than waiting on the deficit check.",
                     &items,
                 );
             }
@@ -2148,7 +2156,7 @@ fn draw_department_sellers(
                 ),
                 (
                     "Syringe Gun".to_string(),
-                    "A syringe with real range — draws and injects from well beyond arm's reach."
+                    "A syringe with real range - draws and injects from well beyond arm's reach."
                         .to_string(),
                     SYRINGE_GUN_COST,
                     PanelAction::NpcPack(NpcRequisitionKind::LindqvistSyringeGun),
@@ -2166,12 +2174,12 @@ fn draw_department_sellers(
     }
 }
 
-/// One NPC's own personal shop — the individual-standing sibling of
+/// One NPC's own personal shop - the individual-standing sibling of
 /// [`draw_department_shop`], spending [`Shift::npc_standing`] rather than a
 /// department average. Phase 1 has exactly one seller; a second one
 /// generalizes this into a loop the same way `draw_department_shop` loops
 /// `Department::ALL`, rather than hardcoding Ivy by name here.
-/// One NPC's own personal shop — the individual-standing sibling of
+/// One NPC's own personal shop - the individual-standing sibling of
 /// [`draw_department_shop`], spending [`Shift::npc_standing`] rather than a
 /// department average. Generic over the seller: `items` is already resolved
 /// to `(label, blurb, cost, action)` tuples by the caller, since each
@@ -2216,7 +2224,7 @@ fn draw_sign_controls(panel: &mut ChildSpawnerCommands, shift: &Shift, stage: &B
         match stage {
             BoardStage::Open => "Taking requests.",
             BoardStage::WrappingUp { clear: false } => {
-                "Sign is down. Someone is still at the counter — serve them, or wait them out."
+                "Sign is down. Someone is still at the counter - serve them, or wait them out."
             }
             BoardStage::WrappingUp { clear: true } => {
                 "Sign is down and the counter is clear. Call it whenever you're ready."
@@ -2251,7 +2259,7 @@ fn draw_sign_controls(panel: &mut ChildSpawnerCommands, shift: &Shift, stage: &B
 
 /// The end-of-shift debrief.
 ///
-/// Everything on it is a *difference* — this shift against the one before,
+/// Everything on it is a *difference* - this shift against the one before,
 /// never the career total, which the HUD already shows and which nobody needs
 /// two readouts of. That is the whole point of the beat: a career total only
 /// ever goes up, so it can never tell you whether the last hour went well.
@@ -2263,7 +2271,7 @@ fn draw_sign_controls(panel: &mut ChildSpawnerCommands, shift: &Shift, stage: &B
 /// reading it a cost.
 fn draw_debrief(panel: &mut ChildSpawnerCommands, report: &ShiftReport) {
     panel.spawn(label(
-        format!("SHIFT {} — DEBRIEF", report.number),
+        format!("SHIFT {} - DEBRIEF", report.number),
         18.0,
         TEXT,
     ));
@@ -2343,7 +2351,7 @@ fn draw_debrief(panel: &mut ChildSpawnerCommands, report: &ShiftReport) {
     }
 
     panel.spawn(label(
-        "Spend what you've earned before you open up again — requisitions are below.",
+        "Spend what you've earned before you open up again - requisitions are below.",
         12.0,
         TEXT_DIM,
     ));
@@ -2355,16 +2363,16 @@ fn draw_debrief(panel: &mut ChildSpawnerCommands, report: &ShiftReport) {
 /// The campaign notice at the top of the standing board.
 ///
 /// Says as little as the station actually knows. At [`Reveal::Suspected`] that
-/// is only "something is wrong" — [`ArcHeadline::name`] is `None` and there is
+/// is only "something is wrong" - [`ArcHeadline::name`] is `None` and there is
 /// nothing here that could give the answer away early.
 fn draw_arc_notice(panel: &mut ChildSpawnerCommands, arc: &ArcHeadline) {
     let (heading, tone) = match (arc.resolved, &arc.name) {
-        (Some(true), Some(name)) => (format!("STOOD DOWN — {name}"), GOOD_TEXT),
-        (Some(false), Some(name)) => (format!("STATION LOST — {name}"), ERROR_TEXT),
+        (Some(true), Some(name)) => (format!("STOOD DOWN - {name}"), GOOD_TEXT),
+        (Some(false), Some(name)) => (format!("STATION LOST - {name}"), ERROR_TEXT),
         (Some(true), None) => ("STOOD DOWN".to_string(), GOOD_TEXT),
         (Some(false), None) => ("STATION LOST".to_string(), ERROR_TEXT),
-        (None, Some(name)) => (format!("ALERT — {name}"), ERROR_TEXT),
-        (None, None) => ("ALERT — SOMETHING IS ABOARD".to_string(), ERROR_TEXT),
+        (None, Some(name)) => (format!("ALERT - {name}"), ERROR_TEXT),
+        (None, None) => ("ALERT - SOMETHING IS ABOARD".to_string(), ERROR_TEXT),
     };
     panel.spawn(label(heading, 16.0, tone));
 
@@ -2390,13 +2398,13 @@ fn draw_arc_notice(panel: &mut ChildSpawnerCommands, arc: &ArcHeadline) {
     panel.spawn(label(detail, 12.0, TEXT_DIM));
     if arc.incidents > 0 {
         let status = if arc.treated_incidents >= crate::cult::FINALE_WARDS {
-            "Source exposed — the Chapel focus can be confronted."
+            "Source exposed - the Chapel focus can be confronted."
         } else if arc.treated_incidents >= 3 {
-            "Outer wards failing — the pattern is drawing toward a source."
+            "Outer wards failing - the pattern is drawing toward a source."
         } else if arc.treated_incidents > 0 {
-            "Pattern emerging — direct intervention is weakening it."
+            "Pattern emerging - direct intervention is weakening it."
         } else {
-            "Ritual signs documented — none neutralised yet."
+            "Ritual signs documented - none neutralised yet."
         };
         panel.spawn(label(format!("Cult case file: {status}"), 12.0, TEXT_DIM));
     }
@@ -2409,7 +2417,7 @@ fn draw_arc_notice(panel: &mut ChildSpawnerCommands, arc: &ArcHeadline) {
 const BASE_STOCK_CHIP_WIDTH: f32 = 150.0;
 
 /// Every dispensable reagent, grouped by [`ChemFamily`] in display order and
-/// alphabetised within each group — the grid a chemist actually wants to
+/// alphabetised within each group - the grid a chemist actually wants to
 /// scan, instead of one alphabetised wall of ~30 names.
 fn base_stock_groups(db: &ChemDb) -> Vec<(&'static str, Vec<GridChip<PanelAction>>)> {
     ChemFamily::ALL
@@ -2493,6 +2501,20 @@ fn chemmaster5000_body(
             "Methods currently documented in the chemistry field manual.",
             GOOD_TEXT,
         );
+        fact_chip(
+            strip,
+            icons,
+            BookIcon::Purity,
+            format!("{:.0}%", knowledge.dispense_purity() * 100.0),
+            "Stock purity",
+            "Purity of every reagent this unit dispenses. Reactions inherit it, \
+             so each step built on impure stock carries the loss forward.",
+            if knowledge.next_upgrade_cost().is_none() {
+                GOOD_TEXT
+            } else {
+                HPLC_IMPURITY
+            },
+        );
         if let Some(container) = loaded {
             fact_chip(
                 strip,
@@ -2551,6 +2573,59 @@ fn chemmaster5000_body(
                                     }
                                 }
                             });
+                        },
+                    );
+
+                    instrument_card(
+                        controls,
+                        icons,
+                        BookIcon::Purity,
+                        "COLUMN CALIBRATION",
+                        "Better filtration media raises the purity of everything \
+                         this unit dispenses.",
+                        |section| {
+                            let tier = knowledge.dispenser_tier();
+                            let max = Knowledge::max_dispenser_tier();
+                            section.spawn(label(
+                                format!(
+                                    "Tier {tier} of {max}   •   dispensing at {:.0}%",
+                                    knowledge.dispense_purity() * 100.0
+                                ),
+                                13.0,
+                                TEXT,
+                            ));
+                            // Same rule as the hint purchase: only offer the
+                            // button when it can actually go through.
+                            match knowledge.next_upgrade_cost() {
+                                None => {
+                                    section.spawn(label(
+                                        "Fully calibrated. Stock dispenses clean.",
+                                        12.0,
+                                        GOOD_TEXT,
+                                    ));
+                                }
+                                Some(cost) if knowledge.research_points >= cost => {
+                                    section.spawn(button(
+                                        format!("Recalibrate  ({cost} research)"),
+                                        PanelAction::UpgradeDispenser,
+                                    ));
+                                }
+                                Some(cost) => {
+                                    section.spawn(label(
+                                        format!(
+                                            "Needs {cost} research to recalibrate \
+                                             to {:.0}%.",
+                                            DISPENSE_PURITY
+                                                .get(tier as usize + 1)
+                                                .copied()
+                                                .unwrap_or(1.0)
+                                                * 100.0
+                                        ),
+                                        12.0,
+                                        TEXT_DIM,
+                                    ));
+                                }
+                            }
                         },
                     );
 
@@ -2798,7 +2873,7 @@ struct TempSliderFill;
 struct TempSliderReadout;
 
 /// The value a chemist is currently dragging the dial to, before the server
-/// has echoed it back — so their own view never fights their own input
+/// has echoed it back - so their own view never fights their own input
 /// waiting on a round trip. `None` the rest of the time, when the track just
 /// shows whatever `Thermostat.target` has replicated.
 #[derive(Resource, Default)]
@@ -2851,7 +2926,7 @@ fn reaction_is_hazardous(reaction: &chem_sim::Reaction, temperature: Kelvin) -> 
 }
 
 /// Whether `solution` currently satisfies every gating condition
-/// (`Reaction::max_scale`) of some reaction with a destructive effect — the
+/// (`Reaction::max_scale`) of some reaction with a destructive effect - the
 /// same "which reactions can run right now" test `chem_sim::is_reacting`
 /// uses internally, widened past rated reactions so an instantaneous
 /// hazardous reaction is still caught for the one tick before it resolves.
@@ -2860,7 +2935,7 @@ fn reaction_is_hazardous(reaction: &chem_sim::Reaction, temperature: Kelvin) -> 
 /// forecast (`represented_chamber_reactions`/`chamber_forecast`): this is a
 /// physical read of the beaker, the same category of fact as
 /// `Solution::color` or `chem_sim::is_reacting`, not a spoiler of the recipe
-/// book — it names no product or recipe, only "something in here is
+/// book - it names no product or recipe, only "something in here is
 /// dangerous."
 fn solution_is_hazardous(solution: &chem_sim::Solution, reactions: &chem_sim::ReactionSet) -> bool {
     reactions.iter().any(|reaction| {
@@ -3235,7 +3310,7 @@ fn heater_body(
                             readout.spawn(label(
                                 current
                                     .map(|value| format!("Reading  {:.0} K", value.0))
-                                    .unwrap_or_else(|| "Reading  — K".to_string()),
+                                    .unwrap_or_else(|| "Reading  - K".to_string()),
                                 15.0,
                                 Color::srgb(0.66, 0.78, 0.92),
                             ));
@@ -3320,7 +3395,7 @@ fn heater_body(
                             TEXT_DIM,
                         ));
                     } else {
-                        quality.spawn(label("pH  —       purity  —", 15.0, TEXT_DIM));
+                        quality.spawn(label("pH  -       purity  -", 15.0, TEXT_DIM));
                         ph_gauge(quality, 7.0, None);
                         quality.spawn(label("Load a beaker to begin monitoring.", 13.0, TEXT_DIM));
                     }
@@ -3454,7 +3529,7 @@ fn heater_body(
                                                 container.kind.capacity()
                                             )
                                         })
-                                        .unwrap_or_else(|| "BEAKER   — / —".to_string()),
+                                        .unwrap_or_else(|| "BEAKER   - / -".to_string()),
                                     13.0,
                                     TEXT,
                                 ));
@@ -3492,7 +3567,7 @@ fn heater_body(
 ///
 /// The same shape as `settings::drag_sliders`, but scoped to a specific
 /// machine over the network rather than a local resource: dragging writes
-/// `SetTargetTemperature` requests, and the server — not this system — is
+/// `SetTargetTemperature` requests, and the server - not this system - is
 /// what actually moves `Thermostat.target`. Only one [`TempSlider`] is ever
 /// alive at once, so unlike `drag_sliders` this never has to work out *which*
 /// track a press landed on.
@@ -3511,8 +3586,8 @@ fn drag_thermostat_slider(
         return;
     }
     let Ok((interaction, node, transform)) = track.single() else {
-        // No slider on screen — the panel is closed, or showing a different
-        // machine — so there is nothing to drag and nothing to keep held.
+        // No slider on screen - the panel is closed, or showing a different
+        // machine - so there is nothing to drag and nothing to keep held.
         *held = false;
         drag.0 = None;
         return;
@@ -3839,9 +3914,7 @@ fn analyzer_body(
                     .recovers_to
                     .as_deref()
                     .and_then(|key| db.reagents.id_of(key))
-                    .map(|recovered| {
-                        format!("Recover {}", db.reagents.get(recovered).name)
-                    })
+                    .map(|recovered| format!("Recover {}", db.reagents.get(recovered).name))
                     .unwrap_or_else(|| format!("Purify {}", definition.name));
                 header.spawn(button(text, PanelAction::Purify(reagent)));
             }
@@ -3852,7 +3925,7 @@ fn analyzer_body(
         .with_children(|section| {
             let Some(container) = loaded else {
                 section.spawn(label(
-                    "INPUT SAMPLE   —   no container loaded. Carry one over and press E.",
+                    "INPUT SAMPLE   -   no container loaded. Carry one over and press E.",
                     14.0,
                     TEXT_DIM,
                 ));
@@ -3860,7 +3933,7 @@ fn analyzer_body(
             };
             if container.solution.is_empty() {
                 section.spawn(label(
-                    "INPUT SAMPLE   —   container is empty.",
+                    "INPUT SAMPLE   -   container is empty.",
                     14.0,
                     TEXT_DIM,
                 ));
@@ -4035,7 +4108,7 @@ fn grinder_body(
     reacting: bool,
 ) {
     panel.spawn(label(
-        "Extracts produce straight into the beaker. Fast, and never clean — \
+        "Extracts produce straight into the beaker. Fast, and never clean \
          what comes out still has to go through the Mixing Chamber.",
         13.0,
         TEXT_DIM,
@@ -4121,7 +4194,7 @@ fn locker_body(panel: &mut ChildSpawnerCommands, stored: &[StoredItem]) {
                         if item.detail.is_empty() {
                             item.name.clone()
                         } else {
-                            format!("{}   —   {}", item.name, item.detail)
+                            format!("{}   -   {}", item.name, item.detail)
                         },
                         14.0,
                         TEXT,
@@ -4346,7 +4419,7 @@ fn container_readout(
                     }
 
                     // Some recipes take real seconds. The numbers above are already
-                    // moving while one runs — that is the actual readout — but a
+                    // moving while one runs - that is the actual readout - but a
                     // chemist watching them needs to know the difference between
                     // "not finished yet" and "this is all you are getting".
                     if reacting {
@@ -4488,7 +4561,7 @@ fn filter_color(filter: BookFilter) -> Color {
 }
 
 /// The chemist's notes. Known recipes show the full method; locked ones show
-/// only what a chemist would plausibly remember — what it treats, how many
+/// only what a chemist would plausibly remember - what it treats, how many
 /// ingredients, and whatever they have worked out so far.
 ///
 /// Laid out as a sidebar of headings beside a scrolling pane. The single
@@ -5738,9 +5811,9 @@ fn world_effect_icon(effect: &chem_sim::WorldEffect) -> (BookIcon, &'static str,
     }
 }
 
-/// The formula screen for one recipe: itself, then — only while known, so a
+/// The formula screen for one recipe: itself, then - only while known, so a
 /// locked step's own ingredients stay the same spoiler the hint system
-/// already withholds everywhere else — everything that feeds it, one level
+/// already withholds everywhere else - everything that feeds it, one level
 /// deeper per step back through the chain.
 fn spawn_recipe_tree(
     columns: &mut ChildSpawnerCommands,
@@ -5784,7 +5857,7 @@ fn spawn_recipe_tree(
 /// deeper if it's known.
 ///
 /// `visited` tracks reactions open on the *current branch* only (inserted on
-/// entry, removed before returning) — not the whole tree, since two branches
+/// entry, removed before returning) - not the whole tree, since two branches
 /// legitimately sharing an ingredient (bicaridine and tricordrazine both need
 /// dylovene) must both still render it. Nothing in `chem_sim`'s types rules
 /// out an actual cycle, so this must not panic if one appears; it prints a
@@ -5958,7 +6031,7 @@ fn render_recipe_node(
         }
     });
 
-    // A locked node's own ingredients stay hidden — the same spoiler
+    // A locked node's own ingredients stay hidden - the same spoiler
     // discipline the hint system already enforces everywhere else.
     if known {
         if depth == 0 {
@@ -6005,7 +6078,7 @@ fn render_recipe_node(
 
 /// One ingredient row under a known node: recurses one level deeper if
 /// something produces it, otherwise a leaf naming the raw reagent and,
-/// read-only, whether it's still locked at the ChemMaster 5000 — unlocking
+/// read-only, whether it's still locked at the ChemMaster 5000 - unlocking
 /// still only happens there, so this is a note, not a button.
 #[allow(clippy::too_many_arguments)]
 fn render_ingredient_node(
@@ -6143,7 +6216,7 @@ fn category_counts(
     (known, recipes.len())
 }
 
-/// Marks whichever scrollable region the currently-open panel has — the
+/// Marks whichever scrollable region the currently-open panel has - the
 /// reference book's entry list or formula tree, or the standing board's
 /// radio-history-plus-shop pane. Shared rather than one marker per panel:
 /// `sync_panel` despawns the whole `PanelRoot` subtree before rebuilding it,
@@ -6152,7 +6225,7 @@ fn category_counts(
 /// ambiguous about.
 ///
 /// `pub(crate)`: `settings::settings_body`/`controls_body` reuse it for the
-/// same reason a machine panel does — the pre-game Settings/Controls screens
+/// same reason a machine panel does - the pre-game Settings/Controls screens
 /// and the pause-reached ones both got dense enough to outgrow a bare window,
 /// and this is the one scroll idiom the UI already has. Still never more than
 /// one alive at once: the pause overlay only exists while `Paused` is true,
@@ -6655,8 +6728,8 @@ fn spawn_order_queue(mut commands: Commands, icons: Res<BookIconAssets>) {
 /// is taking requests.
 ///
 /// Pure so all three wordings can be checked at once. There is still no phase
-/// clock — the sign and the shift boundary are both the player's own, worked
-/// at the standing board — but the number is what turns "another order" into
+/// clock - the sign and the shift boundary are both the player's own, worked
+/// at the standing board - but the number is what turns "another order" into
 /// "shift six", which is the whole reason shifts came back.
 fn accepting_banner_line(shift: &Shift) -> String {
     let state = if shift.called {
@@ -6670,7 +6743,7 @@ fn accepting_banner_line(shift: &Shift) -> String {
     // one line already on screen saying the lab is shut. `closure_pressure` is
     // points already taken from every department, so it reads as a running
     // total rather than a warning the player has to interpret. Zero whenever
-    // the lab is open, so the open banner is untouched — see
+    // the lab is open, so the open banner is untouched - see
     // `shift::impatience`.
     let souring = match shift.closure_pressure {
         0 => String::new(),
@@ -6827,8 +6900,8 @@ struct Toast(Timer);
 ///
 /// A message rather than a direct spawn so that [`show_toasts`] is the only
 /// thing that ever puts one on screen. Despawning through `Commands` is
-/// deferred, so two spawners in the same frame — a recipe discovered as the
-/// shift ends, or a reaction cascade discovering two at once — would each see a
+/// deferred, so two spawners in the same frame - a recipe discovered as the
+/// shift ends, or a reaction cascade discovering two at once - would each see a
 /// stale "no toasts exist" and stack their cards at the same position.
 #[derive(Message)]
 struct ShowToast {
@@ -6909,7 +6982,7 @@ fn spawn_toast(
 /// A brief banner when a recipe is worked out.
 ///
 /// The radio carries it too, but the radio is a slow feed you might be looking
-/// away from — and discovering a recipe is the one moment that deserves to
+/// away from - and discovering a recipe is the one moment that deserves to
 /// interrupt.
 fn announce_discoveries(
     mut discovered: MessageReader<RecipeDiscovered>,
@@ -6937,7 +7010,7 @@ pub struct LastSignState(Option<(bool, bool)>);
 /// Toasts when the sign flips or the shift is called.
 ///
 /// Watches `Shift` from `Update` rather than the messages themselves, because
-/// this runs on both ends — a joined chemist needs to notice their partner
+/// this runs on both ends - a joined chemist needs to notice their partner
 /// flipping the sign too, and only the replicated resource reaches them, not
 /// the client message that caused it.
 fn announce_accepting_toggle(
@@ -6949,7 +7022,7 @@ fn announce_accepting_toggle(
     if announced.0 == Some(now) {
         return;
     }
-    // Don't toast the very first frame — that would just announce "open" the
+    // Don't toast the very first frame - that would just announce "open" the
     // instant every session starts.
     let first_run = announced.0.is_none();
     announced.0 = Some(now);
@@ -7191,7 +7264,7 @@ fn update_hotbar(
                 }
                 Some((_, None, Some(interactable), _)) => (interactable.label.clone(), TEXT),
                 Some(_) => ("Item".to_string(), TEXT),
-                None => ("—".to_string(), Color::srgb(0.34, 0.37, 0.42)),
+                None => ("-".to_string(), Color::srgb(0.34, 0.37, 0.42)),
             },
             HotbarText::Amount(_) => match item {
                 Some((_, Some(container), _, _)) if container.kind.capacity().is_zero() => {
@@ -7256,7 +7329,7 @@ fn damage_color(kind: DamageKind) -> Color {
     }
 }
 
-/// Fixed slots, filled in each frame — the same pattern as the order queue and
+/// Fixed slots, filled in each frame - the same pattern as the order queue and
 /// for the same reason. Four bars that decay every tick would otherwise force a
 /// full despawn-and-rebuild of the panel every frame.
 fn spawn_vitals_panel(mut commands: Commands) {
@@ -7405,7 +7478,7 @@ fn update_vitals_panel(
             }
             VitalsText::Blood(index) => match contents.get(*index) {
                 // The last slot summarises the overflow rather than silently
-                // hiding it — a chemist needs to know there is more in them
+                // hiding it - a chemist needs to know there is more in them
                 // than the panel has room for.
                 Some(_) if *index == BLOOD_SLOTS - 1 && contents.len() > BLOOD_SLOTS => (
                     format!("+{} more", contents.len() - (BLOOD_SLOTS - 1)),
@@ -7450,7 +7523,7 @@ fn update_vitals_panel(
 /// Worth a line of screen for the same reason the rooms are tinted: the lab is
 /// five rooms now, and a player who has walked through two doorways looking for
 /// the grinder should not have to work out where they ended up from the wall
-/// colour. Top-left is the one free corner — orders sit top-right, the radio
+/// colour. Top-left is the one free corner - orders sit top-right, the radio
 /// bottom-left and vitals bottom-right.
 #[derive(Component)]
 struct RoomLabel;
@@ -7503,7 +7576,7 @@ fn update_room_label(
 /// Slot 0 shows the oldest of the `slots` most recent lines.
 ///
 /// The HUD only ever shows a fixed-size trailing window onto a log that can
-/// now hold far more than that window — `log.entries.get(slot.0)` alone
+/// now hold far more than that window - `log.entries.get(slot.0)` alone
 /// only read as "the most recent lines" back when the log's own capacity
 /// happened to equal the window size.
 #[derive(Clone)]
@@ -7613,7 +7686,7 @@ fn dispatch_seconds(entry: &RadioEntry) -> f32 {
         RadioPriority::RedAlert => 12.0,
     };
     // A PA bulletin is the *least* urgent thing on the radio and the longest
-    // thing to listen to — the fanfare in front of it runs nearly nine
+    // thing to listen to - the fanfare in front of it runs nearly nine
     // seconds. Taking the card away four seconds into the jingle would leave
     // the player listening to a punchline they can no longer read.
     if entry.announcement {
@@ -7809,7 +7882,7 @@ fn radio_channel_color(channel: RadioChannel) -> Color {
 
 const BEAKER_PREVIEW_WIDTH: f32 = 64.0;
 const BEAKER_PREVIEW_HEIGHT: f32 = 96.0;
-// The glass's own corners, echoed on `BeakerFill` (bottom only — a liquid's
+// The glass's own corners, echoed on `BeakerFill` (bottom only - a liquid's
 // top edge is its flat surface, not a rounded lip) so the fill reads as
 // poured into this exact vessel rather than an unrelated rectangle clipped
 // inside it.
@@ -7823,11 +7896,11 @@ const BEAKER_HAZARD_HZ: f32 = 2.2;
 
 /// Which loaded container a beaker-preview piece belongs to, carried
 /// directly on every per-frame-mutated part rather than looked up through
-/// the hierarchy — keeps `animate_beaker_previews` a flat query per part,
+/// the hierarchy - keeps `animate_beaker_previews` a flat query per part,
 /// like `DamageBar`/`TempSliderFill`. Mirrors `LiquidVisual { container }`
 /// (`src/containers/mod.rs`), the 3D-mesh version of this same fill. Unlike
 /// the always-alone `TempSlider`, more than one beaker preview can be alive
-/// at once — the Mixing Chamber's beakers A and B.
+/// at once - the Mixing Chamber's beakers A and B.
 #[derive(Component, Clone, Copy)]
 struct BeakerOf(Entity);
 
@@ -7849,15 +7922,15 @@ struct BeakerHazardFlash;
 /// One rising bubble. `seed` (0..1, evenly spaced across
 /// `BEAKER_BUBBLE_COUNT`) offsets its phase and horizontal column so a
 /// beaker's bubbles never move in lockstep. Deterministic rather than
-/// `rand`-seeded — nothing here needs to differ run to run, and `rand` is
+/// `rand`-seeded - nothing here needs to differ run to run, and `rand` is
 /// not otherwise a dependency of this module.
 #[derive(Component)]
 struct BeakerBubble {
     seed: f32,
 }
 
-/// Centrepiece live preview of a loaded container, spawned beside — never
-/// instead of — a panel's own compact text readout. `container` is the
+/// Centrepiece live preview of a loaded container, spawned beside - never
+/// instead of - a panel's own compact text readout. `container` is the
 /// loaded container's entity, already computed by `sync_panel` as
 /// `loaded_entity`/`loaded_entity_b`, or `None` to draw a dim static
 /// placeholder with no marker components at all, so an idle machine costs
@@ -7920,7 +7993,7 @@ fn beaker_preview_sized(
                 right: px(0),
                 bottom: px(0),
                 height: percent(0),
-                // Square top — a liquid's surface is flat, not a lip — but
+                // Square top - a liquid's surface is flat, not a lip - but
                 // rounded on the bottom to match the glass it is sitting in,
                 // so it reads as poured into this vessel rather than an
                 // unrelated rectangle merely clipped inside it.
@@ -7974,10 +8047,10 @@ fn beaker_preview_sized(
 
 /// Repaints every live [`beaker_preview`] from its container's current
 /// state. Runs every frame, unconditionally, right after `sync_panel` in the
-/// same `Update` chain — the same ordering `sync_thermostat_slider` already
+/// same `Update` chain - the same ordering `sync_thermostat_slider` already
 /// documents: a widget spawned this frame is corrected before it is ever
 /// drawn. Like `update_vitals_panel`/`sync_thermostat_slider`, this does not
-/// gate on `Changed<Container>` — see the section banner above for why that
+/// gate on `Changed<Container>` - see the section banner above for why that
 /// would be too coarse for this widget.
 #[allow(clippy::too_many_arguments)]
 fn animate_beaker_previews(
@@ -8106,7 +8179,7 @@ fn fill_fraction(container: &Container) -> f32 {
 
 /// Colour/blur/spread for the beaker's ambient-temperature glow: fully
 /// transparent at `Kelvin::AMBIENT`, warming toward red/orange at
-/// `TEMPERATURE_MAX` or cooling toward blue at `TEMPERATURE_MIN` — the same
+/// `TEMPERATURE_MAX` or cooling toward blue at `TEMPERATURE_MIN` - the same
 /// domain the Reaction Chamber's thermostat slider already sweeps.
 fn heat_glow(temperature: Kelvin) -> ShadowStyle {
     let k = temperature.0;
@@ -8230,7 +8303,7 @@ fn section() -> Node {
 }
 
 /// Generic over the action so the menu's buttons look like the lab's without
-/// the two sharing an action enum — a panel button dispenses a reagent, a menu
+/// the two sharing an action enum - a panel button dispenses a reagent, a menu
 /// button opens a save, and neither wants the other's variants.
 pub(crate) fn button<A: Component>(text: impl Into<String>, action: A) -> impl Bundle {
     (
@@ -8281,7 +8354,7 @@ struct GridChip<A: Component> {
     swatch: Color,
     action: A,
     /// Painted `BUTTON_ACTIVE` by `button_feedback`, the same marker the
-    /// dispense-amount row and book tabs use — most grids never set this,
+    /// dispense-amount row and book tabs use - most grids never set this,
     /// but a picker that remembers "last used" gets it for free.
     selected: bool,
 }
@@ -8326,7 +8399,7 @@ fn chip_button<A: Component>(
 }
 
 /// A same-width grid of swatch-and-label buttons, split into labelled
-/// sub-groups — the shape every "pick one of many named, colour-coded
+/// sub-groups - the shape every "pick one of many named, colour-coded
 /// things" picker in the lab wants. Built for the ChemMaster 5000's chemical
 /// list, but kept generic so another panel can group the same way later.
 /// Empty groups are skipped rather than printing a bare heading over
@@ -8357,7 +8430,7 @@ fn chip_grid<A: Component>(
     }
 }
 
-/// A titled card: a dim heading above a tinted [`section()`] box — the "this
+/// A titled card: a dim heading above a tinted [`section()`] box - the "this
 /// is one coherent group of controls" unit the whole panel now uses.
 /// `container_readout` was the only place this shape already existed; this
 /// pulls it out so every group in a panel (amounts, stock, readouts) is
@@ -8434,6 +8507,7 @@ struct PanelMessages<'w> {
     leave_machine: MessageWriter<'w, LeaveMachineRequested>,
     unlock_all: MessageWriter<'w, UnlockAllRequested>,
     buy_hint: MessageWriter<'w, BuyHintRequested>,
+    upgrade_dispenser: MessageWriter<'w, UpgradeDispenserRequested>,
     play: MessageWriter<'w, PlaySfx>,
 }
 
@@ -8445,7 +8519,7 @@ fn handle_panel_clicks(
     mut amounts: Query<&mut DispenseAmount>,
     mut out: PanelMessages,
     thermostats: Query<&Thermostat>,
-    // Read-only mirrors of `handle_eject`'s own occupancy check — client-side,
+    // Read-only mirrors of `handle_eject`'s own occupancy check - client-side,
     // so `Sfx::Eject` (and the request itself) only fires when there is
     // actually something to eject, not on every press of a button that is
     // drawn live regardless of whether the slot is empty.
@@ -8491,6 +8565,12 @@ fn handle_panel_clicks(
                 out.buy_hint.write(BuyHintRequested {
                     reaction: *reaction,
                 });
+                continue;
+            }
+            // Career-wide like the hint purchase, so it goes out before the
+            // machine guard even though the button lives on the ChemMaster.
+            PanelAction::UpgradeDispenser => {
+                out.upgrade_dispenser.write(UpgradeDispenserRequested);
                 continue;
             }
             PanelAction::UnlockAll => {
@@ -8713,6 +8793,7 @@ fn handle_panel_clicks(
             }
             // Handled above, before the machine guard.
             PanelAction::BuyHint(_)
+            | PanelAction::UpgradeDispenser
             | PanelAction::UnlockAll
             | PanelAction::ShowCategory(_)
             | PanelAction::ShowBookFilter(_)
@@ -8859,6 +8940,7 @@ mod tests {
             .add_message::<LeaveMachineRequested>()
             .add_message::<UnlockAllRequested>()
             .add_message::<BuyHintRequested>()
+            .add_message::<UpgradeDispenserRequested>()
             .add_message::<PlaySfx>()
             .add_systems(Update, handle_panel_clicks);
         let board = app
@@ -8897,7 +8979,7 @@ mod tests {
 
     #[test]
     fn a_hotbar_cell_shows_a_short_label_whole_and_quotes_it() {
-        // Quoted so it can never be mistaken for something the game wrote —
+        // Quoted so it can never be mistaken for something the game wrote -
         // a bottle marked "Bicaridine" must not read like a bottle the game
         // is telling you contains bicaridine.
         let marked = crate::labels::Label("Bicaridine".to_string());
@@ -8924,7 +9006,7 @@ mod tests {
     #[test]
     fn cutting_a_label_short_never_splits_a_character() {
         // `MAX_LABEL` counts characters and so does this, but the two used to
-        // be easy to write as byte slices — which panics on any label a
+        // be easy to write as byte slices - which panics on any label a
         // player types with an accent in it.
         let marked = crate::labels::Label("é".repeat(crate::labels::MAX_LABEL));
         assert_eq!(
@@ -9002,7 +9084,7 @@ mod tests {
     #[test]
     fn dragging_past_either_end_of_the_dial_clamps() {
         // The drag reads a raw cursor position, which is routinely outside
-        // the track — pulling toward an end is how you reach it.
+        // the track - pulling toward an end is how you reach it.
         assert_eq!(temp_at_fraction(-3.0), TEMPERATURE_MIN);
         assert_eq!(temp_at_fraction(4.0), TEMPERATURE_MAX);
     }
@@ -9227,14 +9309,14 @@ mod tests {
         assert_eq!(font_safe_text("pH 4.0–10.0  ◇7.2"), "pH 4.0-10.0  OPT 7.2");
         assert_eq!(font_safe_text("≥60%"), ">=60%");
         assert_eq!(
-            font_safe_text("SHIFT 4  ·  CLOSED — not accepting requests"),
+            font_safe_text("SHIFT 4  ·  CLOSED - not accepting requests"),
             "SHIFT 4  |  CLOSED - not accepting requests"
         );
     }
 
     #[test]
     fn font_safe_text_covers_every_typographic_symbol_authored_in_the_ui() {
-        let authored = "—·–→…•≥‹°■≤−⚠▸⁻¹←○“”‘’›◇▯±●≈◌×";
+        let authored = "-·–→…•≥‹°■≤−⚠▸⁻¹←○“”‘’›◇▯±●≈◌×";
         let safe = font_safe_text(authored);
         assert!(
             safe.is_ascii(),
@@ -9368,7 +9450,7 @@ mod tests {
         assert_eq!(keys.first(), Some(&"kelotane"), "{keys:?}");
         assert!(keys.contains(&"dermaline"), "{keys:?}");
         // Tricordrazine treats all four types, so it is filed here as well as
-        // under trauma — the count columns deliberately overlap.
+        // under trauma - the count columns deliberately overlap.
         assert!(keys.contains(&"tricordrazine"), "{keys:?}");
 
         let (known, total) = category_counts(&db, &knowledge, Some(Category::Burns));
@@ -9573,7 +9655,7 @@ mod tests {
     #[test]
     fn the_board_says_nothing_while_the_antagonist_is_hidden() {
         // The board is a public notice. Before the station has worked anything
-        // out, there is nothing public to post — and posting early would hand
+        // out, there is nothing public to post - and posting early would hand
         // the player the answer the whole arc is built around.
         assert!(arc_headline(&campaign_at(Reveal::Hidden), None).is_none());
     }

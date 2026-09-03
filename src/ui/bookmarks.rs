@@ -59,8 +59,6 @@ const GROWTH_WIDTH: f32 = 300.0;
 const GROWTH_HEIGHT: f32 = 180.0;
 /// How far right the tab travels, as a percentage of the screen.
 const TRAVEL_PERCENT: f32 = 46.0;
-/// How far left the *other* tab retreats while a screen is open, in pixels.
-const RETREAT_PIXELS: f32 = 220.0;
 
 /// The stretch of the flight over which the ghost dissolves.
 ///
@@ -238,14 +236,12 @@ fn ghost_alpha(eased: f32) -> f32 {
 pub(super) struct BookmarkTab {
     bookmark: Bookmark,
     /// 0.0 at rest on the edge, 1.0 fully flown out.
-    progress: f32,
-    /// 0.0 in place, 1.0 fully stepped aside off the left edge.
     ///
-    /// Independent of [`Self::progress`]: a tab is either flying out to become
-    /// a screen, or getting out of the way of the other tab's screen, and
-    /// conflating the two let an idle tab read as retreated (drawn at zero
-    /// alpha) and a mid-flight one snap to fully opaque when the screen closed.
-    retreat: f32,
+    /// The only axis a tab moves on. An earlier cut had a second one for
+    /// sliding the *other* tab off the edge while a screen was open; that
+    /// removed the very thing you click to swap between the two screens, so the
+    /// idle tab now simply stays on its edge in the panel's left margin.
+    progress: f32,
 }
 
 // There is deliberately no mechanism here for *delaying* the panel.
@@ -430,7 +426,6 @@ pub(super) fn spawn_bookmarks(mut commands: Commands, icons: Res<BookIconAssets>
                 BookmarkTab {
                     bookmark,
                     progress: 0.0,
-                    retreat: 0.0,
                 },
                 crate::until_we_leave_the_lab(),
             ))
@@ -563,7 +558,6 @@ pub(super) fn animate_bookmarks(
     // One of the two bookmark screens is up. Not "any panel": a machine panel
     // leaves both tabs sitting normally on the edge, still offered, because
     // either screen can be opened over a machine without dropping the claim.
-    let any_open = Bookmark::ALL.iter().any(|b| is_active(*b, mode));
     let delta = time.delta_secs();
     // Each tab's fade, indexed the same way `Bookmark::ALL` is, so the second
     // pass over the children can look one up without walking the hierarchy.
@@ -578,23 +572,12 @@ pub(super) fn animate_bookmarks(
         let progress = tab.progress;
         let eased = ease_out_cubic(progress);
 
-        // The tab that is *not* the one being opened steps aside, so it does not
-        // hang over the screen that just appeared.
-        //
-        // Tracked on its own axis rather than derived from `eased`. Deriving it
-        // meant an idle tab (`eased == 0`) read as *fully* retreated the instant
-        // the other screen opened, so instead of sliding aside it blinked to
-        // zero alpha — and stayed invisible for as long as anything was open.
-        tab.retreat = stepped(tab.retreat, any_open && !active, delta);
-        let retreat = ease_out_cubic(tab.retreat);
-
         // Hidden behind the pause overlay, and under a screen that owns the
         // keyboard or the whole frame. Never at a machine — both screens can be
-        // read while operating one — never mid-flight or mid-retreat, or a tab
-        // would vanish on its way home, and never merely because the *other*
-        // tab's screen is open: that case is the retreat above, which slides it
-        // off the edge and can always slide it back.
-        let hidden = progress <= 0.0 && retreat <= 0.0 && (paused || tabs_are_unavailable(mode));
+        // read while operating one — never mid-flight, or a tab would vanish on
+        // its way home, and never because the *other* tab's screen is open:
+        // that is exactly when it is most useful.
+        let hidden = progress <= 0.0 && (paused || tabs_are_unavailable(mode));
         let wanted = if hidden {
             Visibility::Hidden
         } else {
@@ -604,11 +587,7 @@ pub(super) fn animate_bookmarks(
             *visibility = wanted;
         }
 
-        node.left = if progress > 0.0 {
-            percent(eased * TRAVEL_PERCENT)
-        } else {
-            px(-retreat * RETREAT_PIXELS)
-        };
+        node.left = percent(eased * TRAVEL_PERCENT);
         node.width = px(TAB_WIDTH + eased * GROWTH_WIDTH);
         node.height = px(TAB_HEIGHT + eased * GROWTH_HEIGHT);
         // The flat spine rounds off as the ribbon becomes a free-floating
@@ -632,14 +611,13 @@ pub(super) fn animate_bookmarks(
             z.0 = wanted_z;
         }
 
-        // One factor for the whole tab: the handoff fade while flying out, and
-        // the retreat fade when stepping aside for the other screen.
-        let alpha = ghost_alpha(eased) * (1.0 - retreat);
+        // The ghost's fade as it hands off to the panel it becomes.
+        let alpha = ghost_alpha(eased);
         alphas[tab.bookmark.slot()] = alpha;
         // Hovering lifts the ribbon a little brighter, standing in for the
         // generic button repaint this node opts out of. Only at rest: a tab
         // mid-flight is already the loudest thing on screen.
-        let lit = hovered && progress <= 0.0 && retreat <= 0.0;
+        let lit = hovered && progress <= 0.0;
         let base = if lit { tint.1.lighter(0.06) } else { tint.1 };
         background.0 = base.with_alpha(tint.1.alpha() * alpha);
         // The spine tracks the panel's own frame colour as it lands, so the
@@ -662,7 +640,6 @@ pub(super) fn animate_bookmarks(
     for (tint, mut color) in &mut contents.chips {
         color.0 = tint.1.with_alpha(tint.1.alpha() * alphas[tint.0.slot()]);
     }
-
 }
 
 #[cfg(test)]
@@ -874,17 +851,23 @@ mod tests {
         assert!(crew_flying_out > 0.0, "the other must start opening");
     }
 
-    /// Retreat is its own axis. Derived from the open progress, an idle tab
-    /// read as fully retreated the moment the other screen opened.
+    /// The idle tab stays put and fully lit while the other screen is open.
+    ///
+    /// It is the swap target — with the crew directory up, the manual's ribbon
+    /// is what you click to cross to the book. An earlier cut slid it off the
+    /// left edge to keep it clear of the panel, which left nothing to click.
     #[test]
-    fn an_idle_tab_is_not_treated_as_retreated() {
-        // A tab at rest with nothing open stays put and fully visible.
+    fn the_idle_tab_stays_put_as_a_swap_target() {
+        // A tab that is not the active one never advances, so it sits at 0.0 —
+        // on its edge, at full alpha, with nothing pulling it off screen.
         assert_eq!(stepped(0.0, false, 0.016), 0.0);
-        // It only retreats once told to, and gets there gradually.
-        let first = stepped(0.0, true, 0.016);
-        assert!(first > 0.0 && first < 1.0, "retreat must ease, not snap");
-        // And it can always come back.
-        assert!(stepped(first, false, 0.016) < first);
+        assert_eq!(
+            ghost_alpha(ease_out_cubic(0.0)),
+            1.0,
+            "an idle tab must be fully visible, not faded out"
+        );
+        // And its travel really does start from the edge, not from off screen.
+        const { assert!(TRAVEL_PERCENT > 0.0) };
     }
 
     /// Only the key chip's inset panel is background-tinted.

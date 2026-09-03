@@ -342,7 +342,11 @@ mod tests {
         let carrying = target(&mut world, &stage, Vec3::ZERO).unwrap();
         assert_eq!(
             carrying.0.x,
-            world.get::<Transform>(chemmaster5000).unwrap().translation.x
+            world
+                .get::<Transform>(chemmaster5000)
+                .unwrap()
+                .translation
+                .x
         );
         assert!(carrying.1.starts_with("Use ChemMaster 5000"));
         let other = world.spawn(Transform::from_xyz(6.0, 1.0, 0.0)).id();

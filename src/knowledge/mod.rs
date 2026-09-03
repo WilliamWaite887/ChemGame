@@ -68,11 +68,32 @@ pub fn research_for_delivery_at_purity(potency: u32, purity: f32) -> u32 {
     ((clean_value as f32 * purity.clamp(0.0, 1.0)).ceil() as u32).max(1)
 }
 
-/// Historical dispenser-upgrade costs, retained only to interpret old saves
-/// and verify that their former tier field remains harmless. Base stock is no
-/// longer a progression lock and [`Knowledge::next_upgrade_cost`] always
-/// returns `None`.
-pub const DISPENSER_TIER_COSTS: [u32; 7] = [24, 27, 48, 15, 54, 21, 24];
+/// Research to buy each successive ChemMaster 5000 tier. Index `n` is the cost
+/// of moving from tier `n` to tier `n + 1`, so this is one shorter than
+/// [`DISPENSE_PURITY`].
+///
+/// Cheap early and steep late, deliberately: the first upgrade should land
+/// while the player still remembers being annoyed at dirty reagents, and the
+/// last should be a real endgame purchase. These compete with hints
+/// ([`HINT_COST`]) for the same bank rather than being a parallel currency.
+///
+/// The tier is no longer a *stock* lock — every dispensable reagent is
+/// available from minute one. It buys quality, not access.
+pub const DISPENSER_TIER_COSTS: [u32; 5] = [8, 16, 30, 50, 80];
+
+/// Purity of a reagent the ChemMaster 5000 hands out, per tier.
+///
+/// This is the raw dispensed reagent only. Reactions never read it directly:
+/// `chem_sim::Reaction::product_purity` inherits `input_purity` and can only
+/// lower it, so impurity compounds down a chain on its own — a two-step build
+/// from tier-0 stock lands near 0.64, a three-step near 0.51.
+///
+/// Tier 0 sits clear of the dense 0.25–0.40 band of authored `min_purity`
+/// gates on purpose. A reaction below its gate refuses to start at all rather
+/// than producing worse output, so a lower floor here would close most of the
+/// recipe tree on a fresh save and read as a bug rather than a difficulty.
+/// Single-step chemistry always works at tier 0; depth is what wants the HPLC.
+pub const DISPENSE_PURITY: [f32; 6] = [0.80, 0.85, 0.90, 0.94, 0.97, 1.00];
 
 /// Distinct reagents a beaker can hold when it reacts and still count as a
 /// focused experiment worth learning from — see
@@ -101,6 +122,7 @@ impl Plugin for KnowledgePlugin {
             // Same reasoning as the line above: career-wide, carries no
             // `Entity`, so nothing for `MapEntities` to translate.
             .add_client_message::<BuyHintRequested>(Channel::Ordered)
+            .add_client_message::<UpgradeDispenserRequested>(Channel::Ordered)
             .add_systems(OnEnter(AppState::Playing), initialise_knowledge)
             .add_systems(
                 Update,
@@ -110,6 +132,7 @@ impl Plugin for KnowledgePlugin {
                     (
                         handle_unlock_all,
                         handle_hint_purchase,
+                        handle_dispenser_upgrade,
                         learn_from_experiments,
                         persist_knowledge,
                         broadcast_knowledge,
@@ -180,6 +203,22 @@ fn handle_hint_purchase(
         // into debt — the same trust boundary every other client message here
         // sits behind.
         knowledge.buy_hint(&db, request.reaction);
+    }
+}
+
+/// Buying the next ChemMaster 5000 purity tier. Career-wide and carries no
+/// `Entity`, so like [`BuyHintRequested`] there is nothing to map.
+#[derive(Message, Serialize, Deserialize)]
+pub struct UpgradeDispenserRequested;
+
+fn handle_dispenser_upgrade(
+    mut requests: MessageReader<FromClient<UpgradeDispenserRequested>>,
+    mut knowledge: ResMut<Knowledge>,
+) {
+    for _ in requests.read() {
+        // Same trust boundary as `handle_hint_purchase`: `buy_upgrade` decides
+        // whether it can happen, not the panel that offered the button.
+        knowledge.buy_upgrade();
     }
 }
 
@@ -346,7 +385,49 @@ impl Knowledge {
     /// Research points to upgrade the ChemMaster 5000 to its next tier, or `None`
     /// if it is already at the highest tier.
     pub fn next_upgrade_cost(&self) -> Option<u32> {
-        None
+        DISPENSER_TIER_COSTS
+            .get(self.dispenser_tier as usize)
+            .copied()
+    }
+
+    /// The current ChemMaster 5000 tier.
+    pub fn dispenser_tier(&self) -> u32 {
+        self.dispenser_tier
+    }
+
+    /// Highest tier that can be reached.
+    pub fn max_dispenser_tier() -> u32 {
+        DISPENSER_TIER_COSTS.len() as u32
+    }
+
+    /// Purity of whatever the ChemMaster 5000 dispenses at the current tier.
+    ///
+    /// Saturates at the top of [`DISPENSE_PURITY`] so a save written by a
+    /// future build with more tiers still dispenses something sensible rather
+    /// than panicking on an out-of-range index.
+    pub fn dispense_purity(&self) -> f32 {
+        DISPENSE_PURITY
+            .get(self.dispenser_tier as usize)
+            .copied()
+            .unwrap_or(1.0)
+    }
+
+    /// Spends research on the next ChemMaster 5000 tier.
+    ///
+    /// Re-checks affordability itself, exactly as [`Knowledge::buy_hint`] does:
+    /// this is the trust boundary for the request, not the panel that offered
+    /// it, so a stale or hand-crafted message buys nothing rather than putting
+    /// the bank into debt.
+    pub fn buy_upgrade(&mut self) -> bool {
+        let Some(cost) = self.next_upgrade_cost() else {
+            return false;
+        };
+        if self.research_points < cost {
+            return false;
+        }
+        self.research_points -= cost;
+        self.dispenser_tier += 1;
+        true
     }
 
     /// Exposes every ChemMaster 5000 reagent and recipe without spending research.
@@ -841,16 +922,61 @@ mod tests {
     }
 
     #[test]
-    fn there_is_no_dispenser_upgrade_track() {
+    fn the_dispenser_upgrade_track_buys_purity_and_never_stock() {
         let data = data();
         let mut knowledge = Knowledge::new(&data);
+        let every_reagent = data.reagents.dispensable().count();
+
+        // Tier 0 already reaches every reagent: the track sells quality.
+        assert_eq!(knowledge.dispenser_tier(), 0);
+        assert_eq!(knowledge.dispense_purity(), DISPENSE_PURITY[0]);
+        assert_eq!(knowledge.dispensable(&data).len(), every_reagent);
+
         knowledge.award_research(1000);
+        for tier in 0..Knowledge::max_dispenser_tier() {
+            let cost = knowledge
+                .next_upgrade_cost()
+                .expect("a tier below the maximum must be purchasable");
+            assert_eq!(cost, DISPENSER_TIER_COSTS[tier as usize]);
+            let bank = knowledge.research_points;
+            assert!(knowledge.buy_upgrade());
+            assert_eq!(knowledge.research_points, bank - cost);
+            assert_eq!(knowledge.dispenser_tier(), tier + 1);
+            // Never a stock lock, at any tier.
+            assert_eq!(knowledge.dispensable(&data).len(), every_reagent);
+        }
+
+        // Fully calibrated: nothing left to sell, and stock is clean.
         assert_eq!(knowledge.next_upgrade_cost(), None);
-        assert_eq!(knowledge.research_points, 1000);
-        assert_eq!(
-            knowledge.dispensable(&data).len(),
-            data.reagents.dispensable().count()
-        );
+        assert!(!knowledge.buy_upgrade());
+        assert_eq!(knowledge.dispense_purity(), 1.0);
+    }
+
+    #[test]
+    fn an_unaffordable_upgrade_changes_nothing() {
+        let data = data();
+        let mut knowledge = Knowledge::new(&data);
+        knowledge.award_research(DISPENSER_TIER_COSTS[0] - 1);
+
+        assert!(!knowledge.buy_upgrade());
+        assert_eq!(knowledge.dispenser_tier(), 0);
+        assert_eq!(knowledge.research_points, DISPENSER_TIER_COSTS[0] - 1);
+        assert_eq!(knowledge.dispense_purity(), DISPENSE_PURITY[0]);
+    }
+
+    #[test]
+    fn dispensed_purity_rises_with_every_tier_and_ends_clean() {
+        // The whole point of the track: each tier is a real improvement, and
+        // tier 0 sits above the dense band of authored `min_purity` gates so a
+        // fresh save can still run single-step chemistry.
+        // Tier 0 must clear the 0.70 gates, or a fresh save cannot run the
+        // recipes those reactions gate at all.
+        const { assert!(DISPENSE_PURITY[0] >= 0.75) };
+        assert_eq!(*DISPENSE_PURITY.last().unwrap(), 1.0);
+        assert_eq!(DISPENSE_PURITY.len(), DISPENSER_TIER_COSTS.len() + 1);
+        for pair in DISPENSE_PURITY.windows(2) {
+            assert!(pair[1] > pair[0], "purity must increase every tier");
+        }
     }
 
     #[test]
@@ -862,7 +988,10 @@ mod tests {
         knowledge.unlock_all(&data);
 
         assert_eq!(knowledge.research_points, 7);
+        // The playtest switch tops out the column too, so sandbox stock is
+        // clean rather than tier-0 quality.
         assert_eq!(knowledge.next_upgrade_cost(), None);
+        assert_eq!(knowledge.dispense_purity(), 1.0);
         assert_eq!(knowledge.known_count(), data.reactions.recipe_count());
         assert!(data
             .reagents
@@ -908,7 +1037,29 @@ mod tests {
         let restored = Knowledge::from_save(&data, ron::from_str(&text).unwrap());
 
         assert!(restored.is_reagent_unlocked(&data, hydrogen));
-        assert_eq!(restored.next_upgrade_cost(), None);
+        // A fresh career starts at the bottom of the column, with the first
+        // recalibration still to buy.
+        assert_eq!(restored.dispenser_tier(), 0);
+        assert_eq!(restored.next_upgrade_cost(), Some(DISPENSER_TIER_COSTS[0]));
+    }
+
+    #[test]
+    fn a_purchased_tier_survives_a_save_round_trip() {
+        // `dispenser_tier` is an existing save field reused for purity, so an
+        // old career loads at tier 0 and a new one keeps what it paid for —
+        // neither needs migration data.
+        let data = data();
+        let mut original = Knowledge::new(&data);
+        original.award_research(1000);
+        assert!(original.buy_upgrade());
+        assert!(original.buy_upgrade());
+
+        let text = ron::ser::to_string(&original.to_save(&data)).unwrap();
+        let restored = Knowledge::from_save(&data, ron::from_str(&text).unwrap());
+
+        assert_eq!(restored.dispenser_tier(), 2);
+        assert_eq!(restored.dispense_purity(), DISPENSE_PURITY[2]);
+        assert_eq!(restored.research_points, original.research_points);
     }
 
     fn learn_app() -> App {
