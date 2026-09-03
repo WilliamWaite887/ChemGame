@@ -109,6 +109,7 @@ impl Plugin for SfxPlugin {
             .add_systems(
                 OnEnter(AppState::Playing),
                 (
+                    clear_menu_ambience,
                     reset_radio_cursor,
                     |mut cursor: ResMut<StabilityAudioCursor>| cursor.0 = None,
                     |mut cooldown: ResMut<AmbienceCooldown>| {
@@ -116,12 +117,19 @@ impl Plugin for SfxPlugin {
                     },
                 ),
             )
+            .add_systems(OnEnter(AppState::MainMenu), ensure_menu_ambience)
+            .add_systems(OnEnter(AppState::Connecting), ensure_menu_ambience)
+            // UI feedback and the volume dial are application-wide. Keeping
+            // these outside Playing makes the main menu feel like part of the
+            // game instead of a silent launcher.
+            .add_systems(
+                Update,
+                ((play_ui_click_sfx, play_sfx).chain(), sync_master_volume),
+            )
             .add_systems(
                 Update,
                 (
-                    play_sfx,
                     (fanout_world_sfx.run_if(is_authority), play_world_sfx).chain(),
-                    sync_master_volume,
                     play_reaction_sfx.run_if(is_authority),
                     play_collapse_sfx.run_if(is_authority),
                     play_status_sfx.run_if(is_authority),
@@ -133,7 +141,6 @@ impl Plugin for SfxPlugin {
                     play_evacuation_sfx,
                     play_stability_sfx,
                     play_radio_sfx,
-                    play_ui_click_sfx,
                     play_door_sfx.run_if(is_authority),
                     (schedule_ambience.run_if(is_authority), play_ambience).chain(),
                 )
@@ -524,8 +531,41 @@ fn play_sfx(mut commands: Commands, assets: Res<SfxAssets>, mut requests: Messag
         commands.spawn((
             AudioPlayer::new(assets.handle(*sfx, 0)),
             PlaybackSettings::DESPAWN.with_volume(Volume::Linear(sfx.volume())),
-            crate::until_we_leave_the_lab(),
         ));
+    }
+}
+
+/// Both quiet loops that make the menu's reaction chamber feel powered. They
+/// survive MainMenu <-> Connecting transitions and are removed atomically as
+/// gameplay begins, before the in-lab ambience scheduler takes over.
+#[derive(Component)]
+struct MenuAmbience;
+
+fn ensure_menu_ambience(
+    mut commands: Commands,
+    assets: Res<SfxAssets>,
+    playing: Query<(), With<MenuAmbience>>,
+) {
+    if !playing.is_empty() {
+        return;
+    }
+    if let Some(station) = assets.calm_ambience.last() {
+        commands.spawn((
+            AudioPlayer::new(station.clone()),
+            PlaybackSettings::LOOP.with_volume(Volume::Linear(0.16)),
+            MenuAmbience,
+        ));
+    }
+    commands.spawn((
+        AudioPlayer::new(assets.heater_loop.clone()),
+        PlaybackSettings::LOOP.with_volume(Volume::Linear(0.055)),
+        MenuAmbience,
+    ));
+}
+
+fn clear_menu_ambience(mut commands: Commands, playing: Query<Entity, With<MenuAmbience>>) {
+    for entity in &playing {
+        commands.entity(entity).despawn();
     }
 }
 

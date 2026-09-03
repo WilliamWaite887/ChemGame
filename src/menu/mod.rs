@@ -11,9 +11,14 @@
 //! command line. Those flags still work and still skip the menu — they are how
 //! the game gets launched twice from one terminal while testing co-op.
 
+use bevy::ecs::system::SystemParam;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
+use bevy::input_focus::directional_navigation::DirectionalNavigationPlugin;
+use bevy::input_focus::{FocusCause, InputFocus, InputFocusVisible};
+use bevy::math::CompassOctant;
 use bevy::prelude::*;
+use bevy::ui::auto_directional_navigation::{AutoDirectionalNavigation, AutoDirectionalNavigator};
 
 use crate::arc::{AntagId, CampaignChoice, Mode};
 use crate::net::{self, parse_address, parse_literal_address, ConnectFailed, LaunchMode};
@@ -24,6 +29,8 @@ use crate::ui::{
     TEXT, TEXT_DIM,
 };
 use crate::AppState;
+
+mod backdrop;
 
 /// Which menu screen is up.
 ///
@@ -37,6 +44,8 @@ pub enum MenuScreen {
     Hidden,
     /// Host, Join or Solo.
     Mode,
+    /// Steam hosting and the two ways a guest can join.
+    Multiplayer,
     /// New save, or one of the existing ones.
     Save,
     Training,
@@ -63,29 +72,45 @@ pub enum MenuScreen {
     /// `Mode` directly — `Mode`'s job is the one primary decision, and the
     /// pause root already has room to spare that this screen does not.
     Controls,
+    /// Verified third-party asset and dependency attribution.
+    Credits,
 }
 
 pub struct MenuPlugin;
 
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
-        app.init_state::<MenuScreen>()
+        app.add_plugins(DirectionalNavigationPlugin)
+            .init_state::<MenuScreen>()
             .init_resource::<AddressInput>()
             .init_resource::<PendingMode>()
             .init_resource::<ConnectError>()
             .init_resource::<PendingDelete>()
-            .add_systems(OnEnter(AppState::MainMenu), open_menu)
-            .add_systems(OnExit(AppState::MainMenu), close_menu)
-            .add_systems(OnEnter(AppState::Connecting), open_connecting)
-            .add_systems(OnExit(AppState::Connecting), close_menu)
+            .init_resource::<MenuReturn>()
+            .init_resource::<MenuSyntheticPress>()
+            .init_resource::<MenuStickRepeat>()
+            .insert_resource(InputFocusVisible(true))
+            .add_systems(Startup, backdrop::load_assets)
+            .add_systems(
+                OnEnter(AppState::MainMenu),
+                (backdrop::ensure_environment, open_menu).chain(),
+            )
+            .add_systems(
+                OnEnter(AppState::Connecting),
+                (backdrop::ensure_environment, open_connecting).chain(),
+            )
+            .add_systems(OnEnter(AppState::Playing), backdrop::clear_environment)
             .add_systems(OnEnter(MenuScreen::Mode), show_mode_screen)
+            .add_systems(OnEnter(MenuScreen::Multiplayer), show_multiplayer_screen)
             .add_systems(OnEnter(MenuScreen::Save), show_save_screen)
             .add_systems(OnEnter(MenuScreen::Campaign), show_campaign_screen)
             .add_systems(OnEnter(MenuScreen::Join), show_join_screen)
             .add_systems(OnEnter(MenuScreen::Connecting), show_connecting_screen)
             .add_systems(OnEnter(MenuScreen::Settings), show_settings_screen)
             .add_systems(OnEnter(MenuScreen::Controls), show_controls_screen)
+            .add_systems(OnEnter(MenuScreen::Credits), show_credits_screen)
             .add_systems(OnExit(MenuScreen::Mode), clear_screen)
+            .add_systems(OnExit(MenuScreen::Multiplayer), clear_screen)
             // A stale confirmation must not reappear if the player leaves the
             // save list and comes back — cleared here rather than trusted to
             // reset itself, the same defensive footing `open_connecting`
@@ -99,15 +124,20 @@ impl Plugin for MenuPlugin {
             .add_systems(OnExit(MenuScreen::Connecting), clear_screen)
             .add_systems(OnExit(MenuScreen::Settings), clear_screen)
             .add_systems(OnExit(MenuScreen::Controls), clear_screen)
+            .add_systems(OnExit(MenuScreen::Credits), clear_screen)
             .add_systems(
                 Update,
                 (
+                    prepare_menu_navigation,
+                    navigate_menu,
                     type_address.run_if(in_state(MenuScreen::Join)),
                     show_typed_address.run_if(in_state(MenuScreen::Join)),
                     handle_menu_clicks,
                     refresh_save_screen.run_if(in_state(MenuScreen::Save)),
                     handle_connect_failure.run_if(in_state(AppState::Connecting)),
                     button_feedback,
+                    show_menu_focus,
+                    backdrop::animate_environment.run_if(backdrop::menu_or_connecting),
                 )
                     .chain()
                     .run_if(in_state(AppState::MainMenu).or_else(in_state(AppState::Connecting))),
@@ -125,26 +155,36 @@ impl Plugin for MenuPlugin {
 #[derive(Component)]
 struct MenuRoot;
 
-/// The menu's own camera.
-///
-/// The lab's camera belongs to a chemist and does not exist until one has been
-/// assigned, which happens well after the menu needs to be on screen — with no
-/// camera at all, bevy has nothing to draw the UI onto.
-#[derive(Component)]
-struct MenuCamera;
-
 /// Host or Solo, remembered while the player picks a save.
 #[derive(Resource, Default, Clone, Copy)]
 struct PendingMode(LaunchMode);
 
 /// Why the last join attempt failed, if it did.
 ///
-/// Shown on the mode screen after `handle_connect_failure` bounces back from
-/// `AppState::Connecting` — the one place in the menu that has to say
+/// Shown on the direct-join screen after `handle_connect_failure` bounces back
+/// from `AppState::Connecting` — the one place in the menu that has to say
 /// something went wrong out loud, since silence is exactly the failure mode
 /// this whole feature exists to fix.
 #[derive(Resource, Default)]
 struct ConnectError(Option<String>);
+
+/// Screen restored after temporarily leaving `MainMenu` to connect.
+#[derive(Resource, Default)]
+struct MenuReturn(Option<MenuScreen>);
+
+/// A controller/keyboard activation is translated to the same `Interaction`
+/// transition a mouse click produces, so every existing button handler stays
+/// the single source of truth.
+#[derive(Resource, Default)]
+struct MenuSyntheticPress(Option<Entity>);
+
+/// Repeat state for an analogue stick held past the navigation threshold.
+#[derive(Resource, Default)]
+struct MenuStickRepeat {
+    direction: IVec2,
+    held_for: f32,
+    since_repeat: f32,
+}
 
 /// The address being typed on the join screen.
 #[derive(Resource, Default)]
@@ -167,6 +207,249 @@ fn reset_pending_delete(mut pending: ResMut<PendingDelete>) {
     pending.0 = None;
 }
 
+/// Makes every live menu button discoverable by Bevy's spatial navigator and
+/// establishes a deterministic first focus after a screen rebuild.
+fn prepare_menu_navigation(
+    mut commands: Commands,
+    buttons: Query<(Entity, Option<&crate::ui::ButtonTone>), With<Button>>,
+    added: Query<Entity, Added<Button>>,
+    mut focus: ResMut<InputFocus>,
+) {
+    for entity in &added {
+        commands.entity(entity).insert((
+            AutoDirectionalNavigation::default(),
+            Outline::new(px(2), px(2), Color::NONE),
+        ));
+    }
+
+    let focus_is_live = focus
+        .get()
+        .is_some_and(|entity| buttons.get(entity).is_ok());
+    if focus_is_live {
+        return;
+    }
+
+    let mut eligible: Vec<_> = buttons
+        .iter()
+        .filter(|(_, tone)| tone != &Some(&crate::ui::ButtonTone::Disabled))
+        .map(|(entity, _)| entity)
+        .collect();
+    eligible.sort_by_key(|entity| entity.index());
+    if let Some(first) = eligible.first().copied() {
+        focus.set(first, FocusCause::Navigated);
+    } else {
+        focus.clear();
+    }
+}
+
+fn stick_direction(stick: Vec2) -> IVec2 {
+    if stick.length_squared() < 0.36 {
+        IVec2::ZERO
+    } else if stick.x.abs() > stick.y.abs() {
+        IVec2::new(stick.x.signum() as i32, 0)
+    } else {
+        IVec2::new(0, stick.y.signum() as i32)
+    }
+}
+
+#[derive(SystemParam)]
+struct MenuControls<'w, 's> {
+    time: Res<'w, Time>,
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    gamepads: Query<'w, 's, &'static Gamepad>,
+    rebinding: Res<'w, Rebinding>,
+}
+
+type MenuButtons<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static mut Interaction,
+        Option<&'static MenuAction>,
+        Option<&'static crate::tutorial::ui::Action>,
+        Has<settings::NavigableSlider>,
+    ),
+    With<Button>,
+>;
+
+/// Keyboard, D-pad, and left-stick navigation for every main-menu screen.
+/// Left/right adjusts a focused slider; all other controls use the same
+/// automatic spatial relationships as their on-screen layout.
+fn navigate_menu(
+    input: MenuControls,
+    mut repeat: ResMut<MenuStickRepeat>,
+    mut synthetic: ResMut<MenuSyntheticPress>,
+    mut navigator: AutoDirectionalNavigator,
+    mut buttons: MenuButtons,
+    mut scroll_panes: Query<(&mut ScrollPosition, &ComputedNode), With<crate::ui::ScrollPane>>,
+    mut slider_adjustments: MessageWriter<settings::AdjustFocusedSlider>,
+) {
+    // Release last frame's synthetic press before looking for a new one.
+    if let Some(entity) = synthetic.0.take() {
+        if let Ok((_, mut interaction, _, _, _)) = buttons.get_mut(entity) {
+            *interaction = Interaction::None;
+        }
+    }
+
+    // While a key binding is armed, its capture system owns the keyboard.
+    // Controller input remains available so the user cannot strand focus.
+    let keyboard_enabled = !input.rebinding.is_armed();
+    let mut direction = IVec2::ZERO;
+    if keyboard_enabled {
+        direction.x = i32::from(input.keys.just_pressed(KeyCode::ArrowRight))
+            - i32::from(input.keys.just_pressed(KeyCode::ArrowLeft));
+        direction.y = i32::from(input.keys.just_pressed(KeyCode::ArrowUp))
+            - i32::from(input.keys.just_pressed(KeyCode::ArrowDown));
+    }
+
+    let mut select = keyboard_enabled
+        && (input.keys.just_pressed(KeyCode::Enter) || input.keys.just_pressed(KeyCode::Space));
+    let mut back = keyboard_enabled && input.keys.just_pressed(KeyCode::Escape);
+    let mut scroll_delta = if keyboard_enabled {
+        520.0
+            * (i32::from(input.keys.just_pressed(KeyCode::PageDown))
+                - i32::from(input.keys.just_pressed(KeyCode::PageUp))) as f32
+    } else {
+        0.0
+    };
+    let scroll_to_start = keyboard_enabled && input.keys.just_pressed(KeyCode::Home);
+    let scroll_to_end = keyboard_enabled && input.keys.just_pressed(KeyCode::End);
+    let mut analogue = IVec2::ZERO;
+    for gamepad in &input.gamepads {
+        direction.x += i32::from(gamepad.just_pressed(GamepadButton::DPadRight))
+            - i32::from(gamepad.just_pressed(GamepadButton::DPadLeft));
+        direction.y += i32::from(gamepad.just_pressed(GamepadButton::DPadUp))
+            - i32::from(gamepad.just_pressed(GamepadButton::DPadDown));
+        select |= gamepad.just_pressed(GamepadButton::South);
+        back |= gamepad.just_pressed(GamepadButton::East);
+        scroll_delta += 520.0
+            * (i32::from(gamepad.just_pressed(GamepadButton::RightTrigger))
+                - i32::from(gamepad.just_pressed(GamepadButton::LeftTrigger))) as f32;
+        scroll_delta -= gamepad.right_stick().y * 620.0 * input.time.delta_secs();
+        if analogue == IVec2::ZERO {
+            analogue = stick_direction(gamepad.left_stick());
+        }
+    }
+
+    if scroll_delta != 0.0 || scroll_to_start || scroll_to_end {
+        for (mut position, computed) in &mut scroll_panes {
+            let limit = (computed.content_size().y - computed.size().y).max(0.0);
+            position.y = if scroll_to_start {
+                0.0
+            } else if scroll_to_end {
+                limit
+            } else {
+                (position.y + scroll_delta).clamp(0.0, limit)
+            };
+        }
+    }
+
+    if analogue == IVec2::ZERO {
+        repeat.direction = IVec2::ZERO;
+        repeat.held_for = 0.0;
+        repeat.since_repeat = 0.0;
+    } else if analogue != repeat.direction {
+        repeat.direction = analogue;
+        repeat.held_for = 0.0;
+        repeat.since_repeat = 0.0;
+        if direction == IVec2::ZERO {
+            direction = analogue;
+        }
+    } else {
+        let delta = input.time.delta_secs();
+        repeat.held_for += delta;
+        repeat.since_repeat += delta;
+        if repeat.held_for >= 0.38 && repeat.since_repeat >= 0.12 {
+            repeat.since_repeat = 0.0;
+            if direction == IVec2::ZERO {
+                direction = analogue;
+            }
+        }
+    }
+
+    direction.x = direction.x.signum();
+    direction.y = direction.y.signum();
+
+    if let Some(focused) = navigator.input_focus() {
+        let focused_slider = direction.y == 0
+            && direction.x != 0
+            && buttons
+                .get(focused)
+                .is_ok_and(|(_, _, _, _, slider)| slider);
+        if focused_slider {
+            slider_adjustments.write(settings::AdjustFocusedSlider {
+                entity: focused,
+                direction: direction.x as f32,
+            });
+            direction = IVec2::ZERO;
+        }
+    }
+
+    let compass = match (direction.x, direction.y) {
+        (0, 1) => Some(CompassOctant::North),
+        (0, -1) => Some(CompassOctant::South),
+        (1, 0) => Some(CompassOctant::East),
+        (-1, 0) => Some(CompassOctant::West),
+        (1, 1) => Some(CompassOctant::NorthEast),
+        (-1, 1) => Some(CompassOctant::NorthWest),
+        (1, -1) => Some(CompassOctant::SouthEast),
+        (-1, -1) => Some(CompassOctant::SouthWest),
+        _ => None,
+    };
+    if let Some(compass) = compass {
+        let _ = navigator.navigate(compass);
+    }
+
+    // Hovered mouse controls take focus without hiding the controller ring.
+    for (entity, interaction, _, _, _) in &mut buttons {
+        if *interaction == Interaction::Hovered && navigator.input_focus() != Some(entity) {
+            navigator
+                .manual_directional_navigation
+                .focus
+                .set(entity, FocusCause::Pressed);
+        }
+    }
+
+    let target = if back {
+        buttons
+            .iter()
+            .find_map(|(entity, _, menu_action, training_action, _)| {
+                let menu_back = menu_action
+                    .is_some_and(|action| matches!(action, MenuAction::Back | MenuAction::Cancel));
+                let training_back = training_action
+                    .is_some_and(|action| matches!(action, crate::tutorial::ui::Action::Back));
+                (menu_back || training_back).then_some(entity)
+            })
+    } else if select {
+        navigator.input_focus()
+    } else {
+        None
+    };
+    if let Some(entity) = target {
+        if let Ok((_, mut interaction, _, _, _)) = buttons.get_mut(entity) {
+            *interaction = Interaction::Pressed;
+            synthetic.0 = Some(entity);
+        }
+    }
+}
+
+/// Draws a slim cyan ring around the focused control without replacing each
+/// button's semantic hover/selected border colour.
+fn show_menu_focus(
+    focus: Res<InputFocus>,
+    visible: Res<InputFocusVisible>,
+    mut buttons: Query<(Entity, &mut Outline), With<AutoDirectionalNavigation>>,
+) {
+    for (entity, mut outline) in &mut buttons {
+        outline.color = if visible.0 && focus.get() == Some(entity) {
+            Color::srgba(0.30, 0.82, 1.0, 0.90)
+        } else {
+            Color::NONE
+        };
+    }
+}
+
 /// Marks the text node showing what has been typed.
 #[derive(Component)]
 struct AddressField;
@@ -181,6 +464,7 @@ pub(crate) enum MenuAction {
     ChooseHost,
     ChooseSolo,
     ChooseJoin,
+    OpenMultiplayer,
     NewSave,
     /// Opens deterministic antagonist selection for a fresh chemist save.
     /// Kept out of shipping builds along with its screen and click handler.
@@ -205,6 +489,7 @@ pub(crate) enum MenuAction {
     OpenTraining,
     OpenSettings,
     OpenControls,
+    OpenCredits,
     /// Puts every dial and display option back where it shipped. Deliberately
     /// leaves `bindings` untouched — see [`MenuAction::RestoreBindings`].
     RestoreDefaults,
@@ -228,11 +513,11 @@ fn open_menu(
     career: Option<Res<crate::tutorial::StartCareer>>,
     lessons: Option<Res<crate::tutorial::ui::ShowLessons>>,
     mut pending: ResMut<PendingMode>,
+    mut return_to: ResMut<MenuReturn>,
 ) {
     // Done here rather than at startup so it happens exactly once, on the path
     // that is about to list the saves.
     saves::migrate_legacy_saves();
-    commands.spawn((Camera2d, MenuCamera));
     if lessons.is_some() {
         commands.remove_resource::<crate::tutorial::ui::ShowLessons>();
         screen.set(MenuScreen::TrainingLessons);
@@ -240,6 +525,8 @@ fn open_menu(
         pending.0 = LaunchMode::Singleplayer;
         commands.remove_resource::<crate::tutorial::StartCareer>();
         screen.set(MenuScreen::Save);
+    } else if let Some(target) = return_to.0.take() {
+        screen.set(target);
     } else {
         screen.set(MenuScreen::Mode);
     }
@@ -247,33 +534,12 @@ fn open_menu(
 
 /// Opens the waiting-room screen on the way into `AppState::Connecting`.
 ///
-/// Mirrors `open_menu`: a fresh `MenuCamera` (the previous one, if any, was
-/// just despawned by `close_menu` on the way out of `MainMenu`), and clears
-/// any error left over from an earlier attempt so a successful retry does not
-/// show a stale failure the moment it lands back on the mode screen.
-fn open_connecting(
-    mut commands: Commands,
-    mut screen: ResMut<NextState<MenuScreen>>,
-    mut error: ResMut<ConnectError>,
-) {
+/// The menu environment deliberately remains alive during the handshake.
+/// Clear an older error here so a successful retry cannot leave stale failure
+/// copy waiting behind the connecting panel.
+fn open_connecting(mut screen: ResMut<NextState<MenuScreen>>, mut error: ResMut<ConnectError>) {
     error.0 = None;
-    commands.spawn((Camera2d, MenuCamera));
     screen.set(MenuScreen::Connecting);
-}
-
-fn close_menu(
-    mut commands: Commands,
-    cameras: Query<Entity, With<MenuCamera>>,
-    roots: Query<Entity, With<MenuRoot>>,
-) {
-    for camera in &cameras {
-        commands.entity(camera).despawn();
-    }
-    // `try_` because leaving the menu also exits the current screen, and that
-    // despawns the same root: both run in this frame's state transition.
-    for root in &roots {
-        commands.entity(root).try_despawn();
-    }
 }
 
 fn clear_screen(mut commands: Commands, roots: Query<Entity, With<MenuRoot>>) {
@@ -286,56 +552,63 @@ fn clear_screen(mut commands: Commands, roots: Query<Entity, With<MenuRoot>>) {
 // Screens
 // ---------------------------------------------------------------------------
 
-fn show_mode_screen(mut commands: Commands, error: Res<ConnectError>) {
-    menu_shell(
+fn show_mode_screen(mut commands: Commands) {
+    landing_shell(&mut commands, |panel| {
+        panel.spawn(landing_choice(
+            "Solo",
+            "Choose or begin a chemistry career.",
+            MenuAction::ChooseSolo,
+        ));
+        panel.spawn(landing_choice(
+            "Multiplayer",
+            "Host or join a lab for up to four chemists.",
+            MenuAction::OpenMultiplayer,
+        ));
+        panel.spawn(landing_choice(
+            "Training",
+            "Guided lessons and an open practice laboratory.",
+            MenuAction::OpenTraining,
+        ));
+        panel.spawn(landing_choice(
+            "Settings",
+            "Display, sound, look, and controls.",
+            MenuAction::OpenSettings,
+        ));
+        panel.spawn(landing_choice("Quit", "Close ChemGame.", MenuAction::Quit));
+    });
+}
+
+fn show_multiplayer_screen(mut commands: Commands, steam: Option<Res<crate::net::steam::Client>>) {
+    menu_panel_shell(
         &mut commands,
         MenuRoot,
-        "ChemGame",
-        "A shift in the chemistry lab.",
+        "Multiplayer",
+        "One shared career, one shared lab, up to four chemists.",
         |panel| {
-            if let Some(reason) = &error.0 {
-                panel.spawn(label(
-                    format!("Could not connect: {reason}"),
-                    13.0,
-                    ERROR_TEXT,
+            if steam.is_some() {
+                panel.spawn(choice(
+                    "Host a lab",
+                    "Choose a career and open a friends-only Steam lobby.",
+                    MenuAction::ChooseHost,
+                ));
+            } else {
+                panel.spawn(disabled_choice(
+                    "Host a lab — Steam unavailable",
+                    "Start Steam and relaunch ChemGame to open a lobby.",
                 ));
             }
             panel.spawn(choice(
-                "Solo",
-                "One chemist. No networking.",
-                MenuAction::ChooseSolo,
-            ));
-            panel.spawn(choice(
-                "Training",
-                "A solo course and a laboratory for practice.",
-                MenuAction::OpenTraining,
-            ));
-            panel.spawn(choice(
-                "Host",
-                "Play your save and open the lab to as many as three other chemists, over Steam.",
-                MenuAction::ChooseHost,
-            ));
-            panel.spawn(choice(
-                "Join",
-                "Work someone else's lab. Their save, their shift. \
-                 If they clicked Host here, accept their Steam invite \
-                 instead — you don't need this screen.",
+                "Join a lab",
+                "Accept a Steam invite, or connect directly on a local network.",
                 MenuAction::ChooseJoin,
             ));
-            panel.spawn(choice(
-                "Settings",
-                "Look sensitivity, field of view, volume, display, and key bindings.",
-                MenuAction::OpenSettings,
-            ));
-            panel.spawn(row()).with_children(|row| {
-                row.spawn(button("Quit", MenuAction::Quit));
-            });
+            panel.spawn(choice("Back", "Return to the main menu.", MenuAction::Back));
         },
     );
 }
 
 fn show_settings_screen(mut commands: Commands, settings: Res<Settings>) {
-    menu_shell(
+    menu_panel_shell(
         &mut commands,
         MenuRoot,
         "Settings",
@@ -362,7 +635,7 @@ fn show_controls_screen(
     settings: Res<Settings>,
     rebinding: Res<Rebinding>,
 ) {
-    menu_shell(
+    menu_panel_shell(
         &mut commands,
         MenuRoot,
         "Controls",
@@ -379,6 +652,119 @@ fn show_controls_screen(
     );
 }
 
+fn show_credits_screen(mut commands: Commands) {
+    menu_panel_shell(
+        &mut commands,
+        MenuRoot,
+        "Credits & licenses",
+        "Verified third-party attribution. Scroll with the wheel, Page Up/Down, or controller bumpers/right stick.",
+        |panel| {
+            panel
+                .spawn((
+                    Node {
+                        width: percent(100),
+                        max_height: vh(68),
+                        padding: UiRect::right(px(12)),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    ScrollPosition::default(),
+                    crate::ui::ScrollPane,
+                ))
+                .with_children(|credits| {
+                    credits.spawn((
+                        Text::new(credits_text()),
+                        TextFont::from_font_size(13.0),
+                        TextColor(TEXT_DIM),
+                        TextLayout {
+                            linebreak: LineBreak::WordBoundary,
+                            ..default()
+                        },
+                        Node {
+                            width: percent(100),
+                            ..default()
+                        },
+                    ));
+                });
+            panel.spawn(choice("Back", "Return to the main menu.", MenuAction::Back));
+        },
+    );
+}
+
+/// Turns the repository's single attribution source into readable menu text.
+/// Keeping this derived avoids a second credits list silently going stale.
+fn credits_text() -> String {
+    let mut out = String::new();
+    let mut skip_original_work = false;
+    for raw in include_str!("../../CREDITS.md").lines() {
+        let line = raw.trim();
+        if line.starts_with("## Artwork and models") {
+            skip_original_work = true;
+            continue;
+        }
+        if skip_original_work && line.starts_with("## ") {
+            skip_original_work = false;
+        }
+        if skip_original_work {
+            continue;
+        }
+        if line.is_empty() {
+            out.push('\n');
+            continue;
+        }
+        if line.starts_with("|---") || line.starts_with("| File ") {
+            continue;
+        }
+        if line.starts_with('|') {
+            let fields: Vec<_> = line
+                .trim_matches('|')
+                .split('|')
+                .map(|field| clean_credit_markdown(field.trim()))
+                .collect();
+            if let Some((file, details)) = fields.split_first() {
+                out.push_str(file);
+                out.push('\n');
+                out.push_str("  ");
+                out.push_str(&details.join(" - "));
+                out.push_str("\n\n");
+            }
+            continue;
+        }
+        let heading = line.trim_start_matches('#').trim();
+        if heading == "Third-party asset credits" {
+            continue;
+        }
+        if line.starts_with('#') {
+            if !out.ends_with("\n\n") {
+                out.push('\n');
+            }
+            out.push_str(&heading.to_uppercase());
+            out.push_str("\n\n");
+        } else {
+            out.push_str(&clean_credit_markdown(line));
+            out.push('\n');
+        }
+    }
+    crate::ui::font_safe_text(out)
+}
+
+fn clean_credit_markdown(input: &str) -> String {
+    let mut text = input.replace("**", "").replace('`', "");
+    while let Some(open) = text.find('[') {
+        let Some(label_end) = text[open + 1..].find("](").map(|at| open + 1 + at) else {
+            break;
+        };
+        let url_start = label_end + 2;
+        let Some(url_end) = text[url_start..].find(')').map(|at| url_start + at) else {
+            break;
+        };
+        let label = text[open + 1..label_end].to_string();
+        let url = text[url_start..url_end].to_string();
+        text.replace_range(open..=url_end, &format!("{label} ({url})"));
+    }
+    text
+}
+
 fn show_save_screen(
     mut commands: Commands,
     pending_mode: Res<PendingMode>,
@@ -392,55 +778,72 @@ fn show_save_screen(
 /// arming or clearing a confirmation is not a `MenuScreen` transition, so
 /// there is no `OnEnter` to re-run.
 fn render_save_screen(commands: &mut Commands, mode: LaunchMode, pending_delete: &PendingDelete) {
-    let subtitle = match mode {
-        LaunchMode::HostSteam => "Hosting — the save you pick is the lab you both work.",
-        _ => "Playing alone.",
+    let (title, subtitle) = match mode {
+        LaunchMode::HostSteam => (
+            "Host a career",
+            "The career you choose becomes the shared Steam lab.",
+        ),
+        _ => (
+            "Solo careers",
+            "Choose an existing career or begin a new one.",
+        ),
     };
     let slots = saves::list_slots();
 
-    menu_shell(commands, MenuRoot, "Choose a save", subtitle, |panel| {
-        panel.spawn(choice(
-            "New save",
-            "Start over: shift 1, an empty notebook.",
-            MenuAction::NewSave,
-        ));
-        #[cfg(debug_assertions)]
-        panel.spawn(choice(
-            "New antagonist test save",
-            "Testing only: start a fresh chemist career against a chosen antagonist.",
-            MenuAction::NewAntagonistTestSave,
-        ));
+    menu_panel_shell(commands, MenuRoot, title, subtitle, |panel| {
+        panel
+            .spawn((
+                Node {
+                    width: percent(100),
+                    max_height: vh(68),
+                    padding: UiRect::right(px(10)),
+                    flex_direction: FlexDirection::Column,
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                },
+                ScrollPosition::default(),
+                crate::ui::ScrollPane,
+            ))
+            .with_children(|list| {
+                list.spawn(choice(
+                    "New career",
+                    "Start over: shift 1, an empty notebook.",
+                    MenuAction::NewSave,
+                ));
+                #[cfg(debug_assertions)]
+                list.spawn(choice(
+                    "New antagonist test save",
+                    "Testing only: start a fresh chemist career against a chosen antagonist.",
+                    MenuAction::NewAntagonistTestSave,
+                ));
 
-        if slots.is_empty() {
-            panel.spawn(label("No saved games yet.", 14.0, TEXT_DIM));
-        } else {
-            for slot in slots {
-                if pending_delete.0.as_deref() == Some(slot.name.as_str()) {
-                    delete_confirmation_card(panel, &slot.name);
-                    continue;
-                }
+                if slots.is_empty() {
+                    list.spawn(label("No saved games yet.", 14.0, TEXT_DIM));
+                } else {
+                    for slot in slots {
+                        if pending_delete.0.as_deref() == Some(slot.name.as_str()) {
+                            delete_confirmation_card(list, &slot.name);
+                            continue;
+                        }
 
-                let evacuated = slot.evacuated;
-                let action = MenuAction::LoadSave(slot.name.clone());
-                let mut spawned = panel.spawn(choice(slot.name.clone(), &slot.detail(), action));
-                // Dimmed, not removed: the row still names the save and
-                // says why it stopped (`SlotSummary::detail`'s "Evacuated
-                // — " prefix), it just cannot be clicked back into. The
-                // actual gate is `handle_menu_clicks`'s own defensive
-                // re-check, same "dim the button, refuse the click"
-                // convention `ui::draw_department_shop`'s `Refused`
-                // marker already uses for an unaffordable purchase.
-                if evacuated {
-                    spawned.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
+                        if slot.evacuated {
+                            list.spawn(disabled_choice(&slot.name, &slot.detail()));
+                        } else {
+                            list.spawn(choice(
+                                slot.name.clone(),
+                                &slot.detail(),
+                                MenuAction::LoadSave(slot.name.clone()),
+                            ));
+                        }
+                        list.spawn(row()).with_children(|row| {
+                            row.spawn(button(
+                                "Delete save",
+                                MenuAction::RequestDeleteSave(slot.name.clone()),
+                            ));
+                        });
+                    }
                 }
-                panel.spawn(row()).with_children(|row| {
-                    row.spawn(button(
-                        "Delete save",
-                        MenuAction::RequestDeleteSave(slot.name.clone()),
-                    ));
-                });
-            }
-        }
+            });
 
         panel.spawn(row()).with_children(|row| {
             row.spawn(button("Back", MenuAction::Back));
@@ -514,7 +917,7 @@ fn delete_confirmation_card(panel: &mut ChildSpawnerCommands, name: &str) {
 fn show_campaign_screen(mut commands: Commands) {
     let unlocked = saves::thwarted_antags();
 
-    menu_shell(
+    menu_panel_shell(
         &mut commands,
         MenuRoot,
         "A new career",
@@ -552,7 +955,7 @@ fn show_campaign_screen(mut commands: Commands) {
 /// builds, so the normal new-save flow cannot reveal the hidden roster.
 #[cfg(debug_assertions)]
 fn show_antagonist_test_screen(mut commands: Commands) {
-    menu_shell(
+    menu_panel_shell(
         &mut commands,
         MenuRoot,
         "Antagonist test save",
@@ -572,7 +975,11 @@ fn show_antagonist_test_screen(mut commands: Commands) {
     );
 }
 
-fn show_join_screen(mut commands: Commands, mut input: ResMut<AddressInput>) {
+fn show_join_screen(
+    mut commands: Commands,
+    mut input: ResMut<AddressInput>,
+    error: Res<ConnectError>,
+) {
     // Prefilled, because on a home network it is the same address every time
     // and retyping it is the worst part of joining.
     if input.text.is_empty() {
@@ -582,14 +989,42 @@ fn show_join_screen(mut commands: Commands, mut input: ResMut<AddressInput>) {
     }
     let typed = input.text.clone();
 
-    menu_shell(
+    menu_panel_shell(
         &mut commands,
         MenuRoot,
         "Join a lab",
-        "For a host who started their game from a terminal on your local network. \
-         If your host instead clicked Host in the menu, they're using Steam, so \
-         accept their overlay invite instead of typing an address here.",
+        "Steam invitations connect automatically. Direct addresses are for LAN and development hosts.",
         |panel| {
+            panel
+                .spawn((
+                    Node {
+                        width: percent(100),
+                        padding: UiRect::all(px(12)),
+                        margin: UiRect::bottom(px(6)),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(3),
+                        border: UiRect::left(px(3)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.08, 0.24, 0.31, 0.86)),
+                    BorderColor::all(Color::srgb(0.30, 0.72, 0.92)),
+                ))
+                .with_children(|steam| {
+                    steam.spawn(label("JOIN THROUGH STEAM", 13.0, TEXT));
+                    steam.spawn(label(
+                        "Accept an invite or choose Join Game from the Steam friends list.",
+                        13.0,
+                        TEXT_DIM,
+                    ));
+                });
+            if let Some(reason) = &error.0 {
+                panel.spawn(label(
+                    format!("Could not connect: {reason}"),
+                    13.0,
+                    ERROR_TEXT,
+                ));
+            }
+            panel.spawn(label("DIRECT / LAN", 13.0, TEXT_DIM));
             panel
                 .spawn((
                     Node {
@@ -635,7 +1070,7 @@ fn show_connecting_screen(mut commands: Commands, mode: Res<LaunchMode>) {
         _ => "Connecting…".to_string(),
     };
 
-    menu_shell(&mut commands, MenuRoot, "Joining a lab", &detail, |panel| {
+    menu_panel_shell(&mut commands, MenuRoot, "Joining a lab", &detail, |panel| {
         panel.spawn(row()).with_children(|row| {
             row.spawn(button("Cancel", MenuAction::Cancel));
         });
@@ -744,6 +1179,8 @@ fn handle_menu_clicks(
     mut pending: ResMut<PendingMode>,
     mut pending_delete: ResMut<PendingDelete>,
     mut input: ResMut<AddressInput>,
+    mut connect_error: ResMut<ConnectError>,
+    mut return_to: ResMut<MenuReturn>,
     mut settings: ResMut<Settings>,
     mut quit: MessageWriter<AppExit>,
 ) {
@@ -774,7 +1211,11 @@ fn handle_menu_clicks(
                 pending.0 = LaunchMode::HostSteam;
                 screen.set(MenuScreen::Save);
             }
-            MenuAction::ChooseJoin => screen.set(MenuScreen::Join),
+            MenuAction::ChooseJoin => {
+                connect_error.0 = None;
+                screen.set(MenuScreen::Join);
+            }
+            MenuAction::OpenMultiplayer => screen.set(MenuScreen::Multiplayer),
             MenuAction::OpenTraining => screen.set(MenuScreen::Training),
             // With nothing unlocked there is only one kind of new save, and a
             // one-option screen asking which kind you want would both waste a
@@ -882,6 +1323,7 @@ fn handle_menu_clicks(
             }
             MenuAction::Cancel => {
                 net::abandon_connection_attempt(&mut commands, *mode);
+                return_to.0 = Some(MenuScreen::Multiplayer);
                 app_state.set(AppState::MainMenu);
             }
             // Back goes up one level, not all the way out: the campaign
@@ -893,6 +1335,8 @@ fn handle_menu_clicks(
                 #[cfg(debug_assertions)]
                 MenuScreen::AntagonistTest => MenuScreen::Save,
                 MenuScreen::Controls => MenuScreen::Settings,
+                MenuScreen::Save if pending.0 == LaunchMode::HostSteam => MenuScreen::Multiplayer,
+                MenuScreen::Join => MenuScreen::Multiplayer,
                 _ => MenuScreen::Mode,
             }),
             MenuAction::Quit => {
@@ -900,6 +1344,7 @@ fn handle_menu_clicks(
             }
             MenuAction::OpenSettings => screen.set(MenuScreen::Settings),
             MenuAction::OpenControls => screen.set(MenuScreen::Controls),
+            MenuAction::OpenCredits => screen.set(MenuScreen::Credits),
             MenuAction::RestoreDefaults => settings::restore_settings_defaults(&mut settings),
             MenuAction::RestoreBindings => settings::restore_bindings_defaults(&mut settings),
             // These three only mutate `PendingDelete`; `refresh_save_screen`
@@ -931,6 +1376,7 @@ fn handle_connect_failure(
     mode: Res<LaunchMode>,
     mut app_state: ResMut<NextState<AppState>>,
     mut error: ResMut<ConnectError>,
+    mut return_to: ResMut<MenuReturn>,
 ) {
     // `.last()`: if several arrive the same frame, only the final word matters
     // — but the read still has to drain the whole reader, or an earlier one
@@ -940,6 +1386,7 @@ fn handle_connect_failure(
     };
     net::abandon_connection_attempt(&mut commands, *mode);
     error.0 = Some(failure.reason.clone());
+    return_to.0 = Some(MenuScreen::Join);
     app_state.set(AppState::MainMenu);
 }
 
@@ -973,6 +1420,232 @@ fn start(
 // ---------------------------------------------------------------------------
 // Widgets
 // ---------------------------------------------------------------------------
+
+const MENU_RAIL_BG: Color = Color::srgba(0.035, 0.047, 0.061, 0.94);
+const MENU_SCRIM: Color = Color::srgba(0.008, 0.012, 0.018, 0.34);
+const MENU_ACCENT: Color = Color::srgb(0.30, 0.72, 0.92);
+
+/// The deliberately asymmetric landing page: a quiet work-order rail over the
+/// live lab, not a dialog box floating in the middle of an empty screen.
+fn landing_shell(commands: &mut Commands, body: impl FnOnce(&mut ChildSpawnerCommands)) {
+    commands
+        .spawn((
+            MenuRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                height: percent(100),
+                ..default()
+            },
+            BackgroundColor(MENU_SCRIM),
+        ))
+        .with_children(|screen| {
+            screen
+                .spawn((
+                    Node {
+                        width: vw(42),
+                        min_width: px(410),
+                        max_width: px(590),
+                        height: percent(100),
+                        padding: UiRect::axes(px(48), px(42)),
+                        flex_direction: FlexDirection::Column,
+                        justify_content: JustifyContent::SpaceBetween,
+                        border: UiRect::right(px(1)),
+                        ..default()
+                    },
+                    BackgroundColor(MENU_RAIL_BG),
+                    BorderColor::all(Color::srgba(0.30, 0.72, 0.92, 0.28)),
+                ))
+                .with_children(|rail| {
+                    rail.spawn(Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(3),
+                        ..default()
+                    })
+                    .with_children(|brand| {
+                        brand.spawn((
+                            Text::new("CHEMGAME"),
+                            TextFont::from_font_size(42.0),
+                            TextColor(TEXT),
+                        ));
+                        brand.spawn((
+                            Node {
+                                width: px(112),
+                                height: px(3),
+                                margin: UiRect::vertical(px(7)),
+                                ..default()
+                            },
+                            BackgroundColor(MENU_ACCENT),
+                        ));
+                        brand.spawn(label("STATION CHEMISTRY DIVISION", 12.0, MENU_ACCENT));
+                        brand.spawn(label("A shift in the chemistry lab.", 14.0, TEXT_DIM));
+                    });
+                    rail.spawn(Node {
+                        width: percent(100),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(7),
+                        ..default()
+                    })
+                    .with_children(body);
+                    rail.spawn(Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(3),
+                        ..default()
+                    })
+                    .with_children(|footer| {
+                        footer.spawn(label(
+                            "ARROWS / D-PAD  NAVIGATE     ENTER / A  SELECT",
+                            10.0,
+                            TEXT_DIM,
+                        ));
+                        footer.spawn(label(
+                            format!("BUILD {}  /  SELECT A SHIFT", env!("CARGO_PKG_VERSION")),
+                            11.0,
+                            TEXT_DIM,
+                        ));
+                    });
+                });
+
+            screen
+                .spawn(button("Credits", MenuAction::OpenCredits))
+                .insert(Node {
+                    position_type: PositionType::Absolute,
+                    right: px(28),
+                    bottom: px(24),
+                    padding: UiRect::axes(px(16), px(8)),
+                    ..default()
+                });
+        });
+}
+
+fn landing_choice(title: &str, detail: &str, action: MenuAction) -> impl Bundle {
+    (
+        Button,
+        Node {
+            width: percent(100),
+            min_height: px(62),
+            padding: UiRect::axes(px(18), px(10)),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::FlexStart,
+            justify_content: JustifyContent::Center,
+            row_gap: px(1),
+            border: UiRect::left(px(4)),
+            border_radius: BorderRadius::right(px(5)),
+            ..default()
+        },
+        BackgroundColor(Color::srgb(0.13, 0.16, 0.21)),
+        BorderColor::all(Color::srgba(0.30, 0.72, 0.92, 0.48)),
+        crate::ui::ButtonTone::Utility,
+        action,
+        children![
+            (
+                Text::new(title.to_uppercase()),
+                TextFont::from_font_size(19.0),
+                TextColor(TEXT),
+            ),
+            (
+                Text::new(detail.to_string()),
+                TextFont::from_font_size(12.0),
+                TextColor(TEXT_DIM),
+            ),
+        ],
+    )
+}
+
+fn disabled_choice(title: &str, detail: &str) -> impl Bundle {
+    (
+        Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::FlexStart,
+            row_gap: px(2),
+            padding: UiRect::axes(px(14), px(10)),
+            margin: UiRect::vertical(px(3)),
+            border: UiRect::left(px(3)),
+            border_radius: BorderRadius::all(px(5)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.08, 0.09, 0.11, 0.90)),
+        BorderColor::all(Color::srgba(0.85, 0.35, 0.35, 0.55)),
+        children![
+            (
+                Text::new(crate::ui::font_safe_text(title)),
+                TextFont::from_font_size(17.0),
+                TextColor(TEXT_DIM),
+            ),
+            (
+                Text::new(detail.to_string()),
+                TextFont::from_font_size(13.0),
+                TextColor(ERROR_TEXT),
+            ),
+        ],
+    )
+}
+
+/// The main-menu work surface used by every screen below the landing page.
+pub(crate) fn menu_panel_shell(
+    commands: &mut Commands,
+    root: impl Bundle,
+    title: &str,
+    subtitle: &str,
+    body: impl FnOnce(&mut ChildSpawnerCommands),
+) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                height: percent(100),
+                align_items: AlignItems::Center,
+                padding: UiRect::left(vw(4)),
+                ..default()
+            },
+            BackgroundColor(MENU_SCRIM),
+            root,
+        ))
+        .with_children(|screen| {
+            screen
+                .spawn((
+                    Node {
+                        width: vw(52),
+                        min_width: px(480),
+                        max_width: px(760),
+                        max_height: vh(92),
+                        padding: UiRect::all(px(30)),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(10),
+                        border: UiRect {
+                            left: px(3),
+                            right: px(1),
+                            top: px(1),
+                            bottom: px(1),
+                        },
+                        border_radius: BorderRadius::right(px(8)),
+                        ..default()
+                    },
+                    BackgroundColor(MENU_RAIL_BG),
+                    BorderColor::all(Color::srgba(0.30, 0.72, 0.92, 0.46)),
+                ))
+                .with_children(|panel| {
+                    panel.spawn((
+                        Text::new(crate::ui::font_safe_text(title)),
+                        TextFont::from_font_size(30.0),
+                        TextColor(TEXT),
+                    ));
+                    panel.spawn(label(subtitle, 14.0, TEXT_DIM));
+                    panel.spawn((
+                        Node {
+                            width: percent(100),
+                            height: px(2),
+                            margin: UiRect::vertical(px(3)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.30, 0.72, 0.92, 0.38)),
+                    ));
+                    body(panel);
+                });
+        });
+}
 
 /// The frame every screen shares: title, subtitle, and a column of controls.
 ///
@@ -1093,6 +1766,7 @@ mod tests {
             .init_resource::<PendingDelete>()
             .init_resource::<LaunchMode>()
             .init_resource::<ConnectError>()
+            .init_resource::<MenuReturn>()
             .init_resource::<Settings>()
             .add_message::<AppExit>()
             .add_message::<KeyboardInput>()
@@ -1325,7 +1999,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_drops_the_attempt_and_returns_to_the_mode_screen() {
+    fn cancel_drops_the_attempt_and_returns_to_multiplayer() {
         // The escape hatch that did not exist before this feature: a doomed
         // or just slow handshake used to have no way out but force-quitting.
         let mut app = menu_app();
@@ -1336,6 +2010,10 @@ mod tests {
 
         click(&mut app, MenuAction::Cancel);
         assert_eq!(state(&app), AppState::MainMenu);
+        assert_eq!(
+            app.world().resource::<MenuReturn>().0,
+            Some(MenuScreen::Multiplayer)
+        );
     }
 
     #[test]
@@ -1359,6 +2037,11 @@ mod tests {
         assert_eq!(
             app.world().resource::<ConnectError>().0.as_deref(),
             Some("could not reach the host")
+        );
+        assert_eq!(
+            app.world().resource::<MenuReturn>().0,
+            Some(MenuScreen::Join),
+            "a failed direct connection should reopen the field and its error"
         );
     }
 
@@ -1421,6 +2104,39 @@ mod tests {
     }
 
     // -- settings, reached before a save is ever chosen --------------------
+
+    #[test]
+    fn landing_routes_multiplayer_and_credits_to_their_own_screens() {
+        let mut app = menu_app();
+        click(&mut app, MenuAction::OpenMultiplayer);
+        assert_eq!(screen(&app), MenuScreen::Multiplayer);
+
+        click(&mut app, MenuAction::Back);
+        assert_eq!(screen(&app), MenuScreen::Mode);
+
+        click(&mut app, MenuAction::OpenCredits);
+        assert_eq!(screen(&app), MenuScreen::Credits);
+    }
+
+    #[test]
+    fn a_host_backtracks_to_multiplayer_not_the_landing_page() {
+        let mut app = menu_app();
+        click(&mut app, MenuAction::OpenMultiplayer);
+        click(&mut app, MenuAction::ChooseHost);
+        assert_eq!(screen(&app), MenuScreen::Save);
+
+        click(&mut app, MenuAction::Back);
+        assert_eq!(screen(&app), MenuScreen::Multiplayer);
+    }
+
+    #[test]
+    fn credits_are_derived_from_third_party_attribution_only() {
+        let credits = credits_text();
+        assert!(credits.contains("SOUND EFFECTS - SOURCED FROM TGSTATION"));
+        assert!(credits.contains("CODE - VENDORED DEPENDENCY"));
+        assert!(!credits.contains("ARTWORK AND MODELS - ORIGINAL WORK"));
+        assert!(credits.contains("Freesound 203281 (https://freesound.org"));
+    }
 
     #[test]
     fn settings_is_reachable_from_the_mode_screen() {

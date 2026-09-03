@@ -43,12 +43,24 @@ use crate::AppState;
 
 pub struct SettingsPlugin;
 
+/// A keyboard or gamepad nudge applied to a focused settings slider.
+///
+/// Kept as a message rather than exposing [`Knob`] outside this module: the
+/// menu navigation layer only needs to say "move this control left/right",
+/// while Settings remains the sole owner of ranges and value formatting.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct AdjustFocusedSlider {
+    pub entity: Entity,
+    pub direction: f32,
+}
+
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Settings::load())
             .init_resource::<Paused>()
             .init_resource::<PauseScreen>()
             .init_resource::<Rebinding>()
+            .add_message::<AdjustFocusedSlider>()
             .add_systems(
                 Update,
                 (
@@ -67,6 +79,7 @@ impl Plugin for SettingsPlugin {
                     handle_binding_clicks,
                     capture_rebind_key,
                     drag_sliders,
+                    adjust_focused_slider,
                     handle_display_clicks,
                     apply_pause_to_the_clock.run_if(in_state(AppState::Playing)),
                     sync_pause_overlay.run_if(in_state(AppState::Playing)),
@@ -408,6 +421,12 @@ impl Knob {
 #[derive(Component, Clone, Copy)]
 struct Slider(Knob);
 
+/// Public marker used by the menu's generic focus navigator. It deliberately
+/// carries no setting identity; only this module is allowed to interpret the
+/// slider and mutate [`Settings`].
+#[derive(Component)]
+pub(crate) struct NavigableSlider;
+
 /// The filled portion of a slider, resized to match the live value.
 #[derive(Component, Clone, Copy)]
 struct SliderFill(Knob);
@@ -465,7 +484,7 @@ const RESOLUTION_PRESETS: [(u32, u32); 4] = [(1280, 720), (1600, 900), (1920, 10
 /// Shared by both ways of reaching Settings — the pause-reached screen and the
 /// main menu's own — so the copy on the two can't drift apart.
 pub(crate) const SETTINGS_SUBTITLE: &str =
-    "Drag a dial, or click anywhere along it. Kept beside your saves, shared by every career.";
+    "Drag or click a dial; with focus, press Left/Right. Shared by every career.";
 
 /// The content of the Settings screen, shared by both callers. Spawns no
 /// action buttons of its own: each caller owns its `menu_shell` call, its root
@@ -575,6 +594,7 @@ fn slider_row(panel: &mut ChildSpawnerCommands, knob: Knob, settings: &Settings)
             },
             BackgroundColor(SECTION_BG),
             Slider(knob),
+            NavigableSlider,
             PreserveButtonBackground,
         ))
         .with_children(|track| {
@@ -659,6 +679,27 @@ fn drag_sliders(
     let value = value_at(knob, local.x + 0.5);
     if knob.read(&settings) != value {
         knob.write(&mut settings, value);
+    }
+}
+
+/// Gives focused sliders the same fine adjustment expected from a settings
+/// screen on keyboard and controller. Five percent of the dial per press is
+/// precise enough for sensitivity while still moving volume/FOV visibly.
+fn adjust_focused_slider(
+    mut adjustments: MessageReader<AdjustFocusedSlider>,
+    sliders: Query<&Slider>,
+    mut settings: ResMut<Settings>,
+) {
+    for adjustment in adjustments.read() {
+        let Ok(slider) = sliders.get(adjustment.entity) else {
+            continue;
+        };
+        let knob = slider.0;
+        let fraction = fraction_of(knob, knob.read(&settings));
+        knob.write(
+            &mut settings,
+            value_at(knob, fraction + adjustment.direction.signum() * 0.05),
+        );
     }
 }
 
@@ -1468,6 +1509,31 @@ mod tests {
             assert_eq!(value_at(knob, -3.0), lo);
             assert_eq!(value_at(knob, 4.0), hi);
         }
+    }
+
+    #[test]
+    fn focused_slider_nudges_use_five_percent_steps_and_clamp() {
+        let mut app = App::new();
+        app.init_resource::<Settings>()
+            .add_message::<AdjustFocusedSlider>()
+            .add_systems(Update, adjust_focused_slider);
+        let slider = app.world_mut().spawn(Slider(Knob::Volume)).id();
+        app.world_mut().resource_mut::<Settings>().master_volume = 0.50;
+
+        app.world_mut().write_message(AdjustFocusedSlider {
+            entity: slider,
+            direction: 1.0,
+        });
+        app.update();
+        assert!((app.world().resource::<Settings>().master_volume - 0.55).abs() < 1e-5);
+
+        app.world_mut().resource_mut::<Settings>().master_volume = 1.0;
+        app.world_mut().write_message(AdjustFocusedSlider {
+            entity: slider,
+            direction: 1.0,
+        });
+        app.update();
+        assert_eq!(app.world().resource::<Settings>().master_volume, 1.0);
     }
 
     #[test]

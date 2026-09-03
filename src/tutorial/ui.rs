@@ -9,7 +9,7 @@ struct MenuRoot;
 #[derive(Component)]
 struct HudRoot;
 #[derive(Component, Clone)]
-pub(super) enum Action {
+pub(crate) enum Action {
     Continue,
     Lesson(String),
     Topic(String),
@@ -57,44 +57,29 @@ pub fn pause_controls(panel: &mut ChildSpawnerCommands) {
     });
 }
 fn shell(commands: &mut Commands, title: &str, body: impl FnOnce(&mut ChildSpawnerCommands)) {
-    commands
-        .spawn((
-            MenuRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                width: percent(100),
-                height: percent(100),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                ..default()
-            },
-            BackgroundColor(PANEL_BG),
-        ))
-        .with_children(|root| {
-            root.spawn((
-                Node {
-                    width: px(700),
-                    max_width: percent(95),
-                    max_height: percent(94),
-                    padding: UiRect::all(px(24)),
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(8),
-                    overflow: Overflow::scroll_y(),
-                    ..default()
-                },
-                crate::ui::ScrollPane,
-                ScrollPosition::default(),
-            ))
-            .with_children(|p| {
-                p.spawn(label(title, 26.0, TEXT));
-                p.spawn(label(
-                    "Solo practice. Your careers and their discoveries are separate.",
-                    14.0,
-                    TEXT_DIM,
-                ));
-                body(p);
-            });
-        });
+    crate::menu::menu_panel_shell(
+        commands,
+        MenuRoot,
+        title,
+        "Solo practice. Your careers and their discoveries are separate.",
+        |panel| {
+            panel
+                .spawn((
+                    Node {
+                        width: percent(100),
+                        max_height: vh(68),
+                        padding: UiRect::right(px(10)),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(6),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    crate::ui::ScrollPane,
+                    ScrollPosition::default(),
+                ))
+                .with_children(body);
+        },
+    );
 }
 fn training_menu(mut commands: Commands, profile: Res<Profile>) {
     shell(&mut commands, "Training", |p| {
