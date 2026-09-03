@@ -7,7 +7,7 @@ from the required unfamiliar-player study.
 
 The focused tests exercise actual authorized machine actions, analyzer snapshots,
 packaging and committed delivery outcomes. They include correction and fresh
-preparation, separation, calibration restrictions, stale evidence, full inventory,
+preparation, separation, analyzer availability, stale evidence, full inventory,
 profile serialization, control substitution and textbook navigation.
 
 Run from the repository root:

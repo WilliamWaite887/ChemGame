@@ -134,9 +134,9 @@ customer and departure, patient, supplies, sample, spawn, annex and cleanup loca
 machine markers and queue machinery are reused. The non-TrenchBroom build reads
 the same layout for its simple geometry and fixtures.
 
-Only the designated training analyzer receives TrainingCalibrated. UI and action
-handler share the same eligibility check, requiring both the training session and
-that marker. Career calibration still requires the ordinary recorded methods.
+Analysis and HPLC purification are available on every analyzer from the start.
+Training uses the same capability and authority validation as a career rather
+than carrying a special calibration bypass.
 
 Training progress is a separate versioned `training.ron` file alongside the slot
 directories. It records completed IDs, skipped IDs and the resume exercise, not
@@ -148,7 +148,7 @@ resume bookmark remains available.
 ## Validation
 
 Commands and final results are recorded in tutorial-verification.md. Focused guards
-cover authored references, recipe disclosure, map connectivity, calibration,
+cover authored references, recipe disclosure, map connectivity, analyzer availability,
 progress serialization, actual machine/analysis/packaging/delivery behavior, and
 stale evidence. The opt-in debug `--tutorial-playtest` harness uses isolated appdata
 and exercises real handlers while relocating the player between workstations.
@@ -172,7 +172,7 @@ Revise unclear interactions and observations before increasing text length.
 | Measurement, reports, thermal, pH, extraction, application, spills | The same driver with `-Lesson measurement`, `reports`, `thermal`, `ph`, `extraction`, `application`, or `spills`; separate verified result files |
 | Correction and replacement solutions | `tutorial::tests::measured_mistake_accepts_both_correction_and_fresh_preparation` |
 | Scan, package and handoff authorization | `tutorial::tests::actual_preparation_analysis_packaging_and_delivery_complete_only_after_verified_handoff` |
-| Purification capability | `tutorial::tests::physical_hplc_gate_does_not_unlock_recipes_or_other_analyzers` |
+| Purification capability | `tutorial::tests::hplc_is_available_in_training_and_career_without_unlocking_recipes` |
 | Full inventory | `tutorial::tests::full_inventory_keeps_packaged_material_available_for_recovery` |
 | Restart/resume identity | `tutorial::tests::restarting_discards_pending_actions_and_evidence_but_keeps_profile`; existing session teardown tests |
 | Every article and linked lesson | `textbook::tests::textbook_content_is_short_linked_and_complete` and `tutorial::tests::training_content_links_and_goals_are_valid` |

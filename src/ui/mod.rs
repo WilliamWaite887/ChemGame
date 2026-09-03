@@ -33,7 +33,7 @@ use crate::machines::{
     BufferTransferRequested, DispenseAmount, DispenseRequested, EjectRequested, EmptyRequested,
     GrindRequested, Hopper, HplcReport, Machine, MachineKind, MachineSlot, PackageRequested,
     PurifyRequested, SetHeaterPower, SetTargetTemperature, TakeRequested, Thermostat,
-    HPLC_RECIPE_REQUIREMENT, LOCKER_CAPACITY, TEMPERATURE_MAX, TEMPERATURE_MIN,
+    LOCKER_CAPACITY, TEMPERATURE_MAX, TEMPERATURE_MIN,
 };
 use crate::orders::{Department, DevelopmentOrder, GlasswarePackId, Order, Shift, StationData};
 use crate::player::LocalPlayer;
@@ -89,8 +89,9 @@ pub(crate) const GOOD_TEXT: Color = Color::srgb(0.45, 0.80, 0.50);
 /// is the one piece of text in this UI the *game* did not write. Every number
 /// beside it is measured; this is a claim, and it needs to look like one.
 pub(crate) const LABEL_INK: Color = Color::srgb(0.92, 0.82, 0.55);
-pub(crate) const BUTTON_IDLE: Color = Color::srgb(0.17, 0.19, 0.23);
-const BUTTON_HOVER: Color = Color::srgb(0.25, 0.29, 0.35);
+pub(crate) const BUTTON_IDLE: Color = Color::srgb(0.20, 0.23, 0.29);
+const BUTTON_HOVER: Color = Color::srgb(0.28, 0.33, 0.41);
+const BUTTON_BORDER: Color = Color::srgb(0.42, 0.49, 0.60);
 /// The "this is the one that is currently set" tint, shared by the dispense
 /// amount row, the book's open tab and the settings screen's presets.
 ///
@@ -99,6 +100,21 @@ const BUTTON_HOVER: Color = Color::srgb(0.25, 0.29, 0.35);
 /// for normal-size text. This value keeps it reading as "the blue one" next to
 /// `BUTTON_HOVER`/`BUTTON_IDLE` while landing at 7.78:1.
 pub(crate) const BUTTON_ACTIVE: Color = Color::srgb(0.10, 0.28, 0.40);
+const BUTTON_ACTIVE_HOVER: Color = Color::srgb(0.12, 0.37, 0.52);
+const BUTTON_ACTIVE_BORDER: Color = Color::srgb(0.30, 0.72, 0.92);
+const BUTTON_PRIMARY: Color = Color::srgb(0.06, 0.31, 0.46);
+const BUTTON_PRIMARY_HOVER: Color = Color::srgb(0.09, 0.40, 0.57);
+const BUTTON_UTILITY: Color = Color::srgb(0.13, 0.16, 0.21);
+const BUTTON_UTILITY_HOVER: Color = Color::srgb(0.20, 0.24, 0.31);
+const BUTTON_UTILITY_BORDER: Color = Color::srgb(0.34, 0.41, 0.51);
+const BUTTON_TOGGLE: Color = Color::srgb(0.10, 0.33, 0.21);
+const BUTTON_TOGGLE_HOVER: Color = Color::srgb(0.13, 0.43, 0.27);
+const BUTTON_TOGGLE_BORDER: Color = Color::srgb(0.42, 0.78, 0.50);
+const BUTTON_CAUTION: Color = Color::srgb(0.34, 0.15, 0.16);
+const BUTTON_CAUTION_HOVER: Color = Color::srgb(0.46, 0.20, 0.20);
+const BUTTON_CAUTION_BORDER: Color = Color::srgb(0.85, 0.39, 0.36);
+const BUTTON_DISABLED: Color = Color::srgb(0.10, 0.11, 0.14);
+const BUTTON_DISABLED_BORDER: Color = Color::srgb(0.22, 0.24, 0.29);
 
 /// Low-alpha tint pair for a "pay attention" callout box (a safety warning),
 /// built from [`ERROR_TEXT`] so the tint and the icon/border read as the same
@@ -228,6 +244,26 @@ pub(crate) struct Selected;
 /// Generic hover/pressed feedback must not repaint the entire slider track.
 #[derive(Component)]
 pub(crate) struct PreserveButtonBackground;
+
+/// Visual role for a shared UI control. Machine panels reuse a small number of
+/// interaction shapes, so their colour and feedback should communicate what a
+/// control *means* before the player has read every label.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ButtonTone {
+    /// One option in a set: dispense amount, reagent, package, or table row.
+    #[default]
+    Choice,
+    /// Advances the machine's main workflow: analyze, agitate, grind, package.
+    Primary,
+    /// Leaves or rearranges the workflow without changing the chemistry.
+    Utility,
+    /// A currently-enabled persistent state such as chamber power.
+    ToggleOn,
+    /// Irreversible or easy-to-misclick actions such as emptying a vessel.
+    Caution,
+    /// Visible for discoverability, but not currently actionable.
+    Disabled,
+}
 
 /// What a button does when clicked.
 #[derive(Component, Clone)]
@@ -1005,7 +1041,6 @@ fn sync_panel(
     arc_script: Option<Res<crate::arc::Script>>,
     board: BoardView,
     previous: ResMut<LastPanel>,
-    training: crate::tutorial::TrainingEquipment,
 ) {
     let shift = &board.shift;
     let mode = modes.iter().next().copied().unwrap_or_default();
@@ -1280,7 +1315,11 @@ fn sync_panel(
                         })
                         .with_children(|header| {
                             header.spawn(heading(machine.kind.label()));
-                            header.spawn(button("Close  (Esc)", PanelAction::Close));
+                            header.spawn(styled_button(
+                                "Close  (Esc)",
+                                PanelAction::Close,
+                                ButtonTone::Utility,
+                            ));
                         });
                     panel
                         .spawn((
@@ -1351,17 +1390,15 @@ fn sync_panel(
                                                 snapshot.report.matches(&c.solution, &db)
                                             })
                                         {
-                                            body.spawn(button(
+                                            body.spawn(styled_button(
                                                 "Print Report",
                                                 PanelAction::PrintReport(snapshot.report.id),
+                                                ButtonTone::Primary,
                                             ));
                                         }
                                     }
                                     analyzer_body(
                                         body,
-                                        training.kind.as_deref(),
-                                        open_machine
-                                            .is_some_and(|e| training.calibrated.contains(e)),
                                         &db,
                                         &knowledge,
                                         loaded,
@@ -2242,17 +2279,30 @@ fn draw_sign_controls(panel: &mut ChildSpawnerCommands, shift: &Shift, stage: &B
         } else {
             "Start taking requests"
         };
-        row.spawn(button(caption, PanelAction::ToggleAcceptingOrders));
+        row.spawn(styled_button(
+            caption,
+            PanelAction::ToggleAcceptingOrders,
+            if shift.accepting_orders {
+                ButtonTone::ToggleOn
+            } else {
+                ButtonTone::Primary
+            },
+        ));
 
         // Only live once the sign is down *and* nobody is left waiting. Drawn
         // dead rather than hidden while the counter is busy, for the same
         // reason an unaffordable requisition is: a button that appears out of
         // nowhere is a button the player never learns exists.
         if let BoardStage::WrappingUp { clear } = stage {
-            let mut entity = row.spawn(button("Call it a shift", PanelAction::CallItAShift));
-            if !clear {
-                entity.insert(BackgroundColor(Color::srgb(0.11, 0.12, 0.14)));
-            }
+            row.spawn(styled_button(
+                "Call it a shift",
+                PanelAction::CallItAShift,
+                if *clear {
+                    ButtonTone::Caution
+                } else {
+                    ButtonTone::Disabled
+                },
+            ));
         }
     });
 }
@@ -2356,7 +2406,11 @@ fn draw_debrief(panel: &mut ChildSpawnerCommands, report: &ShiftReport) {
         TEXT_DIM,
     ));
     panel.spawn(row()).with_children(|row| {
-        row.spawn(button("Open up again", PanelAction::OpenUpAgain));
+        row.spawn(styled_button(
+            "Open up again",
+            PanelAction::OpenUpAgain,
+            ButtonTone::Primary,
+        ));
     });
 }
 
@@ -2564,12 +2618,13 @@ fn chemmaster5000_body(
                             section.spawn(row()).with_children(|row| {
                                 for step in [1, 5, 10, 25, 50] {
                                     let units = Units::whole(step);
-                                    let mut entity = row.spawn(button(
+                                    let mut entity = row.spawn(styled_button(
                                         format!("{step}u"),
                                         PanelAction::SetAmount(units),
+                                        ButtonTone::Choice,
                                     ));
                                     if units == selected {
-                                        entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
+                                        entity.insert(Selected);
                                     }
                                 }
                             });
@@ -2605,9 +2660,10 @@ fn chemmaster5000_body(
                                     ));
                                 }
                                 Some(cost) if knowledge.research_points >= cost => {
-                                    section.spawn(button(
+                                    section.spawn(styled_button(
                                         format!("Recalibrate  ({cost} research)"),
                                         PanelAction::UpgradeDispenser,
+                                        ButtonTone::Primary,
                                     ));
                                 }
                                 Some(cost) => {
@@ -2660,9 +2716,10 @@ fn chemmaster5000_body(
                             // like.
                             #[cfg(debug_assertions)]
                             if knowledge.known_count() < db.reactions.recipe_count() {
-                                section.spawn(button(
+                                section.spawn(styled_button(
                                     "PLAYTEST: unlock all chemistry",
                                     PanelAction::UnlockAll,
+                                    ButtonTone::Caution,
                                 ));
                             }
                         },
@@ -2850,8 +2907,16 @@ fn chemmaster_sample_card(
             }
 
             section.spawn(row()).with_children(|actions| {
-                actions.spawn(button("Eject vessel", PanelAction::Eject(MachineSlot::A)));
-                actions.spawn(button("Empty vessel", PanelAction::Empty(MachineSlot::A)));
+                actions.spawn(styled_button(
+                    "Eject vessel",
+                    PanelAction::Eject(MachineSlot::A),
+                    ButtonTone::Utility,
+                ));
+                actions.spawn(styled_button(
+                    "Empty vessel",
+                    PanelAction::Empty(MachineSlot::A),
+                    ButtonTone::Caution,
+                ));
             });
         },
     );
@@ -3263,17 +3328,19 @@ fn heater_body(
         })
         .with_children(|header| {
             header.spawn(label("PROCESS CONTROLS", 12.0, TEXT_DIM));
-            let mut power = header.spawn(button(
+            header.spawn(styled_button(
                 if thermostat.powered {
                     "● Chamber on"
                 } else {
                     "○ Chamber off"
                 },
                 PanelAction::TogglePower,
+                if thermostat.powered {
+                    ButtonTone::ToggleOn
+                } else {
+                    ButtonTone::Utility
+                },
             ));
-            if thermostat.powered {
-                power.insert(BackgroundColor(BUTTON_ACTIVE));
-            }
         });
 
     panel
@@ -3533,7 +3600,11 @@ fn heater_body(
                                     13.0,
                                     TEXT,
                                 ));
-                                header.spawn(button("Eject", PanelAction::Eject(MachineSlot::A)));
+                                header.spawn(styled_button(
+                                    "Eject",
+                                    PanelAction::Eject(MachineSlot::A),
+                                    ButtonTone::Utility,
+                                ));
                             });
                         if let Some(container) = loaded {
                             if container.solution.is_empty() {
@@ -3711,14 +3782,19 @@ fn selected_hplc_reagent(
 
 fn hplc_cell(text: impl Into<String>, width: f32, size: f32, color: Color) -> impl Bundle {
     (
-        Text::new(text.into()),
-        TextFont::from_font_size(size),
-        TextColor(color),
         Node {
             width: px(width),
             flex_shrink: 0.0,
+            align_self: AlignSelf::Stretch,
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::Center,
             ..default()
         },
+        children![(
+            Text::new(text.into()),
+            TextFont::from_font_size(size),
+            TextColor(color),
+        )],
     )
 }
 
@@ -3874,16 +3950,12 @@ fn hplc_graph(
 
 fn analyzer_body(
     panel: &mut ChildSpawnerCommands,
-    training: Option<&crate::session::SessionKind>,
-    training_calibrated: bool,
     db: &ChemDb,
     knowledge: &Knowledge,
     loaded: Option<&Container>,
     report: Option<&HplcReport>,
     requested_selection: Option<ReagentId>,
 ) {
-    let calibrated =
-        crate::tutorial::hplc_available(knowledge.known_count(), training, training_calibrated);
     let selected = loaded
         .and_then(|container| selected_hplc_reagent(&container.solution, requested_selection));
 
@@ -3895,20 +3967,8 @@ fn analyzer_body(
             ..default()
         })
         .with_children(|header| {
-            header.spawn(label(
-                if calibrated {
-                    "HPLC / MASS PROFILE   •   CALIBRATED".to_string()
-                } else {
-                    format!(
-                        "HPLC / MASS PROFILE   •   CALIBRATING {}/{}",
-                        knowledge.known_count(),
-                        HPLC_RECIPE_REQUIREMENT
-                    )
-                },
-                12.0,
-                if calibrated { GOOD_TEXT } else { HPLC_IMPURITY },
-            ));
-            if let Some(reagent) = selected.filter(|_| calibrated) {
+            header.spawn(label("HPLC / MASS PROFILE", 12.0, GOOD_TEXT));
+            if let Some(reagent) = selected {
                 let definition = db.reagents.get(reagent);
                 let text = definition
                     .recovers_to
@@ -3916,7 +3976,11 @@ fn analyzer_body(
                     .and_then(|key| db.reagents.id_of(key))
                     .map(|recovered| format!("Recover {}", db.reagents.get(recovered).name))
                     .unwrap_or_else(|| format!("Purify {}", definition.name));
-                header.spawn(button(text, PanelAction::Purify(reagent)));
+                header.spawn(styled_button(
+                    text,
+                    PanelAction::Purify(reagent),
+                    ButtonTone::Primary,
+                ));
             }
         });
 
@@ -3937,7 +4001,11 @@ fn analyzer_body(
                     14.0,
                     TEXT_DIM,
                 ));
-                section.spawn(button("Eject", PanelAction::Eject(MachineSlot::A)));
+                section.spawn(styled_button(
+                    "Eject",
+                    PanelAction::Eject(MachineSlot::A),
+                    ButtonTone::Utility,
+                ));
                 return;
             }
             let selected = selected.expect("a non-empty solution has a selectable reagent");
@@ -3996,6 +4064,8 @@ fn analyzer_body(
                         let purity = container.solution.purity_of(reagent);
                         let profile = HplcProfile::of(purity, definition.recovers_to.is_some());
                         let is_selected = reagent == selected;
+                        let (background, border) =
+                            button_colors(ButtonTone::Choice, Interaction::None, is_selected);
                         let mut row = table.spawn((
                             Button,
                             Node {
@@ -4003,13 +4073,12 @@ fn analyzer_body(
                                 min_height: px(30),
                                 padding: UiRect::axes(px(8), px(4)),
                                 align_items: AlignItems::Center,
+                                border: UiRect::all(px(1)),
                                 ..default()
                             },
-                            BackgroundColor(if is_selected {
-                                Color::srgb(0.12, 0.34, 0.27)
-                            } else {
-                                Color::srgba(0.05, 0.06, 0.08, 0.55)
-                            }),
+                            BackgroundColor(background),
+                            BorderColor::all(border),
+                            ButtonTone::Choice,
                             PanelAction::SelectHplc(reagent),
                         ));
                         if is_selected {
@@ -4054,8 +4123,16 @@ fn analyzer_body(
                 })
                 .count();
             section.spawn(row()).with_children(|row| {
-                row.spawn(button("Analyze", PanelAction::Analyze));
-                row.spawn(button("Eject", PanelAction::Eject(MachineSlot::A)));
+                row.spawn(styled_button(
+                    "Analyze",
+                    PanelAction::Analyze,
+                    ButtonTone::Primary,
+                ));
+                row.spawn(styled_button(
+                    "Eject",
+                    PanelAction::Eject(MachineSlot::A),
+                    ButtonTone::Utility,
+                ));
                 row.spawn(label(
                     if unknown == 0 {
                         "No unrecorded signatures".to_string()
@@ -4153,8 +4230,16 @@ fn grinder_body(
         });
 
     panel.spawn(row()).with_children(|row| {
-        row.spawn(button("Grind one", PanelAction::Grind { all: false }));
-        row.spawn(button("Grind all", PanelAction::Grind { all: true }));
+        row.spawn(styled_button(
+            "Grind one",
+            PanelAction::Grind { all: false },
+            ButtonTone::Primary,
+        ));
+        row.spawn(styled_button(
+            "Grind all",
+            PanelAction::Grind { all: true },
+            ButtonTone::Primary,
+        ));
     });
 
     container_readout(panel, db, container_entity, loaded, marked, reacting, true);
@@ -4189,7 +4274,11 @@ fn locker_body(panel: &mut ChildSpawnerCommands, stored: &[StoredItem]) {
 
             for item in stored {
                 section.spawn(row()).with_children(|row| {
-                    row.spawn(button("Take", PanelAction::Take(item.item)));
+                    row.spawn(styled_button(
+                        "Take",
+                        PanelAction::Take(item.item),
+                        ButtonTone::Primary,
+                    ));
                     row.spawn(label(
                         if item.detail.is_empty() {
                             item.name.clone()
@@ -4333,11 +4422,15 @@ fn delivery_slot_card(
         if !contents.is_empty() {
             card.spawn(label(contents, 13.0, TEXT));
         }
-        card.spawn(button("Eject", PanelAction::Eject(slot)))
-            .insert(TooltipSource::new(
-                format!("Eject tray {slot_name}"),
-                "Return this container to the chemist without changing its contents.",
-            ));
+        card.spawn(styled_button(
+            "Eject",
+            PanelAction::Eject(slot),
+            ButtonTone::Utility,
+        ))
+        .insert(TooltipSource::new(
+            format!("Eject tray {slot_name}"),
+            "Return this container to the chemist without changing its contents.",
+        ));
     });
 }
 
@@ -4427,9 +4520,17 @@ fn container_readout(
                     }
 
                     column.spawn(row()).with_children(|row| {
-                        row.spawn(button("Eject", PanelAction::Eject(MachineSlot::A)));
+                        row.spawn(styled_button(
+                            "Eject",
+                            PanelAction::Eject(MachineSlot::A),
+                            ButtonTone::Utility,
+                        ));
                         if show_empty_button {
-                            row.spawn(button("Empty", PanelAction::Empty(MachineSlot::A)));
+                            row.spawn(styled_button(
+                                "Empty",
+                                PanelAction::Empty(MachineSlot::A),
+                                ButtonTone::Caution,
+                            ));
                         }
                     });
                 });
@@ -7882,6 +7983,7 @@ fn radio_channel_color(channel: RadioChannel) -> Color {
 
 const BEAKER_PREVIEW_WIDTH: f32 = 64.0;
 const BEAKER_PREVIEW_HEIGHT: f32 = 96.0;
+const BEAKER_BORDER_WIDTH: f32 = 2.0;
 // The glass's own corners, echoed on `BeakerFill` (bottom only - a liquid's
 // top edge is its flat surface, not a rounded lip) so the fill reads as
 // poured into this exact vessel rather than an unrelated rectangle clipped
@@ -7904,9 +8006,17 @@ const BEAKER_HAZARD_HZ: f32 = 2.2;
 #[derive(Component, Clone, Copy)]
 struct BeakerOf(Entity);
 
-/// The liquid fill: bottom-anchored, height = volume/capacity, colour =
-/// [`chem_sim::Solution::color`]. The `bevy_ui` counterpart to
-/// `update_liquid_visuals`'s mesh scale/tint (`src/containers/mod.rs`).
+/// Rectangular clipping window whose height is volume/capacity. Its child is a
+/// full-height [`BeakerFill`] so the rounded lower silhouette never gets
+/// rescaled at low volumes.
+#[derive(Component, Clone, Copy)]
+struct BeakerFillMask {
+    inner_height: f32,
+}
+
+/// One continuous, vessel-shaped liquid layer revealed through
+/// [`BeakerFillMask`]. The `bevy_ui` counterpart to `update_liquid_visuals`'s
+/// mesh scale/tint (`src/containers/mod.rs`).
 #[derive(Component)]
 struct BeakerFill;
 
@@ -7927,6 +8037,27 @@ struct BeakerHazardFlash;
 #[derive(Component)]
 struct BeakerBubble {
     seed: f32,
+    inner_width: f32,
+    inner_height: f32,
+    bottom_radius: f32,
+    size: f32,
+}
+
+fn beaker_fill_height(fill: f32, inner_height: f32) -> f32 {
+    fill.clamp(0.0, 1.0) * inner_height.max(0.0)
+}
+
+fn beaker_wall_inset(height_above_bottom: f32, bottom_radius: f32) -> f32 {
+    let radius = bottom_radius.max(0.0);
+    let height = height_above_bottom.max(0.0);
+    if radius == 0.0 || height >= radius {
+        return 0.0;
+    }
+    let from_center = height - radius;
+    radius
+        - (radius * radius - from_center * from_center)
+            .max(0.0)
+            .sqrt()
 }
 
 /// Centrepiece live preview of a loaded container, spawned beside - never
@@ -7962,13 +8093,17 @@ fn beaker_preview_sized(
     let top_radius = (BEAKER_TOP_RADIUS * scale).min(8.0);
     let bottom_radius = (BEAKER_BOTTOM_RADIUS * scale).min(30.0);
     let bubble_size = (6.0 * scale.sqrt()).min(9.0);
+    let inner_width = (width - BEAKER_BORDER_WIDTH * 2.0).max(0.0);
+    let inner_height = (height - BEAKER_BORDER_WIDTH * 2.0).max(0.0);
+    let inner_top_radius = (top_radius - BEAKER_BORDER_WIDTH).max(0.0);
+    let inner_bottom_radius = (bottom_radius - BEAKER_BORDER_WIDTH).max(0.0);
     let mut glass = panel.spawn((
         Node {
             position_type: PositionType::Relative,
             width: px(width),
             height: px(height),
             flex_shrink: 0.0,
-            border: UiRect::all(px(2)),
+            border: UiRect::all(px(BEAKER_BORDER_WIDTH)),
             border_radius: BorderRadius {
                 top_left: px(top_radius),
                 top_right: px(top_radius),
@@ -7986,29 +8121,41 @@ fn beaker_preview_sized(
     };
     glass.insert((BeakerOf(entity), BeakerGlow, BoxShadow::default()));
     glass.with_children(|glass| {
-        glass.spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(0),
-                right: px(0),
-                bottom: px(0),
-                height: percent(0),
-                // Square top - a liquid's surface is flat, not a lip - but
-                // rounded on the bottom to match the glass it is sitting in,
-                // so it reads as poured into this vessel rather than an
-                // unrelated rectangle merely clipped inside it.
-                border_radius: BorderRadius {
-                    top_left: px(0.0),
-                    top_right: px(0.0),
-                    bottom_left: px(bottom_radius),
-                    bottom_right: px(bottom_radius),
+        glass
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(0),
+                    right: px(0),
+                    bottom: px(0),
+                    height: px(0),
+                    overflow: Overflow::clip(),
+                    ..default()
                 },
-                ..default()
-            },
-            BackgroundColor(Color::NONE),
-            BeakerOf(entity),
-            BeakerFill,
-        ));
+                BeakerOf(entity),
+                BeakerFillMask { inner_height },
+            ))
+            .with_children(|mask| {
+                mask.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(0),
+                        right: px(0),
+                        bottom: px(0),
+                        height: px(inner_height),
+                        border_radius: BorderRadius {
+                            top_left: px(inner_top_radius),
+                            top_right: px(inner_top_radius),
+                            bottom_left: px(inner_bottom_radius),
+                            bottom_right: px(inner_bottom_radius),
+                        },
+                        ..default()
+                    },
+                    BackgroundColor(Color::NONE),
+                    BeakerOf(entity),
+                    BeakerFill,
+                ));
+            });
         for i in 0..BEAKER_BUBBLE_COUNT {
             glass.spawn((
                 Node {
@@ -8024,6 +8171,10 @@ fn beaker_preview_sized(
                 BeakerOf(entity),
                 BeakerBubble {
                     seed: i as f32 / BEAKER_BUBBLE_COUNT as f32,
+                    inner_width,
+                    inner_height,
+                    bottom_radius: inner_bottom_radius,
+                    size: bubble_size,
                 },
             ));
         }
@@ -8036,6 +8187,12 @@ fn beaker_preview_sized(
                 right: px(0),
                 top: px(0),
                 bottom: px(0),
+                border_radius: BorderRadius {
+                    top_left: px(inner_top_radius),
+                    top_right: px(inner_top_radius),
+                    bottom_left: px(inner_bottom_radius),
+                    bottom_right: px(inner_bottom_radius),
+                },
                 ..default()
             },
             BackgroundColor(ERROR_TEXT.with_alpha(0.0)),
@@ -8059,10 +8216,20 @@ fn animate_beaker_previews(
     containers: Query<&Container>,
     buffers: Query<&Buffer>,
     agitations: Query<&AgitationRun>,
+    mut fill_masks: Query<
+        (&BeakerOf, &BeakerFillMask, &mut Node),
+        (
+            With<BeakerFillMask>,
+            Without<BeakerFill>,
+            Without<BeakerBubble>,
+            Without<BeakerHazardFlash>,
+        ),
+    >,
     mut fills: Query<
-        (&BeakerOf, &mut Node, &mut BackgroundColor),
+        (&BeakerOf, &mut BackgroundColor),
         (
             With<BeakerFill>,
+            Without<BeakerFillMask>,
             Without<BeakerBubble>,
             Without<BeakerHazardFlash>,
         ),
@@ -8074,7 +8241,11 @@ fn animate_beaker_previews(
     >,
     mut bubbles: Query<
         (&BeakerOf, &BeakerBubble, &mut Node, &mut BackgroundColor),
-        (Without<BeakerFill>, Without<BeakerHazardFlash>),
+        (
+            Without<BeakerFill>,
+            Without<BeakerFillMask>,
+            Without<BeakerHazardFlash>,
+        ),
     >,
 ) {
     let t = time.elapsed_secs();
@@ -8094,15 +8265,22 @@ fn animate_beaker_previews(
             })
     };
 
-    for (of, mut node, mut background) in &mut fills {
+    for (of, mask, mut node) in &mut fill_masks {
         let Some(container) = read(of.0) else {
             continue;
         };
         let fill = fill_fraction(&container);
-        let wanted_height = percent(fill * 100.0);
+        let wanted_height = px(beaker_fill_height(fill, mask.inner_height));
         if node.height != wanted_height {
             node.height = wanted_height;
         }
+    }
+
+    for (of, mut background) in &mut fills {
+        let Some(container) = read(of.0) else {
+            continue;
+        };
+        let fill = fill_fraction(&container);
         let wanted_color = if fill > 0.0 {
             let [r, g, b] = container.solution.color(&db.reagents);
             Color::srgb(r, g, b)
@@ -8151,13 +8329,17 @@ fn animate_beaker_previews(
         let active = (reacting || agitating) && fill > 0.04;
 
         let phase = (t / BEAKER_BUBBLE_RISE_SECS + bubble.seed).fract();
-        let bottom_pct = (phase * (fill * 100.0 - 6.0).max(0.0)).clamp(0.0, 100.0);
+        let fill_height = fill * bubble.inner_height;
+        let bottom = phase * (fill_height - bubble.size).max(0.0);
+        let wall_inset = beaker_wall_inset(bottom, bubble.bottom_radius);
         let wobble = (t * 3.0 + bubble.seed * std::f32::consts::TAU).sin() * 3.0;
         let column = 16.0 + bubble.seed * 68.0;
-        let left_pct = (column + wobble).clamp(4.0, 92.0);
+        let across = ((column + wobble) / 100.0).clamp(0.0, 1.0);
+        let available_width = (bubble.inner_width - wall_inset * 2.0 - bubble.size).max(0.0);
+        let left = wall_inset + across * available_width;
 
-        node.bottom = percent(bottom_pct);
-        node.left = percent(left_pct);
+        node.bottom = px(bottom);
+        node.left = px(left);
 
         let alpha = if active { 0.5 } else { 0.0 };
         let [r, g, b] = container.solution.color(&db.reagents);
@@ -8306,6 +8488,18 @@ fn section() -> Node {
 /// the two sharing an action enum - a panel button dispenses a reagent, a menu
 /// button opens a save, and neither wants the other's variants.
 pub(crate) fn button<A: Component>(text: impl Into<String>, action: A) -> impl Bundle {
+    styled_button(text, action, ButtonTone::Choice)
+}
+
+/// Shared button shape with semantic colour. A brighter edge and slightly
+/// heavier lower border keep controls legible against both `PANEL_BG` and
+/// `SECTION_BG` without introducing an art-heavy second UI system.
+pub(crate) fn styled_button<A: Component>(
+    text: impl Into<String>,
+    action: A,
+    tone: ButtonTone,
+) -> impl Bundle {
+    let (background, border) = button_colors(tone, Interaction::None, false);
     (
         Button,
         Node {
@@ -8313,10 +8507,18 @@ pub(crate) fn button<A: Component>(text: impl Into<String>, action: A) -> impl B
             margin: UiRect::all(px(3)),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
+            border: UiRect {
+                left: px(1),
+                right: px(1),
+                top: px(1),
+                bottom: px(2),
+            },
             border_radius: BorderRadius::all(px(4)),
             ..default()
         },
-        BackgroundColor(BUTTON_IDLE),
+        BackgroundColor(background),
+        BorderColor::all(border),
+        tone,
         action,
         children![(
             Text::new(font_safe_text(text.into())),
@@ -8369,6 +8571,7 @@ fn chip_button<A: Component>(
     action: A,
 ) -> impl Bundle {
     let text = text.into();
+    let (background, border) = button_colors(ButtonTone::Choice, Interaction::None, false);
     (
         Button,
         Node {
@@ -8377,10 +8580,18 @@ fn chip_button<A: Component>(
             margin: UiRect::all(px(3)),
             align_items: AlignItems::Center,
             column_gap: px(6),
+            border: UiRect {
+                left: px(1),
+                right: px(1),
+                top: px(1),
+                bottom: px(2),
+            },
             border_radius: BorderRadius::all(px(4)),
             ..default()
         },
-        BackgroundColor(BUTTON_IDLE),
+        BackgroundColor(background),
+        BorderColor::all(border),
+        ButtonTone::Choice,
         TooltipSource::new(
             text.clone(),
             "Dispense the selected transfer volume of this base reagent.",
@@ -8423,7 +8634,7 @@ fn chip_grid<A: Component>(
                     chip.action,
                 ));
                 if chip.selected {
-                    entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
+                    entity.insert(Selected);
                 }
             }
         });
@@ -8456,7 +8667,9 @@ pub(crate) type ChangedButtons<'w, 's> = Query<
     (
         &'static Interaction,
         &'static mut BackgroundColor,
+        Option<&'static mut BorderColor>,
         Has<Selected>,
+        Option<&'static ButtonTone>,
     ),
     (
         Changed<Interaction>,
@@ -8465,17 +8678,52 @@ pub(crate) type ChangedButtons<'w, 's> = Query<
     ),
 >;
 
-pub(crate) fn button_feedback(mut buttons: ChangedButtons) {
-    for (interaction, mut background, selected) in &mut buttons {
-        background.0 = match interaction {
-            Interaction::Pressed => BUTTON_ACTIVE,
-            Interaction::Hovered => BUTTON_HOVER,
-            // `Interaction` counts as changed on spawn, so without the
-            // `Selected` check the highlighted amount button would be reset to
-            // idle the frame the panel is built.
-            Interaction::None if selected => BUTTON_ACTIVE,
-            Interaction::None => BUTTON_IDLE,
+fn button_colors(tone: ButtonTone, interaction: Interaction, selected: bool) -> (Color, Color) {
+    if selected {
+        return match interaction {
+            Interaction::Hovered => (BUTTON_ACTIVE_HOVER, BUTTON_ACTIVE_BORDER),
+            Interaction::Pressed => (BUTTON_PRIMARY, BUTTON_ACTIVE_BORDER),
+            Interaction::None => (BUTTON_ACTIVE, BUTTON_ACTIVE_BORDER),
         };
+    }
+
+    match tone {
+        ButtonTone::Choice => match interaction {
+            Interaction::Hovered => (BUTTON_HOVER, BUTTON_ACTIVE_BORDER),
+            Interaction::Pressed => (BUTTON_ACTIVE, BUTTON_ACTIVE_BORDER),
+            Interaction::None => (BUTTON_IDLE, BUTTON_BORDER),
+        },
+        ButtonTone::Primary => match interaction {
+            Interaction::Hovered => (BUTTON_PRIMARY_HOVER, BUTTON_ACTIVE_BORDER),
+            Interaction::Pressed => (BUTTON_ACTIVE, BUTTON_ACTIVE_BORDER),
+            Interaction::None => (BUTTON_PRIMARY, BUTTON_ACTIVE_BORDER),
+        },
+        ButtonTone::Utility => match interaction {
+            Interaction::Hovered => (BUTTON_UTILITY_HOVER, BUTTON_BORDER),
+            Interaction::Pressed => (BUTTON_ACTIVE, BUTTON_ACTIVE_BORDER),
+            Interaction::None => (BUTTON_UTILITY, BUTTON_UTILITY_BORDER),
+        },
+        ButtonTone::ToggleOn => match interaction {
+            Interaction::Hovered => (BUTTON_TOGGLE_HOVER, BUTTON_TOGGLE_BORDER),
+            Interaction::Pressed => (BUTTON_TOGGLE, BUTTON_TOGGLE_BORDER),
+            Interaction::None => (BUTTON_TOGGLE, BUTTON_TOGGLE_BORDER),
+        },
+        ButtonTone::Caution => match interaction {
+            Interaction::Hovered => (BUTTON_CAUTION_HOVER, BUTTON_CAUTION_BORDER),
+            Interaction::Pressed => (BUTTON_CAUTION, BUTTON_CAUTION_BORDER),
+            Interaction::None => (BUTTON_CAUTION, BUTTON_CAUTION_BORDER),
+        },
+        ButtonTone::Disabled => (BUTTON_DISABLED, BUTTON_DISABLED_BORDER),
+    }
+}
+
+pub(crate) fn button_feedback(mut buttons: ChangedButtons) {
+    for (interaction, mut background, border, selected, tone) in &mut buttons {
+        let (fill, edge) = button_colors(tone.copied().unwrap_or_default(), *interaction, selected);
+        background.0 = fill;
+        if let Some(mut border) = border {
+            *border = BorderColor::all(edge);
+        }
     }
 }
 
@@ -8513,7 +8761,7 @@ struct PanelMessages<'w> {
 
 #[allow(clippy::too_many_arguments)]
 fn handle_panel_clicks(
-    buttons: Query<(&Interaction, &PanelAction), Changed<Interaction>>,
+    buttons: Query<(&Interaction, &PanelAction, Option<&ButtonTone>), Changed<Interaction>>,
     mut modes: Query<(Entity, &mut InteractionMode), With<LocalPlayer>>,
     mut machine_views: ParamSet<(Query<&mut Machine>, Query<(Entity, &Machine)>)>,
     mut amounts: Query<&mut DispenseAmount>,
@@ -8553,8 +8801,8 @@ fn handle_panel_clicks(
     if mouse.is_some_and(|mouse| !mouse.just_pressed(MouseButton::Left)) {
         return;
     }
-    for (interaction, action) in &buttons {
-        if *interaction != Interaction::Pressed {
+    for (interaction, action, tone) in &buttons {
+        if *interaction != Interaction::Pressed || tone == Some(&ButtonTone::Disabled) {
             continue;
         }
 
@@ -8848,6 +9096,87 @@ mod tests {
     }
 
     #[test]
+    fn shared_button_roles_have_distinct_idle_and_hover_feedback() {
+        let interactive = [
+            ButtonTone::Choice,
+            ButtonTone::Primary,
+            ButtonTone::Utility,
+            ButtonTone::ToggleOn,
+            ButtonTone::Caution,
+        ];
+        let idle = interactive.map(|tone| button_colors(tone, Interaction::None, false).0);
+
+        for (index, tone) in interactive.into_iter().enumerate() {
+            assert_ne!(
+                idle[index],
+                button_colors(tone, Interaction::Hovered, false).0,
+                "{tone:?} needs visible hover feedback"
+            );
+            for other in idle.iter().skip(index + 1) {
+                assert_ne!(
+                    idle[index], *other,
+                    "button roles must not collapse together"
+                );
+            }
+        }
+
+        assert_eq!(
+            button_colors(ButtonTone::Disabled, Interaction::None, false),
+            button_colors(ButtonTone::Disabled, Interaction::Hovered, false),
+            "disabled controls must not light up as if actionable"
+        );
+        assert_eq!(
+            button_colors(ButtonTone::Choice, Interaction::None, true),
+            (BUTTON_ACTIVE, BUTTON_ACTIVE_BORDER),
+            "selected choices need a stable authored state"
+        );
+    }
+
+    #[derive(Component)]
+    struct TestButtonAction;
+
+    #[test]
+    fn shared_buttons_ship_with_a_visible_edge_and_semantic_tone() {
+        let mut world = World::new();
+        let entity = world
+            .spawn(styled_button(
+                "Analyze",
+                TestButtonAction,
+                ButtonTone::Primary,
+            ))
+            .id();
+
+        assert_eq!(world.get::<ButtonTone>(entity), Some(&ButtonTone::Primary));
+        assert!(world.get::<BorderColor>(entity).is_some());
+        assert_eq!(world.get::<Node>(entity).unwrap().border.bottom, px(2));
+    }
+
+    #[test]
+    fn analyzer_cells_center_their_text_inside_the_full_row_height() {
+        let mut world = World::new();
+        let cell = world
+            .spawn(hplc_cell("01   Carbon", 250.0, 13.0, TEXT))
+            .id();
+        let node = world.get::<Node>(cell).unwrap();
+
+        assert_eq!(node.align_self, AlignSelf::Stretch);
+        assert_eq!(node.flex_direction, FlexDirection::Column);
+        assert_eq!(node.justify_content, JustifyContent::Center);
+    }
+
+    #[test]
+    fn beaker_fill_uses_a_continuous_full_height_silhouette() {
+        let inner_height = 210.0;
+        for units in [1, 5, 10, 15, 20, 25, 30] {
+            let fill = units as f32 / 100.0;
+            let expected = units as f32 * 2.1;
+            assert!((beaker_fill_height(fill, inner_height) - expected).abs() < 0.001);
+        }
+        assert_eq!(beaker_fill_height(-1.0, inner_height), 0.0);
+        assert_eq!(beaker_fill_height(2.0, inner_height), inner_height);
+    }
+
+    #[test]
     fn social_standing_uses_signed_balances_and_plain_statuses() {
         assert_eq!(signed_standing(12), "+12");
         assert_eq!(signed_standing(0), "0");
@@ -8962,6 +9291,11 @@ mod tests {
             Interaction::Pressed,
             PanelAction::Requisition(RequisitionKind::Glassware),
         ));
+        app.world_mut().spawn((
+            Interaction::Pressed,
+            PanelAction::CallItAShift,
+            ButtonTone::Disabled,
+        ));
 
         app.update();
 
@@ -8975,6 +9309,9 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].board, board);
         assert_eq!(sent[0].kind, RequisitionKind::Glassware);
+        let messages = app.world().resource::<Messages<CallItAShift>>();
+        let mut cursor = messages.get_cursor();
+        assert_eq!(cursor.read(messages).count(), 0);
     }
 
     #[test]

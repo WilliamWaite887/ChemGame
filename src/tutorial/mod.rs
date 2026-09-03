@@ -19,10 +19,7 @@ use crate::{
     session::SessionKind,
     AppState,
 };
-use bevy::{
-    ecs::system::{SystemParam, SystemState},
-    prelude::*,
-};
+use bevy::{ecs::system::SystemState, prelude::*};
 use bevy_replicon::prelude::*;
 use chem_sim::{Solution, Units};
 use serde::{Deserialize, Serialize};
@@ -34,17 +31,6 @@ pub const TRAINING_REQUEST_BIT: u64 = 1 << 63;
 pub struct StartCareer;
 #[derive(Resource)]
 struct Relaunch(pub String);
-#[derive(Component)]
-pub struct TrainingCalibrated;
-#[derive(SystemParam)]
-pub struct TrainingEquipment<'w, 's> {
-    pub kind: Option<Res<'w, SessionKind>>,
-    pub calibrated: Query<'w, 's, (), With<TrainingCalibrated>>,
-}
-pub fn hplc_available(known: usize, kind: Option<&SessionKind>, calibrated: bool) -> bool {
-    known >= crate::machines::HPLC_RECIPE_REQUIREMENT
-        || (kind == Some(&SessionKind::Training) && calibrated)
-}
 #[derive(Resource, Default)]
 pub struct TrainingSpots(pub HashMap<String, Transform>);
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
@@ -501,15 +487,6 @@ fn prepare(world: &mut World) {
     if machines.len() < 7 {
         world.insert_resource(runner);
         return;
-    }
-    for (id, kind) in machines {
-        if kind == MachineKind::Analyzer
-            && world
-                .get::<crate::lab::MachineSpotId>(id)
-                .is_some_and(|spot| spot.0 == "training.analyzer")
-        {
-            world.entity_mut(id).insert(TrainingCalibrated);
-        }
     }
     let start = spot(world, "spawn");
     for mut at in world

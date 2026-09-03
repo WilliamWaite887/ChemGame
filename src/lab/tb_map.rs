@@ -298,6 +298,24 @@ fn every_map_texture_has_a_runtime_asset() {
 }
 
 #[test]
+fn chemistry_uses_modular_furniture_instead_of_the_placeholder_bench() {
+    assert!(
+        !std::path::Path::new("assets/textures/bench.png").exists(),
+        "the featureless placeholder bench sprite must stay retired"
+    );
+    assert!(
+        parse()
+            .iter()
+            .all(|entity| entity.brushes.iter().all(|brush| {
+                brush
+                    .iter()
+                    .all(|surface| surface.texture.to_string_lossy() != "bench")
+            })),
+        "lab.map must use modular Chemistry fixtures, not a brush textured `bench`"
+    );
+}
+
+#[test]
 fn chemistry_surface_sprites_are_small_power_of_two_pngs() {
     const CHEMISTRY_SURFACES: &[&str] = &[
         "floor_mixing_hall",
@@ -599,19 +617,27 @@ fn the_maps_walkable_rooms_match_the_floor_plan() {
             continue;
         };
 
-        for brush in &entity.brushes {
-            let actual = footprint(brush);
-            for (what, got, want) in [
-                ("min_x", actual.min_x, expected.bounds.min_x),
-                ("max_x", actual.max_x, expected.bounds.max_x),
-                ("min_z", actual.min_z, expected.bounds.min_z),
-                ("max_z", actual.max_z, expected.bounds.max_z),
-            ] {
-                assert!(
-                    (got - want).abs() < 0.01,
-                    "{room}'s walkable volume has {what} = {got}, floor plan says {want}",
-                );
-            }
+        let actual = entity
+            .brushes
+            .iter()
+            .map(|brush| footprint(brush))
+            .reduce(|left, right| Bounds {
+                min_x: left.min_x.min(right.min_x),
+                max_x: left.max_x.max(right.max_x),
+                min_z: left.min_z.min(right.min_z),
+                max_z: left.max_z.max(right.max_z),
+            })
+            .unwrap_or_else(|| panic!("{room} has no walkable brush"));
+        for (what, got, want) in [
+            ("min_x", actual.min_x, expected.bounds.min_x),
+            ("max_x", actual.max_x, expected.bounds.max_x),
+            ("min_z", actual.min_z, expected.bounds.min_z),
+            ("max_z", actual.max_z, expected.bounds.max_z),
+        ] {
+            assert!(
+                (got - want).abs() < 0.01,
+                "{room}'s combined walkable volume has {what} = {got}, floor plan says {want}",
+            );
         }
     }
 }
@@ -1612,17 +1638,11 @@ fn every_named_crew_member_has_a_work_post() {
 fn department_dressing_markers_fit_their_authored_rooms() {
     // Each shell-free set keeps the starter bay's 4.6 x 3.6 m authoring
     // envelope. These origins put the five public departments against their
-    // rear walls while retaining the full south-side route to the corridor;
-    // Chemistry occupies the clear east side of the Mixing Hall.
+    // rear walls while retaining the full south-side route to the corridor.
+    // Chemistry deliberately uses modular fixtures instead of a starter bay.
     const HALF_WIDTH: f32 = 2.3;
     const HALF_DEPTH: f32 = 1.8;
     const EXPECTED: &[(&str, &str, Vec3, &str)] = &[
-        (
-            "Chemistry",
-            "Mixing Hall",
-            Vec3::new(5.0, 0.0, -3.7),
-            "0 0 0",
-        ),
         ("Medical", "Medical", Vec3::new(-27.0, 0.0, 4.0), "0 180 0"),
         (
             "Engineering",
@@ -1648,7 +1668,13 @@ fn department_dressing_markers_fit_their_authored_rooms() {
     assert_eq!(
         markers.len(),
         EXPECTED.len(),
-        "the station needs exactly one dressing marker per starter department",
+        "only departments still using a starter bay should have dressing markers",
+    );
+    assert!(
+        markers
+            .iter()
+            .all(|marker| property(marker, "department").as_deref() != Some("Chemistry")),
+        "Chemistry's overlapping starter dressing must stay replaced by modular fixtures",
     );
 
     for (department, room, expected_origin, expected_angles) in EXPECTED {
@@ -1870,8 +1896,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
     const PLACEMENTS: &[Placement] = &[
         Placement {
             kind: "chem.supply_shelf",
-            origin: "-176 296 0",
-            angles: "0 90 0",
+            origin: "-232 254 0",
+            angles: "0 180 0",
             mount: Mount::Wall,
             room: Bounds {
                 min_x: -7.5,
@@ -1881,6 +1907,62 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             },
             width: 1.65,
             depth: 0.38,
+        },
+        Placement {
+            kind: "chem.sink_island",
+            origin: "88 140 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: Bounds {
+                min_x: -7.5,
+                max_x: 7.5,
+                min_z: -5.5,
+                max_z: 2.0,
+            },
+            width: 2.60,
+            depth: 0.90,
+        },
+        Placement {
+            kind: "chem.clean_workbench",
+            origin: "88 -80 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: Bounds {
+                min_x: -7.5,
+                max_x: 7.5,
+                min_z: -5.5,
+                max_z: 2.0,
+            },
+            width: 2.60,
+            depth: 0.90,
+        },
+        Placement {
+            kind: "chem.sample_bench",
+            origin: "56 -360 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: Bounds {
+                min_x: 7.5,
+                max_x: 13.5,
+                min_z: -5.5,
+                max_z: -0.5,
+            },
+            width: 2.20,
+            depth: 0.80,
+        },
+        Placement {
+            kind: "chem.fume_hood",
+            origin: "204 416 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: Bounds {
+                min_x: -13.5,
+                max_x: -7.5,
+                min_z: -5.5,
+                max_z: -1.5,
+            },
+            width: 1.50,
+            depth: 0.75,
         },
         Placement {
             kind: "chem.analysis_panel",
@@ -3217,6 +3299,51 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             placement.room,
         );
 
+        if placement.mount == Mount::Wall && placement.kind.starts_with("chem.") {
+            let doorway_bridges: Vec<Bounds> = map
+                .iter()
+                .filter(|entity| {
+                    classname(entity).as_deref() == Some("func_walkable")
+                        && property(entity, "bridge_id").is_some()
+                })
+                .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
+                .collect();
+            assert!(
+                doorway_bridges
+                    .iter()
+                    .all(|bridge| bridge.intersection(&bounds).is_none()),
+                "wall fixture {} at {bounds:?} hangs into a doorway bridge",
+                placement.kind,
+            );
+
+            // Three samples across the mount width must land on tall physical
+            // world geometry immediately behind the model. This catches a
+            // shelf placed across an opening even when its centre happens to
+            // be close to a remaining wall return.
+            let (back, lateral) = match placement.angles {
+                "0 0 0" => (Vec3::NEG_Z, Vec3::X),
+                "0 90 0" => (Vec3::NEG_X, Vec3::Z),
+                "0 180 0" => (Vec3::Z, Vec3::X),
+                "0 -90 0" => (Vec3::X, Vec3::Z),
+                other => panic!("unsupported Chemistry wall angle {other}"),
+            };
+            let world = map
+                .iter()
+                .find(|entity| classname(entity).as_deref() == Some("worldspawn"))
+                .expect("worldspawn");
+            for offset in [-half_width + 0.05, 0.0, half_width - 0.05] {
+                let sample = Vec3::new(x, 0.0, z) + back * 0.20 + lateral * offset;
+                assert!(
+                    world.brushes.iter().any(|brush| {
+                        let (bottom, top) = vertical_span(brush);
+                        top - bottom > 1.0 && footprint(brush).holds(sample)
+                    }),
+                    "wall fixture {} has no backing wall at {sample}",
+                    placement.kind,
+                );
+            }
+        }
+
         // The invariant that makes a floor fixture safe. A wall module can
         // overhang walkable floor — you brush past a shelf. A bed cannot: with
         // no collider on the scene and no `Solid` for crew to consult, standing
@@ -3710,8 +3837,8 @@ fn every_station_kit_glb_parses_with_bevys_gltf_parser() {
         });
     }
     assert_eq!(
-        count, 122,
-        "the station starter kit should contain 122 GLBs, including the Chapel and Cult set"
+        count, 126,
+        "the station starter kit should contain 126 GLBs, including the modular Chemistry fixtures"
     );
 }
 
@@ -4740,22 +4867,22 @@ fn the_map_still_places_every_machine() {
 
 #[test]
 fn core_lanes_clear_the_authored_chemistry_furniture() {
-    // Bounds measured from department_chemistry_dressing.glb. The export is
-    // render-only for navigation, but its fume hood and island are real visible
-    // furniture: placing a machine through either still makes the workstation
-    // unusable even though collision cannot catch the mistake.
-    const FURNITURE_LOCAL: &[Bounds] = &[
+    // The two islands preserve a separate physical lane for each machine pair.
+    // Keep their authored envelopes literal here rather than sharing the map
+    // placement table: moving either side without updating this test should be
+    // a deliberate workflow decision.
+    const FURNITURE: &[Bounds] = &[
         Bounds {
-            min_x: -1.975,
-            max_x: -0.525,
-            min_z: -1.605,
-            max_z: -0.9225,
+            min_x: -4.8,
+            max_x: -2.2,
+            min_z: -2.65,
+            max_z: -1.75,
         },
         Bounds {
-            min_x: -0.7601,
-            max_x: 1.9552,
-            min_z: -0.1601,
-            max_z: 0.7711,
+            min_x: 0.7,
+            max_x: 3.3,
+            min_z: -2.65,
+            max_z: -1.75,
         },
     ];
     const CORE_IDS: &[&str] = &["chemmaster5000.a", "mixer.a", "chemmaster5000.b", "mixer.b"];
@@ -4764,31 +4891,17 @@ fn core_lanes_clear_the_authored_chemistry_furniture() {
         a.min_x < b.max_x && a.max_x > b.min_x && a.min_z < b.max_z && a.max_z > b.min_z
     };
     let map = parse();
-    let dressing = map
-        .iter()
-        .find(|entity| {
-            classname(entity).as_deref() == Some("department_dressing")
-                && property(entity, "department").as_deref() == Some("Chemistry")
-        })
-        .expect("Chemistry dressing marker");
-    assert_eq!(property(dressing, "angles").as_deref(), Some("0 0 0"));
-    let (dress_x, dress_z) = origin_xz(dressing).expect("valid Chemistry dressing origin");
-    let furniture: Vec<Bounds> = FURNITURE_LOCAL
-        .iter()
-        .map(|bounds| Bounds {
-            min_x: bounds.min_x + dress_x,
-            max_x: bounds.max_x + dress_x,
-            min_z: bounds.min_z + dress_z,
-            max_z: bounds.max_z + dress_z,
-        })
-        .collect();
-
     let hall = map
         .iter()
         .filter(|entity| classname(entity).as_deref() == Some("func_walkable"))
         .filter(|entity| property(entity, "room").as_deref() == Some("Mixing Hall"))
         .flat_map(|entity| entity.brushes.iter().map(|brush| footprint(brush)))
-        .next()
+        .reduce(|left, right| Bounds {
+            min_x: left.min_x.min(right.min_x),
+            max_x: left.max_x.max(right.max_x),
+            min_z: left.min_z.min(right.min_z),
+            max_z: left.max_z.max(right.max_z),
+        })
         .expect("Mixing Hall floor");
 
     for id in CORE_IDS {
@@ -4823,7 +4936,7 @@ fn core_lanes_clear_the_authored_chemistry_furniture() {
                     && bounds.max_z <= hall.max_z,
                 "{id} {what} leaves the Mixing Hall: {bounds:?}",
             );
-            for occupied in &furniture {
+            for occupied in FURNITURE {
                 assert!(
                     !overlaps(bounds, *occupied),
                     "{id} {what} overlaps visible Chemistry furniture: {bounds:?} vs {occupied:?}",

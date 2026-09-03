@@ -168,10 +168,9 @@ pub struct RequestDef {
     /// Successful deliveries required before this request joins the pool.
     #[serde(default)]
     pub minimum_successes: u32,
-    /// Recorded methods required before specialized equipment assumptions in
-    /// this request are fair. This is independent of knowing the requested
-    /// reagent itself: a chromatography-grade order also requires a calibrated
-    /// analyzer.
+    /// Recorded methods required before the requested chemistry is fair. This
+    /// is independent of equipment availability: the analyzer and its HPLC
+    /// purification are usable from the start.
     #[serde(default)]
     pub minimum_recipes_known: usize,
     /// Exact industrial/emergency asks do not accept a category substitute.

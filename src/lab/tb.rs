@@ -6,8 +6,9 @@
 //!
 //! # What the map owns, and what it does not
 //!
-//! Owned by the map: the shell geometry, the benches, the ceiling lights and
-//! their per-room tint, where each machine stands, and where a chemist starts.
+//! Owned by the map: the shell geometry, modular furniture placements, the
+//! ceiling lights and their per-room tint, where each machine stands, and where
+//! a chemist starts.
 //! Each brush also becomes a [`Solid`], so walls you draw in TrenchBroom stop
 //! the player without anyone restating them in Rust.
 //!
@@ -1316,6 +1317,22 @@ pub struct DecorationSpot {
 /// whoever is authoring the map, not a rule.
 const DECORATION_KINDS: &[(&str, &str)] = &[
     (
+        "chem.sink_island",
+        "3dassets/station_starter_kit/glb/decor_chem_sink_island.glb",
+    ),
+    (
+        "chem.clean_workbench",
+        "3dassets/station_starter_kit/glb/decor_chem_clean_workbench.glb",
+    ),
+    (
+        "chem.sample_bench",
+        "3dassets/station_starter_kit/glb/decor_chem_sample_bench.glb",
+    ),
+    (
+        "chem.fume_hood",
+        "3dassets/station_starter_kit/glb/decor_chem_fume_hood.glb",
+    ),
+    (
         "chem.supply_shelf",
         "3dassets/station_starter_kit/glb/decor_chem_supply_shelf.glb",
     ),
@@ -1738,6 +1755,14 @@ fn load_decoration_assets(mut commands: Commands, assets: Res<AssetServer>) {
 /// briefing table is the one deliberate exception — its real ~0.80 m top is
 /// left alone because a table *should* be settable-on.
 const FLOOR_COLLIDER_ENVELOPES: &[(&str, Vec3)] = &[
+    // Chemistry's modular benches replace the old solid map brushes. Their
+    // collider tops deliberately match the authored worktops, so the existing
+    // set-down system can land beakers on them. Small visual glassware and the
+    // sink faucet do not make the whole island artificially taller.
+    ("chem.sink_island", Vec3::new(1.30, 0.95, 0.45)),
+    ("chem.clean_workbench", Vec3::new(1.30, 0.95, 0.45)),
+    ("chem.sample_bench", Vec3::new(1.10, 0.90, 0.40)),
+    ("chem.fume_hood", Vec3::new(0.75, 2.50, 0.375)),
     ("eng.smes_bank", Vec3::new(1.10, 2.10, 0.50)),
     ("eng.generator_turbine", Vec3::new(1.30, 2.30, 1.00)),
     ("eng.hardsuit_locker", Vec3::new(0.90, 2.10, 0.425)),
@@ -2264,5 +2289,40 @@ mod tests {
             Some(&authored),
             "decoration must preserve the transform authored in TrenchBroom",
         );
+    }
+
+    #[test]
+    fn chemistry_workbench_gets_a_rotating_set_down_collider() {
+        let mut app = App::new();
+        app.insert_resource(DecorationAssets {
+            scenes: DECORATION_KINDS
+                .iter()
+                .map(|(kind, _)| (*kind, default()))
+                .collect(),
+        })
+        .add_systems(Update, dress_decorations);
+
+        let authored = Transform::from_xyz(-3.5, 0.0, -2.2)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let marker = app
+            .world_mut()
+            .spawn((
+                DecorationSpot {
+                    kind: "chem.sink_island".to_string(),
+                },
+                authored,
+            ))
+            .id();
+
+        app.update();
+
+        let world = app.world();
+        let solid = world
+            .get::<Solid>(marker)
+            .expect("a floor fixture needs a runtime collider");
+        assert!((solid.half_extents.x - 0.45).abs() < 0.001);
+        assert!((solid.half_extents.y - 0.95).abs() < 0.001);
+        assert!((solid.half_extents.z - 1.30).abs() < 0.001);
+        assert_eq!(world.get::<Transform>(marker), Some(&authored));
     }
 }

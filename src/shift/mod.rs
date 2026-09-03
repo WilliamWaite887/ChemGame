@@ -2360,11 +2360,7 @@ mod tests {
             .find(|request| request.reagent == "lenturi")
             .unwrap();
         assert!(mastery.patience_scale >= 2.0);
-        assert_eq!(
-            mastery.minimum_recipes_known,
-            crate::machines::HPLC_RECIPE_REQUIREMENT,
-            "the mastery request must not precede analyzer calibration"
-        );
+        assert_eq!(mastery.minimum_recipes_known, 24);
         assert!(mastery.amounts.iter().all(|amount| amount % 4 == 0));
     }
 

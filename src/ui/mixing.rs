@@ -172,23 +172,29 @@ fn ingredients(
                 if !locked {
                     list.spawn(wrap_row()).with_children(|controls| {
                         if chamber {
-                            controls.spawn(button(
+                            controls.spawn(styled_button(
                                 "To A",
                                 PanelAction::ToContainer(reagent, amount, MachineSlot::A),
+                                ButtonTone::Primary,
                             ));
-                            controls.spawn(button(
+                            controls.spawn(styled_button(
                                 "To B",
                                 PanelAction::ToContainer(reagent, amount, MachineSlot::B),
+                                ButtonTone::Primary,
                             ));
                         } else {
                             for n in [5, 10] {
-                                controls.spawn(button(
+                                controls.spawn(styled_button(
                                     format!("{n}u"),
                                     PanelAction::ToBuffer(reagent, Units::whole(n), slot),
+                                    ButtonTone::Primary,
                                 ));
                             }
-                            controls
-                                .spawn(button("All", PanelAction::ToBuffer(reagent, amount, slot)));
+                            controls.spawn(styled_button(
+                                "All",
+                                PanelAction::ToBuffer(reagent, amount, slot),
+                                ButtonTone::Primary,
+                            ));
                         }
                     });
                 }
@@ -227,7 +233,11 @@ fn beaker(
         beaker_preview_sized(p, entity, 72.0, 88.0);
         readings(p, loaded.map(|c| &c.solution));
         if !locked && entity.is_some() {
-            p.spawn(button("Eject", PanelAction::Eject(slot)));
+            p.spawn(styled_button(
+                "Eject",
+                PanelAction::Eject(slot),
+                ButtonTone::Utility,
+            ));
         }
     });
 }
@@ -314,7 +324,11 @@ pub(super) fn body(
                     }),
                 });
             if available {
-                buttons.spawn(button(title, PanelAction::Agitate(direction)));
+                buttons.spawn(styled_button(
+                    title,
+                    PanelAction::Agitate(direction),
+                    ButtonTone::Primary,
+                ));
             } else {
                 buttons
                     .spawn((
@@ -409,22 +423,24 @@ pub(super) fn body(
                                 ContainerKind::PhPaper,
                                 ContainerKind::SmokeProjector,
                             ] {
-                                let mut option = grid.spawn(button(
+                                let mut option = grid.spawn(styled_button(
                                     format!("{} ({})", kind.label(), kind.capacity()),
                                     PanelAction::Package(kind),
+                                    ButtonTone::Choice,
                                 ));
                                 if draft.kind == kind {
-                                    option.insert((
-                                        BackgroundColor(BUTTON_ACTIVE),
-                                        PreserveButtonBackground,
-                                    ));
+                                    option.insert(Selected);
                                 }
                             }
                         });
                     });
             });
             bottom.spawn(column(29.0)).with_children(|output| {
-                output.spawn(button("Label", PanelAction::FocusPackageLabel));
+                output.spawn(styled_button(
+                    "Label",
+                    PanelAction::FocusPackageLabel,
+                    ButtonTone::Utility,
+                ));
                 let auto = if draft.kind == ContainerKind::PhPaper {
                     "pH paper".into()
                 } else {
@@ -458,6 +474,7 @@ pub(super) fn body(
                         },
                         BackgroundColor(PANEL_BG),
                         BorderColor::all(if draft.editing { LABEL_INK } else { TEXT_DIM }),
+                        PreserveButtonBackground,
                         PanelAction::FocusPackageLabel,
                         ScrollPosition(Vec2::new(0.0, scroll[4])),
                         ScrollPane,
@@ -491,12 +508,11 @@ pub(super) fn body(
                                         .any(|(r, _)| db.reagents.get(r).explosive.is_some())
                                 }))));
                 if valid {
-                    output
-                        .spawn(button("Package", PanelAction::FinishPackage))
-                        .insert((
-                            BackgroundColor(Color::srgb(0.12, 0.45, 0.28)),
-                            PreserveButtonBackground,
-                        ));
+                    output.spawn(styled_button(
+                        "Package",
+                        PanelAction::FinishPackage,
+                        ButtonTone::Primary,
+                    ));
                 } else {
                     output.spawn(label("Package unavailable", 14.0, TEXT_DIM));
                 }

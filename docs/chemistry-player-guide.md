@@ -177,9 +177,9 @@ precise readings.
 
 ### Sample Analyzer / HPLC
 
-After the required method knowledge is recorded, the analyzer can separate a
-selected reagent from contaminants and improve its retained purity. Yield is
-lost during purification; the rejected fraction goes to a reject beaker.
+The analyzer can separate a selected reagent from contaminants and improve its
+retained purity from the start of a career. Yield is lost during purification;
+the rejected fraction goes to a reject beaker.
 
 Use HPLC when:
 

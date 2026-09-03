@@ -59,16 +59,6 @@ fn training_content_links_and_goals_are_valid() {
     );
 }
 #[test]
-fn calibration_requires_both_training_session_and_designated_equipment() {
-    for known in [0, 3, 23] {
-        assert!(!hplc_available(known, None, true));
-        assert!(!hplc_available(known, Some(&SessionKind::Career), true));
-        assert!(!hplc_available(known, Some(&SessionKind::Training), false));
-        assert!(hplc_available(known, Some(&SessionKind::Training), true));
-    }
-    assert!(hplc_available(24, Some(&SessionKind::Career), false));
-}
-#[test]
 fn progress_roundtrip_distinguishes_skipped_and_completed() {
     let mut p = TrainingProgress {
         version: 1,
@@ -297,7 +287,7 @@ fn actual_preparation_analysis_packaging_and_delivery_complete_only_after_verifi
     assert!(!app.world().contains_resource::<crate::saves::SaveSlot>());
 }
 #[test]
-fn physical_hplc_gate_does_not_unlock_recipes_or_other_analyzers() {
+fn hplc_is_available_in_training_and_career_without_unlocking_recipes() {
     use crate::machines::*;
     let (mut app, _, bench, beaker) = app();
     let reagent = app
@@ -311,15 +301,6 @@ fn physical_hplc_gate_does_not_unlock_recipes_or_other_analyzers() {
         .unwrap()
         .solution
         .add(reagent, Units::whole(10));
-    send(
-        &mut app,
-        PurifyRequested {
-            machine: bench,
-            reagent,
-        },
-    );
-    assert!(app.world().get::<HplcReport>(bench).is_none());
-    app.world_mut().entity_mut(bench).insert(TrainingCalibrated);
     send(
         &mut app,
         PurifyRequested {
@@ -346,7 +327,14 @@ fn physical_hplc_gate_does_not_unlock_recipes_or_other_analyzers() {
             reagent,
         },
     );
-    assert!(app.world().get::<HplcReport>(bench).is_none());
+    assert!(app.world().get::<HplcReport>(bench).is_some());
+    assert_eq!(
+        app.world()
+            .resource::<crate::knowledge::Knowledge>()
+            .known_count(),
+        3,
+        "using HPLC must not bypass recipe discovery"
+    );
 }
 #[test]
 fn stale_delivery_generation_and_seeded_bottles_cannot_complete_an_exercise() {

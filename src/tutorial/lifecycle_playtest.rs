@@ -207,13 +207,7 @@ fn drive(world: &mut World) {
             }
         }
         3 if state == AppState::MainMenu => {
-            if world.contains_resource::<Runner>()
-                || world
-                    .query_filtered::<Entity, With<TrainingCalibrated>>()
-                    .iter(world)
-                    .next()
-                    .is_some()
-            {
+            if world.contains_resource::<Runner>() {
                 finish(world, Some("Training capability survived leaving"));
                 return;
             }

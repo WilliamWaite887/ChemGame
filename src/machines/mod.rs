@@ -35,10 +35,6 @@ mod playtest;
 
 pub struct MachinePlugin;
 
-/// Recipe methods the shared notebook must contain before the analyzer's
-/// separation program is considered calibrated.
-pub const HPLC_RECIPE_REQUIREMENT: usize = 24;
-
 fn emit_world_sfx(sounds: &mut Option<ResMut<Messages<EmitWorldSfx>>>, sound: Sfx, position: Vec3) {
     if let Some(sounds) = sounds {
         sounds.write(EmitWorldSfx::new(sound, position));
@@ -2441,10 +2437,7 @@ pub(crate) fn handle_analyze(
 /// a hidden dice roll.
 fn handle_purify(
     mut commands: Commands,
-    training: Option<Res<crate::session::SessionKind>>,
-    calibrated: Query<(), With<crate::tutorial::TrainingCalibrated>>,
     db: Res<ChemDb>,
-    knowledge: Res<Knowledge>,
     mut requests: MessageReader<FromClient<PurifyRequested>>,
     machines: Query<&Machine>,
     chemists: Query<(Entity, &Chemist)>,
@@ -2458,13 +2451,6 @@ fn handle_purify(
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
 ) {
     for request in requests.read() {
-        if !crate::tutorial::hplc_available(
-            knowledge.known_count(),
-            training.as_deref(),
-            calibrated.contains(request.machine),
-        ) {
-            continue;
-        }
         if authorized_machine_actor(
             request.client_id,
             machines.get(request.machine).ok(),
@@ -3241,7 +3227,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn hplc_stays_locked_until_the_notebook_has_expert_coverage() {
+    fn hplc_purifies_with_a_fresh_notebook() {
         let mut app = test_app();
         let water = reagent(&app, "water");
         let machine = app.world_mut().spawn(Transform::default()).id();
@@ -3253,20 +3239,20 @@ pub(crate) mod tests {
 
         request_purification(&mut app, machine, water);
 
-        let unchanged = app.world().get::<Container>(source).unwrap();
-        assert_eq!(unchanged.solution.volume_of(water), Units::whole(10));
-        assert!((unchanged.solution.purity_of(water) - 0.40).abs() < 0.001);
+        let purified = app.world().get::<Container>(source).unwrap();
+        assert_eq!(purified.solution.volume_of(water), Units::whole(9));
+        assert!((purified.solution.purity_of(water) - 0.85).abs() < 0.001);
         assert_eq!(
             app.world_mut()
                 .query::<&Container>()
                 .iter(app.world())
                 .count(),
-            1,
-            "a forged early request must not create a reject beaker"
+            2,
+            "purification should create one reject beaker"
         );
         assert!(
-            app.world().get::<HplcReport>(machine).is_none(),
-            "a rejected request must not forge a successful result"
+            app.world().get::<HplcReport>(machine).is_some(),
+            "the analyzer must report a fresh-notebook purification"
         );
     }
 
