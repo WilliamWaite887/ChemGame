@@ -1,0 +1,36 @@
+Every release
+1. Finish and save all game changes.
+2. If assets changed:
+   - Add new protected/public classifications to [assets.ron](C:/Users/William/Documents/ChemGame/release/assets.ron).
+   - Add required attribution to CREDITS.md.
+   - Remember that credited assets must remain public loose files.
+3. Open PowerShell in the project folder:
+   cd C:\Users\William\Documents\ChemGame
+4. Set the values for that PowerShell session:
+   $env:CHEMGAME_ASSET_KEY = "7755d798de68ebd7d1d7eb27545888a0c32c229af6e3a369c351c06532a3e029"
+   $env:STEAM_USERNAME = "richnisdude3000"
+   The asset key is an environment value, not a script argument. SteamCMD may separately request your Steam account password and Steam Guard code.
+5. Build and inspect without uploading:
+   .\tools\release-steam.ps1 -PackageOnly
+   This runs tests, builds the Windows executable, packages protected assets, and audits the release.
+6. Inspect target\steam\windows-content. It should contain only:
+   chemgame.exe
+   steam_api64.dll
+   CREDITS.md
+   content_00.cgp
+   content_01.cgp
+   content_02.cgp
+   assets\sounds\...*.ogg
+7. Upload the release:
+   .\tools\release-steam.ps1
+   This repeats the verified build and uploads it to the candidate branch. It does not make the build public.
+8. In Steamworks, confirm the new Build ID appears and is assigned to candidate. Steam allows SetLive to automatically assign beta branches, but the public default branch must be changed manually. Steam branch documentation
+9. Install the build through Steam on a clean Windows installation:
+   - Select candidate under the game’s Steam Properties → Game Versions & Betas.
+   - Enter the candidate access password if you created one.
+   - Confirm CREDITS.md opens from the installed folder.
+   - Confirm credited sounds are readable.
+   - Confirm Python, Blender, RON, map, GLB, PNG, and other authoring files are absent.
+   - Test startup, normal gameplay, save/reload, and Steam co-op.
+10. When satisfied, manually set that Build ID live on the default branch in Steamworks.
+For the first public launch, Valve must approve both the store presence and a mostly final build. Once those reviews and the Coming Soon requirement are complete, use Steamworks’ green “Release App” workflow. Valve review process, release process

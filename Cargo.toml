@@ -5,6 +5,7 @@ members = ["crates/chem_sim", "crates/bevy_replicon_renet2_patched"]
 name = "chemgame"
 version = "0.1.0"
 edition = "2021"
+default-run = "chemgame"
 
 [dependencies]
 chem_sim = { path = "crates/chem_sim" }
@@ -21,6 +22,8 @@ ron = "0.11"
 # Also reads the authored training layout in fallback builds.
 quake-map = "0.6"
 sha2 = "0.10"
+aes-gcm-siv = "0.11"
+zstd = "0.13"
 bevy_replicon = "0.42.0"
 bevy_replicon_renet = "0.18.0"
 # Locally patched — see crates/bevy_replicon_renet2_patched/PATCH_NOTES.md.
@@ -55,6 +58,9 @@ trenchbroom = ["dep:bevy_trenchbroom"]
 # default because it needs the shared library alongside the binary, so it is
 # not suitable for shipping: `cargo run --features fast-compile`.
 fast-compile = ["bevy/dynamic_linking"]
+# Steam builds replace Bevy's loose-file asset reader with the authenticated
+# pack reader. Development remains loose-file by default.
+packed-assets = []
 
 # Bevy is unusably slow to iterate on without this: dependencies get optimised
 # even in debug builds, while our own crates stay fast to recompile.

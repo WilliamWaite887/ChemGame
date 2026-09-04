@@ -1,0 +1,76 @@
+// This is the release boundary. A rule only includes files with the listed
+// runtime extension; Python, Blender, Markdown, JSON, SVG and preview sources
+// therefore never enter a Steam depot.
+(
+    packs: [
+        (
+            file: "content_00.cgp",
+            include: [
+                (root: "data", extensions: ["ron"]),
+                (root: "maps", extensions: ["map"]),
+            ],
+        ),
+        (
+            file: "content_01.cgp",
+            include: [
+                (root: "3dassets/glb", extensions: ["glb"]),
+                (root: "3dassets/station_starter_kit/glb", extensions: ["glb"]),
+            ],
+        ),
+        (
+            file: "content_02.cgp",
+            include: [
+                (root: "textures", extensions: ["png"]),
+                (root: "ui/chemistry_book/icons", extensions: ["png"]),
+            ],
+        ),
+    ],
+
+    // Every credited asset stays in its original, readable form. CREDITS.md is
+    // copied separately to the install root by the packer.
+    public: [
+        (root: "sounds", extensions: ["ogg"]),
+    ],
+
+    // These have runtime-looking extensions but are authoring output or
+    // deliberately unused alternatives. Keeping them explicit makes a newly
+    // added PNG/GLB fail the packaging audit until its intent is reviewed.
+    ignored: [
+        (root: "3dassets/previews", extensions: ["png"]),
+        (root: "3dassets/station_starter_kit/textures", extensions: ["png"]),
+    ],
+    ignored_files: [
+        // These two are compiled into the executable with include_str! and do
+        // not need a second copy in a depot pack.
+        "data/lab.textbook.ron",
+        "data/lab.training.ron",
+        "3dassets/glb/first_char_test.glb",
+        "3dassets/station_starter_kit/glb/department_cargo_starter.glb",
+        "3dassets/station_starter_kit/glb/department_engineering_starter.glb",
+        "3dassets/station_starter_kit/glb/department_medical_starter.glb",
+        "3dassets/station_starter_kit/glb/department_security_starter.glb",
+        "3dassets/station_starter_kit/glb/department_service_starter.glb",
+        "3dassets/station_starter_kit/preview_botany_decor.png",
+        "3dassets/station_starter_kit/preview_bridge_decor.png",
+        "3dassets/station_starter_kit/preview_chemistry_decor.png",
+        "3dassets/station_starter_kit/preview_chemistry_fixtures.png",
+        "3dassets/station_starter_kit/preview_conveyor.png",
+        "3dassets/station_starter_kit/preview_cult_campaign.png",
+        "3dassets/station_starter_kit/preview_department_decor.png",
+        "3dassets/station_starter_kit/preview_departments.png",
+        "3dassets/station_starter_kit/preview_engineering_decor.png",
+        "3dassets/station_starter_kit/preview_machines.png",
+        "3dassets/station_starter_kit/preview_medical_decor.png",
+        "3dassets/station_starter_kit/preview_medical_ward.png",
+        "3dassets/station_starter_kit/preview_security_decor.png",
+        "3dassets/station_starter_kit/preview_service_decor.png",
+        "textures/clip.png",
+        "textures/floor_cargo.png",
+        "textures/floor_engineering.png",
+        "textures/floor_medical.png",
+        "textures/floor_pod.png",
+        "textures/floor_security.png",
+        "textures/floor_service.png",
+        "textures/preview_chemistry_surfaces.png",
+    ],
+)

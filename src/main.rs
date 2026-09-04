@@ -4,6 +4,8 @@ mod addiction;
 mod analysis_reports;
 mod antagonist;
 mod arc;
+#[cfg(feature = "packed-assets")]
+mod asset_pack_format;
 mod audio;
 mod bent_guard;
 mod body;
@@ -45,6 +47,8 @@ mod player;
 mod produce;
 mod quack;
 mod radio;
+#[cfg(feature = "packed-assets")]
+mod release_assets;
 mod rogue_security;
 mod saboteur;
 mod saves;
@@ -67,6 +71,13 @@ use bevy::prelude::*;
 
 fn main() {
     let mut app = App::new();
+
+    // A Steam build has no loose fallback for original data, maps, models or
+    // textures. Credited sounds remain normal files under assets/sounds.
+    // Register before DefaultPlugins installs AssetPlugin.
+    #[cfg(feature = "packed-assets")]
+    release_assets::register(&mut app);
+
     // A profile identity belongs to this installation, not to a save slot or
     // one network connection. Load it before networking can begin.
     app.insert_resource(net::LocalAccount::load_or_create());

@@ -11,6 +11,10 @@ use std::path::PathBuf;
 /// quietly if it isn't set, so this stays harmless on a machine without the
 /// SDK — only the Steam transport needs it; the LAN/dev path does not.
 fn main() {
+    // The Steam asset key is compiled into packed builds. Cargo must rebuild
+    // the executable when a release operator intentionally rotates it.
+    println!("cargo:rerun-if-env-changed=CHEMGAME_ASSET_KEY");
+
     let Ok(sdk) = env::var("STEAM_SDK_LOCATION") else {
         return;
     };
