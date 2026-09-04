@@ -810,19 +810,58 @@ fn selective_subrooms_are_inside_their_parent_departments() {
                 max_z: 51.0,
             },
         ),
-        (
-            "Botany Nursery",
-            Bounds {
-                min_x: -18.5,
-                max_x: 13.5,
-                min_z: 42.0,
-                max_z: 51.0,
-            },
-        ),
     ] {
         let found = named_bounds(room);
         assert_eq!(found.len(), 1, "{room} should be one walkable rectangle");
         assert!(bounds_are_close(found[0], expected), "{room}: {found:?}");
+    }
+
+    // The nursery's propagation racks are two carved rows, so its walkable
+    // floor is the three long aisles plus a cross-aisle at each airlock.
+    let nursery = named_bounds("Botany Nursery");
+    assert_eq!(
+        nursery.len(),
+        5,
+        "Botany Nursery should be three aisles joined at both airlocks"
+    );
+    for expected in [
+        Bounds {
+            min_x: -18.5,
+            max_x: -8.6,
+            min_z: 42.0,
+            max_z: 51.0,
+        },
+        Bounds {
+            min_x: -7.4,
+            max_x: 7.4,
+            min_z: 42.0,
+            max_z: 51.0,
+        },
+        Bounds {
+            min_x: 8.6,
+            max_x: 13.5,
+            min_z: 42.0,
+            max_z: 51.0,
+        },
+        Bounds {
+            min_x: -18.5,
+            max_x: 13.5,
+            min_z: 42.0,
+            max_z: 43.5,
+        },
+        Bounds {
+            min_x: -18.5,
+            max_x: 13.5,
+            min_z: 49.5,
+            max_z: 51.0,
+        },
+    ] {
+        assert!(
+            nursery
+                .iter()
+                .any(|actual| bounds_are_close(*actual, expected)),
+            "Botany Nursery is missing {expected:?}: {nursery:?}",
+        );
     }
 
     // Bridge Operations is the southern half of one band-and-aisle skeleton
@@ -1077,12 +1116,24 @@ fn station_v2_keeps_its_department_and_route_footprints() {
     let botany = named_bounds("Botany");
     assert_eq!(
         botany.len(),
-        3,
-        "Botany should be its two original halves plus the connector across the old spine gap"
+        14,
+        "Botany should be greenhouse aisles, workroom aisles, and the connector across the old spine gap"
     );
     for expected in [
         Bounds {
             min_x: -18.5,
+            max_x: -9.2,
+            min_z: 15.0,
+            max_z: 28.6,
+        },
+        Bounds {
+            min_x: -6.8,
+            max_x: 6.8,
+            min_z: 15.0,
+            max_z: 28.6,
+        },
+        Bounds {
+            min_x: 9.2,
             max_x: 13.5,
             min_z: 15.0,
             max_z: 28.6,
@@ -1090,7 +1141,61 @@ fn station_v2_keeps_its_department_and_route_footprints() {
         Bounds {
             min_x: -18.5,
             max_x: 13.5,
+            min_z: 15.0,
+            max_z: 17.0,
+        },
+        Bounds {
+            min_x: -18.5,
+            max_x: 13.5,
+            min_z: 26.5,
+            max_z: 28.6,
+        },
+        Bounds {
+            min_x: -18.5,
+            max_x: -14.0,
             min_z: 31.4,
+            max_z: 42.0,
+        },
+        Bounds {
+            min_x: -4.5,
+            max_x: 9.9,
+            min_z: 31.4,
+            max_z: 42.0,
+        },
+        Bounds {
+            min_x: 11.1,
+            max_x: 13.5,
+            min_z: 31.4,
+            max_z: 42.0,
+        },
+        Bounds {
+            min_x: -18.5,
+            max_x: 9.9,
+            min_z: 31.4,
+            max_z: 33.3,
+        },
+        Bounds {
+            min_x: -18.5,
+            max_x: 9.9,
+            min_z: 35.7,
+            max_z: 37.8,
+        },
+        Bounds {
+            min_x: -6.8,
+            max_x: -3.5,
+            min_z: 38.2,
+            max_z: 41.2,
+        },
+        Bounds {
+            min_x: -6.8,
+            max_x: 9.9,
+            min_z: 39.6,
+            max_z: 41.2,
+        },
+        Bounds {
+            min_x: -18.5,
+            max_x: 13.5,
+            min_z: 40.4,
             max_z: 42.0,
         },
         // Deliberately overhangs both halves by 1.5 m rather than butting up
@@ -1868,6 +1973,21 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         max_x: -23.5,
         min_z: 15.0,
         max_z: 28.6,
+    };
+    // Botany is one continuous greenhouse across the old maintenance spine.
+    // Its floor fixtures are carved out of the walkable brushes, but placement
+    // validation uses the complete architectural floor they stand on.
+    const BOTANY: Bounds = Bounds {
+        min_x: -18.5,
+        max_x: 13.5,
+        min_z: 15.0,
+        max_z: 42.0,
+    };
+    const BOTANY_NURSERY: Bounds = Bounds {
+        min_x: -18.5,
+        max_x: 13.5,
+        min_z: 42.0,
+        max_z: 51.0,
     };
     const CHAPEL: Bounds = Bounds {
         min_x: -38.7,
@@ -3108,6 +3228,263 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             width: 0.42,
             depth: 0.42,
         },
+        // --------------------------------------------------------------
+        // Botany greenhouse. Two planted lanes frame the public entrance;
+        // the deeper room divides into mature crops, a research island, and
+        // hydroponic support; the nursery is a paired propagation promenade.
+        // --------------------------------------------------------------
+        Placement {
+            kind: "bot.grow_plot",
+            origin: "-760 320 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 4.00,
+            depth: 2.40,
+        },
+        Placement {
+            kind: "bot.grow_plot",
+            origin: "-920 320 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 4.00,
+            depth: 2.40,
+        },
+        Placement {
+            kind: "bot.planter_row",
+            origin: "-1030 320 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 1.50,
+            depth: 2.40,
+        },
+        Placement {
+            kind: "bot.grow_plot",
+            origin: "-760 -320 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 4.00,
+            depth: 2.40,
+        },
+        Placement {
+            kind: "bot.grow_plot",
+            origin: "-920 -320 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 4.00,
+            depth: 2.40,
+        },
+        Placement {
+            kind: "bot.planter_row",
+            origin: "-1030 -320 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 1.50,
+            depth: 2.40,
+        },
+        Placement {
+            kind: "bot.grow_plot",
+            origin: "-1380 480 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 4.00,
+            depth: 2.40,
+        },
+        Placement {
+            kind: "bot.grow_plot",
+            origin: "-1380 320 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 4.00,
+            depth: 2.40,
+        },
+        Placement {
+            kind: "bot.planter_row",
+            origin: "-1380 210 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 1.50,
+            depth: 2.40,
+        },
+        Placement {
+            kind: "bot.research_desk",
+            origin: "-1560 512 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 2.40,
+            depth: 1.60,
+        },
+        Placement {
+            kind: "bot.research_desk",
+            origin: "-1560 416 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 2.40,
+            depth: 1.60,
+        },
+        Placement {
+            kind: "bot.research_desk",
+            origin: "-1560 320 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 2.40,
+            depth: 1.60,
+        },
+        Placement {
+            kind: "bot.hydro_rack",
+            origin: "-1340 -420 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 3.00,
+            depth: 1.20,
+        },
+        Placement {
+            kind: "bot.hydro_rack",
+            origin: "-1460 -420 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 3.00,
+            depth: 1.20,
+        },
+        Placement {
+            kind: "bot.nutrient_tank",
+            origin: "-1544 -420 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 1.20,
+            depth: 1.20,
+        },
+        Placement {
+            kind: "bot.nutrient_tank",
+            origin: "-1592 -420 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BOTANY,
+            width: 1.20,
+            depth: 1.20,
+        },
+        Placement {
+            kind: "bot.hydro_rack",
+            origin: "-1800 320 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BOTANY_NURSERY,
+            width: 3.00,
+            depth: 1.20,
+        },
+        Placement {
+            kind: "bot.hydro_rack",
+            origin: "-1920 320 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BOTANY_NURSERY,
+            width: 3.00,
+            depth: 1.20,
+        },
+        Placement {
+            kind: "bot.hydro_rack",
+            origin: "-1800 -320 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BOTANY_NURSERY,
+            width: 3.00,
+            depth: 1.20,
+        },
+        Placement {
+            kind: "bot.hydro_rack",
+            origin: "-1920 -320 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: BOTANY_NURSERY,
+            width: 3.00,
+            depth: 1.20,
+        },
+        Placement {
+            kind: "bot.seed_vault",
+            origin: "-720 740 0",
+            angles: "0 90 0",
+            mount: Mount::Wall,
+            room: BOTANY,
+            width: 1.30,
+            depth: 0.38,
+        },
+        Placement {
+            kind: "bot.tool_rack",
+            origin: "-940 740 0",
+            angles: "0 90 0",
+            mount: Mount::Wall,
+            room: BOTANY,
+            width: 1.20,
+            depth: 0.32,
+        },
+        Placement {
+            kind: "bot.sample_board",
+            origin: "-1340 740 0",
+            angles: "0 90 0",
+            mount: Mount::Wall,
+            room: BOTANY,
+            width: 1.30,
+            depth: 0.16,
+        },
+        Placement {
+            kind: "bot.irrigation_panel",
+            origin: "-1640 740 0",
+            angles: "0 90 0",
+            mount: Mount::Wall,
+            room: BOTANY,
+            width: 1.10,
+            depth: 0.34,
+        },
+        Placement {
+            kind: "bot.irrigation_panel",
+            origin: "-720 -540 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: BOTANY,
+            width: 1.10,
+            depth: 0.34,
+        },
+        Placement {
+            kind: "bot.sample_board",
+            origin: "-1080 -540 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: BOTANY,
+            width: 1.30,
+            depth: 0.16,
+        },
+        Placement {
+            kind: "bot.seed_vault",
+            origin: "-1360 -540 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: BOTANY,
+            width: 1.30,
+            depth: 0.38,
+        },
+        Placement {
+            kind: "bot.tool_rack",
+            origin: "-1880 -540 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: BOTANY_NURSERY,
+            width: 1.20,
+            depth: 0.32,
+        },
         Placement {
             kind: "chapel.plinth",
             origin: "-1900 970 0",
@@ -3376,7 +3753,16 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
                 .collect();
             if let Some(overlap) = walkable
                 .iter()
-                .find(|area| area.intersection(&bounds).is_some())
+                // A fixture may meet the carved floor exactly at its edge.
+                // `Bounds::intersection` intentionally treats touching edges
+                // as connected for navigation, but edge contact is not floor
+                // area a body can stand on inside the visible fixture.
+                .find(|area| {
+                    area.min_x < bounds.max_x
+                        && area.max_x > bounds.min_x
+                        && area.min_z < bounds.max_z
+                        && area.max_z > bounds.min_z
+                })
             {
                 panic!(
                     "floor fixture {} at {bounds:?} stands in walkable floor {overlap:?}; \
@@ -3516,6 +3902,39 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             max_x: -34.2,
             min_z: 15.7,
             max_z: 17.3,
+        },
+        // Botany's central home marker plus its public, west, nursery, and
+        // perimeter airlocks. Cultivation rows deliberately frame these
+        // clearances instead of turning a doorway into a slalom.
+        Bounds {
+            min_x: -1.0,
+            max_x: 1.0,
+            min_z: 19.0,
+            max_z: 21.0,
+        },
+        Bounds {
+            min_x: -1.0,
+            max_x: 1.0,
+            min_z: 14.2,
+            max_z: 15.8,
+        },
+        Bounds {
+            min_x: -19.3,
+            max_x: -17.7,
+            min_z: 37.0,
+            max_z: 39.0,
+        },
+        Bounds {
+            min_x: -1.0,
+            max_x: 1.0,
+            min_z: 41.2,
+            max_z: 42.8,
+        },
+        Bounds {
+            min_x: -1.0,
+            max_x: 1.0,
+            min_z: 50.2,
+            max_z: 51.8,
         },
     ];
     let overlaps = |a: Bounds, b: Bounds| {
@@ -3808,6 +4227,42 @@ fn every_decoration_kind_has_an_exported_glb() {
         (
             "bridge.tactical_rail",
             "assets/3dassets/station_starter_kit/glb/decor_bridge_tactical_rail.glb",
+        ),
+        (
+            "bot.grow_plot",
+            "assets/3dassets/station_starter_kit/glb/decor_bot_grow_plot.glb",
+        ),
+        (
+            "bot.planter_row",
+            "assets/3dassets/station_starter_kit/glb/decor_bot_planter_row.glb",
+        ),
+        (
+            "bot.hydro_rack",
+            "assets/3dassets/station_starter_kit/glb/decor_bot_hydro_rack.glb",
+        ),
+        (
+            "bot.research_desk",
+            "assets/3dassets/station_starter_kit/glb/decor_bot_research_desk.glb",
+        ),
+        (
+            "bot.nutrient_tank",
+            "assets/3dassets/station_starter_kit/glb/decor_bot_nutrient_tank.glb",
+        ),
+        (
+            "bot.seed_vault",
+            "assets/3dassets/station_starter_kit/glb/decor_bot_seed_vault.glb",
+        ),
+        (
+            "bot.tool_rack",
+            "assets/3dassets/station_starter_kit/glb/decor_bot_tool_rack.glb",
+        ),
+        (
+            "bot.sample_board",
+            "assets/3dassets/station_starter_kit/glb/decor_bot_sample_board.glb",
+        ),
+        (
+            "bot.irrigation_panel",
+            "assets/3dassets/station_starter_kit/glb/decor_bot_irrigation_panel.glb",
         ),
     ] {
         let bytes = std::fs::read(path)
@@ -4117,6 +4572,122 @@ fn department_and_escape_markers_are_on_floor_and_route_to_gameplay() {
             "department_spot `{role}` cannot route to the escape pod",
         );
     }
+}
+
+/// Every kind of `crew_post` the loader will accept.
+///
+/// `lab::tb`'s own `match` only `warn!`s on anything else, which is invisible
+/// in play: a mistyped kind silently authors nothing at all.
+const CREW_POST_KINDS: [&str; 5] = ["work", "relax", "loiter", "visit", "duty"];
+
+#[test]
+fn every_crew_post_is_on_walkable_floor_and_routes_to_the_counter() {
+    // `department_spot` has had this check since the station was laid out;
+    // `crew_post` never did, which was tolerable at eleven hand-verified
+    // markers and is not at forty. The Bridge is the reason: its walkable
+    // aisles are 72-88 units wide with furniture carved out between them, so a
+    // post authored twenty units off is in a console rather than beside it,
+    // and the only symptom in play is one crew member who never arrives.
+    let map = parse();
+    let areas = authored_walkable_areas();
+    let graph = NavGraph::build(&areas, NAV_RADIUS);
+    let on_floor = |point: Vec3| {
+        const TOLERANCE: f32 = 0.25;
+        areas.regions().iter().any(|region| {
+            point.x >= region.bounds.min_x - TOLERANCE
+                && point.x <= region.bounds.max_x + TOLERANCE
+                && point.z >= region.bounds.min_z - TOLERANCE
+                && point.z <= region.bounds.max_z + TOLERANCE
+        })
+    };
+
+    for post in map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("crew_post"))
+    {
+        let kind = property(post, "kind").unwrap_or_else(|| "<missing>".into());
+        let occupant = property(post, "occupant").unwrap_or_default();
+        let label = if occupant.is_empty() {
+            format!("{kind} post")
+        } else {
+            format!("{kind} post for {occupant}")
+        };
+        let (x, z) = origin_xz(post).expect("a valid crew_post origin");
+        let at = Vec3::new(x, 0.0, z);
+        assert!(on_floor(at), "{label} at {at} is not on walkable floor");
+        assert!(
+            graph.path(at, COUNTER_SPOT).is_some(),
+            "{label} at {at} cannot route to the lab counter",
+        );
+    }
+}
+
+#[test]
+fn every_crew_post_kind_is_one_the_loader_handles() {
+    let map = parse();
+    for post in map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("crew_post"))
+    {
+        let kind = property(post, "kind").unwrap_or_else(|| "<missing>".into());
+        assert!(
+            CREW_POST_KINDS.contains(&kind.as_str()),
+            "crew_post has kind '{kind}', which `lab::tb` only warns about",
+        );
+    }
+}
+
+#[test]
+fn work_posts_name_a_roster_member_and_communal_posts_do_not() {
+    // Both halves are silent failures otherwise. A `work` post with no
+    // occupant is dropped by the loader with a warning; an occupant on a
+    // communal post is a copy-paste slip that reads as authored intent.
+    let map = parse();
+    let roster: Vec<crate::crew::CrewDef> =
+        ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap();
+
+    for post in map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("crew_post"))
+    {
+        let kind = property(post, "kind").unwrap_or_default();
+        let occupant = property(post, "occupant").unwrap_or_default();
+        if kind == "work" {
+            assert!(
+                roster.iter().any(|member| member.name == occupant),
+                "work crew_post names '{occupant}', who is not on the roster",
+            );
+        } else {
+            assert!(
+                occupant.is_empty(),
+                "{kind} crew_post is communal but names an occupant '{occupant}'",
+            );
+        }
+    }
+}
+
+#[test]
+fn the_bridge_has_somewhere_to_pretend_to_work() {
+    // The Bridge is the most heavily furnished room in the map and had nobody
+    // in it until duty posts existed. Without this, tidying the map back to
+    // zero duty posts would silently return it to being an empty set — the
+    // fluff crew would still spawn, on their department point, doing nothing.
+    const BRIDGE_MIN_X: f32 = -83.5;
+    const BRIDGE_MAX_X: f32 = -41.5;
+
+    let map = parse();
+    let on_the_bridge = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("crew_post"))
+        .filter(|entity| property(entity, "kind").as_deref() == Some("duty"))
+        .filter_map(origin_xz)
+        .filter(|(x, _)| *x >= BRIDGE_MIN_X && *x <= BRIDGE_MAX_X)
+        .count();
+
+    assert!(
+        on_the_bridge >= 4,
+        "the Bridge has {on_the_bridge} duty posts; it needs enough to look staffed",
+    );
 }
 
 #[test]

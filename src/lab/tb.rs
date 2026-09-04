@@ -337,6 +337,11 @@ fn collect_loaded_map(
                 }
                 "relax" => crew_posts.add_relax(transform.translation),
                 "loiter" => crew_posts.add_loiter(transform.translation),
+                // These two keep the marker's yaw. Every kind above discards
+                // it, which is why a resident's heading at a post has always
+                // been wherever they happened to walk in from.
+                "visit" => crew_posts.add_visit(transform.translation, transform.rotation),
+                "duty" => crew_posts.add_duty(transform.translation, transform.rotation),
                 other => warn!("crew_post has unknown kind '{other}'"),
             }
         }
@@ -412,17 +417,30 @@ pub struct CrisisSpot {
 /// A personal or communal spot an ambient resident can be sent to, replacing
 /// the one-shared-point-per-department model [`DepartmentSpot`] alone gives.
 ///
-/// `kind` is `"work"`, `"relax"` or `"loiter"`, the same single-marker/
-/// kind-tag convention [`DecorationSpot`] already uses rather than several
-/// marker types. A `"work"` post names its `occupant` — a `station.crew.ron`
-/// *name*, not a role, since the whole point is to give each individual
-/// their own place instead of everyone in a department stacking on one
-/// point. A `"relax"` spot is communal and leaves `occupant` empty: any idle
-/// resident may be sent to one, not just its author's intended owner. A
-/// `"loiter"` spot is kept as its own pool rather than folded into
-/// `"relax"` — see `crew::CrewPosts` for why — and is where a department
-/// minor's off-roster identity (`smuggler::loiter_smuggler`) visibly hangs
-/// around between scripted visits.
+/// `kind` is one of five, the same single-marker/kind-tag convention
+/// [`DecorationSpot`] already uses rather than several marker types:
+///
+/// - `"work"` names its `occupant` — a `station.crew.ron` *name*, not a role,
+///   since the whole point is to give each individual their own place instead
+///   of everyone in a department stacking on one point. Only its owner reads
+///   as working there.
+/// - `"relax"` is communal and leaves `occupant` empty: any idle resident may
+///   be sent to one, not just its author's intended owner.
+/// - `"loiter"` is kept as its own pool rather than folded into `"relax"` —
+///   see `crew::CrewPosts` for why — and is where a department minor's
+///   off-roster identity (`smuggler::loiter_smuggler`) visibly hangs around
+///   between scripted visits.
+/// - `"visit"` is somewhere ordinary to go that is not a department point.
+///   Communal, `occupant` empty. These are what stop a room reading as having
+///   exactly one place worth standing.
+/// - `"duty"` is a communal *work* spot: whoever is standing at one reads as
+///   working, unlike `"work"` above. Communal, `occupant` empty. Author these
+///   beside the fixture the work happens at — a console, a desk, a rack.
+///
+/// `angles` on a `"visit"` or `"duty"` post is a **facing**, not a direction of
+/// travel — the way [`DecorationSpot`] means it, and deliberately *not* the way
+/// [`ConveyorSpot`] does. It is the heading a resident is turned to once they
+/// have arrived and stopped. The other three kinds ignore rotation entirely.
 #[point_class(
     classname("crew_post"),
     base(Transform),

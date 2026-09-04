@@ -3039,23 +3039,127 @@
 {
 "classname" "func_walkable"
 "room" "Botany"
-// brush 0
+// North greenhouse: two planted lanes are carved out of three longitudinal
+// aisles, with a cross-aisle at each end.  The visible beds fill each carve.
+// brush 0 - west aisle
 {
-( -1144 -540 0 ) ( -1144 740 0 ) ( -1144 -540 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1144 -540 0 ) ( -1144 -540 20 ) ( -600 -540 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1144 -540 0 ) ( -600 -540 0 ) ( -1144 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1144 -540 20 ) ( -1144 740 20 ) ( -600 -540 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1144 368 0 ) ( -1144 740 0 ) ( -1144 368 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 368 0 ) ( -1144 368 20 ) ( -600 368 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 368 0 ) ( -600 368 0 ) ( -1144 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1144 368 20 ) ( -1144 740 20 ) ( -600 368 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
 ( -1144 740 0 ) ( -600 740 0 ) ( -1144 740 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -600 368 0 ) ( -600 368 20 ) ( -600 740 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 1 - central aisle
+{
+( -1144 -272 0 ) ( -1144 272 0 ) ( -1144 -272 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 -272 0 ) ( -1144 -272 20 ) ( -600 -272 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 -272 0 ) ( -600 -272 0 ) ( -1144 272 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1144 -272 20 ) ( -1144 272 20 ) ( -600 -272 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1144 272 0 ) ( -600 272 0 ) ( -1144 272 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -600 -272 0 ) ( -600 -272 20 ) ( -600 272 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 2 - east aisle
+{
+( -1144 -540 0 ) ( -1144 -368 0 ) ( -1144 -540 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 -540 0 ) ( -1144 -540 20 ) ( -600 -540 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 -540 0 ) ( -600 -540 0 ) ( -1144 -368 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1144 -540 20 ) ( -1144 -368 20 ) ( -600 -540 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1144 -368 0 ) ( -600 -368 0 ) ( -1144 -368 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -600 -540 0 ) ( -600 -540 20 ) ( -600 -368 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 3 - public-door cross aisle
+{
+( -680 -540 0 ) ( -680 740 0 ) ( -680 -540 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -680 -540 0 ) ( -680 -540 20 ) ( -600 -540 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -680 -540 0 ) ( -600 -540 0 ) ( -680 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -680 -540 20 ) ( -680 740 20 ) ( -600 -540 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -680 740 0 ) ( -600 740 0 ) ( -680 740 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
 ( -600 -540 0 ) ( -600 -540 20 ) ( -600 740 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
-// brush 1
+// brush 4 - greenhouse-to-spine cross aisle
+{
+( -1144 -540 0 ) ( -1144 740 0 ) ( -1144 -540 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 -540 0 ) ( -1144 -540 20 ) ( -1060 -540 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1144 -540 0 ) ( -1060 -540 0 ) ( -1144 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1144 -540 20 ) ( -1144 740 20 ) ( -1060 -540 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1144 740 0 ) ( -1060 740 0 ) ( -1144 740 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1060 -540 0 ) ( -1060 -540 20 ) ( -1060 740 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+
+// South workroom: mature-crop and research islands on the west, hydroponics
+// on the east, and a broad central route between every Botany airlock.
+// brush 5 - west door aisle
+{
+( -1680 560 0 ) ( -1680 740 0 ) ( -1680 560 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1680 560 0 ) ( -1680 560 20 ) ( -1256 560 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1680 560 0 ) ( -1256 560 0 ) ( -1680 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1680 560 20 ) ( -1680 740 20 ) ( -1256 560 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1680 740 0 ) ( -1256 740 0 ) ( -1680 740 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1256 560 0 ) ( -1256 560 20 ) ( -1256 740 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 6 - central airlock aisle
+{
+( -1680 -396 0 ) ( -1680 180 0 ) ( -1680 -396 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1680 -396 0 ) ( -1680 -396 20 ) ( -1256 -396 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1680 -396 0 ) ( -1256 -396 0 ) ( -1680 180 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1680 -396 20 ) ( -1680 180 20 ) ( -1256 -396 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1680 180 0 ) ( -1256 180 0 ) ( -1680 180 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1256 -396 0 ) ( -1256 -396 20 ) ( -1256 180 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 7 - east wall aisle
+{
+( -1680 -540 0 ) ( -1680 -444 0 ) ( -1680 -540 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1680 -540 0 ) ( -1680 -540 20 ) ( -1256 -540 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1680 -540 0 ) ( -1256 -540 0 ) ( -1680 -444 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1680 -540 20 ) ( -1680 -444 20 ) ( -1256 -540 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1680 -444 0 ) ( -1256 -444 0 ) ( -1680 -444 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1256 -540 0 ) ( -1256 -540 20 ) ( -1256 -444 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 8 - spine-side cross aisle
+{
+( -1332 -396 0 ) ( -1332 740 0 ) ( -1332 -396 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1332 -396 0 ) ( -1332 -396 20 ) ( -1256 -396 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1332 -396 0 ) ( -1256 -396 0 ) ( -1332 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1332 -396 20 ) ( -1332 740 20 ) ( -1256 -396 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1332 740 0 ) ( -1256 740 0 ) ( -1332 740 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1256 -396 0 ) ( -1256 -396 20 ) ( -1256 740 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 9 - crop/research cross aisle
+{
+( -1512 -396 0 ) ( -1512 740 0 ) ( -1512 -396 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1512 -396 0 ) ( -1512 -396 20 ) ( -1428 -396 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1512 -396 0 ) ( -1428 -396 0 ) ( -1512 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1512 -396 20 ) ( -1512 740 20 ) ( -1428 -396 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1512 740 0 ) ( -1428 740 0 ) ( -1512 740 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1428 -396 0 ) ( -1428 -396 20 ) ( -1428 740 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 10 - narrow open strip beside the research island
+{
+( -1648 140 0 ) ( -1648 272 0 ) ( -1648 140 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1648 140 0 ) ( -1648 140 20 ) ( -1528 140 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1648 140 0 ) ( -1528 140 0 ) ( -1648 272 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1648 140 20 ) ( -1648 272 20 ) ( -1528 140 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1648 272 0 ) ( -1528 272 0 ) ( -1648 272 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1528 140 0 ) ( -1528 140 20 ) ( -1528 272 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 11 - strip after the research island
+{
+( -1648 -396 0 ) ( -1648 272 0 ) ( -1648 -396 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1648 -396 0 ) ( -1648 -396 20 ) ( -1584 -396 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1648 -396 0 ) ( -1584 -396 0 ) ( -1648 272 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1648 -396 20 ) ( -1648 272 20 ) ( -1584 -396 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1648 272 0 ) ( -1584 272 0 ) ( -1648 272 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1584 -396 0 ) ( -1584 -396 20 ) ( -1584 272 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 12 - nursery-door cross aisle, spanning around the hydro row
 {
 ( -1680 -540 0 ) ( -1680 740 0 ) ( -1680 -540 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1680 -540 0 ) ( -1680 -540 20 ) ( -1256 -540 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1680 -540 0 ) ( -1256 -540 0 ) ( -1680 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1680 -540 20 ) ( -1680 740 20 ) ( -1256 -540 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -1680 740 0 ) ( -1256 740 0 ) ( -1680 740 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1256 -540 0 ) ( -1256 -540 20 ) ( -1256 740 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1680 -540 0 ) ( -1680 -540 20 ) ( -1616 -540 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1680 -540 0 ) ( -1616 -540 0 ) ( -1680 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1680 -540 20 ) ( -1680 740 20 ) ( -1616 -540 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1680 740 0 ) ( -1616 740 0 ) ( -1680 740 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1616 -540 0 ) ( -1616 -540 20 ) ( -1616 740 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 }
 // entity 58
@@ -3448,6 +3552,232 @@
 "occupant" ""
 "kind" "loiter"
 }
+// crew_post kind=duty: communal work spots. Anyone standing at one reads as
+// working, unlike the personal "work" posts above — see crew::CrewPosts.
+//
+// "angles" here is a FACING, the way decoration_spot means it and deliberately
+// not the way conveyor_spot does: it is the way the body looks once it has
+// arrived. crew::CrewPosts::body_facing turns it into the yaw walk_route uses,
+// so an angle authored here points the same direction as the same angle on a
+// neighbouring decoration.
+//
+// The Bridge aisles are 72-88 units wide with the console rows carved out
+// between them, so these use a 20-unit inset rather than the ~35 used
+// elsewhere in this file. That is still comfortably outside NAV_RADIUS, which
+// is 0.35 m = 14 units; the wider figure is an authoring habit, not a limit.
+// every_crew_post_is_on_walkable_floor_and_routes_to_the_counter is what
+// actually holds these honest.
+//
+// Bridge, west aisle (X -400..-328), facing the console row at X -286.
+{
+"classname" "crew_post"
+"origin" "-348 3214 0"
+"occupant" ""
+"kind" "duty"
+"angles" "0 0 0"
+}
+{
+"classname" "crew_post"
+"origin" "-348 2734 0"
+"occupant" ""
+"kind" "duty"
+"angles" "0 0 0"
+}
+// Bridge, same aisle, facing the two nav desks on the west wall at X -400.
+{
+"classname" "crew_post"
+"origin" "-380 3200 0"
+"occupant" ""
+"kind" "duty"
+"angles" "0 180 0"
+}
+{
+"classname" "crew_post"
+"origin" "-380 2580 0"
+"occupant" ""
+"kind" "duty"
+"angles" "0 180 0"
+}
+// Bridge, centre aisle (X -244..-156), facing the console row at X -94.
+{
+"classname" "crew_post"
+"origin" "-176 2170 0"
+"occupant" ""
+"kind" "duty"
+"angles" "0 0 0"
+}
+{
+"classname" "crew_post"
+"origin" "-176 2652 0"
+"occupant" ""
+"kind" "duty"
+"angles" "0 0 0"
+}
+// Bridge Operations, west aisle (X 140..228), facing the arcs at X 98.
+{
+"classname" "crew_post"
+"origin" "160 3094 0"
+"occupant" ""
+"kind" "duty"
+"angles" "0 180 0"
+}
+{
+"classname" "crew_post"
+"origin" "160 2028 0"
+"occupant" ""
+"kind" "duty"
+"angles" "0 180 0"
+}
+// Bridge Operations, east aisle (X 312..360 — note X 228..312 is NOT
+// walkable), facing the arc at X 270.
+{
+"classname" "crew_post"
+"origin" "332 2766 0"
+"occupant" ""
+"kind" "duty"
+"angles" "0 180 0"
+}
+// crew_post kind=visit: somewhere ordinary to go that is not a department
+// point. Communal, and the reason a room stops reading as having exactly one
+// place worth standing. Standard ~35-unit inset, verified against each room's
+// own func_walkable box.
+//
+// Chapel (X -2040..-1760, Y 940..1548), down the aisle between the pews.
+{
+"classname" "crew_post"
+"origin" "-1900 1100 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 90 0"
+}
+{
+"classname" "crew_post"
+"origin" "-1900 1400 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 90 0"
+}
+// Quiet Room (X -2040..-1760, Y 1660..1900).
+{
+"classname" "crew_post"
+"origin" "-1900 1780 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 90 0"
+}
+// Cargo Receiving (X -1904..-1256, Y 3760..4380).
+{
+"classname" "crew_post"
+"origin" "-1600 4000 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 0 0"
+}
+{
+"classname" "crew_post"
+"origin" "-1400 3900 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 180 0"
+}
+// Botany Nursery (X -2040..-1680, Y -540..740).
+{
+"classname" "crew_post"
+"origin" "-1860 -300 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 90 0"
+}
+{
+"classname" "crew_post"
+"origin" "-1860 300 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 90 0"
+}
+{
+"classname" "crew_post"
+"origin" "-1860 600 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 270 0"
+}
+// Security Back Room (X 80..360, Y 3340..4380).
+{
+"classname" "crew_post"
+"origin" "220 3600 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 180 0"
+}
+{
+"classname" "crew_post"
+"origin" "220 4100 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 0 0"
+}
+// Quarantine (X 120..360, Y 660..1500).
+{
+"classname" "crew_post"
+"origin" "240 900 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 180 0"
+}
+{
+"classname" "crew_post"
+"origin" "240 1300 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 0 0"
+}
+// Atmos/Utility (X -1144..-600, Y 2180..2640).
+{
+"classname" "crew_post"
+"origin" "-900 2300 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 90 0"
+}
+{
+"classname" "crew_post"
+"origin" "-750 2500 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 270 0"
+}
+// The public corridor (X -600..-400, Y -540..4380) — the spine everyone
+// crosses. Four stops down its length so the walk between departments has
+// somewhere to pause rather than being pure transit.
+{
+"classname" "crew_post"
+"origin" "-500 300 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 90 0"
+}
+{
+"classname" "crew_post"
+"origin" "-500 1600 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 270 0"
+}
+{
+"classname" "crew_post"
+"origin" "-500 3000 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 90 0"
+}
+{
+"classname" "crew_post"
+"origin" "-500 4100 0"
+"occupant" ""
+"kind" "visit"
+"angles" "0 270 0"
+}
 // entity 71
 {
 "classname" "escape_pod"
@@ -3565,14 +3895,52 @@
 {
 "classname" "func_walkable"
 "room" "Botany Nursery"
-// brush 0
+// Two propagation rows with a central promenade and cross-aisles at both
+// airlocks. The racks themselves occupy the two carved strips.
+// brush 0 - west aisle
+{
+( -2040 344 0 ) ( -2040 740 0 ) ( -2040 344 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 344 0 ) ( -2040 344 20 ) ( -1680 344 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 344 0 ) ( -1680 344 0 ) ( -2040 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 344 20 ) ( -2040 740 20 ) ( -1680 344 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 740 0 ) ( -1680 740 0 ) ( -2040 740 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1680 344 0 ) ( -1680 344 20 ) ( -1680 740 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 1 - central promenade
+{
+( -2040 -296 0 ) ( -2040 296 0 ) ( -2040 -296 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 -296 0 ) ( -2040 -296 20 ) ( -1680 -296 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 -296 0 ) ( -1680 -296 0 ) ( -2040 296 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 -296 20 ) ( -2040 296 20 ) ( -1680 -296 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 296 0 ) ( -1680 296 0 ) ( -2040 296 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1680 -296 0 ) ( -1680 -296 20 ) ( -1680 296 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 2 - east aisle
+{
+( -2040 -540 0 ) ( -2040 -344 0 ) ( -2040 -540 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 -540 0 ) ( -2040 -540 20 ) ( -1680 -540 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 -540 0 ) ( -1680 -540 0 ) ( -2040 -344 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 -540 20 ) ( -2040 -344 20 ) ( -1680 -540 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 -344 0 ) ( -1680 -344 0 ) ( -2040 -344 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1680 -540 0 ) ( -1680 -540 20 ) ( -1680 -344 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 3 - inner-airlock cross aisle
+{
+( -1740 -540 0 ) ( -1740 740 0 ) ( -1740 -540 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1740 -540 0 ) ( -1740 -540 20 ) ( -1680 -540 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1740 -540 0 ) ( -1680 -540 0 ) ( -1740 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1740 -540 20 ) ( -1740 740 20 ) ( -1680 -540 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -1740 740 0 ) ( -1680 740 0 ) ( -1740 740 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1680 -540 0 ) ( -1680 -540 20 ) ( -1680 740 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+}
+// brush 4 - perimeter-airlock cross aisle
 {
 ( -2040 -540 0 ) ( -2040 740 0 ) ( -2040 -540 20 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2040 -540 0 ) ( -2040 -540 20 ) ( -1680 -540 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -2040 -540 0 ) ( -1680 -540 0 ) ( -2040 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2040 -540 20 ) ( -2040 740 20 ) ( -1680 -540 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
-( -2040 740 0 ) ( -1680 740 0 ) ( -2040 740 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
-( -1680 -540 0 ) ( -1680 -540 20 ) ( -1680 740 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 -540 0 ) ( -2040 -540 20 ) ( -1980 -540 0 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -2040 -540 0 ) ( -1980 -540 0 ) ( -2040 740 0 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 -540 20 ) ( -2040 740 20 ) ( -1980 -540 20 ) clip [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1
+( -2040 740 0 ) ( -1980 740 0 ) ( -2040 740 20 ) clip [ 1 0 0 0 ] [ 0 0 -1 0 ] 0 1 1
+( -1980 -540 0 ) ( -1980 -540 20 ) ( -1980 740 0 ) clip [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 1 1
 }
 }
 // entity 79
@@ -6685,4 +7053,234 @@
 "lane" "medical_access"
 "sequence" "4"
 "origin" "-130 700 0"
+}
+
+// Botany greenhouse dressing. The first room is arranged as two cultivation
+// lanes around the public-door aisle; the deeper room separates mature crops,
+// research benches, and a hydroponic service row. Every floor module exactly
+// fills one of the carved walkable gaps above.
+{
+"classname" "decoration_spot"
+"origin" "-760 320 0"
+"kind" "bot.grow_plot"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-920 320 0"
+"kind" "bot.grow_plot"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1030 320 0"
+"kind" "bot.planter_row"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-760 -320 0"
+"kind" "bot.grow_plot"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-920 -320 0"
+"kind" "bot.grow_plot"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1030 -320 0"
+"kind" "bot.planter_row"
+"angles" "0 90 0"
+}
+
+// Mature-crop island.
+{
+"classname" "decoration_spot"
+"origin" "-1380 480 0"
+"kind" "bot.grow_plot"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1380 320 0"
+"kind" "bot.grow_plot"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1380 210 0"
+"kind" "bot.planter_row"
+"angles" "0 0 0"
+}
+
+// A continuous three-desk research island: microscope, samples, and analysis
+// screens face the crop rows across a generous working aisle.
+{
+"classname" "decoration_spot"
+"origin" "-1560 512 0"
+"kind" "bot.research_desk"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1560 416 0"
+"kind" "bot.research_desk"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1560 320 0"
+"kind" "bot.research_desk"
+"angles" "0 0 0"
+}
+
+// Hydroponic service spine, closing with two nutrient reservoirs.
+{
+"classname" "decoration_spot"
+"origin" "-1340 -420 0"
+"kind" "bot.hydro_rack"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1460 -420 0"
+"kind" "bot.hydro_rack"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1544 -420 0"
+"kind" "bot.nutrient_tank"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1592 -420 0"
+"kind" "bot.nutrient_tank"
+"angles" "0 90 0"
+}
+
+// Nursery propagation racks. Two bright rows frame a straight sightline from
+// the inner airlock to the perimeter stair door.
+{
+"classname" "decoration_spot"
+"origin" "-1800 320 0"
+"kind" "bot.hydro_rack"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1920 320 0"
+"kind" "bot.hydro_rack"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1800 -320 0"
+"kind" "bot.hydro_rack"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1920 -320 0"
+"kind" "bot.hydro_rack"
+"angles" "0 90 0"
+}
+
+// Botany wall language: seed storage and tools in the public greenhouse,
+// specimen records and irrigation controls in the working room, with one
+// final tool board in the nursery.
+{
+"classname" "decoration_spot"
+"origin" "-720 740 0"
+"kind" "bot.seed_vault"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-940 740 0"
+"kind" "bot.tool_rack"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1340 740 0"
+"kind" "bot.sample_board"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1640 740 0"
+"kind" "bot.irrigation_panel"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-720 -540 0"
+"kind" "bot.irrigation_panel"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1080 -540 0"
+"kind" "bot.sample_board"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1360 -540 0"
+"kind" "bot.seed_vault"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1880 -540 0"
+"kind" "bot.tool_rack"
+"angles" "0 -90 0"
+}
+
+// Local, shadow-free horticultural lights supplement the two broad Botany
+// room lights. The emissive magenta bars remain the visible light source.
+{
+"classname" "light_point"
+"origin" "-840 -320 108"
+"color" "0.82 1 0.76"
+"intensity" "210000"
+"range" "7"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-1380 360 108"
+"color" "0.82 1 0.76"
+"intensity" "210000"
+"range" "7"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-1560 400 108"
+"color" "1 0.62 0.90"
+"intensity" "150000"
+"range" "6"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-1440 -420 108"
+"color" "0.72 1 0.82"
+"intensity" "190000"
+"range" "7"
+"shadows_enabled" "false"
+}
+{
+"classname" "light_point"
+"origin" "-1880 -320 108"
+"color" "0.78 1 0.78"
+"intensity" "210000"
+"range" "7"
+"shadows_enabled" "false"
 }

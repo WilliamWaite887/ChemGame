@@ -4,6 +4,8 @@
 //! such as the counter or a department, and navigation supplies safe doorway
 //! and corridor waypoints.
 
+mod fluff;
+
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -74,6 +76,11 @@ impl Plugin for CrewPlugin {
                         handle_medical_evacuation.run_if(crate::session::career_session),
                         ambient_behaviour.run_if(crate::session::career_session),
                         walk_route,
+                        // After `walk_route`, which writes rotation every step
+                        // for anyone travelling: this only ever turns a body
+                        // that has already stopped, so ordering it second means
+                        // the two never fight over the same Transform.
+                        face_authored_posts.run_if(crate::session::career_session),
                         // After `walk_route`, so an errand set in reaction to
                         // an arrival this frame starts walking on the next one
                         // rather than half a frame late.
@@ -103,6 +110,13 @@ impl Plugin for CrewPlugin {
                     // `CrewRoute`; `walk_route` (still gated on `MapReady`
                     // above) resolves the real path once nav is ready.
                     populate_departments
+                        .run_if(crate::session::career_session)
+                        .run_if(resource_exists_and_changed::<Departments>)
+                        .run_if(is_authority),
+                    // Same conditions as `populate_departments`, deliberately:
+                    // it has the same shape and would have the same silent
+                    // never-spawns bug the comment above describes.
+                    fluff::populate_fluff_posts
                         .run_if(crate::session::career_session)
                         .run_if(resource_exists_and_changed::<Departments>)
                         .run_if(is_authority),
@@ -202,6 +216,39 @@ pub struct CrewPosts {
     /// ordinary resident's relax spot — mixing the two would blur the exact
     /// behavioural tell this exists to give an attentive player.
     loiter: Vec<Vec3>,
+    /// Somewhere ordinary to go that is not a department point. The station is
+    /// mostly rooms nobody works in — the chapel, the quiet room, cargo
+    /// receiving, the long public corridor — and before this pool existed an
+    /// idle resident's entire vocabulary was eight department points plus their
+    /// own post, so every room read as having exactly one place worth standing.
+    ///
+    /// Carries a facing, unlike the three pools above: a wander target beside a
+    /// window or a notice board is worth arriving at *looking at the thing*,
+    /// and the marker already knows which way that is.
+    visit: Vec<Post>,
+    /// A communal work spot: standing at one reads as working, whoever you are.
+    ///
+    /// Deliberately its own pool rather than an entry in `work`, for the reason
+    /// the `relax`/`loiter` split above already documents — pool identity *is*
+    /// the signal. `work` answers "where does this named individual belong",
+    /// and only its owner reads as working there; `duty` answers "is this a
+    /// place the station's business gets done", which is true for anyone who
+    /// happens to be standing in it. Merging them would have a visitor looking
+    /// like they were doing a colleague's job.
+    duty: Vec<Post>,
+}
+
+/// A communal spot with an authored facing.
+///
+/// The facing is the marker's own yaw, which `crew_post` has always carried on
+/// its `Transform` and the loader used to throw away. Without it a resident's
+/// heading on arrival is wherever they happened to walk in from — fine in a
+/// corridor, wrong at a console, where standing side-on to the screen is the
+/// single clearest tell that nobody is really working.
+#[derive(Clone, Copy)]
+struct Post {
+    at: Vec3,
+    facing: Quat,
 }
 
 impl CrewPosts {
@@ -249,11 +296,99 @@ impl CrewPosts {
         Self::random_of(&self.loiter)
     }
 
+    #[cfg_attr(not(feature = "trenchbroom"), allow(dead_code))]
+    pub fn add_visit(&mut self, at: Vec3, marker: Quat) {
+        self.visit.push(Post {
+            at,
+            facing: Self::body_facing(marker),
+        });
+    }
+
+    #[cfg_attr(not(feature = "trenchbroom"), allow(dead_code))]
+    pub fn add_duty(&mut self, at: Vec3, marker: Quat) {
+        self.duty.push(Post {
+            at,
+            facing: Self::body_facing(marker),
+        });
+    }
+
+    /// Turns a marker's rotation into the yaw a crew body wants.
+    ///
+    /// These two conventions genuinely disagree, and the disagreement is a
+    /// half-turn — the worst possible size, because it looks deliberate.
+    /// `angles` follows the glTF/Bevy convention where a model's forward is
+    /// `-Z`, which is what every `decoration_spot` in the map is authored
+    /// against. But [`walk_route`] faces a body with
+    /// `from_rotation_y(dx.atan2(dz))`, whose zero points at `+Z`. Authoring
+    /// around that by hand would mean every `crew_post` angle in the map being
+    /// 180° from the console it sits at, and the first person to copy an angle
+    /// off a neighbouring decoration would get it wrong.
+    ///
+    /// So the map keeps one convention — a marker points the way you want the
+    /// body to look, exactly as a decoration points the way it faces — and the
+    /// correction lives here, once.
+    fn body_facing(marker: Quat) -> Quat {
+        marker * Quat::from_rotation_y(std::f32::consts::PI)
+    }
+
+    /// Somewhere ordinary to go next, if the station has authored any.
+    pub fn random_visit(&self) -> Option<Vec3> {
+        Self::random_post_of(&self.visit)
+    }
+
+    /// A random communal work spot, if the station has authored any.
+    pub fn random_duty(&self) -> Option<Vec3> {
+        Self::random_post_of(&self.duty)
+    }
+
+    /// Whether `at` is close enough to a communal work spot to count as
+    /// standing at it. Presentation-only, exactly as [`Self::is_near_relax`]
+    /// is — see [`post_presentation_animation`].
+    pub fn is_near_duty(&self, at: Vec3) -> bool {
+        Self::nearest(&self.duty, at).is_some()
+    }
+
+    /// The authored facing of whichever communal spot `at` is standing on.
+    ///
+    /// Duty beats visit for the same reason relax beats work in
+    /// [`post_presentation_animation`]: when two spots overlap, the more
+    /// specific intent wins. A resident who walked to a console should face the
+    /// console even if a wander target happens to sit within tolerance too.
+    pub fn facing_at(&self, at: Vec3) -> Option<Quat> {
+        Self::nearest(&self.duty, at)
+            .or_else(|| Self::nearest(&self.visit, at))
+            .map(|post| post.facing)
+    }
+
+    /// The closest post within [`POST_PROXIMITY`], ignoring height for the
+    /// same reason [`Self::is_near_relax`] does: a marker is authored on the
+    /// floor and a body stands [`BODY_OFFSET`] above it.
+    fn nearest(posts: &[Post], at: Vec3) -> Option<Post> {
+        posts
+            .iter()
+            .map(|post| {
+                let flat = Vec3::new(post.at.x, at.y, post.at.z);
+                (*post, at.distance(flat))
+            })
+            .filter(|(_, distance)| *distance < POST_PROXIMITY)
+            .min_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(post, _)| post)
+    }
+
     fn random_of(spots: &[Vec3]) -> Option<Vec3> {
         if spots.is_empty() {
             return None;
         }
         spots.get(rand::random_range(0..spots.len())).copied()
+    }
+
+    fn random_post_of(posts: &[Post]) -> Option<Vec3> {
+        if posts.is_empty() {
+            return None;
+        }
+        posts
+            .get(rand::random_range(0..posts.len()))
+            .map(|post| post.at)
     }
 }
 
@@ -822,6 +957,14 @@ fn post_presentation_animation(
     if crew_posts.is_near_relax(at) {
         return Some(CharacterAnimation::Sitting);
     }
+    // A communal work spot reads as work for whoever is standing in it, which
+    // is exactly how it differs from the personal post below: `work` is "where
+    // this named individual belongs", `duty` is "where the station's business
+    // gets done". Checked before the personal post so an authored duty spot
+    // wins on the rare tile that is both.
+    if crew_posts.is_near_duty(at) {
+        return Some(CharacterAnimation::Working);
+    }
     let post = crew_posts.work(&member.name)?;
     let flat = Vec3::new(post.x, at.y, post.z);
     (at.distance(flat) < POST_PROXIMITY).then_some(CharacterAnimation::Working)
@@ -1063,6 +1206,14 @@ pub type NotResident = Without<Ambient>;
 /// How long an idle crew member lingers before moving on.
 const DWELL_SECONDS: (f32, f32) = (4.0, 11.0);
 
+/// How long they linger somewhere they were ostensibly *doing* something — a
+/// communal work spot or a seat — rather than merely passing through.
+///
+/// Longer than [`DWELL_SECONDS`] on purpose. The dwell is what the player
+/// actually reads as intent: a body that leaves a console after four seconds
+/// was never working at it, however good the animation is.
+const DUTY_DWELL_SECONDS: (f32, f32) = (12.0, 26.0);
+
 /// Gives every department someone to be in it.
 ///
 /// Runs when [`Departments`] is filled, which only ever happens under the map —
@@ -1119,6 +1270,22 @@ fn populate_departments(
 /// shift.
 #[derive(Component)]
 pub(crate) struct ReturnsToDuty;
+
+/// This body belongs to the station and is never disposable.
+///
+/// [`walk_route`] despawns anyone who finishes a `Leaving` route, which is
+/// right for a visitor — a customer who walks out has genuinely gone home. It
+/// is wrong for a resident nothing can re-create. `react_to_chemical_statuses`
+/// sends anyone sedated, paranoid or badly saddened away on exactly such a
+/// route, and `handle_crew_collapse` does the same when they fall over, so a
+/// single bad afternoon on the Bridge used to be permanent: the officers left,
+/// and only a reload brought them back.
+///
+/// Distinct from [`ReturnsToDuty`], which marks *one* recalled trip and is
+/// stripped on arrival. This is a standing property of the body, so it survives
+/// the trip and the second panic after it.
+#[derive(Component)]
+pub(crate) struct StationResident;
 
 /// Sends an existing off-duty resident to the counter to collect an order,
 /// instead of spawning a second, unlinked entity under the same name.
@@ -1237,20 +1404,43 @@ fn ambient_behaviour(
         if ambient.dwell > 0.0 {
             continue;
         }
-        ambient.dwell = rand::random_range(DWELL_SECONDS.0..=DWELL_SECONDS.1);
+        // How long they have just stood here depends on what they were standing
+        // at. Somewhere they were ostensibly working is worth holding; a
+        // corridor is not. Without this a bridge officer leaves their console
+        // every few seconds and the room reads as a bus stop rather than as
+        // staffed.
+        let settled = crew_posts.is_near_duty(transform.translation)
+            || crew_posts.is_near_relax(transform.translation);
+        let dwell = if settled {
+            DUTY_DWELL_SECONDS
+        } else {
+            DWELL_SECONDS
+        };
+        ambient.dwell = rand::random_range(dwell.0..=dwell.1);
 
-        // A chance to relax at a communal spot first — independent of the
-        // ordinary elsewhere/home choice below, so relax spots
-        // (concentrated in the Service hall to start) draw residents
-        // station-wide, not just Service's own.
-        let relaxing = (rand::random_range(0..4) == 0)
+        // Communal spots first — independent of the ordinary elsewhere/home
+        // choice below, so they draw residents station-wide rather than only
+        // the department they happen to sit in. Each arm falls through to the
+        // next when its pool is empty, so a station that authors none of them
+        // behaves exactly as it did before they existed.
+        let communal = (rand::random_range(0..5) == 0)
             .then(|| crew_posts.random_relax())
-            .flatten();
+            .flatten()
+            .or_else(|| {
+                (rand::random_range(0..5) == 0)
+                    .then(|| crew_posts.random_duty())
+                    .flatten()
+            })
+            .or_else(|| {
+                (rand::random_range(0..3) == 0)
+                    .then(|| crew_posts.random_visit())
+                    .flatten()
+            });
 
         // Somewhere else on the station: another department, or their own —
         // preferring their own post over the shared department point when
         // they stay home, the same fix `populate_departments` already gets.
-        let destination = relaxing.or_else(|| {
+        let destination = communal.or_else(|| {
             let next = departments.somewhere_else(&member.role)?;
             Some(if Some(next) == departments.home(&member.role) {
                 crew_posts.work(&member.name).unwrap_or(next)
@@ -1264,6 +1454,42 @@ fn ambient_behaviour(
             route.counter_bound = false;
             route.phase = CrewPhase::Arriving;
         }
+    }
+}
+
+/// How fast a stopped resident turns to face what they are standing at, in
+/// radians per second. Slow enough to read as turning rather than snapping,
+/// fast enough to be settled well inside the shortest [`DUTY_DWELL_SECONDS`].
+const FACING_TURN_RATE: f32 = 4.0;
+
+/// Turns a resident who has stopped at an authored post to its facing.
+///
+/// Without this a body's heading is whatever direction it last walked in, which
+/// is fine in a corridor and wrong at a console: standing side-on to the screen
+/// is the clearest possible tell that nobody is really working. The yaw comes
+/// off the `crew_post` marker's own `Transform` — see `lab::tb::CrewPost`.
+///
+/// Authority-side, because `Transform` is replicated and a client that turned
+/// its own copy would drift. It is ordered after [`walk_route`] in the same
+/// chain and does nothing to a body that is still moving, so the two never
+/// write the same rotation in one frame.
+fn face_authored_posts(
+    time: Res<Time>,
+    crew_posts: Res<CrewPosts>,
+    mut residents: Query<(&CrewRoute, &mut Transform), With<Ambient>>,
+) {
+    for (route, mut transform) in &mut residents {
+        if route.is_moving() {
+            continue;
+        }
+        let Some(facing) = crew_posts.facing_at(transform.translation) else {
+            continue;
+        };
+        // `rotate_towards` is a no-op once it arrives, so this costs a compare
+        // per stationary resident per frame rather than a permanent slerp.
+        transform.rotation = transform
+            .rotation
+            .rotate_towards(facing, FACING_TURN_RATE * time.delta_secs());
     }
 }
 
@@ -1509,6 +1735,7 @@ pub(crate) fn walk_route(
         Option<&CrewMember>,
         Option<&Bloodstream>,
         Has<ReturnsToDuty>,
+        Has<StationResident>,
     )>,
     mut motion: Option<ResMut<crate::npc_motion::NpcMotion>>,
 ) {
@@ -1518,7 +1745,7 @@ pub(crate) fn walk_route(
         .collect();
     walkers.sort();
     for (_, entity) in walkers {
-        let Ok((_, mut transform, mut route, member, blood, returns_to_duty)) =
+        let Ok((_, mut transform, mut route, member, blood, returns_to_duty, station_resident)) =
             crew.get_mut(entity)
         else {
             continue;
@@ -1617,15 +1844,22 @@ pub(crate) fn walk_route(
             // unless they were only ever a resident recalled for this one
             // order (see `recall_resident_for_order`), in which case "done"
             // means back to ambient duty, not gone for the rest of the shift.
+            //
+            // A `StationResident` is the standing version of the same thing:
+            // nothing can re-create them, so despawning one empties its room
+            // for the rest of the save. Its marker is deliberately *not*
+            // stripped here — unlike a one-trip recall, the property survives
+            // the trip, so a second panic is survivable too.
             if route.phase == CrewPhase::Leaving {
-                if returns_to_duty {
-                    commands
-                        .entity(entity)
-                        .remove::<ReturnsToDuty>()
-                        .remove::<crate::social::NpcCommitment>()
-                        .insert(Ambient::new(rand::random_range(
-                            DWELL_SECONDS.0..=DWELL_SECONDS.1,
-                        )));
+                if returns_to_duty || station_resident {
+                    let mut body = commands.entity(entity);
+                    if returns_to_duty {
+                        body.remove::<ReturnsToDuty>()
+                            .remove::<crate::social::NpcCommitment>();
+                    }
+                    body.insert(Ambient::new(rand::random_range(
+                        DWELL_SECONDS.0..=DWELL_SECONDS.1,
+                    )));
                     route.phase = CrewPhase::Arriving;
                 } else {
                     commands.entity(entity).despawn();
@@ -2249,6 +2483,9 @@ mod tests {
             None,
             "Lindqvist's post is not Sato's — only your own post reads as work",
         );
+        // Not in tension with `a_duty_spot_works_for_anyone_not_just_its_author`
+        // below: a `work` post is personal and a `duty` spot is communal. That
+        // split is the whole reason they are separate pools — see `CrewPosts`.
     }
 
     #[test]
@@ -2284,6 +2521,84 @@ mod tests {
         assert_eq!(
             post_presentation_animation(&posts, &member, Vec3::new(-800.0, 0.93, 1400.0)),
             Some(CharacterAnimation::Sitting),
+        );
+    }
+
+    #[test]
+    fn standing_at_a_communal_duty_spot_selects_working() {
+        let mut posts = CrewPosts::default();
+        posts.add_duty(Vec3::new(-348.0, 0.0, 3214.0), Quat::IDENTITY);
+        let member = CrewMember {
+            name: "Ensign Park".to_string(),
+            role: "Bridge".to_string(),
+        };
+        assert_eq!(
+            post_presentation_animation(&posts, &member, Vec3::new(-348.0, 0.93, 3214.0)),
+            Some(CharacterAnimation::Working),
+            "a communal work spot reads as work without any personal post at all",
+        );
+    }
+
+    #[test]
+    fn a_duty_spot_works_for_anyone_not_just_its_author() {
+        // The whole point of the pool: an idle resident who wanders to a
+        // console pretends to work at it. Contrast
+        // `standing_near_someone_elses_work_post_stays_idle` — a *personal*
+        // post stays personal, and the two are separate pools for this reason.
+        let mut posts = CrewPosts::default();
+        posts.add_duty(Vec3::new(-348.0, 0.0, 3214.0), Quat::IDENTITY);
+        let visitor = CrewMember {
+            name: "Miner Sato".to_string(),
+            role: "Cargo".to_string(),
+        };
+        assert_eq!(
+            post_presentation_animation(&posts, &visitor, Vec3::new(-348.0, 0.93, 3214.0)),
+            Some(CharacterAnimation::Working),
+        );
+    }
+
+    #[test]
+    fn sitting_at_a_relax_spot_beats_a_nearby_duty_spot() {
+        // Same ordering rule as the work-post case above: someone who has
+        // actually sat down is never shown standing at attention.
+        let mut posts = CrewPosts::default();
+        posts.add_duty(Vec3::new(-740.0, 0.0, 1400.0), Quat::IDENTITY);
+        posts.add_relax(Vec3::new(-800.0, 0.0, 1400.0));
+        let member = CrewMember {
+            name: "Chef Dubois".to_string(),
+            role: "Service".to_string(),
+        };
+        assert_eq!(
+            post_presentation_animation(&posts, &member, Vec3::new(-800.0, 0.93, 1400.0)),
+            Some(CharacterAnimation::Sitting),
+        );
+    }
+
+    #[test]
+    fn an_authored_marker_faces_a_body_the_way_the_marker_points() {
+        // The two conventions are a half-turn apart, which is exactly the kind
+        // of error that looks deliberate in play — an officer standing with
+        // their back to the console they are working at. `angles "0 0 0"`
+        // points a decoration at -Z, and `walk_route`'s yaw zero points a body
+        // at +Z, so the stored facing must be the marker's, turned around.
+        let mut posts = CrewPosts::default();
+        posts.add_duty(Vec3::ZERO, Quat::IDENTITY);
+
+        let facing = posts.facing_at(Vec3::new(0.0, 0.93, 0.0)).unwrap();
+        let looks_along = facing * Vec3::Z;
+        assert!(
+            looks_along.abs_diff_eq(Vec3::NEG_Z, 0.001),
+            "a marker authored at angles 0 should look where the marker points, got {looks_along}",
+        );
+    }
+
+    #[test]
+    fn a_body_away_from_every_post_has_no_authored_facing() {
+        let mut posts = CrewPosts::default();
+        posts.add_duty(Vec3::ZERO, Quat::IDENTITY);
+        assert!(
+            posts.facing_at(Vec3::new(0.0, 0.93, 40.0)).is_none(),
+            "nothing nearby to face — a walker must keep their travel heading",
         );
     }
 
@@ -3600,6 +3915,122 @@ mod tests {
         );
     }
 
+    /// Walks a leaving body until its route runs out, or the budget does.
+    ///
+    /// A plain `leave()` is not enough to prove anything about despawning: the
+    /// despawn happens when the route *finishes*, which is several seconds of
+    /// walking later.
+    fn walk_until_route_ends(app: &mut App, crew: Entity) {
+        for _ in 0..2000 {
+            if app.world().get_entity(crew).is_err() {
+                return;
+            }
+            match app.world().get::<CrewRoute>(crew) {
+                Some(route) if !route.is_moving() && route.phase != CrewPhase::Leaving => return,
+                None => return,
+                _ => {}
+            }
+            tick(app, 0.05);
+        }
+    }
+
+    #[test]
+    fn a_station_resident_who_flees_returns_to_duty_instead_of_despawning() {
+        // Panicking is already free for any resident — `react_to_chemical_
+        // statuses` sends anyone sedated or paranoid away on a leaving route.
+        // But a leaving route that finishes despawns the body, and nothing
+        // re-creates a fluff officer: no order flow draws their name. So one
+        // bad afternoon used to empty the Bridge for the rest of the save.
+        let mut app = walking_app();
+        let home = Vec3::new(-21.0, 0.0, 18.0);
+        app.world_mut()
+            .resource_mut::<Departments>()
+            .set("Bridge".into(), home);
+
+        let crew = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Ensign Park".into(),
+                    role: "Bridge".into(),
+                },
+                Transform::from_translation(Vec3::new(door_x(), 0.93, spawn_z())),
+                CrewRoute::arrival(0.0),
+                StationResident,
+            ))
+            .id();
+        tick(&mut app, 0.01);
+
+        app.world_mut().get_mut::<CrewRoute>(crew).unwrap().leave();
+        walk_until_route_ends(&mut app, crew);
+
+        assert!(
+            app.world().get_entity(crew).is_ok(),
+            "a station resident walked off the station and was never seen again",
+        );
+        assert!(
+            app.world().get::<Ambient>(crew).is_some(),
+            "back on the station but not back on ambient duty",
+        );
+    }
+
+    #[test]
+    fn a_station_resident_survives_a_second_flight() {
+        // The marker is a standing property of the body, not a one-trip token
+        // like `ReturnsToDuty`. If it were stripped on arrival the second
+        // panic would despawn them and the bug would simply take longer to
+        // show up.
+        let mut app = walking_app();
+        let home = Vec3::new(-21.0, 0.0, 18.0);
+        app.world_mut()
+            .resource_mut::<Departments>()
+            .set("Bridge".into(), home);
+
+        let crew = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Ensign Park".into(),
+                    role: "Bridge".into(),
+                },
+                Transform::from_translation(Vec3::new(door_x(), 0.93, spawn_z())),
+                CrewRoute::arrival(0.0),
+                StationResident,
+            ))
+            .id();
+        tick(&mut app, 0.01);
+
+        for round in 1..=2 {
+            app.world_mut().get_mut::<CrewRoute>(crew).unwrap().leave();
+            walk_until_route_ends(&mut app, crew);
+            assert!(
+                app.world().get_entity(crew).is_ok(),
+                "despawned on flight {round}",
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_visitor_still_despawns_on_the_way_out() {
+        // The other half of the fix: `StationResident` must not turn every
+        // customer into a permanent resident. A visitor who leaves is gone.
+        let mut app = walking_app();
+        let crew = walker(
+            &mut app,
+            Vec3::new(door_x(), 0.93, spawn_z()),
+            CrewRoute::arrival(0.0),
+        );
+        tick(&mut app, 0.01);
+
+        app.world_mut().get_mut::<CrewRoute>(crew).unwrap().leave();
+        walk_until_route_ends(&mut app, crew);
+
+        assert!(
+            app.world().get_entity(crew).is_err(),
+            "an ordinary visitor should be despawned once they are outside",
+        );
+    }
+
     #[test]
     fn a_department_the_station_has_no_room_for_changes_nothing() {
         // Every build without the map has an empty `Departments`, and so does a
@@ -3767,6 +4198,80 @@ mod tests {
             heading_for.distance(home) < 0.01,
             "a hauler headed for {heading_for:?} instead of home to Cargo at {home:?}",
         );
+    }
+
+    #[test]
+    fn an_idle_resident_can_be_sent_to_a_communal_visit_spot() {
+        // The "more places to be" half of the pass. With no departments at all
+        // and only a visit pool authored, the only destination that exists is
+        // the visit spot — so if they move anywhere, the new arm is what sent
+        // them, and this cannot pass by accident on the old code path.
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Departments>()
+            .init_resource::<CrewPosts>()
+            .init_resource::<DeliveryStations>()
+            .insert_resource(crate::nav::NavGraph::build(
+                &crate::lab::WalkableAreas::from_floor_plan(),
+                crate::nav::NAV_RADIUS,
+            ))
+            .add_systems(Update, (ambient_behaviour, walk_route).chain());
+
+        let spot = Vec3::new(-4.0, 0.0, -3.0);
+        app.world_mut()
+            .resource_mut::<CrewPosts>()
+            .add_visit(spot, Quat::IDENTITY);
+
+        let idler = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Idle Resident".into(),
+                    role: "Cargo".into(),
+                },
+                Transform::from_translation(Vec3::new(0.0, 0.93, 0.0)),
+                CrewRoute::standing(),
+                // Already expired: they pick somewhere on the first tick.
+                Ambient { dwell: 0.0 },
+            ))
+            .id();
+
+        // Each arm is a separate roll and a missed one re-rolls the dwell for
+        // several seconds, so this drives real time rather than frames until
+        // the visit arm comes up.
+        for _ in 0..400 {
+            tick(&mut app, 0.5);
+            let route = app.world().get::<CrewRoute>(idler).unwrap();
+            if route.is_moving() {
+                let heading_for = destination(&app, idler);
+                assert!(
+                    heading_for.distance(Vec3::new(spot.x, heading_for.y, spot.z)) < 0.5,
+                    "went to {heading_for:?}, which is not the only authored spot {spot:?}",
+                );
+                return;
+            }
+        }
+        panic!("an idle resident never went to the one place there was to go");
+    }
+
+    #[test]
+    fn an_empty_visit_pool_falls_back_to_the_old_department_choice() {
+        // The property this codebase keeps insisting on: authoring none of the
+        // new markers has to behave exactly as it did before they existed.
+        let mut app = station_app();
+        let hauler = resident(&mut app, "Cargo", Vec3::new(0.0, 0.93, 0.0));
+        app.world_mut().get_mut::<Ambient>(hauler).unwrap().dwell = 0.0;
+
+        for _ in 0..200 {
+            tick(&mut app, 0.01);
+            if app.world().get::<CrewRoute>(hauler).unwrap().is_moving() {
+                // Medical and Cargo are the only two spots in this fixture, so
+                // any destination at all proves the chain still terminates in
+                // `somewhere_else` rather than falling off the end.
+                return;
+            }
+        }
+        panic!("an idle resident with no communal spots authored never went anywhere");
     }
 
     #[test]
