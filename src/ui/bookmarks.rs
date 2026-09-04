@@ -577,7 +577,26 @@ pub(super) fn animate_bookmarks(
         // read while operating one — never mid-flight, or a tab would vanish on
         // its way home, and never because the *other* tab's screen is open:
         // that is exactly when it is most useful.
-        let hidden = progress <= 0.0 && (paused || tabs_are_unavailable(mode));
+        //
+        // A ghost that has finished dissolving is hidden too, and for a reason
+        // that is about input rather than looks. By the end of its flight the
+        // tab has travelled to `left: TRAVEL_PERCENT` and grown by
+        // `GROWTH_WIDTH`/`GROWTH_HEIGHT`, so it comes to rest as a large
+        // rectangle over the middle of the very page it handed off to, at
+        // `FLIGHT_Z` — above that panel. `ghost_alpha` paints it to nothing,
+        // but `ui_focus_system` decides `Interaction` from inherited visibility
+        // and `FocusPolicy` alone and never consults alpha or `Pickable`, so an
+        // invisible ghost still swallowed presses meant for the panel beneath.
+        //
+        // That is what made "Next page" sometimes close the book: the pager row
+        // sits under a card grid whose height depends on how many cards the page
+        // holds, so on a short page — the last one, or a filter matching only a
+        // few methods — the buttons ride up under the landed ghost, and the
+        // click reached the Manual tab and toggled the book shut instead of
+        // turning the page. Hiding it once it is invisible costs nothing on
+        // screen and hands the clicks back.
+        let dissolved = ghost_alpha(ease_out_cubic(progress)) <= 0.0;
+        let hidden = dissolved || (progress <= 0.0 && (paused || tabs_are_unavailable(mode)));
         let wanted = if hidden {
             Visibility::Hidden
         } else {
@@ -868,6 +887,34 @@ mod tests {
         );
         // And its travel really does start from the edge, not from off screen.
         const { assert!(TRAVEL_PERCENT > 0.0) };
+    }
+
+    /// A dissolved ghost stops taking clicks meant for the page underneath.
+    ///
+    /// The landed tab is a large rectangle in the middle of the screen, drawn
+    /// above the panel at [`FLIGHT_Z`] and painted to zero alpha. Bevy's
+    /// `ui_focus_system` reads inherited visibility, never alpha, so while it
+    /// stayed `Visibility::Inherited` it went on swallowing presses — "Next
+    /// page" landing on it closed the book instead of turning the page.
+    #[test]
+    fn a_dissolved_ghost_stops_swallowing_clicks() {
+        // It really does finish its flight invisible, and well before the end.
+        assert_eq!(ghost_alpha(ease_out_cubic(1.0)), 0.0);
+        assert!(
+            HANDOFF_END < 1.0,
+            "the ghost must dissolve before it lands, or there is nothing to fix"
+        );
+
+        // And where it lands genuinely overlaps the panel it flew out of, so
+        // the clicks it was eating were aimed at real controls.
+        assert!(
+            TRAVEL_PERCENT > 0.0 && TRAVEL_PERCENT < 100.0,
+            "the ghost comes to rest over the middle of the open page"
+        );
+        assert!(
+            GROWTH_WIDTH > 0.0 && GROWTH_HEIGHT > 0.0,
+            "and it is much larger there than the ribbon on the edge"
+        );
     }
 
     /// Only the key chip's inset panel is background-tinted.
