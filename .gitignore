@@ -67,3 +67,6 @@ assets/3dassets/station_starter_kit/generate_cult_modules.py
 .gitignore
 docs/label-first-chemistry-verification.md
 docs/label-first-chemistry-plan.md
+promo-art/README.md
+src/bin/promo-studio.rs
+promo-art/convert-app-icon.ps1

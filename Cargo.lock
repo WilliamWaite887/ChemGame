@@ -2324,6 +2324,7 @@ dependencies = [
  "postcard",
  "quake-map",
  "rand 0.10.2",
+ "rodio",
  "ron 0.11.0",
  "serde",
  "sha2",
@@ -5688,6 +5689,7 @@ dependencies = [
  "dasp_sample",
  "lewton",
  "num-rational",
+ "rtrb",
  "thiserror 2.0.20",
  "tracing",
 ]
@@ -5718,6 +5720,12 @@ dependencies = [
  "typeid",
  "unicode-ident",
 ]
+
+[[package]]
+name = "rtrb"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fae8ee26b0371a29a77d2b2d6b3ae13aa81def6f9bf1b1b92a32d279a5e709b7"
 
 [[package]]
 name = "rustc-hash"

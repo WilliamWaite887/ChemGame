@@ -10,6 +10,14 @@ default-run = "chemgame"
 [dependencies]
 chem_sim = { path = "crates/chem_sim" }
 bevy = { version = "0.19", features = ["serialize"] }
+# Microphone capture for proximity voice chat. This is deliberately the exact
+# `rodio` Bevy's own audio backend already links (0.22), with only the additive
+# `recording` feature turned on: it brings in `rtrb` (a lock-free ring buffer)
+# and nothing else, and reuses the `cpal` host already in the tree rather than
+# standing up a second, competing one. Verify with
+# `cargo tree -d -p rodio -p cpal` — two copies of either would mean two audio
+# hosts fighting over the same devices.
+rodio = { version = "0.22", default-features = false, features = ["recording"] }
 # Bevy's accessibility component intentionally does not re-export AccessKit's
 # node builder. This is the exact version Bevy already links; declaring it
 # directly lets icon-only controls carry real screen-reader labels without
