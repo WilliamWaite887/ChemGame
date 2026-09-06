@@ -129,6 +129,48 @@ pub struct Player;
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayerAccount(pub AccountId);
 
+/// The adjectives half of [`display_name`]'s word pair.
+///
+/// Lab-flavoured on both sides rather than borrowed generic "cool robot"
+/// name-generator wordlists — matches the game's own voice.
+const NAME_ADJECTIVES: [&str; 16] = [
+    "Careful", "Steady", "Quick", "Quiet", "Bold", "Sharp", "Calm", "Bright", "Keen", "Deft",
+    "Brisk", "Wry", "Cool", "Neat", "Sly", "Patient",
+];
+
+const NAME_NOUNS: [&str; 16] = [
+    "Beaker", "Flask", "Burner", "Pipette", "Vial", "Titrant", "Reagent", "Catalyst", "Solvent",
+    "Distillate", "Crucible", "Retort", "Funnel", "Filtrate", "Isotope", "Buret",
+];
+
+/// A stable, readable label for an account, with no name ever typed anywhere.
+///
+/// The game has never had a "choose your name" screen, and adding one is a
+/// separate design question from labelling *who is talking* in the voice
+/// chat this function was built for. Deriving the label from [`AccountId`]
+/// instead sidesteps that entirely: every chemist already carries a
+/// replicated [`PlayerAccount`], so every peer can already compute the same
+/// name for the same account with no new wire message, no change to the
+/// account handshake, and no new replicated state — a pure presentation
+/// function built from what already crosses the wire, the same shape
+/// `speech`'s bubbles are built from `Speech`.
+///
+/// Hashes the account's own `Display` string (its hex form) with FNV-1a — the
+/// same technique `net::fingerprint_bytes` already uses for the protocol id
+/// — rather than `AccountId`'s `derive(Hash)`, so the name is guaranteed
+/// stable across every build rather than resting on `DefaultHasher`'s
+/// incidental (not contractually guaranteed) stability.
+pub fn display_name(account: AccountId) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in account.to_string().into_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let adjective = NAME_ADJECTIVES[(hash as usize) % NAME_ADJECTIVES.len()];
+    let noun = NAME_NOUNS[((hash >> 32) as usize) % NAME_NOUNS.len()];
+    format!("{adjective} {noun}")
+}
+
 /// Server-side link from a chemist back to the client driving them.
 ///
 /// Not replicated: `ClientId` is not serialisable, and no client needs to know
@@ -1092,6 +1134,37 @@ mod tests {
     use bevy_replicon::test_app::{ServerTestAppExt, TestClientEntity};
 
     use super::*;
+
+    #[test]
+    fn the_same_account_always_gets_the_same_name() {
+        let account = AccountId::from_bytes([7; 16]);
+        assert_eq!(display_name(account), display_name(account));
+    }
+
+    #[test]
+    fn different_accounts_usually_get_different_names() {
+        // "Usually" is honest: 256 names is a small space and a genuine
+        // collision is not a bug, only unlikely. Across sixteen consecutive
+        // accounts at least one distinct name must appear, or the hash is
+        // not doing its job at all (e.g. only reading one byte).
+        let names: std::collections::HashSet<String> = (0..16u8)
+            .map(|i| display_name(AccountId::from_bytes([i; 16])))
+            .collect();
+        assert!(
+            names.len() > 1,
+            "sixteen different accounts produced only one name"
+        );
+    }
+
+    #[test]
+    fn a_name_is_always_two_real_words() {
+        let account = AccountId::from_bytes([200; 16]);
+        let name = display_name(account);
+        let words: Vec<&str> = name.split(' ').collect();
+        assert_eq!(words.len(), 2, "expected \"Adjective Noun\", got {name:?}");
+        assert!(NAME_ADJECTIVES.contains(&words[0]));
+        assert!(NAME_NOUNS.contains(&words[1]));
+    }
 
     /// Bevy validates query aliasing while a system is initialized — the same
     /// technique `audio::machine_loop_queries_are_disjoint_at_runtime` already

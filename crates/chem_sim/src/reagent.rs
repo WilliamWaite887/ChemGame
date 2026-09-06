@@ -451,6 +451,29 @@ impl Reagent {
             || self.world_effects.iter().any(|effect| effect.is_harmful())
     }
 
+    /// Whether this is meant to be used *on the station* rather than on a
+    /// person — a cleaner, a solvent, a foam.
+    ///
+    /// True when the reagent does something to the world and nothing good to a
+    /// body. Space cleaner is the archetype: it scrubs a spill, and the only
+    /// thing it does to whoever swallows it is a toxin tick.
+    ///
+    /// This exists because a delivery has to choose a route, and "drink it"
+    /// is the wrong answer for a bottle of cleaner no matter who asked for it.
+    /// Deliberately structural rather than a category check — `Utility` is a
+    /// reference-book heading an author picks, while this is a fact about the
+    /// effects the reagent actually carries.
+    pub fn is_for_the_station_not_a_body(&self) -> bool {
+        !self.world_effects.is_empty()
+            && !self
+                .effects
+                .iter()
+                .chain(&self.overdose_effects)
+                .chain(&self.critical_effects)
+                .chain(&self.after_effects)
+                .any(|effect| !effect.is_harmful())
+    }
+
     /// Whether this reagent's body effects are harmful at the supplied active
     /// volume. Unlike [`Self::is_harmful`], a medicine's mere ability to
     /// overdose does not make a therapeutic dose a purge target.

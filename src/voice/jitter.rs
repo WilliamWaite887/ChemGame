@@ -116,6 +116,18 @@ impl JitterBuffer {
         self.held.len()
     }
 
+    /// The talk-spurt currently being played or filled, if any.
+    ///
+    /// Lets a caller holding a stateful decoder alongside this buffer notice
+    /// a new talk-spurt and reset that decoder too — Opus carries a little
+    /// prediction context between frames, and while not resetting it is not
+    /// a correctness bug (unlike mixing up two different speakers, which this
+    /// buffer already prevents on its own), a new utterance's first frame
+    /// otherwise decodes slightly coloured by the tail of the last one.
+    pub fn current_stream(&self) -> Option<u16> {
+        self.stream
+    }
+
     /// Whether anything is currently being played out.
     pub fn is_active(&self) -> bool {
         self.cursor.is_some() || !self.held.is_empty()

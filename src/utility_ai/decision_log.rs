@@ -202,13 +202,16 @@ fn open_log(mut commands: Commands, time: Res<Time>) {
          reading: Unreachable and ReservationUnavailable are the two that \
          strand a worker.",
     );
-    log.write("STATION = periodic snapshot. tickets are shown available/claimed.");
+    log.write(
+        "STATION = periodic snapshot. tickets are shown available/claimed, and \
+         incidents as how many are open over the age of the oldest.",
+    );
     log.write("");
     log.write(
         "Reading it: an odd-looking choice is usually character, not a defect.          A cook who breaks for lunch mid-shift, someone who wanders to the bar,          a botanist who would rather chat, are all the system working.",
     );
     log.write(
-        "What is actually broken looks different, and looks the same every time:          a line that repeats forever, a DONE! that never becomes Completed, or a          STATION snapshot whose numbers stop moving.",
+        "What is actually broken looks different, and looks the same every time:          a line that repeats forever, a DONE! that never becomes Completed, an          incident whose age keeps climbing, or a STATION snapshot whose numbers          stop moving.",
     );
     log.write("");
     info!("utility-AI decision log: {}", path.display());
@@ -326,6 +329,7 @@ fn log_resolutions(
 fn log_station_snapshot(
     time: Res<Time>,
     board: Option<Res<JobBoard>>,
+    incidents: Option<Res<super::IncidentLedger>>,
     controlled: Query<(&ControlOwner, Option<&CurrentAction>)>,
     log: Option<ResMut<AiLog>>,
 ) {
@@ -369,10 +373,37 @@ fn log_station_snapshot(
         per_domain.join("  ")
     });
 
+    // Open incidents are shown with the *age* of the department's oldest,
+    // because age is what separates a busy shift from a stuck one. An incident
+    // resolves only when the work behind it finishes, so one whose age keeps
+    // climbing across snapshots is a department that will read `Emergency` in
+    // the Crew menu with nothing at the scene to find — and, because
+    // `DepartmentProblemPolicy` caps unresolved cases, one that has quietly
+    // stopped generating any new work at all.
+    let incidents = incidents.map(|ledger| {
+        let mut per_domain: Vec<String> = JobDomain::ALL
+            .into_iter()
+            .filter_map(|domain| {
+                let mut open = 0usize;
+                let mut oldest = now;
+                for incident in ledger.active().filter(|held| held.department == domain) {
+                    open += 1;
+                    oldest = oldest.min(incident.created_at);
+                }
+                (open > 0).then(|| format!("{domain:?} {open}/{:.0}s", now - oldest))
+            })
+            .collect();
+        if per_domain.is_empty() {
+            per_domain.push("none".into());
+        }
+        per_domain.join("  ")
+    });
+
     log.write(&format!(
-        "STATION utility-controlled={utility} acting={acting} idle={} | tickets(avail/claimed): {}",
+        "STATION utility-controlled={utility} acting={acting} idle={} | tickets(avail/claimed): {} | incidents(open/oldest): {}",
         utility.saturating_sub(acting),
         tickets.unwrap_or_else(|| "no board".into()),
+        incidents.unwrap_or_else(|| "no ledger".into()),
     ));
 }
 

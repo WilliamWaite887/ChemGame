@@ -18,6 +18,11 @@ bevy = { version = "0.19", features = ["serialize"] }
 # `cargo tree -d -p rodio -p cpal` — two copies of either would mean two audio
 # hosts fighting over the same devices.
 rodio = { version = "0.22", default-features = false, features = ["recording"] }
+# The lock-free SPSC ring buffer `voice::stream` hands decoded PCM to the
+# audio thread through. Already in the tree as `rodio`'s own dependency for
+# `recording` above — pinned to that exact version rather than duplicated,
+# since it is only reachable from our own code as a direct dependency.
+rtrb = "0.3.5"
 # Voice codec. Bindings to libopus, whose source `opusic-sys` vendors and
 # builds — so this needs **cmake** on PATH as well as the C compiler Bevy's
 # own `blake3`/`zstd-sys` already require. That is a real prerequisite for

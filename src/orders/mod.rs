@@ -2230,6 +2230,28 @@ struct Handover<'a> {
     believed: Option<ReagentId>,
 }
 
+/// Whether a delivered batch is station supplies rather than something to take.
+///
+/// Majority-by-volume rather than "contains any", so a medicine carrying a
+/// trace of cleaner is still a medicine and still gets taken — the player's
+/// sloppy synthesis stays their problem. It flips only when the batch is
+/// mostly, actually, a cleaning chemical.
+fn is_station_chemical(container: &Container, db: &ChemDb) -> bool {
+    let total = container.solution.total_volume();
+    if !total.is_positive() {
+        return false;
+    }
+    let station: Units = container
+        .solution
+        .iter()
+        .filter(|(id, _)| db.0.reagents.get(*id).is_for_the_station_not_a_body())
+        .map(|(_, volume)| volume)
+        .fold(Units::ZERO, |sum, volume| sum + volume);
+    // Doubled rather than halved: `Units` is a fixed-point integer with no
+    // division, and this keeps the comparison exact at odd volumes.
+    station * 2 > total
+}
+
 /// Grades a handover and closes the order out.
 ///
 /// Shared by both delivery routes on purpose. The counter and the window have
@@ -2425,7 +2447,16 @@ fn complete_delivery(
         // A personal-consumption order keeps the original behavior. They
         // actually drink what was handed over, including a wrong batch. This
         // branch exists only because the order has no explicit linked use.
-        if let Some((recipient_body, recipient_blood)) = body {
+        //
+        // Except when what was handed over is not for a body at all. A bottle
+        // of space cleaner is for a spill — its own reference entry says "Do
+        // not drink it" — and swallowing it was this branch assuming every
+        // delivery ends in somebody's stomach. Filling the wrong *medicine* is
+        // still the player's mistake to make and still gets drunk; a cleaner
+        // is not a wrong medicine, it is not medicine.
+        if let Some((recipient_body, recipient_blood)) =
+            body.filter(|_| !is_station_chemical(container, db))
+        {
             let mut dose = container.solution.clone();
             if dose.total_volume().is_positive() {
                 let snapshot = dose.clone();
@@ -4175,6 +4206,61 @@ mod tests {
         assert!(
             blood.0.stomach.volume_of(hooch).is_positive(),
             "the recipient should actually have swallowed something, not just been graded a success"
+        );
+    }
+
+    #[test]
+    fn nobody_drinks_the_space_cleaner_they_were_handed() {
+        // Reported from live play: "i gave a tech guy space cleaner and he
+        // drank it himself instead of using it where he needed it."
+        //
+        // `complete_delivery`'s personal-consumption branch assumed every
+        // delivery ends in somebody's stomach, so it swallowed a utility
+        // chemical whose own reference entry reads "Do not drink it."
+        let mut app = window_app();
+        window_with(&mut app, &[("space_cleaner", 20)]);
+        let tech = waiting_crew(&mut app, "Tech Lindqvist", "space_cleaner", 20, 60.0, true);
+        app.world_mut()
+            .entity_mut(tech)
+            .insert((Body::default(), Bloodstream::default()));
+
+        app.update();
+
+        // The delivery still succeeds — they asked for cleaner and got
+        // cleaner. Only the swallowing is wrong.
+        assert_eq!(
+            outcomes(&app),
+            vec![("Tech Lindqvist".to_string(), Outcome::Success)]
+        );
+        let cleaner = reagent_id(&app, "space_cleaner");
+        let blood = app.world().get::<Bloodstream>(tech).unwrap();
+        assert!(
+            blood.0.stomach.volume_of(cleaner).is_zero(),
+            "the technician drank the space cleaner instead of cleaning with it"
+        );
+    }
+
+    #[test]
+    fn a_wrong_medicine_is_still_swallowed() {
+        // The other side of the guard, and the reason it keys on what the
+        // chemical *is* rather than on whether the order matched. Filling an
+        // order with the wrong medicine is a real mistake with real
+        // consequences, and softening that would remove the stakes from every
+        // delivery in the game.
+        let mut app = window_app();
+        window_with(&mut app, &[("hooch", 10)]);
+        let crew = waiting_crew(&mut app, "Mx. Sample", "hooch", 10, 60.0, true);
+        app.world_mut()
+            .entity_mut(crew)
+            .insert((Body::default(), Bloodstream::default()));
+
+        app.update();
+
+        let hooch = reagent_id(&app, "hooch");
+        let blood = app.world().get::<Bloodstream>(crew).unwrap();
+        assert!(
+            blood.0.stomach.volume_of(hooch).is_positive(),
+            "guarding cleaners must not stop an ordinary delivery being taken"
         );
     }
 

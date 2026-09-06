@@ -2837,7 +2837,7 @@
 // entity 46
 {
 "classname" "department_spot"
-"origin" "-340 2400 0"
+"origin" "-200 2380 0"
 "department" "Bridge"
 }
 // entity 47
@@ -3424,7 +3424,7 @@
 // entity 66
 {
 "classname" "department_spot"
-"origin" "-340 1080 0"
+"origin" "-200 1040 0"
 "department" "Medical"
 }
 // entity 67
@@ -3436,19 +3436,19 @@
 // entity 68
 {
 "classname" "department_spot"
-"origin" "-1680 2160 0"
+"origin" "-1660 2300 0"
 "department" "Cargo"
 }
 // entity 69
 {
 "classname" "department_spot"
-"origin" "-340 3840 0"
+"origin" "-200 3800 0"
 "department" "Security"
 }
 // entity 70
 {
 "classname" "department_spot"
-"origin" "-660 1400 0"
+"origin" "-800 1460 0"
 "department" "Service"
 }
 // crew_post: Medical work posts, either side of the shared department_spot.

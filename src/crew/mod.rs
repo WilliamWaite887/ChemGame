@@ -2417,6 +2417,13 @@ const ERRAND_REACH: f32 = 1.2;
 /// Without it an errand-runner walks into a corner forever.
 const ERRAND_DEADLINE_SECONDS: f32 = 45.0;
 
+/// How much closer a walker must get for the deadline to count it as progress.
+///
+/// Small enough that an ordinary stride clears it many times over, large enough
+/// that float noise and the per-step avoidance jitter cannot masquerade as
+/// advancing.
+const ERRAND_PROGRESS_EPSILON: f32 = 0.05;
+
 /// What an errand is aimed at.
 ///
 /// A moving [`ErrandGoal::Target`] rather than only a fixed point because the
@@ -2462,6 +2469,13 @@ pub struct Errand {
     /// Seconds before the errand is written off. See
     /// [`ERRAND_DEADLINE_SECONDS`].
     expires_in: f32,
+    /// The shortest remaining route this errand has ever seen.
+    ///
+    /// What makes [`expires_in`](Self::expires_in) a *no-progress* timer rather
+    /// than a stopwatch: getting genuinely closer resets the clock, so the
+    /// deadline bounds how long a walker may fail to advance, not how far it is
+    /// allowed to walk.
+    closest_yet: f32,
     /// Whether the last tick actually moved them. Read by
     /// [`drive_crew_animation`] to pick the walk cycle — see
     /// [`Errand::is_moving`].
@@ -2479,6 +2493,7 @@ impl Errand {
             speed: WALK_SPEED,
             arrive_within: ERRAND_REACH,
             expires_in: ERRAND_DEADLINE_SECONDS,
+            closest_yet: f32::INFINITY,
             moving: false,
             trail: crate::nav::Trail::default(),
         }
@@ -2626,6 +2641,28 @@ pub(crate) fn run_errands(
         if errand.trail.due_for_replan(dt, ERRAND_REPLAN_SECONDS) {
             errand.trail.plan(nav.as_deref(), transform.translation, at);
         }
+        // Getting genuinely closer resets the clock, which turns the deadline
+        // from a stopwatch into a no-progress timer.
+        //
+        // As a stopwatch it had stopped being a backstop and become a cap on
+        // *distance*: `WALK_SPEED * 45` is 94 m of budget, and a Cargo casualty
+        // is 50 m from a Medical bed before the route bends around any rooms.
+        // A live trace shows what that cost — the Medical response ticket
+        // completing three times over, each one re-published exactly 45.0 s
+        // after the last, because the transport across the station could never
+        // finish and kept resetting its case.
+        //
+        // Every failure the deadline was written for is a failure to advance,
+        // not a failure to be quick: its own comment names "a goal drifting
+        // away as fast as it is chased" and "a route that leads somewhere the
+        // walker can never quite reach". Both still time out here, in the same
+        // 45 seconds, because neither ever shortens the route.
+        if let Some(remaining) = errand.trail.remaining(transform.translation) {
+            if remaining + ERRAND_PROGRESS_EPSILON < errand.closest_yet {
+                errand.closest_yet = remaining;
+                errand.expires_in = ERRAND_DEADLINE_SECONDS;
+            }
+        }
         // Nav has nothing to say, and this system only runs once the map is
         // ready — so this is not a graph still loading, it is genuinely no way
         // there. Stop rather than straight-lining through the wall between.
@@ -2635,7 +2672,29 @@ pub(crate) fn run_errands(
         }
 
         let reach = errand.arrive_within;
-        let arrived = transform.translation.distance_squared(at) <= reach * reach
+        // Horizontal, with a same-deck guard — not a 3D radius.
+        //
+        // A body cannot change its own height: `walk_avoiding` steps
+        // horizontally and `contain_on_surface` rewrites y every step. So a 3D
+        // arrival test is unsatisfiable for anything that does not rest at
+        // exactly body height, and the errand only finds that out at its
+        // deadline. Botany's produce sits at y 0.08 on a floor-level shelf
+        // while a walker's origin is `BODY_OFFSET` 0.93 — a 0.85 m gap against
+        // a 0.3 m radius — so *every* Service ingredient pickup was permanently
+        // unreachable, retried by a new worker every 45 seconds forever.
+        //
+        // The vertical band is still checked, because the station has two decks
+        // and something directly below must not count as reached. 1.2 m is the
+        // same band `npc_motion::sweeps_body` already uses to mean "same
+        // floor", rather than a fourth opinion about deck separation.
+        const SAME_DECK_BAND: f32 = 1.2;
+        let flat_gap = Vec2::new(
+            transform.translation.x - at.x,
+            transform.translation.z - at.z,
+        )
+        .length();
+        let arrived = flat_gap <= reach
+            && (transform.translation.y - at.y).abs() < SAME_DECK_BAND
             && errand.trail.ends_at(at)
             && errand
                 .trail
@@ -5434,6 +5493,69 @@ mod tests {
         }
     }
 
+    /// A walk longer than the deadline is not a stuck walk.
+    ///
+    /// As a stopwatch, `ERRAND_DEADLINE_SECONDS` was a cap on distance:
+    /// `WALK_SPEED * 45` is 94 m, and a Cargo casualty is 50 m from a Medical
+    /// bed before the route bends around a single room. Medical transports
+    /// across the station therefore could not finish, and the live trace shows
+    /// the shape of it — the response ticket completing three separate times,
+    /// each re-published exactly 45.0 s after the last, because the transport
+    /// timed out and reset its case every time. The player's version of this
+    /// was "they never walk into the medical room and go to a bed."
+    ///
+    /// The distance here is deliberately past that 94 m budget, so it fails
+    /// against a stopwatch and passes against a no-progress timer.
+    #[test]
+    fn a_walk_longer_than_the_deadline_still_finishes() {
+        // A purpose-built corridor: the const-table lab is far too small to
+        // exceed the old budget, so a version of this test on that map would
+        // pass either way and prove nothing.
+        let mut areas = crate::lab::WalkableAreas::default();
+        areas.push(
+            crate::lab::Bounds {
+                min_x: 0.0,
+                max_x: 160.0,
+                min_z: 0.0,
+                max_z: 4.0,
+            },
+            Some("long corridor".into()),
+        );
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<ErrandLog>()
+            .insert_resource(crate::nav::NavGraph::build(&areas, crate::nav::NAV_RADIUS))
+            .insert_resource(areas)
+            .add_message::<ErrandResolved>()
+            .add_systems(Update, (run_errands, record_errands).chain());
+
+        let start = Vec3::new(4.0, BODY_OFFSET, 2.0);
+        let goal = Vec3::new(150.0, BODY_OFFSET, 2.0);
+        let straight = start.distance(goal);
+        let old_budget = WALK_SPEED * ERRAND_DEADLINE_SECONDS;
+        assert!(
+            straight > old_budget,
+            "this walk is {straight:.0}m but the stopwatch budget was \
+             {old_budget:.0}m, so the test would pass either way",
+        );
+
+        let walker = errand_runner(&mut app, start);
+        send(&mut app, walker, ErrandGoal::Point(goal));
+        // Generous, but the assertion is arrival — a walker that stalls fails.
+        walk_errand(
+            &mut app,
+            walker,
+            (straight / WALK_SPEED * 3.0 / 0.05) as usize,
+        );
+
+        assert_eq!(
+            errands(&app).first().map(|ended| ended.outcome),
+            Some(ErrandOutcome::Arrived),
+            "a {straight:.0}m walk was written off instead of completed; the \
+             deadline is bounding distance rather than stalling",
+        );
+    }
+
     #[test]
     fn an_errand_that_never_gets_there_is_written_off_rather_than_run_forever() {
         // The deadline, and the only thing that ends this case. The body above
@@ -5449,12 +5571,14 @@ mod tests {
             ErrandGoal::Point(Vec3::new(-400.0, BODY_OFFSET, -400.0)),
         );
 
-        // Past `ERRAND_DEADLINE_SECONDS`, at the tick rate the others use.
-        walk_errand(
-            &mut app,
-            walker,
-            (ERRAND_DEADLINE_SECONDS / 0.05) as usize + 20,
-        );
+        // `ERRAND_DEADLINE_SECONDS` is a no-progress timer, not a stopwatch, so
+        // the clock only starts once this body stops advancing. It legitimately
+        // walks part of the way to the wall first, and that approach resets it —
+        // which is the whole point: a long walk that keeps getting closer is not
+        // a stuck one. Two deadlines is comfortably past approach-plus-stall,
+        // and the assertion below is still that it ends, not that it lingers.
+        let horizon = (ERRAND_DEADLINE_SECONDS * 2.0 / 0.05) as usize;
+        walk_errand(&mut app, walker, horizon);
 
         assert!(
             app.world().get::<Errand>(walker).is_none(),

@@ -1769,6 +1769,50 @@ fn flagship_compounds_expose_their_new_systemic_profiles() {
         .any(|effect| matches!(effect, WorldEffect::Corrode { .. })));
 }
 
+/// Separates the chemicals you clean a station with from the ones you treat a
+/// person with.
+///
+/// The bug this pins: a delivery used to swallow whatever was handed over, so
+/// asking a technician to clean a spill got them a mouthful of space cleaner —
+/// a reagent whose own `treats` line reads "Do not drink it."
+///
+/// The interesting half is the *negative* list. Firefighting foam expands over
+/// a fire like the other foams, but it also carries `Counter(Burning)`, so it
+/// is a real treatment for a burning crew member and must stay deliverable.
+#[test]
+fn a_cleaner_is_for_the_station_and_a_medicine_is_for_a_body() {
+    let data = real();
+    for key in [
+        "space_cleaner",
+        "space_lube",
+        "sterilizine",
+        "drying_agent",
+        "metal_foam",
+    ] {
+        assert!(
+            data.reagents
+                .get(data.reagent(key))
+                .is_for_the_station_not_a_body(),
+            "{key} is a utility chemical and must never be delivered to drink"
+        );
+    }
+    for key in [
+        // Does something to the world *and* something good to a body.
+        "firefighting_foam",
+        // Ordinary medicine, no world effect at all.
+        "bicaridine",
+        "dylovene",
+    ] {
+        assert!(
+            !data
+                .reagents
+                .get(data.reagent(key))
+                .is_for_the_station_not_a_body(),
+            "{key} treats a person and must stay deliverable"
+        );
+    }
+}
+
 /// Pins the RON spelling of every field added for bodies.
 ///
 /// The trap this exists for: RON will not coerce an integer into `Kelvin`'s

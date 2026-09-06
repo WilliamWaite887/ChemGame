@@ -3166,7 +3166,361 @@ and full appropriate checks.
 | Persistence/networking | Packet J | Not started | None | Audit save and replication shapes |
 | Scale and final tuning | Packet J | Not started | None | Run after full integration |
 
+## Files in flight — read before editing (2026-09-06)
+
+Voice chat is being built in parallel in this same dirty worktree. This section
+is the collision surface; it lists what the AI work is actively editing so the
+other side can steer clear, and what it has deliberately *not* touched.
+
+**Actively edited by the AI work:**
+
+- `src/crew/mod.rs` — `run_errands` arrival test and the errand deadline. Both
+  are shared locomotion, also used by `showdown::run_pursuers`.
+- `src/utility_ai/mod.rs` — `select_reference_actions` (occupancy filter, one
+  new `Res<ReservationBook>` param) and `begin_reference_actions` (arrival reach).
+- `src/utility_ai/medical.rs` — response publishing, the alarm horizon,
+  casualty re-announcement.
+- `src/utility_ai/decision_log.rs` — the STATION snapshot line.
+- `src/npc_motion.rs` — `CLEARANCE` made `pub`. No behaviour change.
+- `src/lab/tb_map.rs` and `assets/maps/lab.map` — five `department_spot`
+  origins, plus one new map test.
+- `src/orders/mod.rs` — one new helper (`is_station_chemical`) and a guard on
+  `complete_delivery`'s personal-consumption branch. Nothing else in the file.
+- `crates/chem_sim/src/reagent.rs` — one new predicate,
+  `Reagent::is_for_the_station_not_a_body`. Additive; no existing method changed.
+- `src/net/mod.rs` and `src/settings/mod.rs` — the `--speed` development flag
+  (`parse_speed`, `SimulationSpeed`, `apply_simulation_speed`). **Note for the
+  voice work:** the `settings/mod.rs` change is one new system plus its
+  registration in the plugin's `OnEnter(AppState::Playing)`; it does not touch
+  `Knob`, the sliders, or any UI, so it should not collide with `VoiceVolume`/
+  `MicGain`.
+
+**Untouched on purpose, and safe to work in:** `src/voice/**`,
+`src/ui/bookmarks.rs`, and the Cargo manifests. The AI work has not modified any
+of these at any point and has no reason to.
+
+**If you need to change `crew::run_errands`**, say so here first — its arrival
+test and deadline were both just changed for reasons that are easy to
+accidentally revert, and both have falsification tests
+(`a_walk_longer_than_the_deadline_still_finishes`,
+`a_worker_can_reach_an_item_resting_on_a_surface`).
+
 ## Decision log
+
+### 2026-09-06, the medical round trip, confirmed end to end
+
+The errand-deadline fix was verified in a live run rather than only in tests,
+and this is the trace worth keeping. Fresh save, plain `cargo run -- --solo`,
+nothing forced:
+
+```
+ 15s  incident opens in Cargo, Medical ticket published
+ 25s  ticket claimed
+ 35s  utility-controlled 28 -> 27   (patient picked up and carried)
+ 45s  a second Medical ticket appears (the treatment request, not a retry)
+ 65s  controlled 29, then 70s -> 30 (patient discharged, back under AI control)
+ 70s  incident closed, and stays closed for the rest of the run
+```
+
+The thing to compare it against is run 7, where the same ticket completed three
+times at exactly 45.0 s intervals. One completion that stays completed is the
+signal; the `utility-controlled` count dipping and recovering is what shows a
+body was actually carried and actually given back.
+
+**Why it is always Cargo.** Worth writing down because it looks like a rigged
+test and is not. Four departments have a `DepartmentProblemPolicy`, and the
+`opening_grace` is counted in *completed jobs*, not seconds. Cargo completes one
+roughly every 6-8 s, so it burns through a grace of 6 in about a minute;
+Engineering has a grace of 2 but barely completes any jobs, so it never gets
+there. The accident is emergent from throughput. `force_next_cargo_burn` exists
+for scenario tests and was not used in any of these runs.
+
+### 2026-09-06, the technician who drank the space cleaner
+
+Reported twice from live play: *"i gave a tech guy space cleaner and he drank it
+himself instead of using it where he needed it."*
+
+`complete_delivery` has two branches. A **linked** order (one carrying an
+`OrderUse`) transfers custody, walks the carrier to a `use_destination`, and
+applies an explicit `Route`. Everything else falls to the
+personal-consumption branch, which hardcoded `Route::Ingested`.
+
+The bug is that **`OrderUse::medical` is the only constructor in the game**, so
+Medical is the only department that ever attaches one. Every other request —
+including a cleaning request — landed in a branch that assumes every delivery
+ends in somebody's stomach. Space cleaner's own reference entry reads *"Nothing.
+The janitor will thank you. Do not drink it."*
+
+Fixed with `Reagent::is_for_the_station_not_a_body`: a reagent that has
+`world_effects` and no *beneficial* body effect is station supplies, and is
+handed over without being swallowed.
+
+Two decisions inside that predicate are load-bearing:
+
+- **Structural, not categorical.** It does not test `Category::Utility`, which
+  is a reference-book heading an author picks. It tests the effects the reagent
+  actually carries. The case that proves the difference is `firefighting_foam`:
+  it is authored `Utility` and expands over a fire like the other foams, but it
+  also carries `Counter(Burning)`, so it is a real treatment for a burning crew
+  member and must stay deliverable. A category check would have blocked it.
+- **Majority by volume, not "contains any".** A medicine carrying a trace of
+  cleaner is still a medicine and is still taken. Filling an order with the
+  wrong *medicine* remains the player's mistake to make, with all its
+  consequences; a cleaner is not a wrong medicine, it is not medicine.
+
+Falsified: removing the guard makes
+`nobody_drinks_the_space_cleaner_they_were_handed` fail with the exact live
+symptom, while `a_wrong_medicine_is_still_swallowed` keeps passing — which is
+what proves the guard is narrow rather than just switching deliveries off.
+
+**Left open deliberately:** the technician still does not *use* the cleaner on
+the spill. Every `Route` in `chem_sim` is a way into a body; there is no "applied
+it to the floor" route, and no non-Medical department builds an `OrderUse` with
+a destination. Giving Service and Engineering a linked-use path is its own
+packet. This change only stops the harm.
+
+### 2026-09-06, a development flag for the clock
+
+Added `--speed <N>`, because the triage loop was bottlenecked on wall-clock
+time: a medical response plus transport is a ~150 s round trip, which is a long
+time to sit and watch for one data point.
+
+It scales `Time<Virtual>` — the same clock the pause menu already stops — so it
+moves everything together and no system needs to know about it. Three
+constraints, each with a test:
+
+- **Gated on `owns_the_clock`**, the identical rule pausing uses. Running the
+  clock fast from one end of a co-op session would desync a peer who never
+  agreed to it, so `Host`/`HostSteam` ignore the flag.
+- **Clamped to 10x.** Not a limit on the simulation but on the *step size*: at
+  higher multipliers one frame advances far enough that a walker can step past a
+  waypoint or through a body-spacing check, and the bugs that produces are
+  artefacts of the flag rather than of the game.
+- **Parsed separately from `LaunchMode::parse_args`**, which returns on the
+  first flag it recognizes — a speed parsed there would be silently dropped for
+  the realistic invocation `--solo --speed 4`. That is exactly what
+  `a_speed_flag_is_read_from_anywhere_on_the_command_line` pins.
+
+Absent flag means the resource is absent and the system is inert, so a shipped
+build carries no multiplier.
+
+### 2026-09-06, the transport that could never arrive
+
+Four defects, all found by running the game and reading the trace, all in the
+same family: **something was measured in a way the station's own movement rules
+make unsatisfiable.**
+
+1. **You cannot walk to a person.** `npc_motion` holds bodies 0.72 m apart;
+   arrival wanted 0.3 m. Any `ActionTarget::Entity` naming a crew body was
+   unreachable by construction. Fixed with `AT_BODY_DISTANCE`.
+2. **You cannot walk to a shared spot.** Six spots are authored at capacity 2 —
+   both Bridge duty stations, both Security ones, the Service host table and the
+   lounge — and every claimant is sent to the *same coordinate*. Only the first
+   can stand on it. In the trace this showed up as `Socialize` failing every
+   21-25 s, cycling through Alvarez, Odera and Imani. Same fix, same constant.
+3. **You cannot walk to anything not at body height.** Arrival was a *3D* test,
+   but a body cannot change its own y — locomotion steps horizontally and
+   containment rewrites y every frame. Botany drops produce at y 0.08; a
+   walker's origin is 0.93. That 0.85 m gap against a 0.3 m radius made **every**
+   Service ingredient pickup permanently unreachable — one trace has Cook
+   Navarro failing the same ticket ten times and Attendant Mensah another nine.
+   Arrival is now horizontal plus a same-deck band, reusing the 1.2 m
+   `npc_motion::sweeps_body` already uses rather than inventing a fourth opinion
+   about deck separation.
+4. **You cannot walk far.** `ERRAND_DEADLINE_SECONDS` was a stopwatch, which on
+   a station this size is a cap on *distance*: `WALK_SPEED * 45` is 94 m, and a
+   Cargo casualty is 50 m from a Medical bed before the route bends around a
+   single room. So Medical transports across the station could not finish. The
+   trace is unambiguous — the response ticket completing three separate times,
+   each re-published exactly 45.0 s after the last, while the patient never
+   reached a bed. The player's version was "they never walk into the medical
+   room and go to a bed; they eventually just solve the problem and walk away",
+   which is the patient healing unaided while the pipeline restarts around them.
+
+   The deadline is now a **no-progress timer**: getting genuinely closer resets
+   it. That matches the constant's own documented intent — it names "a goal
+   drifting away as fast as it is chased" and "a route that leads somewhere the
+   walker can never quite reach", and both are failures to *advance*, not
+   failures to be quick. Both still time out, in the same 45 s.
+
+   The first attempt at this scaled the budget by planned route length instead,
+   and `an_errand_that_never_gets_there_is_written_off_rather_than_run_forever`
+   correctly failed it: a distant *impossible* goal would have been handed an
+   unlimited budget. Worth recording as the reason the progress formulation is
+   the right one rather than the convenient one.
+
+Incidents now resolve on their own in a 640-second run, `ReservationUnavailable`
+is down from 1,983 to 2, and `Unreachable` from 45 to 28. **None of that proves
+treatment works** — the player's observation is the counterweight, and it says
+patients still are not reaching beds. Verify that specifically before believing
+the incident counter.
+
+### 2026-09-06, the doorway finding was wrong — read this before trusting it
+
+**Retracted.** An earlier version of this entry claimed every doorway was 0.64 m
+and too narrow for a 0.70 m body, and proposed widening all 35. That was wrong
+and the widening was applied and then reverted; `lab.map` is byte-identical to
+before it.
+
+The error: `TB_SCALE` is **40.0**, not 100. I took "~35 units (the nav radius
+inset)" from a map comment as meaning 100 units = 1 m. Doorways are **2.00 m**
+(28 department) and **1.85 m** (7 lab). Two bodies need 1.42 m to pass abreast,
+so they fit comfortably. Nothing is wrong with the doorway widths.
+
+Caught by the map test suite — widening put a hardsuit locker inside a walkable
+volume — which is the argument for those tests existing at all. Verify the scale
+against `origin_xz` (`-y/TB_SCALE`, `-x/TB_SCALE`) before doing map arithmetic;
+`door.chemistry.public` should land on world (4.00, 7.10), and its own test
+asserts exactly that.
+
+What *was* real in the player's report is recorded under the department
+gathering points below.
+
+### 2026-09-06, department gathering points sat in their own doorways
+
+Reported from play as "the place where the medical people gather is right inside
+the door, so people are getting stuck", and this half held up.
+
+`crew::Departments::home` is the **single** point everyone of a role walks back
+to, and `somewhere_else` sends idle crew visiting another department two thirds
+of the time — so one spot absorbs a department's entire floating population.
+Five of eight sat exactly **1.50 m** inside their primary door: Medical,
+Security, Bridge, Cargo, Service. A doorway is 1.6 m deep, so that is barely
+past its inner mouth, and with bodies held 0.72 m apart a few arrivals fill the
+opening and everyone behind wedges against it.
+
+Engineering (5.40 m) and Botany (5.00 m) were already clear, and are where the
+fix's 5.00 m comes from — the authored norm, not a new invention. Five origins
+moved, 3.5-3.8 m each, along each door's own axis so they stay in the same part
+of the room. `a_department_gathering_point_is_clear_of_every_doorway` pins it,
+checked against *every* door rather than the department's own, since a point
+nudged clear of its front door and into a maintenance one is the same bug.
+
+**Still open, and the deeper version:** one arrival point per department means
+crowding is inherent wherever that point sits. Moving it out of the doorway
+moved the pile, it did not disperse it. A small per-agent offset on arrival
+would, and the player's Botany screenshot — three botanists overlapping in one
+clump — is what it looks like unfixed.
+
+### 2026-09-06, a hypothesis that did not survive its own test
+
+Recorded because the process is the point, and because the wrong answer was
+plausible enough to have shipped.
+
+Medical's transport leg times out at exactly `ERRAND_DEADLINE_SECONDS`, giving a
+perfectly regular 92-second cycle: response completes, transport walks nowhere
+for 45 seconds, the case resets to `AwaitingResponder`, the ticket republishes.
+The Cargo incident behind it reached 599 seconds and was still climbing.
+
+The hypothesis was that `follow_medical_transport` holds the passenger 0.63 m
+from the carrier — inside `CLEARANCE` — so the carrier is blocked by the person
+they are holding. A `CarriedBody` marker excluding passengers from the crowd
+snapshot was written, wired through a derived sync system, and tested.
+
+**The test would not falsify.** Removing the exclusion changed nothing, in an
+open room *or* in a 1.2 m corridor built specifically to remove the sidestep
+escape. The reason is a handedness error in the original reasoning:
+`Quat::from_rotation_y(heading.x.atan2(heading.z))` maps the local offset
+`(-0.6, 0, -0.2)` to 0.2 m *behind* the carrier along the direction of travel,
+not ahead. Every forward step therefore increases separation and is allowed.
+
+The change was reverted. What survives is the corridor test, reframed as a
+regression guard on the geometric fact that actually matters — the passenger
+must trail the carrier — since putting them in front would jam every transport
+with no error anywhere. The real cause of the timeout is still open, and the
+doorway finding above is the leading candidate: the route into Medical passes
+through a 0.64 m door with staff posted 1.0-1.4 m inside it.
+
+### 2026-09-06, the immortal incident
+
+The first bug the decision log caught in real play, reported from the game as
+"it said emergency on Cargo and when I went there I didn't see anything
+abnormal."
+
+- **The chain.** A Cargo worker is burned, Medical publishes a response ticket
+  carrying `subject: Some(patient)`, and `perception::may_respond_to` refuses
+  any worker who has not witnessed that body. Nobody saw the collapse, so no
+  Medical worker could ever claim the ticket, so the patient was never treated,
+  never discharged, and the incident behind them never resolved. The department
+  read `Emergency` permanently with nothing at the scene to find. The log showed
+  it plainly: `Medical 1/0` held from 40s to 80s while all four Medical staff
+  sat on `IdleObserve`.
+- **It cost more than a wrong label.** Grepping the resolve sites shows that
+  *every* casualty incident in the game — Cargo `Burn`, Botany `Poisoning`,
+  Engineering `Burn` — resolves only through Medical discharging the patient.
+  Only Engineering's `EquipmentFailure` resolves inside its own adapter. And
+  `DepartmentProblemPolicy.unresolved_cap` suppresses new problems while one is
+  active — `cargo_pilot.rs` has a test asserting exactly that. So one
+  unwitnessed collapse permanently ended that department's ability to generate
+  any workplace problem at all. Three of the four problem-producing departments
+  were one unlucky collapse away from going quiet for the rest of the session.
+- **The gate was mine, and it was right; it just had no floor.** P4 introduced
+  the subject gate so help arrives because someone *saw* it, not because the
+  ledger knew — that stays. What was missing is that perception should decide
+  how **fast** help arrives, not **whether** it ever does. Two independent
+  routes now guarantee that, and both are tested separately so neither is
+  carrying the other:
+  - **A body on the floor stays perceivable.** The casualty stimulus was emitted
+    exactly once, at the instant the case opened, which made "was somebody
+    standing here on that precise tick" the whole question. A collapse is a
+    standing fact about a room, not a one-frame noise, so
+    `reannounce_unattended_casualties` re-emits it every
+    `CASUALTY_REANNOUNCE_SECONDS` from the patient's current position while the
+    case still awaits a responder. `NpcMemory::remember` merges repeats, so this
+    refreshes certainty rather than filling memories with copies of one body.
+  - **An unanswered alarm stops being private.** Past
+    `UNANSWERED_ALARM_SECONDS` the response ticket is republished with
+    `subject: None`, which the existing contract already defines as station work
+    anyone may take. The horizon is long enough that a real witness still gets
+    to be the one who answers, which is the behaviour the gate exists to
+    produce.
+- **Rewriting a ticket means cancel-and-publish, so it needs a guard.** Doing
+  that to a *claimed* ticket would cancel the very rescue the escalation exists
+  to cause, and would do it at exactly the moment a slow responder was finally
+  arriving. Only `Available` tickets are rewritten. Falsified: removing the arm
+  fails `the_alarm_horizon_leaves_a_ticket_a_responder_already_holds_alone` and
+  nothing else.
+- **Test-sequencing trap worth recording.** The escalation test first failed
+  looking like the fix was broken — the second assertion found no ticket at all.
+  The fix had in fact worked, and worked *fast*: a single ten-second advance
+  sailed straight past the state under test, because the responder claimed,
+  walked, performed and began transport inside it, which removes the ticket. The
+  assertion now steps in 0.1s frames and catches the flip as it happens. A test
+  that jumps time can fail because the behaviour is too quick, not too slow.
+- **The fix worked, and the trace immediately showed the next link failing.**
+  With the horizon in, Medical claimed the ticket for the first time
+  (`Medical 1/0` → `0/1` at the 45s mark). Then: `DONE!Dr. Vance
+  PerformJob/… = Unreachable`, Okonkwo claims the same ticket, 45.003 seconds
+  later `DONE!Nurse Okonkwo … = Unreachable`, Vance claims it again. Two
+  responders, in turn, forever. The incident was still immortal, for a
+  completely different reason, and only a second trace showed it.
+- **Walking to a person was impossible by construction.** `npc_motion`'s
+  `sweeps_body` refuses any step whose swept segment passes within
+  `CLEARANCE` (`BODY_RADIUS * 2 + 0.02` = 0.72 m) of another body, while
+  arrival required `AT_TARGET_DISTANCE` = 0.3 m in 3D. **0.72 > 0.3**, so *any*
+  `ActionTarget::Entity` naming a crew body was unreachable — not sometimes,
+  not depending on geometry, always. The 45-second gaps in the log are the
+  `ERRAND_DEADLINE_SECONDS` timeout, not a routing failure. Fixed in
+  `begin_reference_actions` with `AT_BODY_DISTANCE = CLEARANCE +
+  AT_TARGET_DISTANCE`, chosen from the target itself (`Has<CrewMember>`) rather
+  than declared per ticket, so no future adapter can publish work at a distance
+  the station's own movement rules forbid. `CLEARANCE` is now `pub` because it
+  is a physical fact about the station, not a private tuning number.
+- **Why 1,549 tests never saw it: `NpcMotion` is an `Option<ResMut<…>>`.** Every
+  harness that walked someone to a person omitted the resource, which models a
+  station where people can stand inside one another. This is the same class of
+  harness omission as the P4 `witness_stimuli` finding, and it is worth stating
+  as a rule: *an optional resource left out of a test harness is a silently
+  different physics, not a smaller one.* The new kernel test inserts `NpcMotion`
+  and carries a second assertion that the two bodies really did end up
+  `CLEARANCE` apart, so it cannot pass by having spacing switched off.
+  Falsified: forcing the body case back to `AT_TARGET_DISTANCE` reproduces the
+  live symptom exactly — `Some(Unreachable)`.
+- **`JobTicket.deadline` is written by four adapters and read by nothing.** The
+  medical response ticket sets a 60s deadline that has never expired anything.
+  Left alone deliberately — a board-wide expiry sweep is its own packet and
+  would have hidden this bug behind a slower one — but it is a live trap for the
+  next adapter that assumes deadlines work.
 
 ### 2026-09-05, P8 lands five of seven and names the block
 
@@ -4218,19 +4572,43 @@ wave is finished and the tree is green. Do not treat any item below as
 
 ### Next actions, in order
 
-1. **A playtest.** This is now the blocking item for everything else, and it
-   is the user's to run. P8's tuning checkbox asks for action frequency,
-   incident bounds, Service attraction and response times to be tuned *from
-   playtest traces*, and there are none. The whole system is proven headless
-   and has never been watched. Note that most behaviour constants are Rust,
-   not RON, so tuning currently means a rebuild — moving them to RON is worth
-   doing first if the iteration loop matters.
-2. **Migrate the off-roster cast**, which unblocks P8's last two checkboxes.
+The station has now been watched once, through `utility_ai::decision_log`
+(`%LOCALAPPDATA%/ChemGame/ailog.txt`, truncated per run). Ninety seconds of real
+play produced three defects that headless testing could not have found. The
+immortal incident is fixed; the other two are open and are the top of this list.
+
+1. **Botany advertises work nobody can take.** 171 `ReservationUnavailable`
+   failures in one 90-second run — Grower Chen 126, Vale 27, Ivy 18. Botany
+   publishes one ticket per plot, but every one of them carries the same
+   `ReservationKey(format!("utility.spot.{}", kind.spot()))` at map capacity 1,
+   so the board advertises several `tend` jobs when only one is physically
+   possible. Workers select, fail, and retry roughly twice a second, forever.
+   **The scale simulations could not have caught this**: they gave every ticket
+   a distinct reservation key and were described as the strictest case, when
+   that was the most forgiving one. Any future scale sim must include tickets
+   that contend for one key.
+2. **Eighteen of thirty workers never performed a real job.** All of Medical,
+   Engineering, and Service idled the whole run; only Cargo, Botany, Security
+   and Bridge published claimable tickets. Medical is partly explained by the
+   immortal-incident bug above and should be re-measured first. Engineering and
+   Service need their own trace.
+3. **A longer playtest, now that the trace is readable.** P8's tuning checkbox
+   asks for action frequency, incident bounds, Service attraction and response
+   times to be tuned *from playtest traces*. One 90-second trace exists. Note
+   that most behaviour constants are Rust, not RON, so tuning currently means a
+   rebuild — moving them to RON is worth doing first if the iteration loop
+   matters.
+4. **Run the game with `cargo run`, never the built executable directly.** Bevy
+   resolves the asset root relative to the binary unless `CARGO_MANIFEST_DIR` is
+   set, which only `cargo run` does. Launching `target/<dir>/debug/chemgame.exe`
+   makes every asset fail to load and renders a grey screen — which looks enough
+   like a clean start that it can be mistaken for a passing smoke test.
+5. **Migrate the off-roster cast**, which unblocks P8's last two checkboxes.
    `crew::fluff`'s support crew is the large one; cult guards and restock
    couriers are small and arguably *should* stay ambient, since neither has a
    department or a job board to answer to. That is a design call, not a
    technical one.
-3. **The aid-use candidates**, when a department wants them:
+6. **The aid-use candidates**, when a department wants them:
    `AdministerDepartmentAid` and `UseProcessAid` moving an accepted batch
    through `ReservedForUse` into a real body or a real process. Everything
    underneath is built and tested — `take_contents` drains exactly once, and
@@ -4239,11 +4617,16 @@ wave is finished and the tree is green. Do not treat any item below as
 
 ### Still unobserved
 
-No rendered or manual station observation has ever been run. The Cargo shift,
-Medical escort, lying posture, Botany floor activity, and the Service meal
-pipeline are proven headless only and still need the user's visual playtest.
-Engineering's four-worker runtime migration in particular is newly enabled by
-this wave and has not been seen in-game.
+One 90-second AFK observation has been run and is analysed above. Nothing has
+been *played* — the Cargo shift, Medical escort, lying posture, Botany floor
+activity, and the Service meal pipeline are still proven headless only and need
+the user's visual playtest. Engineering's four-worker runtime migration has not
+been seen in-game.
+
+Treat the first trace as a floor, not a survey: it found three defects in ninety
+seconds, and two of them were in departments that were producing *no* log lines
+at all rather than obviously wrong ones. A silent department in the trace is a
+finding, not a clean bill.
 
 Voice-chat work shares this dirty worktree — `src/voice`, `src/voice/codec.rs`,
 `src/ui/bookmarks.rs`, and the Cargo manifests. It survived this wave intact.

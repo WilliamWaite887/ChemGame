@@ -324,6 +324,58 @@ impl LaunchMode {
 #[derive(Resource)]
 pub struct LaunchedFromArgs;
 
+/// How fast the simulation clock runs, from `--speed <N>`.
+///
+/// A development flag for watching NPC behaviour that takes minutes of station
+/// time to appear: a medical response and its transport is a ~150s round trip,
+/// which is a long time to sit and watch for one data point. Absent means
+/// real time, and nothing reads this resource unless the flag was passed.
+///
+/// This scales `Time<Virtual>`, so it moves *everything* the same way — the
+/// same clock the pause menu stops. Frame-rate-dependent code would drift out
+/// from under it, but there is none: gameplay reads `delta_secs()`.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct SimulationSpeed(pub f32);
+
+/// The fastest the clock may be driven.
+///
+/// Not a safety rail on the simulation so much as on the *step size*: at very
+/// high multipliers a single frame advances far enough that a walker can step
+/// past a waypoint or through a body-spacing check, and the bugs that produces
+/// are artefacts of the flag rather than of the game.
+const MAX_SIMULATION_SPEED: f32 = 10.0;
+
+/// Reads `--speed <N>`, independent of which mode flag was given.
+///
+/// Deliberately not part of [`LaunchMode::parse_args`]: that returns on the
+/// first flag it recognizes, so a speed parsed there would be silently
+/// dropped whenever it appeared after `--solo`.
+pub fn parse_speed(args: impl IntoIterator<Item = String>) -> Option<f32> {
+    let args: Vec<String> = args.into_iter().collect();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg.as_str() != "--speed" {
+            continue;
+        }
+        let Some(value) = iter.next().and_then(|value| value.parse::<f32>().ok()) else {
+            warn!("ignoring a malformed --speed argument");
+            return None;
+        };
+        // A zero or negative speed reads as "stop the game", which is what
+        // pausing is for and is not something a launch flag should do
+        // silently with no overlay on screen to explain it.
+        if !value.is_finite() || value <= 0.0 {
+            warn!("ignoring a --speed of {value}, which would stop the clock");
+            return None;
+        }
+        if value > MAX_SIMULATION_SPEED {
+            warn!("clamping --speed {value} to {MAX_SIMULATION_SPEED}");
+        }
+        return Some(value.min(MAX_SIMULATION_SPEED));
+    }
+    None
+}
+
 /// Applies whatever the command line asked for, before any plugin builds.
 ///
 /// Also picks the save, because `--host` and `--solo` have no menu to pick one
@@ -331,6 +383,11 @@ pub struct LaunchedFromArgs;
 /// or a `+connect_lobby` gets no slot: the guest reads the host's notebook and
 /// career.
 pub fn apply_command_line(app: &mut App) {
+    // Before the mode check: `--speed` is orthogonal to how the session was
+    // started, and is just as useful on a run launched through the menu.
+    if let Some(speed) = parse_speed(std::env::args().skip(1)) {
+        app.insert_resource(SimulationSpeed(speed));
+    }
     let Some(mode) = LaunchMode::from_args() else {
         return;
     };
@@ -1688,6 +1745,38 @@ mod tests {
         );
         assert_eq!(LaunchMode::parse_args(args(&[])), None);
         assert_eq!(LaunchMode::parse_args(args(&["--unrecognised"])), None);
+    }
+
+    #[test]
+    fn a_speed_flag_is_read_from_anywhere_on_the_command_line() {
+        // The whole reason `parse_speed` is not part of `parse_args`: that
+        // returns on the first flag it recognizes, so the realistic invocation
+        // — `--solo --speed 4` — would silently drop the speed.
+        assert_eq!(parse_speed(args(&["--solo", "--speed", "4"])), Some(4.0));
+        assert_eq!(parse_speed(args(&["--speed", "4", "--solo"])), Some(4.0));
+        assert_eq!(parse_speed(args(&["--speed", "2.5"])), Some(2.5));
+        assert_eq!(parse_speed(args(&[])), None);
+        assert_eq!(parse_speed(args(&["--solo"])), None);
+    }
+
+    #[test]
+    fn a_speed_that_would_stop_or_wreck_the_clock_is_refused() {
+        // Zero and negative read as "stop the game", which is what pausing is
+        // for; falling back to real time is the honest response to a flag that
+        // cannot mean what it says.
+        assert_eq!(parse_speed(args(&["--speed", "0"])), None);
+        assert_eq!(parse_speed(args(&["--speed", "-3"])), None);
+        assert_eq!(parse_speed(args(&["--speed", "nan"])), None);
+        assert_eq!(parse_speed(args(&["--speed", "inf"])), None);
+        assert_eq!(parse_speed(args(&["--speed", "fast"])), None);
+        assert_eq!(parse_speed(args(&["--speed"])), None);
+        // Clamped rather than refused: the intent is legible, and honouring
+        // it literally would make a single frame step further than the
+        // movement and body-spacing checks can resolve.
+        assert_eq!(
+            parse_speed(args(&["--speed", "1000"])),
+            Some(MAX_SIMULATION_SPEED)
+        );
     }
 
     #[test]

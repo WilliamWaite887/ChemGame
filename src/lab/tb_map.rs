@@ -1673,6 +1673,72 @@ fn station_v2_lighting_stays_inside_the_shell_and_reaches_every_room() {
     }
 }
 
+/// A department's gathering point must not sit in its own doorway.
+///
+/// `crew::Departments::home` is the *single* point everyone of a role walks
+/// back to, and `somewhere_else` sends idle crew visiting another department
+/// two thirds of the time — so this one spot is where a department's entire
+/// floating population piles up. Five of the eight sat exactly 1.50 m inside
+/// their primary door. A doorway is 1.6 m deep, so that is barely past its
+/// inner mouth, and with `npc_motion::CLEARANCE` holding bodies 0.72 m apart a
+/// few arrivals fill the opening and everyone behind them wedges against it.
+///
+/// Reported from play, in these words: "the place where the medical people
+/// gather is right inside the door, so people are getting stuck." Engineering
+/// (5.40 m) and Botany (5.00 m) were already clear of theirs, and are where
+/// this threshold comes from — it is the authored norm, not a new invention.
+///
+/// Deliberately checked against *every* door rather than the department's own:
+/// a gathering point that has been nudged clear of its front door and into a
+/// maintenance one is the same bug wearing a different hat.
+#[test]
+fn a_department_gathering_point_is_clear_of_every_doorway() {
+    /// Room for a body (0.70 m) plus a full clearance gap (0.72 m) beyond the
+    /// far mouth of a 1.6 m-deep doorway, rounded up. Below this, a queue at
+    /// the gathering point reaches back into the opening.
+    const CLEAR_OF_DOOR: f32 = 4.5;
+
+    let map = parse();
+    let doors: Vec<(String, Vec3)> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("door_spot"))
+        .filter_map(|entity| {
+            let id = property(entity, "id")?;
+            let (x, z) = origin_xz(entity)?;
+            Some((id, Vec3::new(x, 0.0, z)))
+        })
+        .collect();
+    assert!(
+        !doors.is_empty(),
+        "the map authors no doors to check against"
+    );
+
+    let mut checked = 0;
+    for spot in map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("department_spot"))
+    {
+        let department = property(spot, "department").unwrap_or_else(|| "<unnamed>".into());
+        let (x, z) = origin_xz(spot).expect("department_spot has a valid origin");
+        let at = Vec3::new(x, 0.0, z);
+        for (id, door) in &doors {
+            let gap = at.distance(*door);
+            assert!(
+                gap >= CLEAR_OF_DOOR,
+                "{department}'s gathering point is {gap:.2}m from `{id}`, inside \
+                 the {CLEAR_OF_DOOR}m a crowd needs to not block it — every idle \
+                 visitor to {department} walks to this exact point",
+            );
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 6,
+        "only {checked} department gathering points were checked; the map should \
+         have one per department and this test is silently covering nothing",
+    );
+}
+
 #[test]
 fn every_department_on_the_crew_roster_has_somewhere_to_live() {
     // The station's wings and the crew roster have to agree, or a Botanist

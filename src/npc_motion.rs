@@ -8,7 +8,15 @@ use bevy::prelude::*;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 pub const BODY_RADIUS: f32 = crate::nav::NAV_RADIUS;
-const CLEARANCE: f32 = BODY_RADIUS * 2.0 + 0.02;
+
+/// How close two crew bodies may ever come, in metres.
+///
+/// Public because it is a hard physical floor on the station, not a private
+/// tuning number: [`sweeps_body`] refuses any step whose swept segment passes
+/// within this of another body, so no walking system can deliver someone closer
+/// than this to a person. Anything that asks a body to *arrive at* another body
+/// must budget for it, or it is asking for a walk that can never end.
+pub const CLEARANCE: f32 = BODY_RADIUS * 2.0 + 0.02;
 
 #[derive(Resource, Default)]
 pub struct NpcMotion {

@@ -2327,6 +2327,7 @@ dependencies = [
  "rand 0.10.2",
  "rodio",
  "ron 0.11.0",
+ "rtrb",
  "serde",
  "sha2",
  "zstd",

@@ -299,6 +299,10 @@ fn main() {
             // above has already registered whatever message type it
             // reacts to before any system actually runs.
             audio::SfxPlugin,
+            // After `audio`, for the same non-reason: by now `net`, `player`
+            // and `settings` have all registered what they own, and voice
+            // only reads from them, never the other way round.
+            voice::VoicePlugin,
         ),
     ));
 

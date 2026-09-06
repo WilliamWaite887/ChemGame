@@ -64,6 +64,30 @@ const MAX_TREATMENT_ATTEMPTS: u8 = 3;
 const TRANSPORT_REACH: f32 = 0.3;
 const TRANSPORT_INSTANCE_PREFIX: u64 = 0x4d45_4400_0000_0000;
 
+/// How often a body still lying unattended re-announces itself, in seconds.
+///
+/// A collapse is not a one-frame event. The body stays on the floor, so anyone
+/// who walks in afterwards can plainly see it — but the casualty stimulus was
+/// emitted exactly once, at the instant the case opened, which made "was
+/// somebody standing here on that precise tick" the entire question. A
+/// casualty in an empty corridor therefore stayed unknown even after the
+/// corridor filled up.
+const CASUALTY_REANNOUNCE_SECONDS: f32 = 3.0;
+
+/// How long a casualty may lie unanswered before it stops being one witness's
+/// private knowledge, in seconds.
+///
+/// Perception is meant to decide how *fast* help arrives, not whether it ever
+/// does. Without a horizon the failures compound into a permanent one: nobody
+/// witnesses the collapse, so the response ticket names a subject nobody knows
+/// about, so no responder may claim it, so the patient is never treated, never
+/// discharged, and the incident behind them never resolves — leaving their
+/// department reading `Emergency` forever with nothing at the scene to find.
+///
+/// Long enough that a witness who saw it still gets to be the one who answers,
+/// which is the behaviour the subject gate exists to produce.
+const UNANSWERED_ALARM_SECONDS: f32 = 45.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MedicalCaseId(pub u64);
 
@@ -251,6 +275,7 @@ pub(super) fn register(app: &mut App) {
             Update,
             (
                 open_cases_from_incidents,
+                reannounce_unattended_casualties,
                 publish_medical_response_jobs,
                 publish_treatment_request_jobs,
             )
@@ -657,12 +682,30 @@ fn publish_medical_response_jobs(
     cases: Res<MedicalCaseLedger>,
     mut board: ResMut<JobBoard>,
 ) {
+    let now = time.elapsed_secs();
     for case in cases
         .active()
         .filter(|case| case.status == MedicalCaseStatus::AwaitingResponder)
     {
-        if board.ticket(case.response_ticket).is_some() {
-            continue;
+        // Naming the patient is what makes this ticket answerable only by
+        // someone who saw or heard the collapse. Past the alarm horizon it
+        // stops being named: an unanswered casualty becomes station work that
+        // anyone in Medical may take, so a collapse nobody witnessed is
+        // answered late rather than never.
+        let subject = (now - case.opened_at < UNANSWERED_ALARM_SECONDS).then_some(case.patient);
+        match board
+            .ticket(case.response_ticket)
+            .map(|ticket| (ticket.subject, ticket.state))
+        {
+            Some((held, _)) if held == subject => continue,
+            // A claimed ticket already has a responder on their way, and
+            // escalating out from under them would cancel the very rescue the
+            // escalation exists to cause.
+            Some((_, state)) if state != JobTicketState::Available => continue,
+            Some(_) => {
+                board.cancel(case.response_ticket);
+            }
+            None => {}
         }
         let urgency = 0.85 + case.severity.get() * 0.15;
         board
@@ -671,9 +714,7 @@ fn publish_medical_response_jobs(
                 domain: JobDomain::Medical,
                 kind: format!("medical.respond.{}", case.id.0),
                 target: ActionTarget::Entity(case.patient),
-                // Naming the patient is what makes this ticket answerable only
-                // by someone who saw or heard the collapse.
-                subject: Some(case.patient),
+                subject,
                 reservation: ReservationKey(format!("medical.patient.{}", case.id.0)),
                 reservation_capacity: 1,
                 bucket: UtilityBucket::Emergency,
@@ -686,6 +727,46 @@ fn publish_medical_response_jobs(
                 state: JobTicketState::Available,
             })
             .expect("a case publishes at most one response ticket");
+    }
+}
+
+/// Keeps a body that is still waiting for help perceivable to whoever walks in.
+///
+/// The one-shot announcement in `open_cases_from_incidents` models the *moment*
+/// of collapse, which is right for the noise but wrong for the body: a casualty
+/// on the floor is a standing fact about the room, and someone arriving a
+/// minute later sees it just as plainly as someone who was already there. Only
+/// cases still awaiting a responder re-announce — once a case is being
+/// transported or treated, it is being handled, and repeating the alarm would
+/// just pull more crew towards work already claimed.
+///
+/// Cheap by construction: `NpcMemory::remember` merges a repeat of the same
+/// fact into the existing one, so re-announcing refreshes a witness's certainty
+/// rather than filling their memory with copies of one body.
+fn reannounce_unattended_casualties(
+    time: Res<Time>,
+    mut next_at: Local<f32>,
+    cases: Res<MedicalCaseLedger>,
+    mut witnessed: MessageWriter<super::Stimulus>,
+    bodies: Query<&Transform>,
+) {
+    let now = time.elapsed_secs();
+    if now < *next_at {
+        return;
+    }
+    *next_at = now + CASUALTY_REANNOUNCE_SECONDS;
+    for case in cases
+        .active()
+        .filter(|case| case.status == MedicalCaseStatus::AwaitingResponder)
+    {
+        let Ok(transform) = bodies.get(case.patient) else {
+            continue;
+        };
+        witnessed.write(
+            super::Stimulus::new(super::StimulusKind::Casualty, transform.translation)
+                .about(case.patient)
+                .with_strength(case.severity.get().clamp(0.2, 1.0)),
+        );
     }
 }
 
@@ -2988,5 +3069,521 @@ mod tests {
             0,
         );
         assert!(app.world().get_entity(source).is_err());
+    }
+
+    /// A responder carrying a patient has to be able to walk down a corridor.
+    ///
+    /// `follow_medical_transport` pins the passenger 0.63 m from the carrier —
+    /// **inside** the 0.72 m crowd spacing — so the pair is permanently in a
+    /// state that body avoidance treats as too close, and the carrier may only
+    /// move in directions that increase a separation the carry offset holds
+    /// constant. Whether that jams depends entirely on *which side* the
+    /// passenger is held: behind, and every forward step increases separation
+    /// and is allowed; in front, and no forward step ever is.
+    ///
+    /// It is currently behind, so carrying works. This test exists to keep it
+    /// that way, because the failure mode is not a limp — it is a transport
+    /// that never arrives, times out at the 45-second errand deadline, resets
+    /// its case to "awaiting responder", and republishes the ticket forever.
+    ///
+    /// A corridor rather than open floor on purpose: in a room a blocked
+    /// carrier can sidestep and still make headway, so an open-floor version of
+    /// this test passes either way and proves nothing.
+    #[test]
+    fn a_responder_carrying_a_patient_can_actually_walk() {
+        // A corridor, not an open room. In open floor a blocked carrier can
+        // sidestep around its own passenger and still make headway, which is
+        // why this went unnoticed: the failure needs walls close enough that
+        // "move only away from the body beside you" has nowhere to go. The
+        // width is 1.2 m — a body is kept `BODY_RADIUS` (0.35) off each wall,
+        // leaving 0.5 m of lateral room against a passenger held 0.6 m to the
+        // side.
+        let mut areas = crate::lab::WalkableAreas::default();
+        areas.push(
+            crate::lab::Bounds {
+                min_x: 0.0,
+                max_x: 14.0,
+                min_z: 0.0,
+                max_z: 1.2,
+            },
+            Some("corridor".into()),
+        );
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<crate::npc_motion::NpcMotion>()
+            .insert_resource(crate::nav::NavGraph::build(&areas, crate::nav::NAV_RADIUS))
+            .insert_resource(areas)
+            .add_message::<ErrandResolved>()
+            .add_systems(
+                Update,
+                (
+                    crate::npc_motion::snapshot,
+                    crate::crew::run_errands,
+                    follow_medical_transport,
+                )
+                    .chain(),
+            );
+
+        let start = Vec3::new(1.0, crate::crew::BODY_OFFSET, 0.6);
+        let bed = Vec3::new(11.0, crate::crew::BODY_OFFSET, 0.6);
+        let responder = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Dr. Vance".into(),
+                    role: "Medical".into(),
+                },
+                Transform::from_translation(start),
+                Body::default(),
+                Bloodstream::default(),
+                ControlOwner::MedicalTransport,
+                LocomotionOwner::MedicalTransport,
+            ))
+            .id();
+        let patient = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Miner Sato".into(),
+                    role: "Cargo".into(),
+                },
+                Transform::from_translation(start),
+                Body::default(),
+                Bloodstream::default(),
+                MedicalPatient {
+                    case: MedicalCaseId(1),
+                },
+                TransportedPatient { responder },
+            ))
+            .id();
+        app.world_mut()
+            .entity_mut(responder)
+            .insert(MedicalTransportTask {
+                case: MedicalCaseId(1),
+                patient,
+                bed: MEDICAL_BEDS[0].into(),
+                bed_at: bed,
+                bed_claim: ReservationOwner {
+                    agent: responder,
+                    action_instance: 1,
+                },
+            });
+        {
+            let mut commands = app.world_mut().commands();
+            send_on_errand_with_reach(
+                &mut commands,
+                responder,
+                ErrandGoal::Point(bed),
+                TRANSPORT_REACH,
+            );
+        }
+        app.world_mut().flush();
+
+        for _ in 0..200 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+        }
+
+        let ended_at = app
+            .world()
+            .get::<Transform>(responder)
+            .map(|at| at.translation)
+            .expect("the responder still exists");
+        let travelled = ended_at.distance(start);
+        let short_of_bed = Vec3::new(ended_at.x - bed.x, 0.0, ended_at.z - bed.z).length();
+        assert!(
+            short_of_bed <= TRANSPORT_REACH * 2.0,
+            "a responder carrying a patient stopped {short_of_bed} short of the \
+             bed after 20 seconds (walking {travelled} in total) — the person \
+             they are holding is blocking them",
+        );
+        // The geometric fact the whole thing rests on, pinned so it cannot be
+        // changed by accident: the passenger must trail the carrier along the
+        // direction of travel. Move them in front and the carrier is blocked by
+        // the person they are holding on every step.
+        let carrier = app.world().get::<Transform>(responder).unwrap().translation;
+        let passenger = app.world().get::<Transform>(patient).unwrap().translation;
+        let travel = Vec3::new(bed.x - start.x, 0.0, bed.z - start.z).normalize();
+        let along = (passenger - carrier).dot(travel);
+        assert!(
+            along < 0.0,
+            "the passenger is carried {along} *ahead* of their carrier along \
+             the direction of travel; body spacing then blocks every forward \
+             step and the transport can never arrive",
+        );
+    }
+
+    /// The response half of the pipeline with **no perception system
+    /// registered at all**, so every agent's memory stays empty for the whole
+    /// run no matter where they stand.
+    ///
+    /// That isolates one guarantee: when nobody can learn about the casualty by
+    /// any route, the only thing left that can free the response ticket is the
+    /// alarm horizon. The other route — someone walking in later and seeing the
+    /// body — is proved separately by
+    /// `a_body_left_on_the_floor_is_seen_by_whoever_walks_in_later`, and the two
+    /// must hold independently or an unwitnessed collapse depends on luck.
+    fn unwitnessed_response_app() -> (App, Entity, Entity) {
+        let mut app = App::new();
+        let areas = crate::lab::WalkableAreas::from_floor_plan();
+        app.init_resource::<Time>()
+            .init_resource::<CrewPosts>()
+            .init_resource::<ReservationBook>()
+            .init_resource::<UtilityDecisionLog>()
+            .init_resource::<JobBoard>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<IncidentLedger>()
+            .init_resource::<MedicalCaseLedger>()
+            .insert_resource(crate::nav::NavGraph::build(&areas, crate::nav::NAV_RADIUS))
+            .insert_resource(areas)
+            .add_message::<ErrandResolved>()
+            .add_message::<UtilityActionResolved>()
+            .add_message::<IncidentResolved>()
+            .add_message::<crate::utility_ai::Stimulus>()
+            .add_systems(
+                Update,
+                (
+                    sync_utility_incapacity,
+                    tick_current_actions,
+                    open_cases_from_incidents,
+                    publish_medical_response_jobs,
+                    select_reference_actions,
+                    ApplyDeferred,
+                    begin_reference_actions,
+                    ApplyDeferred,
+                    crate::crew::run_errands,
+                    consume_utility_arrivals,
+                    perform_reference_actions,
+                    resolve_reference_actions,
+                    begin_medical_transport,
+                    ApplyDeferred,
+                )
+                    .chain(),
+            );
+        app.world_mut().resource_mut::<UtilitySpots>().insert(
+            MEDICAL_BEDS[0],
+            Vec3::new(3.0, 0.0, 0.0),
+            1,
+        );
+
+        let patient = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Miner Sato".into(),
+                    role: "Cargo".into(),
+                },
+                Transform::from_xyz(-2.0, crate::crew::BODY_OFFSET, 0.0),
+                Body::default(),
+                Bloodstream::default(),
+                CrewRoute::standing(),
+                UtilityControlBundle::new(UtilityAgent::new(7, 0)),
+            ))
+            .id();
+        app.world_mut()
+            .get_mut::<Body>(patient)
+            .unwrap()
+            .0
+            .apply(chem_sim::Damage::of(
+                chem_sim::DamageKind::Burn,
+                chem_sim::Units::whole(STANDARD_BURN_CARE_UNITS),
+            ));
+        // Standing right next to the body and still unable to answer is the
+        // point: the gate is what this responder *knows*, not how far away
+        // they are, so the horizon is the only variable in this test.
+        let responder = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Dr. Vance".into(),
+                    role: "Medical".into(),
+                },
+                Transform::from_xyz(-4.0, crate::crew::BODY_OFFSET, 0.0),
+                Body::default(),
+                Bloodstream::default(),
+                CrewRoute::standing(),
+                UtilityControlBundle::new(UtilityAgent::new(11, 0)),
+                medical_profile("Dr. Vance").unwrap(),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<IncidentLedger>()
+            .create(
+                IncidentKind::Burn,
+                JobDomain::Cargo,
+                patient,
+                None,
+                Vec3::new(-2.0, crate::crew::BODY_OFFSET, 0.0),
+                Normalized::new(0.35).unwrap(),
+                0.0,
+            )
+            .unwrap();
+        (app, patient, responder)
+    }
+
+    fn advance(app: &mut App, seconds: f32) {
+        let steps = (seconds / 0.1).round() as usize;
+        for _ in 0..steps {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+        }
+    }
+
+    fn response_ticket(app: &App) -> JobTicket {
+        let case = app
+            .world()
+            .resource::<MedicalCaseLedger>()
+            .active()
+            .next()
+            .cloned()
+            .expect("the incident opened a case");
+        app.world()
+            .resource::<JobBoard>()
+            .ticket(case.response_ticket)
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "an awaiting case publishes a response ticket; case status was {:?}",
+                    case.status
+                )
+            })
+    }
+
+    /// A casualty nobody saw is answered late, never not at all.
+    ///
+    /// This is the bug a real playtest surfaced as "it said emergency on Cargo
+    /// and when I went there I didn't see anything abnormal": the response
+    /// ticket named a patient no Medical worker had witnessed, so it could
+    /// never be claimed, the patient was never treated or discharged, and the
+    /// incident behind them stayed open forever — pinning the department's
+    /// condition at `Emergency` with nothing at the scene to find.
+    ///
+    /// Both halves are asserted on purpose. Dropping the first would let a fix
+    /// that simply deletes the subject gate pass, and that gate is what stops
+    /// the whole crew converging on a collapse nobody witnessed.
+    #[test]
+    fn an_unwitnessed_casualty_is_answered_once_the_alarm_horizon_passes() {
+        let (mut app, patient, responder) = unwitnessed_response_app();
+
+        advance(&mut app, UNANSWERED_ALARM_SECONDS - 1.0);
+        let ticket = response_ticket(&app);
+        assert_eq!(
+            ticket.subject,
+            Some(patient),
+            "before the horizon the ticket must still name its patient, so only \
+             a witness may answer it"
+        );
+        assert_eq!(
+            ticket.state,
+            JobTicketState::Available,
+            "no responder knows about this casualty, so nobody may claim it yet"
+        );
+        assert!(
+            app.world().get::<MedicalTransportTask>(responder).is_none(),
+            "a responder who never perceived the collapse must not be treating it"
+        );
+
+        // Stepped rather than jumped: the moment the ticket loses its subject a
+        // responder may take it, and once they finish responding the ticket is
+        // gone. A single long advance sails straight past the state under test.
+        let mut escalated = false;
+        for _ in 0..20 {
+            advance(&mut app, 0.1);
+            let board_ticket = app
+                .world()
+                .resource::<JobBoard>()
+                .ticket(ticket.id)
+                .cloned();
+            escalated |= board_ticket.is_some_and(|held| held.subject.is_none());
+            if escalated {
+                break;
+            }
+        }
+        assert!(
+            escalated,
+            "past the horizon an unanswered casualty must become station work \
+             anyone in Medical can answer"
+        );
+
+        advance(&mut app, 30.0);
+        assert!(
+            app.world().get::<MedicalTransportTask>(responder).is_some(),
+            "once the alarm is common knowledge the casualty must actually get \
+             a responder"
+        );
+    }
+
+    /// Escalation must never reopen work somebody is already doing.
+    ///
+    /// The horizon rewrites the ticket, and rewriting means cancel-and-publish.
+    /// Doing that to a claimed ticket would cancel the very rescue the horizon
+    /// exists to cause — and it would do so at exactly the moment a slow
+    /// responder was finally arriving.
+    #[test]
+    fn the_alarm_horizon_leaves_a_ticket_a_responder_already_holds_alone() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<JobBoard>()
+            .init_resource::<MedicalCaseLedger>()
+            .add_systems(Update, publish_medical_response_jobs);
+        let patient = app.world_mut().spawn_empty().id();
+        let source = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<MedicalCaseLedger>()
+            .cases
+            .insert(
+                MedicalCaseId(9),
+                MedicalCase {
+                    id: MedicalCaseId(9),
+                    incident: super::super::IncidentId(9),
+                    related_incidents: Vec::new(),
+                    patient,
+                    kind: IncidentKind::Burn,
+                    severity: Normalized::new(0.4).unwrap(),
+                    opened_at: 0.0,
+                    response_ticket: JobTicketId(901),
+                    request_ticket: JobTicketId(902),
+                    status: MedicalCaseStatus::AwaitingResponder,
+                    source_entity: source,
+                    bed_claim: None,
+                    next_request_at: 0.0,
+                    treatment_attempts: 0,
+                    treatment_observation_elapsed: 0.0,
+                    treatment_baseline_damage: None,
+                },
+            );
+        app.update();
+
+        let holder = ReservationOwner {
+            agent: app.world_mut().spawn_empty().id(),
+            action_instance: 77,
+        };
+        app.world_mut()
+            .resource_mut::<JobBoard>()
+            .claim(JobTicketId(901), holder)
+            .expect("a witness claims the response ticket before the horizon");
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(
+                UNANSWERED_ALARM_SECONDS + 10.0,
+            ));
+        app.update();
+
+        let board = app.world().resource::<JobBoard>();
+        let ticket = board
+            .ticket(JobTicketId(901))
+            .expect("the horizon must not delete a ticket somebody is answering");
+        assert_eq!(
+            ticket.state,
+            JobTicketState::Claimed(holder),
+            "the responder already on their way must keep their claim"
+        );
+        assert_eq!(
+            ticket.subject,
+            Some(patient),
+            "a ticket in hand is not rewritten underneath its holder"
+        );
+    }
+
+    /// A body on the floor is a standing fact about the room, not a noise that
+    /// happened once.
+    ///
+    /// The casualty stimulus used to be emitted only at the instant the case
+    /// opened, which made "was somebody standing here on that exact tick" the
+    /// whole question. Someone walking into the room a moment later saw
+    /// nothing, because there was nothing left to see.
+    ///
+    /// This route needs no horizon: it is the fast path, and it is what keeps
+    /// the horizon a backstop rather than the normal way help arrives.
+    #[test]
+    fn a_body_left_on_the_floor_is_seen_by_whoever_walks_in_later() {
+        let mut app = App::new();
+        let areas = crate::lab::WalkableAreas::from_floor_plan();
+        app.init_resource::<Time>()
+            .init_resource::<ReservationBook>()
+            .init_resource::<IncidentLedger>()
+            .init_resource::<MedicalCaseLedger>()
+            .insert_resource(areas)
+            .add_message::<crate::utility_ai::Stimulus>()
+            .add_systems(
+                Update,
+                (
+                    // Production order: Observe before BuildContext. Reading
+                    // first is what makes the arrival below genuinely late —
+                    // with the order flipped, a newcomer could still pick up
+                    // the opening announcement out of the message buffer.
+                    crate::utility_ai::perception::witness_stimuli,
+                    open_cases_from_incidents,
+                    reannounce_unattended_casualties,
+                )
+                    .chain(),
+            );
+        let patient = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Miner Sato".into(),
+                    role: "Cargo".into(),
+                },
+                Transform::from_xyz(-2.0, crate::crew::BODY_OFFSET, 0.0),
+                Body::default(),
+                Bloodstream::default(),
+                CrewRoute::standing(),
+                UtilityControlBundle::new(UtilityAgent::new(7, 0)),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<IncidentLedger>()
+            .create(
+                IncidentKind::Burn,
+                JobDomain::Cargo,
+                patient,
+                None,
+                Vec3::new(-2.0, crate::crew::BODY_OFFSET, 0.0),
+                Normalized::new(0.5).unwrap(),
+                0.0,
+            )
+            .unwrap();
+        advance(&mut app, 0.5);
+
+        let newcomer = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Dr. Vance".into(),
+                    role: "Medical".into(),
+                },
+                Transform::from_xyz(-2.5, crate::crew::BODY_OFFSET, 0.0),
+                Body::default(),
+                Bloodstream::default(),
+                CrewRoute::standing(),
+                UtilityControlBundle::new(UtilityAgent::new(11, 0)),
+            ))
+            .id();
+        advance(&mut app, 0.2);
+        let now = app.world().resource::<Time>().elapsed_secs();
+        assert!(
+            !app.world()
+                .get::<crate::utility_ai::perception::NpcMemory>(newcomer)
+                .unwrap()
+                .knows_about(patient, now),
+            "the newcomer arrived after the collapse and must not have picked \
+             the opening announcement out of the message buffer"
+        );
+
+        advance(&mut app, CASUALTY_REANNOUNCE_SECONDS + 0.5);
+        let now = app.world().resource::<Time>().elapsed_secs();
+        assert!(
+            app.world()
+                .get::<crate::utility_ai::perception::NpcMemory>(newcomer)
+                .unwrap()
+                .knows_about(patient, now),
+            "a body still lying in plain sight must be visible to whoever walks in"
+        );
     }
 }

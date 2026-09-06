@@ -1454,6 +1454,22 @@ pub(crate) fn clear_opportunity_buffer(mut buffer: ResMut<UtilityOpportunityBuff
 const MIN_DECISION_SECONDS: f32 = 0.35;
 const DECISION_SPREAD_SECONDS: f32 = 0.4;
 const AT_TARGET_DISTANCE: f32 = 0.3;
+
+/// How close an action may require a body to get to *another body*, in metres.
+///
+/// `npc_motion` refuses any step that would bring two crew within
+/// [`crate::npc_motion::CLEARANCE`], so two people physically cannot stand
+/// nearer than that. Asking for [`AT_TARGET_DISTANCE`] against a spacing floor
+/// more than twice as large is a walk that can never end: the worker circles
+/// the body until the errand deadline and reports `Unreachable`, another worker
+/// claims the same ticket, and the pair of them do it forever.
+///
+/// Found in play, not in tests, and the reason the tests missed it is worth
+/// keeping: `NpcMotion` is an optional resource, so a harness that never
+/// inserts it has no body spacing at all and every such walk arrives. A test
+/// that walks someone to a person must insert the resource or it is measuring a
+/// station where people can stand inside each other.
+const AT_BODY_DISTANCE: f32 = crate::npc_motion::CLEARANCE + AT_TARGET_DISTANCE;
 const IDLE_OBSERVE_SECONDS: f32 = 0.6;
 const MAINTAIN_POST_SECONDS: f32 = 1.2;
 
@@ -1928,12 +1944,17 @@ fn try_commit_emergency_proposal(world: &mut World, proposal: &EmergencyActionPr
     true
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn select_reference_actions(
     mut commands: Commands,
     time: Res<Time>,
     posts: Res<CrewPosts>,
     jobs: Option<Res<JobBoard>>,
+    // Required, not optional, deliberately: a harness without it would silently
+    // lose the occupancy filter below and measure a station where every
+    // workstation has unlimited room. An absent resource must break the test,
+    // not quietly change the physics it is testing.
+    reservations: Res<ReservationBook>,
     opportunities: Option<Res<UtilityOpportunityBuffer>>,
     mut log: ResMut<UtilityDecisionLog>,
     mut agents: Query<
@@ -2054,6 +2075,25 @@ fn select_reference_actions(
                         // A worker only answers a call about a body it knows about.
                         perception::may_respond_to(memory, job.subject, now)
                     })
+                    .filter(|job| {
+                        // Work whose workstation is already occupied is real
+                        // work, but not work that can be *started*. Proposing
+                        // it wins the score, fails its reservation immediately,
+                        // and frees the worker to propose it again next tick —
+                        // a visible thrash rather than a choice to do something
+                        // else. Botany showed this plainly: it publishes one
+                        // ticket per plot but keys them all to the one shared
+                        // tending spot, so the board advertised four jobs when
+                        // one was physically possible, and three workers spent
+                        // the shift failing twice a second.
+                        //
+                        // A read, never a claim. Two workers can still pick the
+                        // same free slot in one frame and one of them lose it;
+                        // that race is fine and self-correcting. What this
+                        // removes is the steady state where the loser can never
+                        // win.
+                        reservations.claims_on(&job.reservation) < job.reservation_capacity.max(1)
+                    })
                     .map(|job| UtilityCandidate {
                         action: UtilityActionId::PerformJob,
                         bucket: job.bucket,
@@ -2075,7 +2115,23 @@ fn select_reference_actions(
         // every offer without each provider restating it.
         let offered: Vec<&UtilityOpportunity> = opportunities
             .as_deref()
-            .map(|buffer| buffer.for_agent(entity).collect())
+            .map(|buffer| {
+                buffer
+                    .for_agent(entity)
+                    // The same occupancy rule the job board gets, for the same
+                    // reason. `social::offer_company` offers the one gather
+                    // spot to *everybody* who is lonely, so once the lounge
+                    // fills the rest re-propose it and fail on every decision
+                    // tick — twenty crew, twenty times a minute. A full room is
+                    // a reason to do something else, not a reason to keep
+                    // walking into it.
+                    .filter(|offer| {
+                        offer.reservation.as_ref().is_none_or(|key| {
+                            reservations.claims_on(key) < offer.reservation_capacity.max(1)
+                        })
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         candidates.extend(offered.iter().map(|offer| {
             let mut considerations = offer.considerations.clone();
@@ -2274,7 +2330,7 @@ fn begin_reference_actions(
     mut commands: Commands,
     mut reservations: ResMut<ReservationBook>,
     jobs: Option<ResMut<JobBoard>>,
-    targets: Query<&Transform>,
+    targets: Query<(&Transform, Has<CrewMember>)>,
     mut agents: Query<(
         Entity,
         &Transform,
@@ -2337,17 +2393,56 @@ fn begin_reference_actions(
             }
         }
 
-        let destination = match target {
-            ActionTarget::Point(point) => Some(point),
-            ActionTarget::Entity(target) => targets.get(target).ok().map(|at| at.translation),
+        // A spot that admits more than one worker sends all of them to the
+        // *same* coordinate, and only the first can stand on it — body spacing
+        // holds the second at `CLEARANCE`, which is further than
+        // `AT_TARGET_DISTANCE`, so they orbit until the errand deadline and
+        // report `Unreachable`. Then the next claimant does it too. Six spots
+        // are authored at capacity 2, including both Bridge duty stations and
+        // both Security ones, so this quietly halved several departments.
+        let shared_spot = action.reservation_capacity > 1;
+
+        // How close this action may ask its worker to get depends on what it is
+        // walking to. A crate or a floor spot can be stood on; a person cannot,
+        // because body spacing holds walkers apart. Decided from the target
+        // itself rather than declared per ticket, so no adapter can publish
+        // work at a distance the station's own movement rules forbid.
+        let (destination, reach) = match target {
+            ActionTarget::Point(point) => (Some(point), AT_TARGET_DISTANCE),
+            ActionTarget::Entity(target) => match targets.get(target) {
+                Ok((at, is_a_body)) => (
+                    Some(at.translation),
+                    if is_a_body {
+                        AT_BODY_DISTANCE
+                    } else {
+                        AT_TARGET_DISTANCE
+                    },
+                ),
+                Err(_) => (None, AT_TARGET_DISTANCE),
+            },
+        };
+        // Whichever rule is more permissive wins: a shared spot and a body are
+        // the same physical problem — something is already standing where this
+        // worker was told to go.
+        let reach = if shared_spot {
+            reach.max(AT_BODY_DISTANCE)
+        } else {
+            reach
         };
         let Some(destination) = destination else {
             action.finish(ActionResult::InvalidTarget);
             continue;
         };
-        if transform.translation.distance_squared(destination)
-            <= AT_TARGET_DISTANCE * AT_TARGET_DISTANCE
-        {
+        // Horizontal, matching `crew::run_errands`' arrival test. Measured in
+        // 3D this disagrees with the walk that follows it: a worker already
+        // standing over a shelf item would be sent on an errand to where it is
+        // already standing.
+        let flat_gap = Vec2::new(
+            transform.translation.x - destination.x,
+            transform.translation.z - destination.z,
+        )
+        .length();
+        if flat_gap <= reach && (transform.translation.y - destination.y).abs() < 1.2 {
             action
                 .advance(ActionPhase::Performing)
                 .expect("reserved action may perform at its target");
@@ -2360,12 +2455,7 @@ fn begin_reference_actions(
             .expect("reserved action may travel to its target");
         *locomotion = LocomotionOwner::Errand;
         *activity = NpcActivity::Traveling;
-        send_on_errand_with_reach(
-            &mut commands,
-            entity,
-            target.errand_goal(),
-            AT_TARGET_DISTANCE,
-        );
+        send_on_errand_with_reach(&mut commands, entity, target.errand_goal(), reach);
     }
 }
 
@@ -4085,6 +4175,613 @@ mod tests {
         assert_eq!(
             app.world().get::<LocomotionOwner>(resident),
             Some(&LocomotionOwner::None)
+        );
+    }
+
+    /// A worker sent to another person must actually get there.
+    ///
+    /// `npc_motion` refuses any step that would bring two crew within
+    /// [`crate::npc_motion::CLEARANCE`], so a walk that only counts as arrived
+    /// inside [`AT_TARGET_DISTANCE`] can never finish when the destination is a
+    /// body. In play that produced a permanent loop: Medical's responder walked
+    /// to the casualty, circled it for the full errand deadline, reported
+    /// `Unreachable`, and the next responder claimed the same ticket and did the
+    /// same thing — so the patient was never treated and the incident behind
+    /// them never resolved.
+    ///
+    /// **This test inserts `NpcMotion` on purpose.** It is an optional resource,
+    /// and every harness that walks someone to a person had been leaving it out,
+    /// which models a station where people can stand inside one another. That
+    /// omission is why 1,500 passing tests never saw this.
+    #[test]
+    fn a_worker_sent_to_another_body_arrives_despite_body_spacing() {
+        let mut app = App::new();
+        let areas = crate::lab::WalkableAreas::from_floor_plan();
+        app.init_resource::<Time>()
+            .init_resource::<CrewPosts>()
+            .init_resource::<ReservationBook>()
+            .init_resource::<UtilityDecisionLog>()
+            .init_resource::<ResolutionLog>()
+            .init_resource::<JobBoard>()
+            .init_resource::<crate::npc_motion::NpcMotion>()
+            .insert_resource(crate::nav::NavGraph::build(&areas, crate::nav::NAV_RADIUS))
+            .insert_resource(areas)
+            .add_message::<ErrandResolved>()
+            .add_message::<UtilityActionResolved>()
+            .add_systems(
+                Update,
+                (
+                    tick_current_actions,
+                    select_reference_actions,
+                    ApplyDeferred,
+                    begin_reference_actions,
+                    ApplyDeferred,
+                    crate::npc_motion::snapshot,
+                    crate::crew::run_errands,
+                    consume_utility_arrivals,
+                    perform_reference_actions,
+                    resolve_reference_actions,
+                    ApplyDeferred,
+                    record_resolutions,
+                )
+                    .chain(),
+            );
+
+        let bystander = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Miner Sato".into(),
+                    role: "Cargo".into(),
+                },
+                Transform::from_xyz(2.0, crate::crew::BODY_OFFSET, 0.0),
+                Body::default(),
+                Bloodstream::default(),
+                CrewRoute::standing(),
+            ))
+            .id();
+        let worker = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Dr. Vance".into(),
+                    role: "Medical".into(),
+                },
+                Transform::from_xyz(-2.0, crate::crew::BODY_OFFSET, 0.0),
+                Body::default(),
+                Bloodstream::default(),
+                CrewRoute::standing(),
+                UtilityControlBundle::new(UtilityAgent::new(23, 0)),
+                NpcJobProfile::new(
+                    JobDomain::Medical,
+                    NarrativeTier::Core,
+                    [JobCapability::new("medical.response")],
+                ),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<JobBoard>()
+            .publish(JobTicket {
+                id: JobTicketId(77),
+                domain: JobDomain::Medical,
+                kind: "medical.reach_a_person".into(),
+                target: ActionTarget::Entity(bystander),
+                // Unsubjected on purpose: this test is about the walk, not
+                // about perception, and a subject would gate the claim.
+                subject: None,
+                reservation: ReservationKey("medical.reach_a_person".into()),
+                reservation_capacity: 1,
+                bucket: UtilityBucket::Routine,
+                urgency: Normalized::ONE,
+                required_capability: JobCapability::new("medical.response"),
+                created_at: 0.0,
+                deadline: None,
+                risk: Normalized::ZERO,
+                perform_seconds: 1.0,
+                state: JobTicketState::Available,
+            })
+            .unwrap();
+
+        let mut outcome = None;
+        for _ in 0..600 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+            outcome = app
+                .world()
+                .resource::<ResolutionLog>()
+                .0
+                .iter()
+                .find(|resolution| resolution.key.action == UtilityActionId::PerformJob)
+                .map(|resolution| resolution.result);
+            if outcome.is_some() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            outcome,
+            Some(ActionResult::Completed),
+            "a worker walking to a person must arrive; body spacing holds them \
+             {} apart, so an action that only counts arrival inside {} can never \
+             finish",
+            crate::npc_motion::CLEARANCE,
+            AT_TARGET_DISTANCE,
+        );
+        let apart = app
+            .world()
+            .get::<Transform>(worker)
+            .unwrap()
+            .translation
+            .distance(app.world().get::<Transform>(bystander).unwrap().translation);
+        assert!(
+            apart >= crate::npc_motion::CLEARANCE - 0.001,
+            "spacing was not actually in force — they ended {apart} apart, so \
+             this test proved nothing",
+        );
+    }
+
+    /// Spawns one more crew member into an already-built test app.
+    fn spawn_worker(app: &mut App, name: &str, seed: u64, at: Vec3) -> Entity {
+        app.world_mut()
+            .spawn((
+                CrewMember {
+                    name: name.into(),
+                    role: "Botany".into(),
+                },
+                Transform::from_translation(at),
+                Body::default(),
+                Bloodstream::default(),
+                CrewRoute::standing(),
+                UtilityControlBundle::new(UtilityAgent::new(seed, 0)),
+                NpcJobProfile::new(
+                    JobDomain::Botany,
+                    NarrativeTier::Support,
+                    [JobCapability::new("botany.tend")],
+                ),
+            ))
+            .id()
+    }
+
+    fn failures_by(app: &App, agent: Entity) -> usize {
+        app.world()
+            .resource::<ResolutionLog>()
+            .0
+            .iter()
+            .filter(|resolution| {
+                resolution.agent == agent
+                    && resolution.result == ActionResult::ReservationUnavailable
+            })
+            .count()
+    }
+
+    /// A workstation that is already taken stops being proposed.
+    ///
+    /// Botany publishes one ticket per plot but keys them all to the single
+    /// shared tending spot, so the board advertised four jobs when one was
+    /// physically possible. The three losers re-proposed and failed on every
+    /// decision tick, forever: **1,983 `ReservationUnavailable` in one
+    /// 580-second trace**, roughly a third of everything the station did.
+    ///
+    /// The second worker is spawned only after the first is established, so
+    /// this pins the steady state rather than the harmless same-frame race
+    /// where two workers both see a free slot and one loses it.
+    #[test]
+    fn a_taken_workstation_stops_being_proposed_as_a_job() {
+        let mut app = App::new();
+        let areas = crate::lab::WalkableAreas::from_floor_plan();
+        app.init_resource::<Time>()
+            .init_resource::<CrewPosts>()
+            .init_resource::<ReservationBook>()
+            .init_resource::<UtilityDecisionLog>()
+            .init_resource::<ResolutionLog>()
+            .init_resource::<JobBoard>()
+            .insert_resource(crate::nav::NavGraph::build(&areas, crate::nav::NAV_RADIUS))
+            .insert_resource(areas)
+            .add_message::<ErrandResolved>()
+            .add_message::<UtilityActionResolved>()
+            .add_systems(
+                Update,
+                (
+                    tick_current_actions,
+                    select_reference_actions,
+                    ApplyDeferred,
+                    begin_reference_actions,
+                    ApplyDeferred,
+                    crate::crew::run_errands,
+                    consume_utility_arrivals,
+                    perform_reference_actions,
+                    resolve_reference_actions,
+                    ApplyDeferred,
+                    record_resolutions,
+                )
+                    .chain(),
+            );
+
+        // Two plots, one physical spot between them — Botany's exact shape.
+        let plot = Vec3::new(2.0, 0.0, 0.0);
+        for id in [101u64, 102] {
+            app.world_mut()
+                .resource_mut::<JobBoard>()
+                .publish(JobTicket {
+                    id: JobTicketId(id),
+                    domain: JobDomain::Botany,
+                    kind: format!("botany.tend.{id}"),
+                    target: ActionTarget::Point(plot),
+                    subject: None,
+                    reservation: ReservationKey("utility.spot.botany.tend".into()),
+                    reservation_capacity: 1,
+                    bucket: UtilityBucket::Routine,
+                    urgency: Normalized::ONE,
+                    required_capability: JobCapability::new("botany.tend"),
+                    created_at: 0.0,
+                    deadline: None,
+                    risk: Normalized::ZERO,
+                    // Long enough that the first worker still holds the slot
+                    // for the whole of the second worker's run below.
+                    perform_seconds: 60.0,
+                    state: JobTicketState::Available,
+                })
+                .unwrap();
+        }
+
+        let first = spawn_worker(
+            &mut app,
+            "Grower Chen",
+            41,
+            Vec3::new(-2.0, crate::crew::BODY_OFFSET, 0.0),
+        );
+        for _ in 0..120 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+        }
+        assert!(
+            app.world()
+                .resource::<ReservationBook>()
+                .claims_on(&ReservationKey("utility.spot.botany.tend".into()))
+                == 1,
+            "the first worker never took the tending spot, so the second one \
+             below is not actually being denied anything"
+        );
+
+        let second = spawn_worker(
+            &mut app,
+            "Agronomist Vale",
+            97,
+            Vec3::new(-3.0, crate::crew::BODY_OFFSET, 0.0),
+        );
+        for _ in 0..200 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+        }
+
+        assert_eq!(
+            failures_by(&app, second),
+            0,
+            "the second worker kept being proposed a spot that is taken",
+        );
+        assert!(
+            app.world()
+                .resource::<ResolutionLog>()
+                .0
+                .iter()
+                .any(|resolution| resolution.agent == second),
+            "the second worker resolved nothing at all, so a zero failure \
+             count proves nothing about what it was offered",
+        );
+        assert!(failures_by(&app, first) == 0);
+    }
+
+    /// An object resting on a surface has to be reachable.
+    ///
+    /// A body cannot change its own height — locomotion steps horizontally and
+    /// rewrites y from the floor every step — so a 3D arrival radius is
+    /// unsatisfiable for anything not sitting at exactly body height, and the
+    /// errand only discovers it at the 45-second deadline. Botany drops produce
+    /// at y 0.08 on a floor-level shelf; a walker's origin is `BODY_OFFSET`
+    /// 0.93. That 0.85 m gap against a 0.3 m radius made **every** Service
+    /// ingredient pickup permanently unreachable, retried by a fresh worker
+    /// forever: one live trace has Cook Navarro failing the same ticket ten
+    /// times and Attendant Mensah another nine.
+    ///
+    /// The 0.85 m offset here is the real one, not a round number, so this test
+    /// fails if produce placement or `BODY_OFFSET` drifts back into conflict.
+    #[test]
+    fn a_worker_can_reach_an_item_resting_on_a_surface() {
+        let mut app = App::new();
+        let areas = crate::lab::WalkableAreas::from_floor_plan();
+        app.init_resource::<Time>()
+            .init_resource::<CrewPosts>()
+            .init_resource::<ReservationBook>()
+            .init_resource::<UtilityDecisionLog>()
+            .init_resource::<ResolutionLog>()
+            .init_resource::<JobBoard>()
+            .insert_resource(crate::nav::NavGraph::build(&areas, crate::nav::NAV_RADIUS))
+            .insert_resource(areas)
+            .add_message::<ErrandResolved>()
+            .add_message::<UtilityActionResolved>()
+            .add_systems(
+                Update,
+                (
+                    tick_current_actions,
+                    select_reference_actions,
+                    ApplyDeferred,
+                    begin_reference_actions,
+                    ApplyDeferred,
+                    crate::crew::run_errands,
+                    consume_utility_arrivals,
+                    perform_reference_actions,
+                    resolve_reference_actions,
+                    ApplyDeferred,
+                    record_resolutions,
+                )
+                    .chain(),
+            );
+
+        // Exactly where `botany::output_position` leaves a harvested item.
+        let shelf_item = app
+            .world_mut()
+            .spawn(Transform::from_xyz(2.0, 0.08, 0.0))
+            .id();
+        app.world_mut()
+            .resource_mut::<JobBoard>()
+            .publish(JobTicket {
+                id: JobTicketId(303),
+                domain: JobDomain::Botany,
+                kind: "service.intake".into(),
+                target: ActionTarget::Entity(shelf_item),
+                subject: None,
+                reservation: ReservationKey("service.ingredient.303".into()),
+                reservation_capacity: 1,
+                bucket: UtilityBucket::Routine,
+                urgency: Normalized::ONE,
+                required_capability: JobCapability::new("botany.tend"),
+                created_at: 0.0,
+                deadline: None,
+                risk: Normalized::ZERO,
+                perform_seconds: 2.0,
+                state: JobTicketState::Available,
+            })
+            .unwrap();
+        let worker = spawn_worker(
+            &mut app,
+            "Cook Navarro",
+            29,
+            Vec3::new(-2.0, crate::crew::BODY_OFFSET, 0.0),
+        );
+
+        let mut outcome = None;
+        for _ in 0..900 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+            outcome = app
+                .world()
+                .resource::<ResolutionLog>()
+                .0
+                .iter()
+                .find(|r| r.agent == worker && r.key.action == UtilityActionId::PerformJob)
+                .map(|r| r.result);
+            if outcome.is_some() {
+                break;
+            }
+        }
+        assert_eq!(
+            outcome,
+            Some(ActionResult::Completed),
+            "a worker could not collect an item resting {:.2}m below its own \
+             origin, which is where every harvested ingredient sits",
+            crate::crew::BODY_OFFSET - 0.08,
+        );
+    }
+
+    /// Both workers at a capacity-2 spot have to be able to arrive at it.
+    ///
+    /// A shared spot is one coordinate, and only the first claimant can stand
+    /// on it — body spacing holds the second `CLEARANCE` (0.72 m) away, which
+    /// is further than `AT_TARGET_DISTANCE` (0.3 m). So the second orbits until
+    /// the errand deadline, reports `Unreachable`, and the next claimant
+    /// repeats it.
+    ///
+    /// Found in a live trace as a slow version of the reservation thrash: with
+    /// the occupancy filter in, `Socialize` stopped failing instantly and began
+    /// failing every 21-25 seconds instead, cycling through Alvarez, Odera and
+    /// Imani. Six spots are authored at capacity 2 — both Bridge duty stations,
+    /// both Security ones, the Service host table and the lounge — so this was
+    /// quietly costing several departments half their staff.
+    #[test]
+    fn both_workers_at_a_shared_spot_can_reach_it() {
+        let mut app = App::new();
+        let areas = crate::lab::WalkableAreas::from_floor_plan();
+        app.init_resource::<Time>()
+            .init_resource::<CrewPosts>()
+            .init_resource::<ReservationBook>()
+            .init_resource::<UtilityDecisionLog>()
+            .init_resource::<ResolutionLog>()
+            .init_resource::<JobBoard>()
+            .init_resource::<crate::npc_motion::NpcMotion>()
+            .insert_resource(crate::nav::NavGraph::build(&areas, crate::nav::NAV_RADIUS))
+            .insert_resource(areas)
+            .add_message::<ErrandResolved>()
+            .add_message::<UtilityActionResolved>()
+            .add_systems(
+                Update,
+                (
+                    tick_current_actions,
+                    select_reference_actions,
+                    ApplyDeferred,
+                    begin_reference_actions,
+                    ApplyDeferred,
+                    crate::npc_motion::snapshot,
+                    crate::crew::run_errands,
+                    consume_utility_arrivals,
+                    perform_reference_actions,
+                    resolve_reference_actions,
+                    ApplyDeferred,
+                    record_resolutions,
+                )
+                    .chain(),
+            );
+
+        // Two tickets, one shared spot at capacity 2 — the authored shape of
+        // `bridge.briefing`, `security.desk` and the lounge.
+        let spot = Vec3::new(2.0, 0.0, 0.0);
+        for id in [201u64, 202] {
+            app.world_mut()
+                .resource_mut::<JobBoard>()
+                .publish(JobTicket {
+                    id: JobTicketId(id),
+                    domain: JobDomain::Botany,
+                    kind: format!("shared.spot.{id}"),
+                    target: ActionTarget::Point(spot),
+                    subject: None,
+                    reservation: ReservationKey("utility.spot.shared".into()),
+                    reservation_capacity: 2,
+                    bucket: UtilityBucket::Routine,
+                    urgency: Normalized::ONE,
+                    required_capability: JobCapability::new("botany.tend"),
+                    created_at: 0.0,
+                    deadline: None,
+                    risk: Normalized::ZERO,
+                    perform_seconds: 4.0,
+                    state: JobTicketState::Available,
+                })
+                .unwrap();
+        }
+        let first = spawn_worker(
+            &mut app,
+            "Grower Chen",
+            13,
+            Vec3::new(-2.0, crate::crew::BODY_OFFSET, 0.0),
+        );
+        let second = spawn_worker(
+            &mut app,
+            "Agronomist Vale",
+            71,
+            Vec3::new(-3.0, crate::crew::BODY_OFFSET, 1.0),
+        );
+
+        for _ in 0..900 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+        }
+
+        for (who, agent) in [("first", first), ("second", second)] {
+            let log = app.world().resource::<ResolutionLog>();
+            let jobs: Vec<_> = log
+                .0
+                .iter()
+                .filter(|r| r.agent == agent && r.key.action == UtilityActionId::PerformJob)
+                .collect();
+            assert!(
+                jobs.iter().any(|r| r.result == ActionResult::Completed),
+                "the {who} worker never completed the shared-spot job: {:?}",
+                jobs.iter().map(|r| r.result).collect::<Vec<_>>(),
+            );
+            assert!(
+                !jobs.iter().any(|r| r.result == ActionResult::Unreachable),
+                "the {who} worker could not reach a spot it holds a claim on",
+            );
+        }
+    }
+
+    /// The same rule for offers, which is a separate code path that grew the
+    /// same defect independently.
+    ///
+    /// `social::offer_company` offers the one gather spot to *everybody* who is
+    /// lonely, so once the lounge fills the rest re-propose it and fail every
+    /// tick — 306 `ReservationUnavailable` across twenty crew in 540 seconds,
+    /// which became the single largest source of failure once Botany's was
+    /// fixed.
+    #[test]
+    fn a_full_gathering_spot_stops_being_proposed_as_an_offer() {
+        let (mut app, first) = opportunity_app();
+        let lounge = Vec3::new(2.0, 0.0, 0.0);
+        let key = ReservationKey("utility.spot.social.gather".into());
+
+        // A provider republishes every frame, as a real one does, offering the
+        // single spot to everybody it is given — which is the behaviour under
+        // test, not a simplification of it.
+        let offer_to = |app: &mut App, residents: &[Entity]| {
+            let mut buffer = app.world_mut().resource_mut::<UtilityOpportunityBuffer>();
+            buffer.clear();
+            for resident in residents {
+                buffer.offer(
+                    UtilityOpportunity::new(
+                        *resident,
+                        UtilityActionId::Socialize,
+                        UtilityBucket::Routine,
+                        11,
+                        Normalized::ONE,
+                    )
+                    .with_target(ActionTarget::Point(lounge))
+                    .with_reservation(key.clone(), 1)
+                    .with_timing(60.0, 120.0),
+                );
+            }
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+        };
+
+        // The first resident settles into the lounge alone, so what follows
+        // pins the steady state rather than the harmless same-frame race where
+        // two residents both see a free seat and one loses it.
+        for _ in 0..120 {
+            offer_to(&mut app, &[first]);
+        }
+        assert_eq!(
+            app.world().resource::<ReservationBook>().claims_on(&key),
+            1,
+            "nobody took the gather spot, so the second resident below is not \
+             actually being denied anything"
+        );
+
+        let second = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Second Lonely Resident".into(),
+                    role: "Service".into(),
+                },
+                Transform::from_translation(Vec3::new(-3.0, crate::crew::BODY_OFFSET, 0.0)),
+                Body::default(),
+                Bloodstream::default(),
+                CrewRoute::standing(),
+                UtilityControlBundle::new(UtilityAgent::new(59, 0)),
+            ))
+            .id();
+        for _ in 0..200 {
+            offer_to(&mut app, &[first, second]);
+        }
+
+        assert_eq!(
+            app.world().resource::<ReservationBook>().claims_on(&key),
+            1,
+            "the gather spot should still be occupied"
+        );
+        assert_eq!(
+            failures_by(&app, second),
+            0,
+            "the second resident kept being offered a lounge seat that is taken",
+        );
+        assert!(
+            app.world()
+                .resource::<ResolutionLog>()
+                .0
+                .iter()
+                .any(|resolution| resolution.agent == second),
+            "the second resident resolved nothing at all, so a zero failure \
+             count proves nothing about what it was offered",
         );
     }
 

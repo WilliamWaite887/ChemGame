@@ -100,6 +100,11 @@ impl Plugin for SettingsPlugin {
                     .chain()
                     .run_if(in_state(AppState::Playing).or_else(in_state(AppState::MainMenu))),
             )
+            // The dev clock multiplier, applied once per entry into the lab
+            // rather than every frame: `set_relative_speed` is a set, not an
+            // accumulate, but running it in `Update` would fight anything that
+            // ever wants to vary the rate for its own reasons.
+            .add_systems(OnEnter(AppState::Playing), apply_simulation_speed)
             // Leaving the lab has to clear this, or quitting to the menu while
             // paused would leave the next session frozen with no overlay on
             // screen to explain why.
@@ -140,6 +145,28 @@ pub fn not_paused(paused: Res<Paused>) -> bool {
 /// definition of "solo".
 fn owns_the_clock(mode: Option<&LaunchMode>) -> bool {
     matches!(mode, None | Some(LaunchMode::Singleplayer))
+}
+
+/// Applies the `--speed` development flag, once, on entering the lab.
+///
+/// Gated on [`owns_the_clock`] for the same reason pausing is: running the
+/// clock fast from one end of a shared session would desync the other peer,
+/// who never agreed to it. Absent resource means real time, so this system
+/// does nothing at all on an ordinary launch.
+fn apply_simulation_speed(
+    speed: Option<Res<crate::net::SimulationSpeed>>,
+    mode: Option<Res<LaunchMode>>,
+    mut time: ResMut<Time<Virtual>>,
+) {
+    let Some(speed) = speed else {
+        return;
+    };
+    if !owns_the_clock(mode.as_deref()) {
+        warn!("ignoring --speed: this process does not own the simulation clock");
+        return;
+    }
+    time.set_relative_speed(speed.0);
+    info!("simulation clock running at {}x", speed.0);
 }
 
 fn apply_pause_to_the_clock(
@@ -361,6 +388,15 @@ enum Knob {
     Sensitivity,
     Fov,
     Volume,
+    /// How loud other chemists' proximity voice plays back. Separate from
+    /// [`Knob::Volume`] — turning down sound effects and turning down other
+    /// people's voices are different requests, and folding them into one
+    /// dial would remove the ability to make either alone.
+    VoiceVolume,
+    /// Capture gain, applied by `voice::frame::apply_gain` before encoding.
+    /// A quiet microphone that never reaches this dial is otherwise
+    /// permanently quiet with no in-game fix.
+    MicGain,
 }
 
 impl Knob {
@@ -377,6 +413,13 @@ impl Knob {
             Knob::Sensitivity => (0.0005, 0.0075),
             Knob::Fov => (30.0, 90.0),
             Knob::Volume => (0.0, 1.0),
+            Knob::VoiceVolume => (0.0, 1.0),
+            // Above 1.0: a quiet microphone needs real amplification, not
+            // just "back to unity". Capped well short of where
+            // `frame::apply_gain`'s soft limiter would be doing most of the
+            // work, so the dial's high end still sounds like gain and not
+            // like a wall of distortion.
+            Knob::MicGain => (0.0, 3.0),
         }
     }
 
@@ -385,6 +428,8 @@ impl Knob {
             Knob::Sensitivity => "Look sensitivity",
             Knob::Fov => "Field of view",
             Knob::Volume => "Volume",
+            Knob::VoiceVolume => "Voice chat volume",
+            Knob::MicGain => "Microphone gain",
         }
     }
 
@@ -393,6 +438,8 @@ impl Knob {
             Knob::Sensitivity => settings.mouse_sensitivity,
             Knob::Fov => settings.fov_degrees,
             Knob::Volume => settings.master_volume,
+            Knob::VoiceVolume => settings.voice_volume,
+            Knob::MicGain => settings.mic_gain,
         }
     }
 
@@ -401,6 +448,8 @@ impl Knob {
             Knob::Sensitivity => settings.mouse_sensitivity = value,
             Knob::Fov => settings.fov_degrees = value,
             Knob::Volume => settings.master_volume = value,
+            Knob::VoiceVolume => settings.voice_volume = value,
+            Knob::MicGain => settings.mic_gain = value,
         }
     }
 
@@ -413,6 +462,8 @@ impl Knob {
             Knob::Sensitivity => format!("{:.0}", value * 1000.0 * 10.0),
             Knob::Fov => format!("{value:.0}° vertical"),
             Knob::Volume => format!("{:.0}%", value * 100.0),
+            Knob::VoiceVolume => format!("{:.0}%", value * 100.0),
+            Knob::MicGain => format!("{:.0}%", value * 100.0),
         }
     }
 }
@@ -505,7 +556,7 @@ pub(crate) fn settings_body(panel: &mut ChildSpawnerCommands, settings: &Setting
             ScrollPane,
         ))
         .with_children(|pane| {
-            for knob in [Knob::Sensitivity, Knob::Fov, Knob::Volume] {
+            for knob in [Knob::Sensitivity, Knob::Fov, Knob::Volume, Knob::VoiceVolume, Knob::MicGain] {
                 slider_row(pane, knob, settings);
             }
             display_section(pane, settings);
@@ -1008,6 +1059,19 @@ pub struct Settings {
     /// list — an off-list value still applies, just with no preset shown as
     /// selected.
     pub resolution: (u32, u32),
+    /// Applied by `voice::stream` on top of Bevy's own spatial falloff.
+    pub voice_volume: f32,
+    /// Applied by `voice::frame::apply_gain` before encoding.
+    pub mic_gain: f32,
+    /// A `cpal::DeviceId`'s string form (`"wasapi:{...}"`), **not** the
+    /// display name: `mic-probe` on the dev machine lists four input devices
+    /// of which three are all named "Microphone", so a name cannot say which
+    /// one a saved setting meant, while `DeviceId` gives each a distinct
+    /// stable id. `None` means "use the system default input" — the only
+    /// state a fresh install or a save from before voice chat existed can be
+    /// in, and also what `voice::capture` falls back to when a saved id no
+    /// longer resolves to a present device.
+    pub voice_input_device: Option<String>,
 }
 
 impl Default for Settings {
@@ -1027,6 +1091,13 @@ impl Default for Settings {
             // who never opens the screen.
             display_mode: DisplayMode::default(),
             resolution: (1280, 720),
+            // Unity gain on both dials: a player who never opens the voice
+            // settings hears others at the same level `PlaybackSettings`
+            // would already give them, and transmits at whatever their
+            // device's own level already is.
+            voice_volume: 1.0,
+            mic_gain: 1.0,
+            voice_input_device: None,
         }
     }
 }
@@ -1055,6 +1126,7 @@ impl Settings {
         match std::fs::read_to_string(&path).map(|text| ron::from_str::<Settings>(&text)) {
             Ok(Ok(mut settings)) => {
                 settings.bindings.migrate_inspect_binding();
+                settings.bindings.migrate_push_to_talk_binding();
                 settings
             }
             Ok(Err(error)) => {
@@ -1114,6 +1186,10 @@ pub struct Bindings {
     /// Write on whatever is in hand — see [`crate::labels`].
     pub label: KeyCode,
     pub inspect: KeyCode,
+    /// Held, not pressed — `voice::capture` reads it with `keys.pressed`, the
+    /// same way `sprint` is read, since talking is a hold like sprinting is,
+    /// not a tap like `interact`.
+    pub push_to_talk: KeyCode,
 }
 
 impl Default for Bindings {
@@ -1132,11 +1208,43 @@ impl Default for Bindings {
             social: KeyCode::Tab,
             label: KeyCode::KeyL,
             inspect: KeyCode::KeyI,
+            push_to_talk: KeyCode::KeyV,
         }
     }
 }
 
 impl Bindings {
+    /// The same problem [`Self::migrate_inspect_binding`] solves, for the key
+    /// added alongside voice chat: an existing save has no `push_to_talk` in
+    /// its file, so `#[serde(default)]` hands it `KeyCode::KeyV` — which is
+    /// silently already the default `push_to_talk` on a fresh install, but on
+    /// a save where the player already rebound something else onto V, two
+    /// actions would now fire on the same keypress with no warning.
+    fn migrate_push_to_talk_binding(&mut self) {
+        let old: Vec<_> = BindingSlot::ALL
+            .iter()
+            .filter(|s| **s != BindingSlot::PushToTalk)
+            .map(|s| s.read(self))
+            .collect();
+        if old.contains(&self.push_to_talk) {
+            if let Some(key) = [
+                KeyCode::KeyV,
+                KeyCode::KeyC,
+                KeyCode::KeyG,
+                KeyCode::KeyN,
+                KeyCode::KeyM,
+                KeyCode::CapsLock,
+                KeyCode::AltLeft,
+                KeyCode::ControlLeft,
+            ]
+            .into_iter()
+            .find(|k| !old.contains(k))
+            {
+                self.push_to_talk = key;
+            }
+        }
+    }
+
     fn migrate_inspect_binding(&mut self) {
         let old: Vec<_> = BindingSlot::ALL
             .iter()
@@ -1207,12 +1315,13 @@ enum BindingSlot {
     Social,
     Label,
     Inspect,
+    PushToTalk,
 }
 
 impl BindingSlot {
     /// In the order the Controls screen reads best — movement, then the
-    /// hands, then the book.
-    const ALL: [BindingSlot; 13] = [
+    /// hands, then the book, then voice last since it is the newest.
+    const ALL: [BindingSlot; 14] = [
         BindingSlot::Forward,
         BindingSlot::Back,
         BindingSlot::Left,
@@ -1226,6 +1335,7 @@ impl BindingSlot {
         BindingSlot::Social,
         BindingSlot::Label,
         BindingSlot::Inspect,
+        BindingSlot::PushToTalk,
     ];
 
     fn title(self) -> &'static str {
@@ -1243,6 +1353,7 @@ impl BindingSlot {
             BindingSlot::Social => "Crew relationships / shops",
             BindingSlot::Label => "Write on what you hold",
             BindingSlot::Inspect => "Inspect held item",
+            BindingSlot::PushToTalk => "Push to talk",
         }
     }
 
@@ -1261,6 +1372,7 @@ impl BindingSlot {
             BindingSlot::Social => bindings.social,
             BindingSlot::Label => bindings.label,
             BindingSlot::Inspect => bindings.inspect,
+            BindingSlot::PushToTalk => bindings.push_to_talk,
         }
     }
 
@@ -1279,6 +1391,7 @@ impl BindingSlot {
             BindingSlot::Social => bindings.social = key,
             BindingSlot::Label => bindings.label = key,
             BindingSlot::Inspect => bindings.inspect = key,
+            BindingSlot::PushToTalk => bindings.push_to_talk = key,
         }
     }
 }
@@ -1467,6 +1580,10 @@ mod tests {
         assert_eq!(settings.bindings.apply, KeyCode::KeyF);
         assert_eq!(settings.bindings.book, KeyCode::KeyB);
         assert_eq!(settings.bindings.social, KeyCode::Tab);
+        assert_eq!(settings.bindings.push_to_talk, KeyCode::KeyV);
+        assert_eq!(settings.voice_volume, 1.0);
+        assert_eq!(settings.mic_gain, 1.0);
+        assert_eq!(settings.voice_input_device, None);
     }
 
     #[test]
@@ -1475,7 +1592,7 @@ mod tests {
         // screen showing a fill that does not match the setting, and there
         // would be no way to drag back to what the player has been using.
         let settings = Settings::default();
-        for knob in [Knob::Sensitivity, Knob::Fov, Knob::Volume] {
+        for knob in [Knob::Sensitivity, Knob::Fov, Knob::Volume, Knob::VoiceVolume, Knob::MicGain] {
             let (lo, hi) = knob.range();
             let value = knob.read(&settings);
             assert!(
@@ -1488,7 +1605,7 @@ mod tests {
 
     #[test]
     fn a_dial_reads_back_what_was_dragged_onto_it() {
-        for knob in [Knob::Sensitivity, Knob::Fov, Knob::Volume] {
+        for knob in [Knob::Sensitivity, Knob::Fov, Knob::Volume, Knob::VoiceVolume, Knob::MicGain] {
             for fraction in [0.0, 0.25, 0.5, 1.0] {
                 let value = value_at(knob, fraction);
                 assert!(
@@ -1504,7 +1621,7 @@ mod tests {
     fn dragging_past_either_end_of_a_dial_clamps() {
         // The drag reads a raw cursor position, which is routinely outside the
         // track — pulling toward an end is how you reach it.
-        for knob in [Knob::Sensitivity, Knob::Fov, Knob::Volume] {
+        for knob in [Knob::Sensitivity, Knob::Fov, Knob::Volume, Knob::VoiceVolume, Knob::MicGain] {
             let (lo, hi) = knob.range();
             assert_eq!(value_at(knob, -3.0), lo);
             assert_eq!(value_at(knob, 4.0), hi);
@@ -1581,7 +1698,7 @@ mod tests {
         // `label` had no row on the old `described()`-based Controls screen —
         // no way for a player to ever discover it existed. `BindingSlot::ALL`
         // enumerating every field of `Bindings` fixes that by construction.
-        assert_eq!(BindingSlot::ALL.len(), 13);
+        assert_eq!(BindingSlot::ALL.len(), 14);
         assert!(BindingSlot::ALL.iter().all(|slot| !slot.title().is_empty()));
         assert!(
             BindingSlot::ALL.contains(&BindingSlot::Label),
@@ -1886,6 +2003,42 @@ mod tests {
         assert!(!owns_the_clock(Some(&LaunchMode::Host)));
         assert!(!owns_the_clock(Some(&LaunchMode::HostSteam)));
     }
+    /// Runs `apply_simulation_speed` once against a given launch mode and
+    /// reports the relative speed it left on the clock.
+    fn speed_after(mode: Option<LaunchMode>, flag: Option<f32>) -> f32 {
+        let mut app = App::new();
+        app.init_resource::<Time<Virtual>>();
+        if let Some(mode) = mode {
+            app.insert_resource(mode);
+        }
+        if let Some(speed) = flag {
+            app.insert_resource(crate::net::SimulationSpeed(speed));
+        }
+        app.add_systems(Update, apply_simulation_speed);
+        app.update();
+        app.world().resource::<Time<Virtual>>().relative_speed()
+    }
+
+    #[test]
+    fn the_speed_flag_drives_the_clock_only_where_pausing_would() {
+        // Same rule as pausing, for the same reason: running the clock fast
+        // from one end of a shared session desyncs a peer who never agreed to
+        // it. If this ever stops holding, `--speed` becomes a co-op griefing
+        // tool rather than a development flag.
+        assert_eq!(speed_after(Some(LaunchMode::Singleplayer), Some(4.0)), 4.0);
+        assert_eq!(speed_after(None, Some(4.0)), 4.0);
+        assert_eq!(speed_after(Some(LaunchMode::Host), Some(4.0)), 1.0);
+        assert_eq!(speed_after(Some(LaunchMode::HostSteam), Some(4.0)), 1.0);
+    }
+
+    #[test]
+    fn an_ordinary_launch_runs_in_real_time() {
+        // No flag means the resource is absent, and the system must then be
+        // inert — a shipped build must not be carrying a clock multiplier.
+        assert_eq!(speed_after(Some(LaunchMode::Singleplayer), None), 1.0);
+        assert_eq!(speed_after(None, None), 1.0);
+    }
+
     #[test]
     fn adding_inspect_keeps_existing_rebound_keys_distinct() {
         let mut old: Bindings = ron::from_str("(interact:KeyI)").unwrap();
@@ -1893,5 +2046,29 @@ mod tests {
         assert_eq!(old.interact, KeyCode::KeyI);
         assert_ne!(old.inspect, old.interact);
         assert_eq!(old.inspect, KeyCode::KeyO);
+    }
+
+    #[test]
+    fn a_save_from_before_voice_chat_gets_an_unused_push_to_talk_key() {
+        // A file this old has no `push_to_talk` field at all, so
+        // `#[serde(default)]` hands it `KeyCode::KeyV` — harmless unless this
+        // particular player had already rebound something else onto V.
+        let mut old: Bindings = ron::from_str("(drop:KeyV)").unwrap();
+        assert_eq!(
+            old.push_to_talk,
+            KeyCode::KeyV,
+            "sanity: the sparse file must not already specify push_to_talk"
+        );
+        old.migrate_push_to_talk_binding();
+        assert_eq!(old.drop, KeyCode::KeyV, "the rebound key must survive");
+        assert_ne!(old.push_to_talk, old.drop);
+        assert_eq!(old.push_to_talk, KeyCode::KeyC);
+    }
+
+    #[test]
+    fn a_save_with_no_collision_keeps_the_default_push_to_talk_key() {
+        let mut old = Bindings::default();
+        old.migrate_push_to_talk_binding();
+        assert_eq!(old.push_to_talk, KeyCode::KeyV);
     }
 }
