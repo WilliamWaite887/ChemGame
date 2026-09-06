@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use chem_sim::Units;
 
 use crate::chem_data::ChemDb;
-use crate::crew::{spawn_crew_member, CrewDef, CrewMember};
+use crate::crew::{CrewDef, CrewMember};
 use crate::net::is_authority;
 use crate::orders::{
     deliverable_amount, reference_category, CounterOrder, Order, OrderKind, OrderResolved, Shift,
@@ -1036,14 +1036,12 @@ fn generate_counter_orders(
         return;
     };
     let lane = waiting.iter().count() as f32 * 0.95;
-    let crew = crate::crew::recall_resident_for_order(
-        &mut commands,
-        &mut residents,
-        &crew_def.name,
-        &crew_def.role,
-        lane,
-    )
-    .unwrap_or_else(|| spawn_crew_member(&mut commands, crew_def, lane));
+    let Some(crew) =
+        crate::crew::recall_or_spawn_crew_member(&mut commands, &mut residents, crew_def, lane)
+    else {
+        intake.cancel_admission(&crew_def.name);
+        return;
+    };
 
     let want_label = reference_category(&db, reagent)
         .map(|cat| cat.want_phrase().to_string())
@@ -2183,12 +2181,36 @@ mod tests {
             ron::from_str(include_str!("../../assets/data/station.quack.ron")).unwrap();
         claim(&quack.role, "quack");
 
+        let botanist: crate::botanist::BotanistScript =
+            ron::from_str(include_str!("../../assets/data/station.botanist.ron")).unwrap();
+        claim(&botanist.role, "botanist");
+
         // `rogue_security` is Security's, and is bespoke enough not to share
         // the others' script shape — it names no `role` field because it *is*
         // Security, by construction.
         covered.push(Department::Security);
 
+        // Bridge is the one department without a minor thread, and it is not
+        // reserved — it simply has not been authored yet. The department was
+        // promoted out of `crew::fluff` when Odera and Sissel became core
+        // characters, so it acquired a department page before it acquired any
+        // trouble.
+        //
+        // This assert is two-sided ON PURPOSE. Botany used to sit here too, and
+        // when its thread landed this test failed with "Botany now HAS a minor
+        // thread", which is exactly what forced the entry's removal instead of
+        // letting a stale exemption rot. Do not "fix" a failure here by
+        // deleting the negative assert.
+        const EXPECTED_GAP: [Department; 1] = [Department::Bridge];
+
         for department in Department::ALL {
+            if EXPECTED_GAP.contains(&department) {
+                assert!(
+                    !covered.contains(&department),
+                    "{department:?} now HAS a minor thread — delete it from EXPECTED_GAP"
+                );
+                continue;
+            }
             assert!(
                 covered.contains(&department),
                 "{department:?} has nobody causing trouble in it"

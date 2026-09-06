@@ -1968,4 +1968,31 @@
     ),
     // Inspectable family products, not substitutes for named recipe ingredients.
     (id: "neutralized_salts", material: (residue: true), name: "Neutralized Salts", color: (0.83, 0.83, 0.78), ph: 7.0, intentionally_inert: true, categories: [Utility], treats: Some("Residue from neutralization. Not a substitute for a named recipe ingredient.")),
+
+    // A plot material, not a chemistry-tree reagent. `player_only` means no NPC
+    // job, shop, incident generator, load hook, or campaign step may ever spawn
+    // it — the only way it reaches NPC hands is a batch a player physically
+    // handed over. Deliberately slow and unremarkable-tasting: the point is a
+    // meal that seems fine until it doesn't, so the harm is discovered rather
+    // than witnessed, which is what gives Security something to investigate.
+    // Not dispensable, so it cannot be pulled straight from the ChemMaster.
+    (
+        id: "quiet_rot",
+        name: "Quiet Rot",
+        color: (0.58, 0.60, 0.50),
+        ph: 6.4,
+        controlled: true,
+        player_only: true,
+        dispensable: false,
+        tier: 3,
+        treats: Some("Nothing. It sits in food and waits."),
+        // Poisons, NOT Illicit. `Illicit` means "recreational, and someone
+        // comes back for it" — `every_illicit_reagent_can_actually_hook_someone`
+        // enforces that, and caught this tag being wrong. Nobody gets hooked on
+        // Quiet Rot; it is contraband because of what it does, not what it is
+        // worth. `controlled` + `player_only` already carry that meaning.
+        categories: [Poisons],
+        metabolism: Some(0.05),
+        effects: [Harm(Toxin, 0.6)],
+    ),
 ]

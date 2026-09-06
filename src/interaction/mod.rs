@@ -749,15 +749,15 @@ fn request_interaction(
             continue;
         }
         if let Some(target) = focus.target {
-            if let Ok(waiting) = pending.get(target) {
+            if evacuations.contains(target) {
+                evacuation_requests.write(EvacuateCrewRequested { target });
+            } else if let Ok(waiting) = pending.get(target) {
                 if waiting.arrived {
                     conversations.write(crate::order_intake::OpenOrderConversation {
                         target,
                         id: waiting.id,
                     });
                 }
-            } else if evacuations.contains(target) {
-                evacuation_requests.write(EvacuateCrewRequested { target });
             } else {
                 requests.write(InteractRequested { target });
             }
@@ -1064,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn use_routes_an_evacuation_prompt_to_the_dedicated_request() {
+    fn evacuation_takes_priority_over_a_stale_order_conversation() {
         let mut app = App::new();
         app.init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<crate::settings::Settings>()
@@ -1072,7 +1072,16 @@ mod tests {
             .add_message::<EvacuateCrewRequested>()
             .add_message::<crate::order_intake::OpenOrderConversation>()
             .add_systems(Update, request_interaction);
-        let target = app.world_mut().spawn(NeedsMedicalEvacuation).id();
+        let target = app
+            .world_mut()
+            .spawn((
+                NeedsMedicalEvacuation,
+                crate::order_intake::AwaitingConversation {
+                    id: 7,
+                    arrived: true,
+                },
+            ))
+            .id();
         app.world_mut().spawn((
             LocalPlayer,
             Focus {
@@ -1095,6 +1104,12 @@ mod tests {
         assert!(app
             .world_mut()
             .resource_mut::<Messages<InteractRequested>>()
+            .drain()
+            .next()
+            .is_none());
+        assert!(app
+            .world_mut()
+            .resource_mut::<Messages<crate::order_intake::OpenOrderConversation>>()
             .drain()
             .next()
             .is_none());

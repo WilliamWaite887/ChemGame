@@ -932,7 +932,7 @@ fn agitation_matching_is_ratio_aware_order_independent_and_reversible() {
 fn seed_data_loads_completely() {
     let data = data();
     assert_eq!(data.reagents.dispensable().count(), 30);
-    assert_eq!(data.reactions.len(), 162);
+    assert_eq!(data.reactions.len(), 163);
     for recipe in STARTING_RECIPES {
         assert!(data.reactions.find(recipe).is_some(), "missing {recipe}");
     }

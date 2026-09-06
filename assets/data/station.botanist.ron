@@ -1,0 +1,105 @@
+// Botany's minor antagonist — see `src/botanist/mod.rs`.
+//
+// Runs in every save, like the other four department minors. Reserved as its
+// own packet for a long time because a Botany antagonist is the one thread that
+// implies illicit chemicals reaching NPC hands, and that has hard rules: see
+// the player-only reagent invariant in `docs/utility-ai-plan.md`. Nothing here
+// spawns a contaminant. Every ask below is a *request to the player*, and the
+// thread only ever escalates using what a player physically handed over.
+//
+// The character: a grower who is certain Botany's work is being wasted, and who
+// has decided that proving it matters more than being honest about how. The
+// asks read as agricultural chemistry, because that is exactly what they are —
+// right up until the last one.
+(
+    name: "Grower Aleksy",
+    role: "Botany",
+    color: (0.42, 0.70, 0.38),
+
+    gap_multiplier: (5.0, 8.0),
+
+    // Ordered, escalating from "reasonable" to "you should have said no". The
+    // first three are real horticulture and stay useful if the player just
+    // wants a working greenhouse; only the last is the turn.
+    visits: [
+        (
+            reagent: "ammonia",
+            amount: 30,
+            plea: "Feed stock for the plots. Service gets a budget for garnish; we get whatever's left.",
+        ),
+        (
+            reagent: "diethylamine",
+            amount: 20,
+            plea: "Growth compound. I can get a second harvest out of the same beds if you'll let me try.",
+        ),
+        (
+            reagent: "sulphuric_acid",
+            // Corrosive, and genuinely used to acidify soil. Reads as ordinary
+            // work; is also the point where the asks stop being small.
+            amount: 15,
+            plea: "The beds have gone alkaline. I need to bring them back before the next cycle dies.",
+        ),
+        (
+            reagent: "quiet_rot",
+            // The turn. `quiet_rot` is `player_only`: it cannot be spawned by
+            // any NPC path, so this ask is the ONLY route by which Aleksy can
+            // ever hold it. Refusing closes the thread's worst branch outright.
+            amount: 12,
+            plea: "Don't ask what it's for. You'll be told it's for the beds, and you can write that down.",
+        ),
+    ],
+
+    // What the thread does when the player refuses. Deliberately *not* a
+    // poisoning: refusal must not produce the same outcome as compliance, or
+    // the choice was never real. Aleksy sulks, and Botany's standing suffers
+    // for the produce that quietly stops arriving.
+    withheld_penalty: -1,
+
+    withheld_lines: [
+        "Botany's shipment came in light again. Aleksy says the beds are 'recovering'.",
+        "Service is short on garnish. Botany says ask Chemistry why.",
+        "Aleksy has stopped logging the plot yields. Nobody has made him start again.",
+        "Two beds in hydroponics are fallow that shouldn't be. Aleksy calls it a rotation.",
+    ],
+
+    // Aired when a player hands over the last ask. Not a confession — Aleksy
+    // does not announce a plan — but the tone changes, which is the only
+    // warning the player gets before behaviour becomes the tell.
+    supplied_line: "Aleksy took the container without reading the label and left without saying thank you.",
+
+    // What the player actually gets for the final handover.
+    //
+    // Required, and validated at load: a deal authored as only a delayed
+    // punishment is rejected outright (`IllicitRequest::validate`). If supplying
+    // Aleksy bought nothing, the "choice" would be a trap, and a player who
+    // learned that once would correctly never engage with the thread again.
+    //
+    // These arrive when the deal resolves and do NOT depend on whether Aleksy
+    // ever finds a covert action worth taking — the upside is a trade, not a
+    // wager on his later behaviour.
+    benefits: [
+        // He is grateful, and says so. Immediate and visible.
+        Standing(name: "Grower Aleksy", amount: 4),
+        // Being someone who supplies without asking questions opens the
+        // existing off-book economy a little further.
+        Underworld(amount: 3),
+        // Botany quietly starts routing the good harvest to Chemistry first.
+        Favor(kind: ExpeditedFreight),
+    ],
+
+    // Aleksy will take a smaller amount if pressed, but does not accept a
+    // substitute for the last ask — he knows exactly what he wants, and a
+    // player offering "something similar" is the tell that they have guessed.
+    options: ["negotiate"],
+
+    // The private motive the handover installs. `DiscreditDepartment` is the
+    // honest one: he wants Service to look careless so Botany's work stops
+    // being treated as garnish. Poisoning a shared meal serves that; a grudge
+    // would not, and the covert scorer knows the difference.
+    goal: DiscreditDepartment,
+
+    // How much risk he tolerates, 0..1. Low: Aleksy is resentful, not reckless,
+    // so he genuinely waits for a moment with fewer people around instead of
+    // acting at the first opportunity.
+    nerve: 0.4,
+)

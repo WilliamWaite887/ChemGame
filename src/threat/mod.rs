@@ -295,32 +295,16 @@ pub fn dispatch_scripted_visit(
     db: &ChemDb,
     rng: &mut impl Rng,
     rules: &ShiftRules,
-    residents: &mut Query<
-        (
-            Entity,
-            &crate::crew::CrewMember,
-            &crate::body::Body,
-            &crate::body::Bloodstream,
-            &mut crate::crew::CrewRoute,
-        ),
-        (
-            With<crate::crew::Ambient>,
-            Without<crate::social::NpcCommitment>,
-        ),
-    >,
+    residents: &mut crate::crew::AvailableResidents,
     visit: ScriptedVisit,
-) -> Entity {
+) -> Option<Entity> {
     let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
-    let crew =
-        crate::crew::recall_resident_for_order(commands, residents, visit.name, visit.role, 0.0)
-            .unwrap_or_else(|| {
-                let identity = crate::crew::CrewDef {
-                    name: visit.name.to_string(),
-                    role: visit.role.to_string(),
-                    color: visit.color,
-                };
-                crate::crew::spawn_crew_member(commands, &identity, 0.0)
-            });
+    let identity = crate::crew::CrewDef {
+        name: visit.name.to_string(),
+        role: visit.role.to_string(),
+        color: visit.color,
+    };
+    let crew = crate::crew::recall_or_spawn_crew_member(commands, residents, &identity, 0.0)?;
     let amount = crate::orders::deliverable_amount(
         db,
         visit.reagent,
@@ -341,7 +325,7 @@ pub fn dispatch_scripted_visit(
         ),
         crate::interaction::Interactable::new("Waiting to speak"),
     ));
-    crew
+    Some(crew)
 }
 
 /// What one of this thread's resolutions meant to it.
@@ -414,6 +398,11 @@ pub enum Ward {
     Raid,
     Smuggler,
     Saboteur,
+    /// Earned by an illicit deal rather than bought. Absorbs the same raid
+    /// `Raid` does, and is spent only after it — a player who holds both should
+    /// burn the one they paid money for first, keeping the favor they are still
+    /// owed. See `Requisition::quiet_access_favors`.
+    QuietAccess,
 }
 
 impl Ward {
@@ -423,6 +412,7 @@ impl Ward {
             Ward::Raid => &mut shift.requisition.raid_wards,
             Ward::Smuggler => &mut shift.requisition.smuggler_wards,
             Ward::Saboteur => &mut shift.requisition.saboteur_wards,
+            Ward::QuietAccess => &mut shift.requisition.quiet_access_favors,
         }
     }
 }

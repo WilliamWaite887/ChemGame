@@ -185,7 +185,7 @@ fn generate_saboteur_visit(
     ) else {
         return;
     };
-    threat::dispatch_scripted_visit(
+    if threat::dispatch_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
@@ -200,7 +200,11 @@ fn generate_saboteur_visit(
             amount_units: visit.amount,
             plea: visit.plea.clone(),
         },
-    );
+    )
+    .is_none()
+    {
+        intake.cancel_admission(&script.name);
+    }
 }
 
 /// Marks the tech while they are on their way to have a fiddle.

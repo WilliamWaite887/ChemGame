@@ -18,6 +18,13 @@ bevy = { version = "0.19", features = ["serialize"] }
 # `cargo tree -d -p rodio -p cpal` — two copies of either would mean two audio
 # hosts fighting over the same devices.
 rodio = { version = "0.22", default-features = false, features = ["recording"] }
+# Voice codec. Bindings to libopus, whose source `opusic-sys` vendors and
+# builds — so this needs **cmake** on PATH as well as the C compiler Bevy's
+# own `blake3`/`zstd-sys` already require. That is a real prerequisite for
+# anyone building the game and is called out in the README.
+# Chosen over `audiopus` (unmaintained since 2021); the pure-Rust
+# `opus-decoder` cannot replace it because it only decodes.
+opus = "0.4"
 # Bevy's accessibility component intentionally does not re-export AccessKit's
 # node builder. This is the exact version Bevy already links; declaring it
 # directly lets icon-only controls carry real screen-reader labels without

@@ -25,5 +25,12 @@
 //! is a view — anything built only on the host fails silently for the guest,
 //! which is how every co-op bug in this project has presented.
 
+// Phase 0 builds and proves the pieces before Phase 1 wires them to a
+// microphone and a socket, so nothing here has a caller yet and every item
+// reads as dead. The tests exercise all of it. **Remove this the moment
+// `VoicePlugin` exists** — after that, an unused item here is a real signal.
+#![allow(dead_code)]
+
+pub mod codec;
 pub mod frame;
 pub mod jitter;

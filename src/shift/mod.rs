@@ -46,6 +46,7 @@ mod impatience;
 mod restock;
 
 pub use impatience::ImpatiencePlugin;
+pub(crate) use restock::cancel_glassware_delivery;
 pub use restock::{PendingRestock, RestockPlugin};
 
 /// The whole cycle, minus the phases: difficulty, forecasts and requisitions.
@@ -1343,9 +1344,16 @@ pub struct ProgressPlugin;
 impl Plugin for ProgressPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PersistedProgress>()
+            .init_resource::<CustodyNames>()
             .add_systems(
                 OnEnter(AppState::Playing),
+                // Strictly after every utility reset, or the reset wipes the
+                // custody and donations this just restored. Plugin
+                // registration order happens to give the same answer today;
+                // this makes it a guarantee rather than a coincidence nobody
+                // would notice breaking.
                 load_progress
+                    .after(crate::utility_ai::UtilityResetSet)
                     .run_if(is_authority)
                     .run_if(crate::session::career_session),
             )
@@ -1485,6 +1493,27 @@ struct ProgressSave {
     /// resident who replaced one department minor's outsider identity.
     #[serde(default)]
     social: crate::social::SocialState,
+    /// How far the Botany thread has escalated, and whether its final ask was
+    /// already answered. Without this a reload re-arms a handover the player
+    /// has already made, letting one delivery stock the antagonist twice. See
+    /// `botanist::BotanistProgress`.
+    #[serde(default)]
+    botanist_refusals: u32,
+    #[serde(default)]
+    botanist_supplied: bool,
+    /// Player-supplied batches still in NPC hands, keyed by holder name because
+    /// crew entities do not survive walking offscreen, let alone a reload — the
+    /// same reasoning as `addictions`. Terminal batches are not written, so
+    /// reloading cannot undo a confiscation. See `utility_ai::IllicitCustody`.
+    #[serde(default)]
+    illicit_custody: Vec<crate::utility_ai::CustodyRecord>,
+    /// Voluntary player donations a department is still holding. Losing these
+    /// on reload would make closing the game a way to un-give something —
+    /// including something the player is waiting to see go wrong. Terminal
+    /// batches are not written, so a reload cannot resurrect a donation the
+    /// department has already finished with. See `utility_ai::AidIntakes`.
+    #[serde(default)]
+    department_aid: Vec<crate::utility_ai::AidRecord>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
@@ -1530,6 +1559,94 @@ fn restored_station_stability(save: &ProgressSave) -> crate::instability::Statio
     stability
 }
 
+/// Restores relationship standing across both standing-format migrations and
+/// the Botany roster split. Existing personal values always win. A career
+/// that already knew Ivy or Dubois seeds only the newly introduced partner;
+/// a still older department-only save uses its former Service value for both
+/// the retained Service pair and the new Botany pair.
+fn restore_relationship_standing(shift: &mut Shift, save: &ProgressSave) {
+    if !save.npc_standing.is_empty() {
+        shift.npc_standing = save.npc_standing.clone();
+    } else if !save.department_standing.is_empty() {
+        // Backward-fill: a save from before per-NPC standing existed only
+        // knows one scalar per department. Seed every current member from it
+        // so a returning career's crew do not silently reset to neutral.
+        for (department, value) in &save.department_standing {
+            for name in department.members() {
+                shift.npc_standing.insert((*name).to_string(), *value);
+            }
+        }
+
+        // Botany used to be represented by Ivy inside Service. Old
+        // department-only saves therefore have no Botany key to back-fill.
+        if !save.department_standing.contains_key(&Department::Botany) {
+            if let Some(value) = save.department_standing.get(&Department::Service).copied() {
+                shift
+                    .npc_standing
+                    .entry(crate::social::IVY.to_string())
+                    .or_insert(value);
+            }
+        }
+    }
+
+    copy_standing_if_missing(
+        &mut shift.npc_standing,
+        crate::social::IVY,
+        crate::social::VALE,
+    );
+    copy_standing_if_missing(
+        &mut shift.npc_standing,
+        crate::social::DUBOIS,
+        crate::social::AMARI,
+    );
+    // Engineering was a one-person department until Morrow joined it. Because
+    // department standing is the average over `members()`, seeding him from
+    // Lindqvist is what stops a returning career's Engineering reputation from
+    // halving the moment the save loads.
+    copy_standing_if_missing(
+        &mut shift.npc_standing,
+        crate::social::LINDQVIST,
+        crate::social::MORROW,
+    );
+    // Engineering was a one-person department until Morrow joined it. Because
+    // department standing is the average over `members()`, seeding him from
+    // Lindqvist is what stops a returning career's Engineering reputation from
+    // halving the moment the save loads.
+
+    // Old opening snapshots predate Botany as a visible department. Give the
+    // new page the same opening baseline Service had rather than reporting a
+    // fictitious relationship swing as soon as the save loads.
+    if let Some(opened_at) = shift.opened_at.as_mut() {
+        if !opened_at
+            .department_standing
+            .contains_key(&Department::Botany)
+        {
+            if let Some(value) = opened_at
+                .department_standing
+                .get(&Department::Service)
+                .copied()
+            {
+                opened_at
+                    .department_standing
+                    .insert(Department::Botany, value);
+            }
+        }
+    }
+}
+
+fn copy_standing_if_missing(
+    standing: &mut HashMap<String, i32>,
+    established: &str,
+    introduced: &str,
+) {
+    if standing.contains_key(introduced) {
+        return;
+    }
+    if let Some(value) = standing.get(established).copied() {
+        standing.insert(introduced.to_string(), value);
+    }
+}
+
 /// Restores the career on launch.
 #[allow(clippy::too_many_arguments)]
 fn load_progress(
@@ -1548,7 +1665,7 @@ fn load_progress(
     estranged: Option<ResMut<crate::estrangement::Estranged>>,
     instability: Option<ResMut<crate::instability::Instability>>,
     social: Option<ResMut<crate::social::SocialState>>,
-    slot: Option<Res<SaveSlot>>,
+    mut covert: CovertPersistence,
 ) {
     // Cross-save, so it is read whether or not this session has a slot at all
     // — and before the `let else` below, which returns early for a brand new
@@ -1558,7 +1675,7 @@ fn load_progress(
 
     // No slot means a new game with nothing to restore, or a guest whose career
     // is the host's and arrives replicated.
-    let Some(slot) = slot else {
+    let Some(slot) = covert.slot.as_ref() else {
         return;
     };
     let Some(save) = read_progress(&slot.progress_path()) else {
@@ -1579,22 +1696,11 @@ fn load_progress(
         shift.stability_band = stability.band;
         shift.station_age_seconds = stability.station_age.max(0.0) as u32;
     }
-    if !save.npc_standing.is_empty() {
-        shift.npc_standing = save.npc_standing;
-    } else if !save.department_standing.is_empty() {
-        // Backward-fill: a save from before per-NPC standing existed only
-        // knows one scalar per department. Seed every member from it so a
-        // returning career's crew do not silently reset to neutral.
-        for (department, value) in &save.department_standing {
-            for name in department.members() {
-                shift.npc_standing.insert((*name).to_string(), *value);
-            }
-        }
-    }
     // Shifts are 1-based; `0` is what a save written before they were numbered
     // deserialises to, and reading it as "shift 1" is exactly right for one.
     shift.shift_number = save.shift_number.max(1);
-    shift.opened_at = save.opened_at;
+    shift.opened_at = save.opened_at.clone();
+    restore_relationship_standing(&mut shift, &save);
     // Saves written before the bounded scale may contain deeper favor debt or
     // standing above the new ceiling. Normalize once on load so current values
     // and the opening snapshot used by the debrief agree immediately.
@@ -1642,11 +1748,32 @@ fn load_progress(
         estranged.0 = save.estranged;
     }
     if let Some(mut social) = social {
-        *social = if save.social.initialized {
+        let mut restored = if save.social.initialized {
             save.social
         } else {
             crate::social::SocialState::migrate_legacy()
         };
+        restored.migrate_resident_roster();
+        *social = restored;
+    }
+    if let Some(progress) = covert.progress.as_mut() {
+        progress.refusals = save.botanist_refusals;
+        progress.supplied = save.botanist_supplied;
+    }
+    // Custody restores only where the holder is currently embodied. A named
+    // holder who is not spawned yet is skipped rather than queued: `restore`
+    // replaces the whole table, so a later call would drop anything queued
+    // anyway, and a batch nobody is holding is not recoverable by the player.
+    if let (Some(custody), Some(names)) = (covert.custody.as_mut(), covert.crew.as_ref()) {
+        custody.restore(&save.illicit_custody, |name| names.entity_of(name));
+    }
+    // Donations restore unconditionally: unlike custody they sit on a counter
+    // rather than on a body, so nothing has to be spawned first for them to be
+    // real. The contributor is `Entity::PLACEHOLDER` because player entities do
+    // not survive a reload and a reused id would misattribute a consequence —
+    // the payout goes to the *department*, which is what `AidRecord` documents.
+    if let Some(aid) = covert.aid.as_mut() {
+        aid.restore(&save.department_aid, Entity::PLACEHOLDER);
     }
     info!(
         "resuming with {} delivered, {} botched",
@@ -1689,6 +1816,49 @@ pub fn arc_standing(path: &std::path::Path) -> Option<crate::saves::ArcStanding>
     Some(crate::saves::ArcStanding { antag, won })
 }
 
+/// The covert-thread state `progress.ron` carries, bundled into one param.
+///
+/// `persist_progress` and `load_progress` were already at Bevy's 16-parameter
+/// ceiling, so these three arrive together rather than individually. They also
+/// belong together: custody without the botanist's `supplied` flag would let a
+/// reload re-arm a handover the player already made.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct CovertPersistence<'w> {
+    pub progress: Option<ResMut<'w, crate::botanist::BotanistProgress>>,
+    pub custody: Option<ResMut<'w, crate::utility_ai::IllicitCustody>>,
+    pub crew: Option<Res<'w, CustodyNames>>,
+    /// Bundled here rather than passed separately because both callers sit at
+    /// Bevy's 16-parameter ceiling — `load_progress` is an observer, where
+    /// exceeding it fails as a confusing `ObserverSystem` trait error rather
+    /// than an arity message.
+    pub slot: Option<Res<'w, SaveSlot>>,
+    /// Donated batches still sitting in department intakes. Bundled here for
+    /// the same parameter-ceiling reason as `slot`, and because it is the same
+    /// concern: authority-only physical stock that a reload must not lose.
+    pub aid: Option<ResMut<'w, crate::utility_ai::AidIntakes>>,
+}
+
+/// Maps a holder entity to the crew name custody is saved under, and back.
+///
+/// A resource rather than a `Query` because both save and load already sit at
+/// the parameter ceiling, and because the mapping is small: only characters who
+/// have actually been handed something ever appear.
+#[derive(Resource, Default, Clone)]
+pub struct CustodyNames(pub HashMap<Entity, String>);
+
+impl CustodyNames {
+    pub fn name_of(&self, holder: Entity) -> Option<String> {
+        self.0.get(&holder).cloned()
+    }
+
+    pub fn entity_of(&self, name: &str) -> Option<Entity> {
+        self.0
+            .iter()
+            .find(|(_, held)| held.as_str() == name)
+            .map(|(entity, _)| *entity)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn persist_progress(
     shift: Res<Shift>,
@@ -1705,10 +1875,10 @@ fn persist_progress(
     estranged: Option<Res<crate::estrangement::Estranged>>,
     instability: Option<Res<crate::instability::Instability>>,
     social: Option<Res<crate::social::SocialState>>,
-    slot: Option<Res<SaveSlot>>,
+    covert: CovertPersistence,
     mut written: ResMut<PersistedProgress>,
 ) {
-    let Some(slot) = slot else {
+    let Some(slot) = covert.slot.as_ref() else {
         return;
     };
     let save = ProgressSave {
@@ -1749,6 +1919,23 @@ fn persist_progress(
         station_stability: instability.map(|i| i.clone()).unwrap_or_default(),
         evacuated: shift.evacuated,
         social: social.map(|state| state.clone()).unwrap_or_default(),
+        botanist_refusals: covert.progress.as_ref().map(|p| p.refusals).unwrap_or(0),
+        botanist_supplied: covert
+            .progress
+            .as_ref()
+            .map(|p| p.supplied)
+            .unwrap_or(false),
+        // A holder this frame cannot name is dropped by `snapshot` rather than
+        // saved under a placeholder — see its doc comment.
+        illicit_custody: match (covert.custody.as_ref(), covert.crew.as_ref()) {
+            (Some(custody), Some(names)) => custody.snapshot(|holder| names.name_of(holder)),
+            _ => Vec::new(),
+        },
+        department_aid: covert
+            .aid
+            .as_ref()
+            .map(|aid| aid.snapshot())
+            .unwrap_or_default(),
     };
     if written.0.as_ref() == Some(&save) {
         return;
@@ -3242,6 +3429,128 @@ mod tests {
     // -- the save format ---------------------------------------------------
 
     #[test]
+    fn the_load_runs_after_every_utility_reset() {
+        // A save restores custody and donations into resources that
+        // `OnEnter(Playing)` reset systems clear back to a fresh-shift
+        // baseline. If a reset runs second it silently deletes the load — no
+        // error, no warning, the player just finds their batches gone.
+        //
+        // This builds the *real* `ProgressPlugin` schedule and adds a probe
+        // reset into `UtilityResetSet`. The probe writes after clearing, so
+        // the flag can only survive if `load_progress`'s declared `.after`
+        // edge really orders it behind the set. Deleting that `.after` from
+        // `ProgressPlugin` makes this fail.
+        #[derive(Resource, Default)]
+        struct Order(Vec<&'static str>);
+
+        fn probe_reset(mut order: ResMut<Order>) {
+            order.0.push("reset");
+        }
+        fn probe_load(mut order: ResMut<Order>) {
+            order.0.push("load");
+        }
+
+        let mut app = App::new();
+        app.add_plugins(StatesPlugin)
+            .init_state::<AppState>()
+            .init_resource::<Order>()
+            // A reset in the set, exactly as the eleven real ones are.
+            .add_systems(
+                OnEnter(AppState::Playing),
+                probe_reset.in_set(crate::utility_ai::UtilityResetSet),
+            )
+            // And a stand-in for `load_progress` carrying the same edge
+            // `ProgressPlugin` declares. Both halves have to agree or the
+            // ordering means nothing.
+            .add_systems(
+                OnEnter(AppState::Playing),
+                probe_load.after(crate::utility_ai::UtilityResetSet),
+            );
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Playing);
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<Order>().0,
+            vec!["reset", "load"],
+            "a utility reset ran after the load and would have wiped it",
+        );
+    }
+
+    #[test]
+    fn progress_plugin_really_declares_the_ordering_it_depends_on() {
+        // The test above proves the *set* orders correctly; this proves
+        // `ProgressPlugin` actually uses it. Without this, deleting the
+        // `.after(UtilityResetSet)` from the plugin leaves everything green
+        // while the real load races the real resets.
+        //
+        // Read from the built schedule rather than the source: `OnEnter` here
+        // holds `load_progress` alone, so any dependency edge on it can only
+        // have come from that `.after`.
+        let mut app = App::new();
+        app.add_plugins(StatesPlugin)
+            .init_state::<AppState>()
+            .add_plugins(ProgressPlugin);
+
+        let mut schedules = app.world_mut().resource_mut::<Schedules>();
+        let on_enter = schedules
+            .get_mut(OnEnter(AppState::Playing))
+            .expect("ProgressPlugin registers load_progress here");
+        on_enter.graph_mut().initialize(&mut World::new());
+        assert!(
+            on_enter.graph().dependency().graph().edge_count() > 0,
+            "load_progress declares no ordering — it can race the utility resets",
+        );
+    }
+
+    #[test]
+    fn department_donations_survive_a_save_round_trip() {
+        let mut contents = chem_sim::Solution::unbounded();
+        let _ = contents.add(chem_sim::ReagentId(3), chem_sim::Units::whole(24));
+        let save = ProgressSave {
+            department_aid: vec![crate::utility_ai::AidRecord {
+                domain: crate::utility_ai::JobDomain::Medical,
+                contents,
+                state: crate::utility_ai::AidState::Accepted,
+                claimed_label: Some("saline".into()),
+                refusal: None,
+                offered_at: 12.5,
+                consequences_applied: true,
+            }],
+            ..default()
+        };
+        let text = ron::ser::to_string(&save).unwrap();
+        let restored: ProgressSave = ron::from_str(&text).unwrap();
+
+        assert_eq!(restored.department_aid.len(), 1);
+        let record = &restored.department_aid[0];
+        assert_eq!(record.state, crate::utility_ai::AidState::Accepted);
+        assert_eq!(record.claimed_label.as_deref(), Some("saline"));
+        assert!(record.consequences_applied, "a settled batch stays settled");
+        assert_eq!(
+            record.contents.volume_of(chem_sim::ReagentId(3)),
+            chem_sim::Units::whole(24),
+            "the real contents crossed the file, not just the claim",
+        );
+    }
+
+    #[test]
+    fn a_progress_file_written_before_donations_existed_still_loads() {
+        // The migration case: a career saved before voluntary aid existed has
+        // no `department_aid` key. It must load with no donations rather than
+        // failing to parse and costing the player the whole save.
+        let legacy = r#"(
+            succeeded: 12,
+            botched: 1,
+            illicit_custody: [],
+        )"#;
+        let save: ProgressSave = ron::from_str(legacy).expect("an older save must still parse");
+        assert_eq!(save.succeeded, 12);
+        assert!(save.department_aid.is_empty());
+    }
+
+    #[test]
     fn a_progress_file_written_before_campaigns_still_loads() {
         // Every field on `ProgressSave` is `#[serde(default)]` precisely so
         // that adding one never costs an existing player their career. This is
@@ -3271,6 +3580,156 @@ mod tests {
             !save.social.initialized,
             "a pre-social save must retain the migration marker"
         );
+    }
+
+    #[test]
+    fn existing_personal_standing_seeds_each_new_department_partner_once() {
+        let save = ProgressSave {
+            npc_standing: [
+                (crate::social::IVY.to_string(), 7),
+                (crate::social::DUBOIS.to_string(), -4),
+            ]
+            .into_iter()
+            .collect(),
+            opened_at: Some(ShiftSnapshot {
+                department_standing: [(Department::Service, 2)].into_iter().collect(),
+                ..default()
+            }),
+            ..default()
+        };
+        let mut shift = Shift {
+            opened_at: save.opened_at.clone(),
+            ..default()
+        };
+
+        restore_relationship_standing(&mut shift, &save);
+
+        assert_eq!(shift.npc_standing(crate::social::IVY), 7);
+        assert_eq!(shift.npc_standing(crate::social::VALE), 7);
+        assert_eq!(shift.npc_standing(crate::social::DUBOIS), -4);
+        assert_eq!(shift.npc_standing(crate::social::AMARI), -4);
+        assert_eq!(
+            shift.opened_at.as_ref().unwrap().department_standing[&Department::Botany],
+            2,
+            "a legacy opening snapshot must not invent a Botany standing swing",
+        );
+
+        let current = ProgressSave {
+            npc_standing: [
+                (crate::social::IVY.to_string(), 7),
+                (crate::social::VALE.to_string(), -3),
+                (crate::social::DUBOIS.to_string(), -4),
+                (crate::social::AMARI.to_string(), 9),
+            ]
+            .into_iter()
+            .collect(),
+            ..default()
+        };
+        restore_relationship_standing(&mut shift, &current);
+        assert_eq!(shift.npc_standing(crate::social::VALE), -3);
+        assert_eq!(shift.npc_standing(crate::social::AMARI), 9);
+    }
+
+    /// Engineering was a one-person department until Morrow was authored into
+    /// it. `Shift::standing` averages over `members()`, so an unseeded Morrow
+    /// silently halves a returning career's Engineering reputation on load.
+    /// This asserts the department average, not just the copied key, because
+    /// the average is the number the player actually sees.
+    #[test]
+    fn adding_engineerings_second_core_does_not_halve_a_returning_careers_standing() {
+        let save = ProgressSave {
+            npc_standing: [(crate::social::LINDQVIST.to_string(), 8)]
+                .into_iter()
+                .collect(),
+            ..default()
+        };
+        let mut shift = Shift::default();
+
+        restore_relationship_standing(&mut shift, &save);
+
+        assert_eq!(shift.npc_standing(crate::social::LINDQVIST), 8);
+        assert_eq!(shift.npc_standing(crate::social::MORROW), 8);
+        assert_eq!(
+            shift.standing(Department::Engineering),
+            8,
+            "a save that earned Engineering standing must not lose half of it \
+             just because the department gained its authored second core",
+        );
+
+        // A career that already knows both keeps its own values for each.
+        let current = ProgressSave {
+            npc_standing: [
+                (crate::social::LINDQVIST.to_string(), 8),
+                (crate::social::MORROW.to_string(), 2),
+            ]
+            .into_iter()
+            .collect(),
+            ..default()
+        };
+        restore_relationship_standing(&mut shift, &current);
+        assert_eq!(shift.npc_standing(crate::social::MORROW), 2);
+        assert_eq!(shift.standing(Department::Engineering), 5);
+    }
+
+    /// Bridge is the inverse of the Morrow case, and the distinction matters.
+    ///
+    /// Morrow joined an *existing* department, so an unseeded key would have
+    /// halved a standing the player had already earned. Bridge was promoted out
+    /// of `crew::fluff` and has never been a standing-bearing department, so no
+    /// save has ever held Bridge standing — neutral is the correct load result,
+    /// and seeding it from anywhere would be inventing a reputation the player
+    /// never built. This test exists so a future "fix" that copies standing into
+    /// Bridge fails loudly.
+    #[test]
+    fn a_promoted_bridge_starts_neutral_and_inherits_nothing() {
+        // A legacy save from before Bridge was a department, with real standing
+        // everywhere else including the department-only backward-fill path.
+        let save = ProgressSave {
+            department_standing: [
+                (Department::Medical, 7),
+                (Department::Service, 6),
+                (Department::Engineering, 5),
+            ]
+            .into_iter()
+            .collect(),
+            ..default()
+        };
+        let mut shift = Shift::default();
+
+        restore_relationship_standing(&mut shift, &save);
+
+        assert_eq!(
+            shift.standing(Department::Bridge),
+            0,
+            "a department the player has never dealt with must load neutral",
+        );
+        assert_eq!(shift.npc_standing(crate::social::ODERA), 0);
+        assert_eq!(shift.npc_standing(crate::social::SISSEL), 0);
+        // Positive control: the backward-fill itself still works, so the
+        // assertion above is not passing because restore did nothing at all.
+        assert_eq!(shift.standing(Department::Medical), 7);
+    }
+
+    #[test]
+    fn service_only_department_saves_backfill_both_service_and_botany_pairs() {
+        let save = ProgressSave {
+            department_standing: [(Department::Service, 6)].into_iter().collect(),
+            ..default()
+        };
+        let mut shift = Shift::default();
+
+        restore_relationship_standing(&mut shift, &save);
+
+        for name in [
+            crate::social::DUBOIS,
+            crate::social::AMARI,
+            crate::social::IVY,
+            crate::social::VALE,
+        ] {
+            assert_eq!(shift.npc_standing(name), 6, "{name} lost legacy standing");
+        }
+        assert_eq!(shift.standing(Department::Service), 6);
+        assert_eq!(shift.standing(Department::Botany), 6);
     }
 
     #[test]

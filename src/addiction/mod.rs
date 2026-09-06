@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 use crate::antagonist::SecuritySuspicion;
 use crate::body::Bloodstream;
 use crate::chem_data::ChemDb;
-use crate::crew::{spawn_crew_member, CrewMember, CrewPhase, CrewRoute};
+use crate::crew::{CrewMember, CrewPhase, CrewRoute};
 use crate::knowledge::Knowledge;
 use crate::net::is_authority;
 use crate::orders::{
@@ -508,14 +508,12 @@ fn generate_addict_visits(
         return;
     };
     let lane = active.iter().count() as f32 * 0.95;
-    let crew = crate::crew::recall_resident_for_order(
-        &mut commands,
-        &mut residents,
-        &crew_def.name,
-        &crew_def.role,
-        lane,
-    )
-    .unwrap_or_else(|| spawn_crew_member(&mut commands, crew_def, lane));
+    let Some(crew) =
+        crate::crew::recall_or_spawn_crew_member(&mut commands, &mut residents, crew_def, lane)
+    else {
+        intake.cancel_admission(&crew_def.name);
+        return;
+    };
 
     let reagent_name = db.reagents.get(reagent).name.clone();
     // The one spawner whose amounts are authored without knowing the reagent —

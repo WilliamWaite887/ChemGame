@@ -1551,7 +1551,7 @@ fn every_crafted_compound_has_an_explicit_identity() {
 
     assert_eq!(
         products.len(),
-        145,
+        146,
         "the audit should cover every shipped product"
     );
     for id in products {

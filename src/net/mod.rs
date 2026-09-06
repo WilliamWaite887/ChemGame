@@ -34,7 +34,7 @@ use crate::containers::{
     ArmedCharge, Container, HeldBy, InSlot, InSlotB, InSlotC, InventorySlot, SelectedInventorySlot,
     Stored,
 };
-use crate::crew::{AtCounter, CrewAppearance, CrewMember, NeedsMedicalEvacuation};
+use crate::crew::{AtCounter, CrewAppearance, CrewMember, NeedsMedicalEvacuation, StationResident};
 use crate::cult::{CultHerald, CultVisual, Cultist, RitualAnchor, RitualFocus};
 use crate::door::{Corroded, Door};
 use crate::hazards::{ActiveHazard, SmokeCloud, SmokeOwner, SmokePayload};
@@ -843,6 +843,7 @@ fn register_replication(app: &mut App) {
         .replicate::<Produce>()
         .replicate::<CrewMember>()
         .replicate::<CrewAppearance>()
+        .replicate::<StationResident>()
         // What someone is currently saying out loud. Deciding what gets said
         // is simulation and happens once, on the authority, so both chemists
         // hear the same station — the same reason radio chatter is written

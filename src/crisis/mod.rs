@@ -170,6 +170,20 @@ fn crisis_gap(band: crate::instability::StabilityBand) -> Option<(f32, f32)> {
     }
 }
 
+/// Whether the legacy walk-in crisis controller still owns this role.
+///
+/// Cargo and Medical are already migrated to utility control. Creating a new
+/// crisis visitor from either roster would put a second same-name body beside
+/// the resident and give the legacy order pipeline a competing controller.
+/// Their workplace injuries now enter the utility Medical case flow instead;
+/// this legacy generator remains staged on the departments not yet migrated.
+fn legacy_crisis_owns_role(role: &str) -> bool {
+    matches!(
+        Department::from_role(role),
+        Some(Department::Security) | Some(Department::Engineering) | Some(Department::Service)
+    )
+}
+
 /// Watches `UnderworldStanding`, warns, then afflicts a crew member.
 ///
 /// Gated on `Shift::accepting_orders` like every other new-traffic spawn —
@@ -232,7 +246,18 @@ fn schedule_crisis(
 
     if due {
         schedule.next_in = None;
-        let case_index = rng.random_range(0..script.cases.len().max(1));
+        let eligible_cases: Vec<_> = script
+            .cases
+            .iter()
+            .enumerate()
+            .filter_map(|(index, case)| {
+                legacy_crisis_owns_role(&case.afflicted_role).then_some(index)
+            })
+            .collect();
+        let Some(&case_index) = eligible_cases.choose(&mut rng) else {
+            warn!("crisis script has no cases owned by the legacy controller");
+            return;
+        };
         schedule.clock.arm(
             rng.random_range(script.warning_seconds.0..=script.warning_seconds.1),
             case_index,
@@ -273,6 +298,12 @@ fn afflict_victim(
     deadline_seconds: (f32, f32),
     radio: &mut RadioLog,
 ) {
+    // Defensive as well as selection-time: an already-armed countdown can
+    // survive a hot-reloaded script. Never let that stale selection create a
+    // competing Cargo or Medical body after those departments migrated.
+    if !legacy_crisis_owns_role(&case.afflicted_role) {
+        return;
+    }
     let Some(harm) = db.reagents.id_of(&case.harm_reagent) else {
         warn!(
             "crisis case names unknown harm reagent '{}'",
@@ -543,6 +574,7 @@ fn pulse_alert_lighting(
 mod tests {
     use super::*;
     use crate::orders::OrderConfig;
+    use bevy::ecs::system::RunSystemOnce;
     use std::time::Duration;
 
     fn data() -> chem_sim::ChemData {
@@ -566,6 +598,78 @@ mod tests {
         let critical = crisis_gap(StabilityBand::Critical).unwrap();
         assert!(unstable.0 < strained.0 && unstable.1 < strained.1);
         assert!(critical.0 < unstable.0 && critical.1 < unstable.1);
+    }
+
+    #[test]
+    fn legacy_crises_exclude_departments_owned_by_utility_ai() {
+        assert!(!legacy_crisis_owns_role("Cargo"));
+        assert!(!legacy_crisis_owns_role("Medical"));
+        assert!(legacy_crisis_owns_role("Security"));
+        assert!(legacy_crisis_owns_role("Engineering"));
+    }
+
+    #[test]
+    fn a_migrated_crisis_case_never_spawns_a_second_same_name_body() {
+        let mut app = App::new();
+        app.insert_resource(ChemDb(data()))
+            .insert_resource({
+                let crew: Vec<CrewDef> =
+                    ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap();
+                let config: OrderConfig =
+                    ron::from_str(include_str!("../../assets/data/station.orders.ron")).unwrap();
+                StationData { crew, config }
+            })
+            .init_resource::<RadioLog>();
+        app.world_mut().spawn((
+            crate::crew::CrewMember {
+                name: "Miner Sato".to_string(),
+                role: "Cargo".to_string(),
+            },
+            crate::crew::StationResident,
+            crate::utility_ai::UtilityControlBundle::new(crate::utility_ai::UtilityAgent::new(
+                7, 0,
+            )),
+        ));
+        let cargo_case = script()
+            .cases
+            .into_iter()
+            .find(|case| case.afflicted_role == "Cargo")
+            .expect("the authored script should keep its Cargo consequence for utility migration");
+
+        app.world_mut()
+            .run_system_once(
+                move |mut commands: Commands,
+                      db: Res<ChemDb>,
+                      station: Res<StationData>,
+                      mut radio: ResMut<RadioLog>| {
+                    afflict_victim(
+                        &mut commands,
+                        &db,
+                        &station,
+                        &cargo_case,
+                        (60.0, 90.0),
+                        &mut radio,
+                    );
+                },
+            )
+            .unwrap();
+
+        let same_name = app
+            .world_mut()
+            .query::<&crate::crew::CrewMember>()
+            .iter(app.world())
+            .filter(|member| member.name == "Miner Sato")
+            .count();
+        assert_eq!(
+            same_name, 1,
+            "the legacy crisis path must not clone a utility-owned resident"
+        );
+        assert!(app
+            .world_mut()
+            .query::<&CrisisOrder>()
+            .iter(app.world())
+            .next()
+            .is_none());
     }
 
     /// Just enough world to drive `schedule_crisis` and `afflict_victim`: no

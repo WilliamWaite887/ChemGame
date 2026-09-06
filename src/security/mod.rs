@@ -204,6 +204,25 @@ fn schedule_raid(
             return;
         }
 
+        // Then a favor owed by an illicit deal. Checked *after* the bought
+        // ward on purpose: a player holding both should spend the one they
+        // paid money for first and keep the one they are still owed. The line
+        // is different because the reason is — someone made this go away.
+        if threat::ward_absorbed(
+            &mut shift,
+            &mut radio,
+            threat::Ward::QuietAccess,
+            RadioEntry::new(
+                crate::radio::RadioChannel::Security,
+                "Security started a sweep of the lab, then quietly reassigned the officer.",
+            )
+            .speaker("Warden Bex")
+            .positive(),
+        ) {
+            clear_suspicion(&mut suspicion);
+            return;
+        }
+
         schedule.clock.arm(script.warning_seconds, 0);
         radio.push(
             RadioEntry::new(

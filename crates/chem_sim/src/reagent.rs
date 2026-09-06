@@ -264,6 +264,20 @@ pub struct ReagentDef {
     /// Controlled material even when it is not filed as an illicit drug.
     #[serde(default)]
     pub controlled: bool,
+    /// A plot material whose supply choice belongs to the player alone.
+    ///
+    /// Distinct from both `controlled` (Security cares) and `Category::Illicit`
+    /// (never legitimately requested), because neither of those means what this
+    /// does: **no NPC job, covert action, incident generator, shop, load hook,
+    /// or campaign step may ever spawn this for NPC use.** The only way an NPC
+    /// holds one is a physical batch a player handed over, and a covert action
+    /// needing it scores zero when no such stock remains.
+    ///
+    /// Deliberately narrow. Dangerous chemicals that arise naturally from Botany
+    /// or ordinary station processes stay available through those real sources;
+    /// tagging them here would remove player agency rather than protect it.
+    #[serde(default)]
+    pub player_only: bool,
     /// Optional related inverse form produced by a reaction-quality branch.
     #[serde(default)]
     pub inverse: Option<String>,
@@ -386,6 +400,9 @@ pub struct Reagent {
     pub ph: f32,
     pub explosive: Option<ExplosiveProfile>,
     pub controlled: bool,
+    /// See [`ReagentDef::player_only`]. Only a player-supplied physical batch
+    /// can ever put this in NPC hands.
+    pub player_only: bool,
     pub inverse: Option<String>,
     pub recovers_to: Option<String>,
     pub overdose: Option<Units>,
@@ -484,6 +501,7 @@ impl ReagentRegistry {
             ph: def.ph.clamp(0.0, 14.0),
             explosive: def.explosive,
             controlled: def.controlled,
+            player_only: def.player_only,
             inverse: def.inverse,
             recovers_to: def.recovers_to,
             overdose: def.overdose,

@@ -1,0 +1,83 @@
+// Needs, break, and social-action tuning for the utility AI.
+//
+// These were deliberate placeholders in Rust while the behaviour was being
+// built — the comment on `NpcNeeds::advance` said so. They are here now because
+// this is the whole point of the numbers: balancing how quickly a station gets
+// hungry, how appealing a mess hall is, or how long two people talk should be a
+// text edit and a restart, not a rebuild.
+//
+// Every value is validated on load (`NeedsTuning::validate`). A file that says
+// something impossible — a negative rate, a threshold outside 0..1, a
+// `starting` need already past its own threshold — fails the game to start
+// rather than producing an unreadably strange station.
+//
+// What is NOT here, on purpose:
+//
+// - Anything the chemistry already decides. `social_disposition` and
+//   `fit_for_leisure` read `Bloodstream` statuses directly; duplicating a
+//   "sedated multiplier" here would create a second mood model that could
+//   disagree with the first.
+// - The physical facts of the map. Seat capacities and spot positions live in
+//   `lab.map`, because they are geometry.
+(
+    // How fast each pressure builds, in units per second, on a 0..1 scale.
+    // A rate of 1/1200 means full pressure after twenty minutes of continuous
+    // play. Hunger climbs fastest because eating is the action with somewhere
+    // to go and something to consume; fatigue is slowest so rest stays a
+    // punctuation rather than a routine.
+    rates: (
+        hunger_per_second: 0.000833,
+        fatigue_per_second: 0.000417,
+        social_per_second: 0.000556,
+    ),
+
+    // Where a shift starts. Non-zero so residents feel like people mid-day
+    // rather than machines fresh off a rack, but each must sit below its own
+    // threshold below — otherwise the station opens with everyone already
+    // abandoning their posts, which `validate` refuses.
+    starting: (
+        hunger: 0.15,
+        fatigue: 0.1,
+        social: 0.2,
+    ),
+
+    // The pressure at which a resident will consider the matching break. Not a
+    // command: an offer at threshold still has to outscore the work in front of
+    // them, and `Idle`/`Routine` bucketing means a casualty always wins.
+    thresholds: (
+        tired_enough_to_rest: 0.45,
+        lonely_enough_to_talk: 0.5,
+    ),
+
+    // How long each action occupies the body, in seconds, and how much pressure
+    // it relieves. Recovery is deliberately less than 1.0: a single meal or sit
+    // does not reset a person to factory condition, so needs stay a rhythm
+    // instead of a sawtooth.
+    actions: (
+        rest_seconds: 6.0,
+        socialize_seconds: 5.0,
+        rest_recovery: 0.6,
+        social_recovery: 0.55,
+        // Talking is worth a small, bounded amount of standing to *both*
+        // participants. Kept at 1 because it is repeatable; the pair cooldown
+        // below is what stops it being a grinding loop.
+        social_standing_gain: 1,
+        pair_cooldown_seconds: 90.0,
+    ),
+
+    // How attractive Service looks right now, as multipliers on a break offer.
+    // A modifier, never a command — nothing in the codebase sends a resident to
+    // Service. These only change how a break the resident already wanted gets
+    // scored against staying put.
+    appeal: (
+        // Food that is actually served and still has portions left.
+        food_bonus: 0.35,
+        // A mess hall with nothing to eat is worse than a neutral room.
+        no_food_penalty: 0.4,
+        // Uncleared plates. Small, because it is unpleasant, not dangerous.
+        dirty_penalty: 0.25,
+        // Every seat taken. Also small: crowded is a reason to go elsewhere,
+        // not a reason to stay at a workbench indefinitely.
+        crowded_penalty: 0.3,
+    ),
+)

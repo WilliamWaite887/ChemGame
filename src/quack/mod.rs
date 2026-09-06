@@ -117,19 +117,7 @@ fn generate_quack_visit(
     shift: Res<Shift>,
     chemists: Query<(), With<Chemist>>,
     social: Option<Res<crate::social::SocialState>>,
-    mut residents: Query<
-        (
-            Entity,
-            &crate::crew::CrewMember,
-            &crate::body::Body,
-            &crate::body::Bloodstream,
-            &mut crate::crew::CrewRoute,
-        ),
-        (
-            With<crate::crew::Ambient>,
-            Without<crate::social::NpcCommitment>,
-        ),
-    >,
+    mut residents: crate::crew::AvailableResidents,
     mut intake: crate::order_intake::Intake,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
@@ -155,7 +143,7 @@ fn generate_quack_visit(
         .as_deref()
         .is_some_and(|social| social.selected(crate::social::ResidentAntagonist::OkonkwoQuack));
     if resident_bound
-        && !residents.iter_mut().any(|(_, member, body, blood, _)| {
+        && !residents.iter_mut().any(|(_, member, body, blood, ..)| {
             member.name == identity && !body.0.collapsed && !blood.0.incapacitated()
         })
     {
@@ -187,7 +175,7 @@ fn generate_quack_visit(
     ) else {
         return;
     };
-    threat::dispatch_scripted_visit(
+    if threat::dispatch_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
@@ -202,7 +190,11 @@ fn generate_quack_visit(
             amount_units: visit.amount,
             plea: visit.plea.clone(),
         },
-    );
+    )
+    .is_none()
+    {
+        intake.cancel_admission(&identity);
+    }
 }
 
 /// Advances the chain — and, on an expired visit, treats someone anyway.

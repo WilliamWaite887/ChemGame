@@ -310,6 +310,14 @@ enum PanelAction {
     OpenOrders,
     ShowSocialDepartment(Department),
     SelectSocialResident(String),
+    /// Answer a live illicit approach from this crew member.
+    ///
+    /// Carries the requester's name and the chosen response. The response is
+    /// re-validated against the authored terms on the way through — the UI only
+    /// ever builds buttons from `LiveApproaches::options_for`, but a stale
+    /// button from a previous frame must not be able to commit a deal the
+    /// requester never offered.
+    AnswerApproach(String, crate::utility_ai::DealResponse),
     CloseSocial,
     Close,
 }
@@ -559,7 +567,7 @@ struct PanelSignature {
     department_standing: Vec<(Department, i32)>,
     /// Botanist Ivy's own individual standing - what her personal shop's
     /// affordability dimming reads. Almost always moves in step with
-    /// `department_standing`'s Service entry (an individual delta moves that
+    /// `department_standing`'s Botany entry (an individual delta moves that
     /// department's shown average too), but tracked explicitly rather than
     /// relying on that correlation, the same way `arc` is tracked separately
     /// from the plot number it is derived from.
@@ -870,16 +878,33 @@ struct BoardView<'w, 's> {
     radio_scroll:
         Query<'w, 's, (&'static ScrollPosition, &'static ComputedNode), With<RadioHistoryPane>>,
     social_view: Res<'w, SocialView>,
-    social_residents: Query<
-        'w,
-        's,
-        (
-            &'static CrewMember,
-            Option<&'static PublicRelationship>,
-            Option<&'static ConversationHistory>,
-        ),
-    >,
+    social_residents: Query<'w, 's, SocialResidentData>,
+    /// Replicated department condition and intake state. A guest holds these
+    /// components too, which is what lets the whole menu draw on a client
+    /// without ever reading the authority-only job board.
+    department_status: Query<'w, 's, DepartmentStatusData>,
 }
+
+/// Everything the Crew menu reads about one department's current condition.
+///
+/// A named alias for the same reason [`SocialResidentData`] is one: both are
+/// replicated, public facts, and the tuple crossed clippy's complexity bar.
+type DepartmentStatusData = (
+    &'static crate::utility_ai::PublicDepartmentStatus,
+    Option<&'static crate::utility_ai::PublicAidStatus>,
+);
+
+/// Everything the Crew menu reads about one resident.
+///
+/// A named alias because the tuple crossed clippy's complexity threshold when
+/// the live-approach component joined it — all four are replicated, public
+/// facts, which is the property that matters here.
+type SocialResidentData = (
+    &'static CrewMember,
+    Option<&'static PublicRelationship>,
+    Option<&'static ConversationHistory>,
+    Option<&'static crate::utility_ai::PublicApproach>,
+);
 
 impl BoardView<'_, '_> {
     fn stage(&self, knowledge: &Knowledge) -> BoardStage {
@@ -907,18 +932,75 @@ impl BoardView<'_, '_> {
                 let visible = self
                     .social_residents
                     .iter()
-                    .find(|(member, _, _)| member.name == name);
+                    .find(|(member, _, _, _)| member.name == name);
                 ResidentSocialSnapshot {
                     name: name.to_string(),
                     relationship: visible
-                        .and_then(|(_, relationship, _)| relationship.cloned())
+                        .and_then(|(_, relationship, _, _)| relationship.cloned())
                         .unwrap_or_default(),
                     history: visible
-                        .and_then(|(_, _, history)| history.cloned())
+                        .and_then(|(_, _, history, _)| history.cloned())
                         .unwrap_or_default(),
+                    approach: visible.and_then(|(_, _, _, approach)| approach.cloned()),
                 }
             })
             .collect()
+    }
+}
+
+/// What the Crew menu shows about one department's current condition.
+///
+/// Built from replicated components only. `None` means the projection has not
+/// published yet (a fresh join, or a client one frame ahead), and the menu
+/// renders the department without a condition line rather than inventing one.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct DepartmentStatusSnapshot {
+    status: Option<crate::utility_ai::PublicDepartmentStatus>,
+    aid: Option<crate::utility_ai::PublicAidStatus>,
+}
+
+/// Every department's condition at once, plus the selected one.
+///
+/// The two travel together everywhere — the rail draws all seven, the page
+/// draws the selected one — so they are one parameter rather than two. The
+/// rail *is* the crew overview: the plan is explicit that the Crew menu must
+/// not grow a second competing screen, and a seven-row rail that already lists
+/// every department is the natural place for seven conditions.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct StationStatusSnapshot {
+    departments: Vec<(Department, DepartmentStatusSnapshot)>,
+    selected: DepartmentStatusSnapshot,
+}
+
+impl StationStatusSnapshot {
+    fn get(&self, department: Department) -> Option<&DepartmentStatusSnapshot> {
+        self.departments
+            .iter()
+            .find(|(other, _)| *other == department)
+            .map(|(_, snapshot)| snapshot)
+    }
+}
+
+impl BoardView<'_, '_> {
+    fn department_snapshot(&self, department: Department) -> DepartmentStatusSnapshot {
+        let found = self
+            .department_status
+            .iter()
+            .find(|(status, _)| status.department == department);
+        DepartmentStatusSnapshot {
+            status: found.map(|(status, _)| *status),
+            aid: found.and_then(|(_, aid)| aid.cloned()),
+        }
+    }
+
+    fn station_snapshot(&self, selected: Department) -> StationStatusSnapshot {
+        StationStatusSnapshot {
+            departments: Department::ALL
+                .into_iter()
+                .map(|department| (department, self.department_snapshot(department)))
+                .collect(),
+            selected: self.department_snapshot(selected),
+        }
     }
 }
 
@@ -927,6 +1009,9 @@ struct ResidentSocialSnapshot {
     name: String,
     relationship: PublicRelationship,
     history: ConversationHistory,
+    /// A live illicit approach from this person, if the player has heard one.
+    /// Replicated, and carries only what was said to their face.
+    approach: Option<crate::utility_ai::PublicApproach>,
 }
 
 #[derive(Clone, Copy)]
@@ -1241,6 +1326,7 @@ fn sync_panel(
         return;
     }
     if matches!(mode, InteractionMode::Social { .. }) {
+        let station_conditions = board.station_snapshot(board.social_view.department);
         spawn_social_directory(
             &mut commands,
             &board.social_view,
@@ -1250,6 +1336,7 @@ fn sync_panel(
             board.station.as_deref(),
             &views.icons,
             entrance,
+            &station_conditions,
         );
         return;
     }
@@ -1567,6 +1654,8 @@ fn department_icon(department: Department) -> BookIcon {
         Department::Engineering => BookIcon::ReactionChamber,
         Department::Cargo => BookIcon::Inputs,
         Department::Service => BookIcon::Orders,
+        Department::Botany => BookIcon::RawReagent,
+        Department::Bridge => BookIcon::Recorded,
     }
 }
 
@@ -1627,6 +1716,11 @@ fn signed_standing(standing: i32) -> String {
 /// The anytime social directory. Its composition deliberately mirrors the
 /// new field manual: a fixed category rail, one generous scrolling detail
 /// pane, compact fact chips, inset cards, and the same blue active state.
+///
+/// The parameter count is content, not accident: this screen draws the roster,
+/// the shops, the produce catalog, the station data and now the department
+/// conditions, and each is an independent read the caller already holds.
+#[allow(clippy::too_many_arguments)]
 fn spawn_social_directory(
     commands: &mut Commands,
     view: &SocialView,
@@ -1637,6 +1731,9 @@ fn spawn_social_directory(
     icons: &BookIconAssets,
     // See `spawn_reference_book`: the same handoff, on the same shell.
     entrance: bookmarks::PanelEntrance,
+    // Every department's public condition, from replicated state: the rail
+    // draws all seven, the page draws the selected one.
+    conditions: &StationStatusSnapshot,
 ) {
     let heard_lines: usize = residents
         .iter()
@@ -1757,9 +1854,16 @@ fn spawn_social_directory(
                             ..default()
                         })
                         .with_children(|columns| {
-                            social_department_sidebar(columns, view, shift, icons);
+                            social_department_sidebar(columns, view, shift, icons, conditions);
                             social_department_page(
-                                columns, view, residents, shift, catalog, station, icons,
+                                columns,
+                                view,
+                                residents,
+                                shift,
+                                catalog,
+                                station,
+                                icons,
+                                &conditions.selected,
                             );
                         });
                 });
@@ -1771,6 +1875,7 @@ fn social_department_sidebar(
     view: &SocialView,
     shift: &Shift,
     icons: &BookIconAssets,
+    conditions: &StationStatusSnapshot,
 ) {
     columns
         .spawn((
@@ -1819,12 +1924,113 @@ fn social_department_sidebar(
                         11.0,
                         TEXT,
                     ));
+                    // The rail doubles as the crew overview: one glance says
+                    // which department needs attention. Only rendered once the
+                    // projection has published, for the same reason the
+                    // department page stays silent until then.
+                    if let Some(public) = conditions
+                        .get(department)
+                        .and_then(|snapshot| snapshot.status)
+                    {
+                        control.spawn(label(
+                            public.condition.label(),
+                            10.0,
+                            condition_color(public.condition),
+                        ));
+                    }
                 });
                 if department == view.department {
                     entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
                 }
             }
         });
+}
+
+/// The colour a condition reads at. Deliberately not a gradient: these are five
+/// named states, and a player should be able to tell `Strained` from
+/// `Backlogged` at a glance rather than comparing two similar oranges.
+fn condition_color(condition: crate::utility_ai::DepartmentCondition) -> Color {
+    use crate::utility_ai::DepartmentCondition;
+    match condition {
+        DepartmentCondition::OnSchedule => GOOD_TEXT,
+        DepartmentCondition::Busy => TEXT,
+        DepartmentCondition::Strained => Color::srgb(0.92, 0.78, 0.36),
+        DepartmentCondition::Backlogged => Color::srgb(0.95, 0.60, 0.28),
+        DepartmentCondition::Emergency => ERROR_TEXT,
+    }
+}
+
+/// One line of "what is this department dealing with right now", plus the
+/// intake state if anything has been donated.
+///
+/// Every value here came off a replicated component. Nothing in this function
+/// can reach the job board, the incident ledger, or a utility score — which is
+/// the structural reason the menu cannot leak them.
+fn department_condition_strip(
+    pane: &mut ChildSpawnerCommands,
+    status: &DepartmentStatusSnapshot,
+    icons: &BookIconAssets,
+) {
+    let Some(public) = status.status else {
+        // Nothing published yet. Say nothing rather than claim "on schedule",
+        // which would be a fact the station has not actually asserted.
+        return;
+    };
+    pane.spawn((
+        Node {
+            width: percent(100),
+            flex_wrap: FlexWrap::Wrap,
+            align_items: AlignItems::Center,
+            column_gap: px(6),
+            row_gap: px(5),
+            padding: UiRect::axes(px(8), px(6)),
+            border_radius: BorderRadius::all(px(6)),
+            ..default()
+        },
+        BackgroundColor(BOOK_PAPER),
+    ))
+    .with_children(|strip| {
+        // The reason has to be *on screen*, not in a tooltip. A label with its
+        // evidence hidden behind a hover is exactly the "trust me" status the
+        // plan forbids, so both go in the rendered value.
+        fact_chip(
+            strip,
+            icons,
+            BookIcon::All,
+            format!("{} — {}", public.condition.label(), public.reason.text()),
+            public.condition.label(),
+            "What the department is dealing with, from work you can go and look at.",
+            condition_color(public.condition),
+        );
+        fact_chip(
+            strip,
+            icons,
+            BookIcon::All,
+            format!("{}/{}", public.workers_present, public.workers_total),
+            "On duty",
+            "Crew currently able to work, out of the department's roster.",
+            TEXT,
+        );
+        if let Some(aid) = status.aid.as_ref().filter(|aid| aid.state.is_some()) {
+            let state = aid.state.expect("filtered to Some");
+            fact_chip(
+                strip,
+                icons,
+                BookIcon::Inputs,
+                // The claim, never the contents. An unlabelled donation stays
+                // unlabelled here — the menu does not analyse it for you.
+                format!(
+                    "{}: {}",
+                    state.label(),
+                    aid.claimed_label.as_deref().unwrap_or("unlabelled"),
+                ),
+                "Donated batch",
+                "What you donated, and how far the department has got with it. \
+                 The label is what was written on it, not what is in it.",
+                TEXT_DIM,
+            );
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1836,6 +2042,7 @@ fn social_department_page(
     catalog: Option<&ProduceCatalog>,
     station: Option<&StationData>,
     icons: &BookIconAssets,
+    status: &DepartmentStatusSnapshot,
 ) {
     columns
         .spawn((
@@ -1884,6 +2091,7 @@ fn social_department_page(
                 ));
             });
             pane.spawn(label(view.department.blurb(), 14.0, TEXT_DIM));
+            department_condition_strip(pane, status, icons);
 
             pane.spawn(wrap_row()).with_children(|cards| {
                 for resident in residents.iter().filter(|resident| {
@@ -1936,6 +2144,59 @@ fn social_department_page(
         });
 }
 
+/// The player-facing name for a response.
+///
+/// Plain verbs rather than system names: the panel is a record of a
+/// conversation, so it says what the player would have said.
+fn approach_answer_label(response: &crate::utility_ai::DealResponse) -> &'static str {
+    use crate::utility_ai::DealResponse as R;
+    match response {
+        R::Cooperate => "Agree",
+        R::Negotiate => "Offer less",
+        R::Counteroffer { .. } => "Offer something else",
+        R::Delay => "Put them off",
+        R::Refuse => "Say no",
+        // Named separately because they are different acts, not one act with a
+        // setting: each hands over something physically different and is caught
+        // by a different means.
+        R::Deceive { method } => match method {
+            crate::utility_ai::DeceptionMethod::Diluted => "Water it down",
+            crate::utility_ai::DeceptionMethod::Substituted => "Swap it for something else",
+            crate::utility_ai::DeceptionMethod::Marked => "Agree, but mark it",
+        },
+        R::Report => "Tell Security",
+    }
+}
+
+/// What each answer actually does, in the terms the player can act on.
+///
+/// States the trade rather than the mechanism — no meters, no numbers. The
+/// hints for `Say no` and `Tell Security` are deliberately different: refusing
+/// closes the offer, reporting closes it *and* spends the player's standing
+/// with the people who make such offers.
+fn approach_answer_hint(response: &crate::utility_ai::DealResponse) -> &'static str {
+    use crate::utility_ai::DealResponse as R;
+    match response {
+        R::Cooperate => "Hand over exactly what they asked for. Best terms, and they will have it.",
+        R::Negotiate => "Supply part of it for part of the reward.",
+        R::Counteroffer { .. } => "Offer a safer substitute instead. Worth less to them.",
+        R::Delay => "Say nothing yet. They will ask again.",
+        R::Refuse => "Turn them down. The offer goes away.",
+        R::Deceive { method } => match method {
+            crate::utility_ai::DeceptionMethod::Diluted => {
+                "Hand over less than you promised. Shows up in the dose, if it is used."
+            }
+            crate::utility_ai::DeceptionMethod::Substituted => {
+                "Hand over something else under the same label. The chemistry will not match."
+            }
+            crate::utility_ai::DeceptionMethod::Marked => {
+                "Hand over the real thing, tagged. Traceable back to you if anyone looks."
+            }
+        },
+        R::Report => "Take it to Security. Closes the offer and costs you off-book access.",
+    }
+}
+
 fn draw_resident_record(panel: &mut ChildSpawnerCommands, resident: &ResidentSocialSnapshot) {
     panel
         .spawn((
@@ -1970,6 +2231,48 @@ fn draw_resident_record(panel: &mut ChildSpawnerCommands, resident: &ResidentSoc
                 12.0,
                 TEXT_DIM,
             ));
+            // A live approach, if this person has made one. Deliberately not
+            // labelled "illicit": the panel states the terms the player was
+            // given and lets them judge, rather than tagging the character as
+            // a criminal, which would hand the player an answer the station
+            // has not earned.
+            if let Some(approach) = &resident.approach {
+                record.spawn(label("THEY ASKED YOU FOR", 13.0, BOOK_ACCENT));
+                record.spawn(label(
+                    format!("{} — {} units", approach.reagent, approach.amount),
+                    13.0,
+                    TEXT,
+                ));
+                record.spawn(label(
+                    match &approach.answered {
+                        Some(response) => {
+                            format!("You said: {}", approach_answer_label(response))
+                        }
+                        None => "You have not answered yet.".to_string(),
+                    },
+                    12.0,
+                    TEXT_DIM,
+                ));
+                record.spawn(wrap_row()).with_children(|choices| {
+                    for option in &approach.options {
+                        let chosen = approach.answered.as_ref() == Some(option);
+                        let mut entity = choices.spawn(icon_control(
+                            PanelAction::AnswerApproach(resident.name.clone(), option.clone()),
+                            approach_answer_label(option).to_string(),
+                            approach_answer_hint(option),
+                            170.0,
+                            52.0,
+                        ));
+                        entity.with_children(|card| {
+                            card.spawn(label(approach_answer_label(option), 13.0, TEXT));
+                        });
+                        if chosen {
+                            entity.insert((Selected, BackgroundColor(BUTTON_ACTIVE)));
+                        }
+                    }
+                });
+            }
+
             record.spawn(label("REMEMBERED DIALOGUE", 13.0, BOOK_ACCENT));
             if resident.history.lines.is_empty() {
                 record.spawn(label(
@@ -2120,7 +2423,7 @@ fn draw_department_sellers(
     station: Option<&StationData>,
 ) {
     match department {
-        Department::Service => {
+        Department::Botany => {
             if let Some(catalog) = catalog {
                 let items: Vec<_> = catalog
                     .packs()
@@ -2207,7 +2510,12 @@ fn draw_department_sellers(
                 ),
             ],
         ),
-        Department::Medical | Department::Security => {}
+        // Bridge trades in information, not supplies, so it has no shop —
+        // the same as Medical, Security, and Service.
+        Department::Medical
+        | Department::Security
+        | Department::Service
+        | Department::Bridge => {}
     }
 }
 
@@ -8755,6 +9063,7 @@ struct PanelMessages<'w> {
     leave_machine: MessageWriter<'w, LeaveMachineRequested>,
     unlock_all: MessageWriter<'w, UnlockAllRequested>,
     buy_hint: MessageWriter<'w, BuyHintRequested>,
+    answer_approach: MessageWriter<'w, crate::utility_ai::AnswerApproachRequested>,
     upgrade_dispenser: MessageWriter<'w, UpgradeDispenserRequested>,
     play: MessageWriter<'w, PlaySfx>,
 }
@@ -8883,6 +9192,16 @@ fn handle_panel_clicks(
                     social_view.department = department;
                     social_view.resident = Some(resident.clone());
                 }
+                continue;
+            }
+            PanelAction::AnswerApproach(requester, response) => {
+                // The authority re-validates: this only says what the player
+                // clicked. See `handle_approach_answers`.
+                out.answer_approach
+                    .write(crate::utility_ai::AnswerApproachRequested {
+                        requester: requester.clone(),
+                        response: response.clone(),
+                    });
                 continue;
             }
             PanelAction::CloseSocial => {
@@ -9053,6 +9372,8 @@ fn handle_panel_clicks(
             | PanelAction::ShowSocialDepartment(_)
             | PanelAction::SelectSocialResident(_)
             | PanelAction::CloseSocial
+            // Handled above, where it writes its request and `continue`s.
+            | PanelAction::AnswerApproach(_, _)
             | PanelAction::Requisition(_)
             | PanelAction::NpcPack(_)
             | PanelAction::Close => {}
@@ -9184,15 +9505,43 @@ mod tests {
         assert_eq!(standing_label(-12), "Strained");
     }
 
-    fn spawn_social_screen_fixture(mut commands: Commands, icons: Res<BookIconAssets>) {
+    /// Lets a test drive the condition line the way the projection would.
+    /// Defaults to "nothing published", which is the fresh-join state.
+    #[derive(Resource, Default)]
+    struct FixtureStatus(DepartmentStatusSnapshot);
+
+    fn spawn_social_screen_fixture(
+        mut commands: Commands,
+        icons: Res<BookIconAssets>,
+        status: Option<Res<FixtureStatus>>,
+    ) {
         let residents = crate::social::RESIDENT_NAMES
             .into_iter()
             .map(|name| ResidentSocialSnapshot {
                 name: name.into(),
                 relationship: PublicRelationship::default(),
                 history: ConversationHistory::default(),
+                approach: None,
             })
             .collect::<Vec<_>>();
+        let fallback = DepartmentStatusSnapshot::default();
+        let selected = status.as_ref().map_or(&fallback, |status| &status.0);
+        // The rail shows every department. The fixture drives one, so the
+        // other six stay unpublished — which also exercises the mixed case a
+        // real client sees while the projection is catching up.
+        let station = StationStatusSnapshot {
+            departments: Department::ALL
+                .into_iter()
+                .map(|department| {
+                    let snapshot = match selected.status {
+                        Some(public) if public.department == department => selected.clone(),
+                        _ => DepartmentStatusSnapshot::default(),
+                    };
+                    (department, snapshot)
+                })
+                .collect(),
+            selected: selected.clone(),
+        };
         spawn_social_directory(
             &mut commands,
             &SocialView::default(),
@@ -9204,6 +9553,7 @@ mod tests {
             // This fixture asserts on the finished screen's contents, not on
             // how it arrives, so it starts settled.
             bookmarks::PanelEntrance::settled(),
+            &station,
         );
     }
 
@@ -9242,6 +9592,129 @@ mod tests {
         }
     }
 
+    fn crew_menu_text(status: Option<FixtureStatus>) -> String {
+        let mut app = App::new();
+        app.add_plugins((TaskPoolPlugin::default(), AssetPlugin::default()))
+            .init_asset::<Image>()
+            .init_resource::<BookIconAssets>()
+            .add_systems(Startup, spawn_social_screen_fixture);
+        if let Some(status) = status {
+            app.insert_resource(status);
+        }
+        app.update();
+        let mut text = app.world_mut().query::<&Text>();
+        text.iter(app.world())
+            .map(|text| text.0.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn department_status(
+        condition: crate::utility_ai::DepartmentCondition,
+        reason: crate::utility_ai::ConditionReason,
+    ) -> FixtureStatus {
+        FixtureStatus(DepartmentStatusSnapshot {
+            status: Some(crate::utility_ai::PublicDepartmentStatus {
+                department: Department::Medical,
+                condition,
+                reason,
+                workers_present: 2,
+                workers_total: 3,
+            }),
+            aid: None,
+        })
+    }
+
+    #[test]
+    fn a_changing_department_condition_changes_what_the_crew_menu_says() {
+        use crate::utility_ai::{ConditionReason, DepartmentCondition};
+        let calm = crew_menu_text(Some(department_status(
+            DepartmentCondition::OnSchedule,
+            ConditionReason::WorkInProgress { count: 0 },
+        )));
+        assert!(calm.contains("On schedule"), "{calm}");
+
+        let swamped = crew_menu_text(Some(department_status(
+            DepartmentCondition::Backlogged,
+            ConditionReason::QueuedWork { count: 4 },
+        )));
+        assert!(swamped.contains("Backlogged"));
+        assert!(
+            swamped.contains("4 jobs waiting"),
+            "the label needs its inspectable reason beside it: {swamped}",
+        );
+        assert!(!swamped.contains("On schedule"));
+    }
+
+    #[test]
+    fn the_directory_rail_doubles_as_the_crew_overview() {
+        // The plan forbids a second competing screen, so the overview is the
+        // rail: every department is already listed there, and its condition
+        // goes beside its standing. One glance says where to go.
+        use crate::utility_ai::{ConditionReason, DepartmentCondition};
+        let visible = crew_menu_text(Some(department_status(
+            DepartmentCondition::Emergency,
+            ConditionReason::ActiveIncident { count: 1 },
+        )));
+        for department in Department::ALL {
+            assert!(
+                visible.contains(department.label()),
+                "{} left the rail",
+                department.label(),
+            );
+        }
+        // Medical is the fixture's department, and its condition rides along.
+        assert!(visible.contains("Emergency"), "{visible}");
+    }
+
+    #[test]
+    fn the_crew_menu_shows_headcount_but_never_a_utility_score() {
+        use crate::utility_ai::{ConditionReason, DepartmentCondition};
+        let visible = crew_menu_text(Some(department_status(
+            DepartmentCondition::Strained,
+            ConditionReason::AllWorkersEngaged { count: 3 },
+        )));
+        assert!(visible.contains("2/3"), "on-duty headcount: {visible}");
+        for leak in ["SCORE", "UTILITY", "URGENCY", "RESERVATION", "TICKET"] {
+            assert!(
+                !visible.to_uppercase().contains(leak),
+                "the crew menu leaked private AI state: {leak}",
+            );
+        }
+    }
+
+    #[test]
+    fn an_unpublished_department_gets_no_invented_condition() {
+        // A fresh join has no projection yet. Saying "On schedule" would be
+        // asserting a fact the station has not published.
+        let visible = crew_menu_text(None);
+        assert!(visible.contains("CREW DIRECTORY"));
+        assert!(!visible.contains("On schedule"), "{visible}");
+        assert!(!visible.contains("Backlogged"));
+    }
+
+    #[test]
+    fn donated_contents_appear_only_as_the_claim_that_was_written_on_them() {
+        // The spoiler boundary: the menu shows what the label said and how far
+        // the department has got, never what is actually in the container.
+        let visible = crew_menu_text(Some(FixtureStatus(DepartmentStatusSnapshot {
+            status: Some(crate::utility_ai::PublicDepartmentStatus {
+                department: Department::Medical,
+                condition: crate::utility_ai::DepartmentCondition::Busy,
+                reason: crate::utility_ai::ConditionReason::WorkInProgress { count: 1 },
+                workers_present: 2,
+                workers_total: 3,
+            }),
+            aid: Some(crate::utility_ai::PublicAidStatus {
+                department: Department::Medical,
+                state: Some(crate::utility_ai::AidState::Accepted),
+                claimed_label: Some("saline".into()),
+            }),
+        })));
+        assert!(visible.contains("Accepted"));
+        assert!(visible.contains("saline"));
+    }
+
     #[test]
     fn social_navigation_and_shops_do_not_require_an_open_machine_panel() {
         let mut app = App::new();
@@ -9269,6 +9742,7 @@ mod tests {
             .add_message::<LeaveMachineRequested>()
             .add_message::<UnlockAllRequested>()
             .add_message::<BuyHintRequested>()
+            .add_message::<crate::utility_ai::AnswerApproachRequested>()
             .add_message::<UpgradeDispenserRequested>()
             .add_message::<PlaySfx>()
             .add_systems(Update, handle_panel_clicks);
@@ -9942,7 +10416,7 @@ mod tests {
         let (db, _) = book_fixture();
         assert_eq!(
             db.reactions.recipe_count(),
-            145,
+            146,
             "update the visual audit when recipe breadth changes"
         );
 

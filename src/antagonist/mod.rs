@@ -21,7 +21,7 @@ use serde::Deserialize;
 
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, HeldBy};
-use crate::crew::{spawn_crew_member, CrewMember, CrewPhase, CrewRoute};
+use crate::crew::{CrewMember, CrewPhase, CrewRoute};
 use crate::interaction::{InteractRequested, Interactable};
 use crate::machines::{chemist_entity, ReactionsFired};
 use crate::net::is_authority;
@@ -49,6 +49,11 @@ const STING_WARNING_SECONDS: f32 = 6.0;
 /// spent), so this alone decides whether the clue lands before the visit is
 /// over or only makes sense in hindsight afterwards.
 const PRIMING_DELAY_SECONDS: (f32, f32) = (0.0, 90.0);
+
+/// A named resident being busy is temporary, unlike invalid authored data.
+/// Retry quickly enough that the already-due offer is preserved without
+/// running the full rare-visit gap again.
+const RESIDENT_OFFER_RETRY_SECONDS: f32 = 1.0;
 
 /// Seconds after a successful illicit delivery before the chaos it caused
 /// gets reported back. Much longer than the priming delay — the priming
@@ -323,6 +328,21 @@ struct IllicitOffer {
     waited: f32,
 }
 
+/// Removes the private offer state and the offer-owned interaction prompt
+/// before another controller takes the NPC. The queued world command keeps
+/// [`IllicitOffer`] private and makes an unconditional call safe for entities
+/// that are not currently offering anything.
+pub(crate) fn cancel_illicit_offer(commands: &mut Commands, entity: Entity) {
+    commands.queue(move |world: &mut World| {
+        if world.get::<IllicitOffer>(entity).is_none() {
+            return;
+        }
+        if let Ok(mut visitor) = world.get_entity_mut(entity) {
+            visitor.remove::<IllicitOffer>().remove::<Interactable>();
+        }
+    });
+}
+
 /// This thread's authored script, once loaded.
 type Script = threat::Authored<AntagonistScript>;
 
@@ -416,7 +436,7 @@ fn generate_antagonist_orders(
         let offer = *in_standing_offers
             .choose(&mut rng)
             .expect("checked non-empty above");
-        spawn_illicit_offer(
+        if spawn_illicit_offer(
             &mut commands,
             &db,
             &mut rng,
@@ -424,7 +444,12 @@ fn generate_antagonist_orders(
             offer,
             lane,
             patience,
-        );
+            &active,
+            &mut residents,
+        ) == IllicitOfferSpawn::Retry
+        {
+            spawner.timer = Timer::from_seconds(RESIDENT_OFFER_RETRY_SECONDS, TimerMode::Once);
+        }
         return;
     }
 
@@ -477,14 +502,12 @@ fn generate_antagonist_orders(
     ) else {
         return;
     };
-    let crew = crate::crew::recall_resident_for_order(
-        &mut commands,
-        &mut residents,
-        &crew_def.name,
-        &crew_def.role,
-        lane,
-    )
-    .unwrap_or_else(|| spawn_crew_member(&mut commands, crew_def, lane));
+    let Some(crew) =
+        crate::crew::recall_or_spawn_crew_member(&mut commands, &mut residents, crew_def, lane)
+    else {
+        intake.cancel_admission(&crew_def.name);
+        return;
+    };
 
     let reagent_name = db.reagents.get(reagent).name.clone();
     let amount = deliverable_amount(&db, reagent, Units::whole(amount as i32));
@@ -525,6 +548,13 @@ fn generate_antagonist_orders(
 /// plain function rather than inlined into [`generate_antagonist_orders`],
 /// mirroring the separation `spawn_scripted_visit` already draws between
 /// picking a visit and building one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IllicitOfferSpawn {
+    Spawned,
+    Retry,
+    Invalid,
+}
+
 fn spawn_illicit_offer(
     commands: &mut Commands,
     db: &ChemDb,
@@ -533,28 +563,38 @@ fn spawn_illicit_offer(
     offer: &AntagonistOfferDef,
     lane: f32,
     patience: f32,
-) {
+    active: &Query<&CrewMember, crate::crew::NotResident>,
+    residents: &mut crate::crew::AvailableResidents,
+) -> IllicitOfferSpawn {
     let Some(reagent) = db.reagents.id_of(&offer.reagent) else {
         warn!("antagonist offer names unknown reagent '{}'", offer.reagent);
-        return;
+        return IllicitOfferSpawn::Invalid;
     };
     let Some(&amount) = offer.amounts.choose(rng) else {
-        return;
+        return IllicitOfferSpawn::Invalid;
     };
-    let candidates: Vec<_> = station
+    let mut candidates: Vec<_> = station
         .crew
         .iter()
         .filter(|def| def.role == offer.role)
+        .filter(|def| !active.iter().any(|member| member.name == def.name))
         .collect();
-    let Some(crew_def) = candidates.choose(rng).copied() else {
+    if candidates.is_empty() {
         warn!(
-            "no crew member with role '{}' to voice an antagonist offer",
+            "no available crew member with role '{}' to voice an antagonist offer",
             offer.role
         );
-        return;
+        return IllicitOfferSpawn::Retry;
+    }
+    candidates.shuffle(rng);
+
+    let Some((crew, crew_def)) = candidates.into_iter().find_map(|crew_def| {
+        crate::crew::recall_or_spawn_crew_member(commands, residents, crew_def, lane)
+            .map(|crew| (crew, crew_def))
+    }) else {
+        return IllicitOfferSpawn::Retry;
     };
 
-    let crew = spawn_crew_member(commands, crew_def, lane);
     commands.entity(crew).insert((
         IllicitOffer {
             reagent,
@@ -573,6 +613,7 @@ fn spawn_illicit_offer(
         "antagonist: {} ({}) is offering {}u {} for {}",
         crew_def.name, crew_def.role, amount, offer.reagent, offer.cost
     );
+    IllicitOfferSpawn::Spawned
 }
 
 // ---------------------------------------------------------------------------
@@ -782,6 +823,7 @@ fn expire_illicit_offers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::RunSystemOnce;
 
     // -- meter invariants ----------------------------------------------------
 
@@ -1236,6 +1278,110 @@ mod tests {
     }
 
     #[test]
+    fn canceling_an_offer_removes_its_private_payload_and_prompt() {
+        let mut app = offer_pickup_app();
+        let offer = waiting_offer(&mut app, "space_drugs", 5, 4);
+        app.world_mut()
+            .entity_mut(offer)
+            .insert(Interactable::new("Private offer"));
+
+        app.world_mut()
+            .run_system_once(move |mut commands: Commands| {
+                cancel_illicit_offer(&mut commands, offer);
+                cancel_illicit_offer(&mut commands, offer);
+            })
+            .unwrap();
+
+        assert!(app.world().get::<IllicitOffer>(offer).is_none());
+        assert!(app.world().get::<Interactable>(offer).is_none());
+    }
+
+    #[test]
+    fn a_busy_cargo_roster_keeps_the_offer_due_without_cloning_a_resident() {
+        let mut app = forced_offer_app(10);
+        app.world_mut()
+            .resource_mut::<Script>()
+            .0
+            .offers
+            .retain(|offer| offer.role == "Cargo");
+        let sato = app
+            .world_mut()
+            .spawn((
+                crate::crew::CrewMember {
+                    name: "Miner Sato".to_string(),
+                    role: "Cargo".to_string(),
+                },
+                crate::body::Body::default(),
+                crate::body::Bloodstream::default(),
+                crate::crew::StationResident,
+                crate::utility_ai::UtilityControlBundle::new(crate::utility_ai::UtilityAgent::new(
+                    11, 0,
+                )),
+            ))
+            .id();
+        app.world_mut().spawn((
+            crate::crew::CrewMember {
+                name: "Quartermaster Rhee".to_string(),
+                role: "Cargo".to_string(),
+            },
+            crate::body::Body::default(),
+            crate::body::Bloodstream::default(),
+            crate::crew::StationResident,
+            crate::utility_ai::UtilityControlBundle::new(crate::utility_ai::UtilityAgent::new(
+                12, 0,
+            )),
+        ));
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.1));
+        app.update();
+
+        assert_eq!(
+            app.world_mut()
+                .query::<&IllicitOffer>()
+                .iter(app.world())
+                .count(),
+            0,
+            "an offer cannot take over either busy Cargo resident"
+        );
+        for name in ["Miner Sato", "Quartermaster Rhee"] {
+            assert_eq!(
+                app.world_mut()
+                    .query::<&crate::crew::CrewMember>()
+                    .iter(app.world())
+                    .filter(|member| member.name == name)
+                    .count(),
+                1,
+                "the offer path must not clone {name}"
+            );
+        }
+
+        app.world_mut()
+            .entity_mut(sato)
+            .insert((crate::crew::Ambient::new(30.0), CrewRoute::arrival(0.0)));
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(
+                RESIDENT_OFFER_RETRY_SECONDS + 0.1,
+            ));
+        app.update();
+
+        assert!(
+            app.world().get::<IllicitOffer>(sato).is_some(),
+            "the already-due offer should use the same body once Sato is free"
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&crate::crew::CrewMember>()
+                .iter(app.world())
+                .filter(|member| member.name == "Miner Sato")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn a_high_min_standing_offer_is_unreachable_below_it() {
         let script = script();
         let underworld = 0;
@@ -1268,6 +1414,16 @@ mod tests {
             assert!(
                 reagent.categories.contains(&chem_sim::Category::Illicit) || reagent.controlled,
                 "'{}' is offered but is neither illicit nor controlled",
+                offer.reagent
+            );
+            // The no-NPC-source invariant, enforced against authored data
+            // rather than trusted. An NPC-generated offer is the station
+            // spawning a reagent for the player; a player-only plot material
+            // must never arrive that way, or its supply stops being the
+            // player's choice. See `ReagentDef::player_only`.
+            assert!(
+                !reagent.player_only,
+                "'{}' is player-only and must never appear in an NPC-generated offer",
                 offer.reagent
             );
             assert!(

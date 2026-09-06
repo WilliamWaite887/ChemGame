@@ -674,18 +674,7 @@ struct Scheduling<'w, 's> {
             Without<CaseCustody>,
         ),
     >,
-    residents: Query<
-        'w,
-        's,
-        (
-            Entity,
-            &'static CrewMember,
-            &'static Body,
-            &'static Bloodstream,
-            &'static mut CrewRoute,
-        ),
-        (With<Ambient>, Without<NpcCommitment>),
-    >,
+    residents: crate::crew::AvailableResidents<'w, 's>,
 }
 fn bench_access(position: Vec3, s: &Scheduling) -> Option<Vec3> {
     // Require a real supporting worktop in Chemistry, not the floor or a remote room.
@@ -744,7 +733,7 @@ fn schedule(
     let Some(reyes_at) = s
         .residents
         .iter()
-        .find(|(_, member, body, blood, _)| {
+        .find(|(_, member, body, blood, ..)| {
             member.name == REYES && !body.0.collapsed && !blood.0.incapacitated()
         })
         .map(|(entity, ..)| entity)

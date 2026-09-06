@@ -160,6 +160,24 @@ fn travel_reserves_intake_but_does_not_spend_greeting_time() {
 }
 
 #[test]
+fn a_body_collapsed_before_acceptance_is_withdrawn_from_intake() {
+    let mut app = app();
+    let npc = visitor(&mut app, 12);
+    let mut body = Body::default();
+    body.0.collapsed = true;
+    app.world_mut().entity_mut(npc).insert(body);
+
+    tick(&mut app, 0.01);
+
+    assert!(app.world().get::<PendingOrder>(npc).is_none());
+    assert!(app.world().get::<AwaitingConversation>(npc).is_none());
+    assert_eq!(
+        app.world().get::<CrewRoute>(npc).unwrap().phase,
+        crate::crew::CrewPhase::Leaving,
+    );
+}
+
+#[test]
 fn acceptance_requires_hearing_current_request_in_reach_and_clear_sight() {
     let mut app = app();
     let player = actor(&mut app, ClientId::Server);

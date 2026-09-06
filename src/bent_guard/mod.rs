@@ -35,7 +35,7 @@ use serde::Deserialize;
 
 use crate::antagonist::{nudge_suspicion, SecuritySuspicion};
 use crate::chem_data::ChemDb;
-use crate::crew::{recall_resident_for_order, spawn_crew_member};
+use crate::crew::recall_or_spawn_crew_member;
 use crate::net::is_authority;
 use crate::orders::{deliverable_amount, IllicitOrder, Order, OrderResolved, Shift, StationData};
 use crate::player::Chemist;
@@ -150,19 +150,7 @@ fn generate_bent_guard_visit(
     shift: Res<Shift>,
     chemists: Query<(), With<Chemist>>,
     social: Option<Res<crate::social::SocialState>>,
-    mut residents: Query<
-        (
-            Entity,
-            &crate::crew::CrewMember,
-            &crate::body::Body,
-            &crate::body::Bloodstream,
-            &mut crate::crew::CrewRoute,
-        ),
-        (
-            With<crate::crew::Ambient>,
-            Without<crate::social::NpcCommitment>,
-        ),
-    >,
+    mut residents: crate::crew::AvailableResidents,
     mut intake: crate::order_intake::Intake,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
@@ -187,7 +175,7 @@ fn generate_bent_guard_visit(
         .as_deref()
         .is_some_and(|social| social.selected(crate::social::ResidentAntagonist::ReyesBentGuard));
     if resident_bound
-        && !residents.iter_mut().any(|(_, member, body, blood, _)| {
+        && !residents.iter_mut().any(|(_, member, body, blood, ..)| {
             member.name == name && !body.0.collapsed && !blood.0.incapacitated()
         })
     {
@@ -227,14 +215,11 @@ fn generate_bent_guard_visit(
         color: script.color,
     };
     let patience = rng.random_range(rules.patience_seconds.0..=rules.patience_seconds.1);
-    let crew = recall_resident_for_order(
-        &mut commands,
-        &mut residents,
-        &identity.name,
-        &identity.role,
-        0.0,
-    )
-    .unwrap_or_else(|| spawn_crew_member(&mut commands, &identity, 0.0));
+    let Some(crew) = recall_or_spawn_crew_member(&mut commands, &mut residents, &identity, 0.0)
+    else {
+        intake.cancel_admission(&identity.name);
+        return;
+    };
 
     let reagent_name = db.reagents.get(reagent).name.clone();
     let amount = deliverable_amount(&db, reagent, chem_sim::Units::whole(visit.amount as i32));

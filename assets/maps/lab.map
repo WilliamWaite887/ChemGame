@@ -3498,6 +3498,227 @@
 "occupant" "Miner Sato"
 "kind" "work"
 }
+{
+"classname" "crew_post"
+"origin" "-1760 2500 0"
+"occupant" "Quartermaster Rhee"
+"kind" "work"
+}
+// utility_spot: Cargo's first utility-AI job affordances. Each ID is stable
+// gameplay data and each capacity is enforced by the shared ReservationBook.
+// All five points are inside Cargo brush 0 (X -1904..-1380, Y 2100..3760).
+{
+"classname" "utility_spot"
+"origin" "-1500 2400 0"
+"id" "cargo.manifest"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-1500 2600 0"
+"id" "cargo.weigh"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-1500 2800 0"
+"id" "cargo.sort"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-1500 3000 0"
+"id" "cargo.dispatch"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-1500 3200 0"
+"id" "cargo.requisition"
+"capacity" "1"
+}
+// Medical patient-bed access points. Both are inside Medical brush 0
+// (X -400..120, Y 660..1448) and stay in front of the visible ward bay.
+{
+"classname" "utility_spot"
+"origin" "-320 1360 0"
+"id" "medical.bed.1"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-40 1360 0"
+"id" "medical.bed.2"
+"capacity" "1"
+}
+// Botany production affordances. These are worker positions in the carved
+// aisles, not the decoration origins inside the grow beds. Inspection,
+// irrigation, tending, harvest processing, and shelf placement therefore all
+// use the same routable utility contract as Cargo and Medical.
+{
+"classname" "utility_spot"
+"origin" "-800 400 0"
+"id" "botany.plot.inspect"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-800 -200 0"
+"id" "botany.irrigation"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-800 -420 0"
+"id" "botany.plot.tend"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-1460 100 0"
+"id" "botany.harvest.process"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-1460 600 0"
+"id" "botany.output.shelf"
+"capacity" "1"
+}
+// Engineering routine-work affordances. These are worker positions beside the
+// generator, breaker panel, pipe manifold, and power monitor decorations. The
+// points stay on Engineering's carved floor rather than inside floor fixtures.
+{
+"classname" "utility_spot"
+"origin" "-1096 4040 0"
+"id" "engineering.generator.inspect"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-1200 3800 0"
+"id" "engineering.breaker.maintenance"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-680 2800 0"
+"id" "engineering.coolant.manifold"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-1200 3360 0"
+"id" "engineering.power.monitor"
+"capacity" "1"
+}
+// Service work affordances. Ingredient intake targets the exact physical
+// Botany output wherever it rests, so only preparation, the meal pass, table
+// hosting, and cleanup need authored points. All four remain inside the joined
+// Service floor brushes and route through the room instead of teleporting.
+{
+"classname" "utility_spot"
+"origin" "-1320 1120 0"
+"id" "service.kitchen.prep"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-680 1120 0"
+"id" "service.meal.pass"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-960 1400 0"
+"id" "service.table.host"
+"capacity" "2"
+}
+{
+"classname" "utility_spot"
+"origin" "-1320 1800 0"
+"id" "service.cleanup"
+"capacity" "1"
+}
+// Break and social affordances. These sit inside the Service floor brush
+// (X -1560..-600, Y 945..1548), away from the kitchen line so a resident on
+// a break does not stand in a working coworker's reservation. `lounge.gather`
+// holds a pair, which is what makes a two-person Socialize possible.
+{
+"classname" "utility_spot"
+"origin" "-1180 1000 0"
+"id" "service.lounge.seat.1"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-1040 1000 0"
+"id" "service.lounge.seat.2"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-1110 1240 0"
+"id" "service.lounge.gather"
+"capacity" "2"
+}
+// Security work affordances. Interviews happen wherever the witness is, so
+// only the department's own fixed stations need authoring. Verified against
+// "Security" (X -400..80, Y 3340..4380) and "Security Back Room"
+// (X 80..360, Y 3340..4380); each sits clear of its fixture collider.
+{
+"classname" "utility_spot"
+"origin" "-40 3400 0"
+"id" "security.dispatch"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-250 4260 0"
+"id" "security.desk"
+"capacity" "2"
+}
+{
+"classname" "utility_spot"
+"origin" "230 4320 0"
+"id" "security.evidence"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "230 3630 0"
+"id" "security.interview.room"
+"capacity" "2"
+}
+// Bridge work affordances. The Bridge floor is four carved rectangles, not one
+// open room, so these reuse the exact coordinates of already-authored `duty`
+// crew_posts rather than picking fresh points that might land inside a
+// furniture cut-out. Verified walkable and routable by
+// `utility_spots_are_unique_walkable_and_routable`.
+{
+"classname" "utility_spot"
+"origin" "-348 2734 0"
+"id" "bridge.helm"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-380 2580 0"
+"id" "bridge.comms"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-176 2170 0"
+"id" "bridge.station.monitor"
+"capacity" "2"
+}
+{
+"classname" "utility_spot"
+"origin" "-176 2652 0"
+"id" "bridge.briefing"
+"capacity" "2"
+}
 // crew_post: Service work posts. Verified against "Service" brush 1
 // (X -1560..-600, Y 945..1548) — the department_spot itself sits only 60
 // units off the east wall, so Ivy's post is offset south instead of east.
@@ -7283,4 +7504,57 @@
 "intensity" "210000"
 "range" "7"
 "shadows_enabled" "false"
+}
+
+// utility_spot: one voluntary-aid intake per department, for
+// `utility_ai::aid`. This is where a player physically hands a container over:
+// the offer is refused unless they are standing within REACH of the spot, so
+// each one sits beside that department's existing work spots and inside its
+// room. Capacity is 1 because the intake is a single counter surface — that is
+// also what makes two same-frame offers impossible.
+//
+// A department with no spot here simply cannot receive aid. That is a real
+// authoring decision, not a fallback, so do not point two departments at one
+// origin to "fix" a missing intake.
+{
+"classname" "utility_spot"
+"origin" "-180 1360 0"
+"id" "medical.aid_intake"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-120 4260 0"
+"id" "security.aid_intake"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-1200 3600 0"
+"id" "engineering.aid_intake"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-1500 3400 0"
+"id" "cargo.aid_intake"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-680 1300 0"
+"id" "service.aid_intake"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-1460 350 0"
+"id" "botany.aid_intake"
+"capacity" "1"
+}
+{
+"classname" "utility_spot"
+"origin" "-176 2450 0"
+"id" "bridge.aid_intake"
+"capacity" "1"
 }

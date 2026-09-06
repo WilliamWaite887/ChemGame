@@ -610,7 +610,16 @@ pub(crate) fn run_pursuers(
     time: Res<Time>,
     nav: Option<Res<NavGraph>>,
     areas: Option<Res<WalkableAreas>>,
-    mut pursuers: Query<(Entity, &mut Transform, &mut Pursuit, Option<&Bloodstream>)>,
+    mut pursuers: Query<(
+        Entity,
+        &mut Transform,
+        &mut Pursuit,
+        Option<&Body>,
+        Option<&Bloodstream>,
+        Has<crate::utility_ai::UtilityAgent>,
+        Option<&crate::utility_ai::ControlOwner>,
+        Option<&crate::utility_ai::LocomotionOwner>,
+    )>,
     mut chemists: Query<(Entity, &Transform, &mut Body, &Chemist), Without<Pursuit>>,
     mut felt: MessageWriter<ToClients<HazardFelt>>,
     mut sounds: Option<ResMut<Messages<EmitWorldSfx>>>,
@@ -618,8 +627,17 @@ pub(crate) fn run_pursuers(
 ) {
     let dt = time.delta_secs();
 
-    for (entity, mut transform, mut pursuit, blood) in &mut pursuers {
-        if blood.is_some_and(|blood| blood.0.status(chem_sim::StatusKind::Pacified).intensity > 0.0)
+    for (entity, mut transform, mut pursuit, body, blood, utility_agent, owner, locomotion) in
+        &mut pursuers
+    {
+        if body.is_some_and(|body| body.0.collapsed)
+            || blood.is_some_and(|blood| {
+                blood.0.incapacitated()
+                    || blood.0.status(chem_sim::StatusKind::Pacified).intensity > 0.0
+            })
+            || (utility_agent
+                && (owner != Some(&crate::utility_ai::ControlOwner::Pursuit)
+                    || locomotion != Some(&crate::utility_ai::LocomotionOwner::Pursuit)))
         {
             pursuit.moving = false;
             continue;
@@ -1405,6 +1423,66 @@ mod tests {
                 .status(chem_sim::StatusKind::Sedated)
                 .intensity,
             0.0
+        );
+    }
+
+    #[test]
+    fn a_utility_pursuer_moves_only_with_exact_pursuit_ownership_and_while_conscious() {
+        let mut areas = WalkableAreas::default();
+        areas.push(
+            Bounds {
+                min_x: -4.0,
+                max_x: 8.0,
+                min_z: -2.0,
+                max_z: 2.0,
+            },
+            None,
+        );
+        let mut app = pursuit_app(areas);
+        let (assailant, chemist) =
+            spawn_pursuit_pair(&mut app, Vec3::ZERO, Vec3::new(6.0, 0.0, 0.0));
+        app.world_mut().entity_mut(assailant).insert((
+            Body::default(),
+            Bloodstream::default(),
+            crate::utility_ai::UtilityControlBundle::new(crate::utility_ai::UtilityAgent::new(
+                55, 0,
+            )),
+        ));
+        let start = app.world().get::<Transform>(assailant).unwrap().translation;
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f32(0.5));
+        app.update();
+        assert_eq!(
+            app.world().get::<Transform>(assailant).unwrap().translation,
+            start,
+            "a Pursuit component cannot bypass the utility locomotion owner",
+        );
+
+        *app.world_mut()
+            .get_mut::<crate::utility_ai::ControlOwner>(assailant)
+            .unwrap() = crate::utility_ai::ControlOwner::Pursuit;
+        *app.world_mut()
+            .get_mut::<crate::utility_ai::LocomotionOwner>(assailant)
+            .unwrap() = crate::utility_ai::LocomotionOwner::Pursuit;
+        app.world_mut()
+            .get_mut::<Body>(assailant)
+            .unwrap()
+            .0
+            .collapsed = true;
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f32(0.5));
+        app.update();
+        assert_eq!(
+            app.world().get::<Transform>(assailant).unwrap().translation,
+            start,
+            "collapse overrides a valid pursuit lease",
+        );
+        assert_eq!(
+            app.world().get::<Body>(chemist).unwrap().0.total(),
+            Units::ZERO,
         );
     }
 

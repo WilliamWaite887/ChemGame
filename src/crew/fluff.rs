@@ -6,9 +6,9 @@
 //! `station.crew.ron` matches it, so `populate_departments` had nobody to put
 //! there. The room was a set, not a place.
 //!
-//! These six are ordinary residents in every respect that matters — a `Body`, a
-//! `Bloodstream`, a wander, an `Interactable` — and deliberately *not* on the
-//! roster, for the reason [`FLUFF_CREW`] documents.
+//! These support workers are ordinary residents in every physical respect that
+//! matters: a `Body`, a `Bloodstream`, navigation, and an `Interactable`. They
+//! stay off the core customer roster for the reason [`FLUFF_CREW`] documents.
 
 use bevy::prelude::*;
 
@@ -17,6 +17,19 @@ use super::{
     StationResident, DWELL_SECONDS,
 };
 use crate::interaction::Interactable;
+
+pub(crate) const CARGO_SUPPORT_NAMES: [&str; 2] = ["Loader Bell", "Clerk Nwosu"];
+pub(crate) const MEDICAL_SUPPORT_NAMES: [&str; 2] = ["Paramedic Hale", "Orderly Imani"];
+pub(crate) const BOTANY_SUPPORT_NAMES: [&str; 2] = ["Grower Chen", "Technician Mbatha"];
+pub(crate) const ENGINEERING_SUPPORT_NAMES: [&str; 2] = ["Mechanic Torres", "Systems Tech Adeyemi"];
+pub(crate) const SERVICE_SUPPORT_NAMES: [&str; 2] = ["Cook Navarro", "Attendant Mensah"];
+pub(crate) const SECURITY_SUPPORT_NAMES: [&str; 2] = ["Patrol Officer Dlamini", "Dispatcher Novak"];
+pub(crate) const BRIDGE_SUPPORT_NAMES: [&str; 4] = [
+    "Ensign Park",
+    "Ensign Alvarez",
+    "Operator Fenn",
+    "Operator Ruiz",
+];
 
 /// The off-roster cast, as `(name, role)`.
 ///
@@ -27,11 +40,15 @@ use crate::interaction::Interactable;
 /// does with its own off-roster guards, and it is safe for the same reasons:
 ///
 /// - not on the roster, so never selected as an order customer;
-/// - `social::RESIDENT_NAMES` is a fixed eight and `social::resident_department`
+/// - `social::RESIDENT_NAMES` is the core cast and `social::resident_department`
 ///   returns `None` for anyone else, so the favor and relationship systems never
 ///   see them;
-/// - `orders::Department::from_role` returns `None` for `"Bridge"`, so standing
-///   and grading ignore them;
+/// - `Department::members()` lists only the two core names per department, and
+///   `Shift::standing` averages over *that* list, so a support worker never
+///   moves a department's standing. This used to read "`from_role` returns
+///   `None` for Bridge" — no longer true now that Bridge is a real department,
+///   which is exactly why the guarantee is stated against `members()` instead:
+///   role strings stopped being the thing that keeps support workers out;
 /// - `CrewAssets::theme_for` falls through to the neutral uniform.
 ///
 /// Every role here **must** name a `department_spot` in the map. A role with no
@@ -41,19 +58,29 @@ use crate::interaction::Interactable;
 /// pins this. That is why the two Bridge Operations officers are `"Bridge"`
 /// too: the room they stand in is decided by their duty post, not their role.
 const FLUFF_CREW: &[(&str, &str)] = &[
-    ("Ensign Park", "Bridge"),
-    ("Ensign Alvarez", "Bridge"),
-    ("Yeoman Sissel", "Bridge"),
-    ("Helmsman Odera", "Bridge"),
-    ("Operator Fenn", "Bridge"),
-    ("Operator Ruiz", "Bridge"),
+    (BRIDGE_SUPPORT_NAMES[0], "Bridge"),
+    (BRIDGE_SUPPORT_NAMES[1], "Bridge"),
+    (BRIDGE_SUPPORT_NAMES[2], "Bridge"),
+    (BRIDGE_SUPPORT_NAMES[3], "Bridge"),
+    (CARGO_SUPPORT_NAMES[0], "Cargo"),
+    (CARGO_SUPPORT_NAMES[1], "Cargo"),
+    (MEDICAL_SUPPORT_NAMES[0], "Medical"),
+    (MEDICAL_SUPPORT_NAMES[1], "Medical"),
+    (BOTANY_SUPPORT_NAMES[0], "Botany"),
+    (BOTANY_SUPPORT_NAMES[1], "Botany"),
+    (ENGINEERING_SUPPORT_NAMES[0], "Engineering"),
+    (ENGINEERING_SUPPORT_NAMES[1], "Engineering"),
+    (SERVICE_SUPPORT_NAMES[0], "Service"),
+    (SERVICE_SUPPORT_NAMES[1], "Service"),
+    (SECURITY_SUPPORT_NAMES[0], "Security"),
+    (SECURITY_SUPPORT_NAMES[1], "Security"),
 ];
 
 /// Uniform tint. Presentation only — `CrewAssets::theme_for` picks the actual
 /// model, and an unrecognised role lands on the neutral one.
 const FLUFF_COLOR: [f32; 3] = [0.62, 0.66, 0.74];
 
-/// Gives the Bridge somebody to be on it.
+/// Gives the Bridge and each currently migrated department their support cast.
 ///
 /// Registered beside `populate_departments` and under the *same* run conditions,
 /// deliberately: the long comment on that registration describes a real bug
@@ -63,17 +90,18 @@ pub(super) fn populate_fluff_posts(
     mut commands: Commands,
     departments: Res<Departments>,
     crew_posts: Res<CrewPosts>,
-    existing: Query<&CrewMember, With<Ambient>>,
+    existing: Query<&CrewMember, With<StationResident>>,
 ) {
     for (name, role) in FLUFF_CREW {
-        // A duty spot if the map has one, otherwise their department point.
+        // Bridge support uses communal duty posts. Department support starts at
+        // its department point until utility selection sends it to real work.
         // Falling back rather than skipping keeps the station populated even
         // in a build whose map authors no duty posts yet, exactly as
         // `populate_departments` falls back from a work post.
-        let Some(home) = crew_posts
-            .random_duty()
-            .or_else(|| departments.home(role))
-        else {
+        let duty = (*role == "Bridge")
+            .then(|| crew_posts.random_duty())
+            .flatten();
+        let Some(home) = duty.or_else(|| departments.home(role)) else {
             continue;
         };
         if existing.iter().any(|member| member.name == *name) {
@@ -92,7 +120,7 @@ pub(super) fn populate_fluff_posts(
             CrewRoute::to(home),
             // Nothing else can re-create them: unlike a resident, no order flow
             // draws these names, so a body that walks off the station is gone
-            // for the rest of the save and the Bridge quietly empties out.
+            // for the rest of the save and its department quietly empties out.
             StationResident,
             Interactable::new(format!("{name} — {role}")),
         ));
@@ -123,20 +151,17 @@ mod tests {
     }
 
     #[test]
-    fn fluff_roles_never_reach_the_standing_or_social_systems() {
+    fn support_workers_never_join_the_core_social_roster() {
         for (name, role) in FLUFF_CREW {
-            assert!(
-                crate::orders::Department::from_role(role).is_none(),
-                "role '{role}' is a real department, so {name} would move its standing",
-            );
             assert!(
                 crate::social::resident_department(name).is_none(),
                 "{name} is a social resident, so the favor system would target them",
             );
             assert!(
                 !crate::social::RESIDENT_NAMES.contains(name),
-                "{name} is in RESIDENT_NAMES, which is meant to be the roster eight",
+                "{name} is in RESIDENT_NAMES, which is reserved for core characters",
             );
+            assert!(!role.trim().is_empty());
         }
     }
 
@@ -169,7 +194,7 @@ mod tests {
         let script: crate::crisis::CrisisScript =
             ron::from_str(include_str!("../../assets/data/station.crisis.ron")).unwrap();
         for case in &script.cases {
-            for (_, role) in FLUFF_CREW {
+            for (_, role) in FLUFF_CREW.iter().filter(|(_, role)| *role == "Bridge") {
                 assert!(
                     !case.responders.iter().any(|listed| listed == role),
                     "'{role}' is listed as a crisis responder but has no medical duty",

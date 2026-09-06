@@ -164,7 +164,7 @@ fn generate_obsessed_visit(
     ) else {
         return;
     };
-    let visitor = threat::dispatch_scripted_visit(
+    let Some(visitor) = threat::dispatch_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
@@ -179,7 +179,10 @@ fn generate_obsessed_visit(
             amount_units: visit.amount,
             plea: visit.plea.clone(),
         },
-    );
+    ) else {
+        intake.cancel_admission(&script.name);
+        return;
+    };
 
     let extra = visit.unsettling_line.clone();
     commands.queue(move |world: &mut World| {

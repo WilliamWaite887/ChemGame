@@ -23,7 +23,8 @@ use serde::Deserialize;
 use crate::chem_data::ChemDb;
 use crate::containers::{Container, HeldBy, InSlot, Stored};
 use crate::crew::{
-    spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewPosts, CrewRoute, NotResident,
+    recall_or_spawn_crew_member, AvailableResidents, CrewDef, CrewMember, CrewPhase, CrewPosts,
+    CrewRoute, NotResident,
 };
 use crate::interaction::Interactable;
 use crate::net::is_authority;
@@ -42,6 +43,9 @@ use crate::AppState;
 const LOITER_CHECK_SECONDS: (f32, f32) = (90.0, 180.0);
 /// How long they stand there before wandering off.
 const LOITER_DWELL_SECONDS: f32 = 20.0;
+/// A resident's real work wins over this atmospheric beat. Keep the loiter
+/// check due and retry after their current owner releases them.
+const LOITER_RETRY_SECONDS: f32 = 1.0;
 
 pub struct SmugglerPlugin;
 
@@ -139,6 +143,28 @@ fn arm_loiter_spawner(mut commands: Commands) {
 #[derive(Component)]
 struct Loitering {
     dwell: f32,
+    /// Whether this visit installed the generic loiter interaction label.
+    /// Recalled residents keep their authored label, which cancellation must
+    /// not erase when used outside Medical admission.
+    owns_prompt: bool,
+}
+
+/// Revokes the private atmospheric action before another controller takes the
+/// NPC. It removes the interaction prompt only when this module created it and
+/// is safe to call unconditionally or more than once.
+pub(crate) fn cancel_smuggler_loitering(commands: &mut Commands, entity: Entity) {
+    commands.queue(move |world: &mut World| {
+        let Some(loitering) = world.get::<Loitering>(entity) else {
+            return;
+        };
+        let owns_prompt = loitering.owns_prompt;
+        if let Ok(mut visitor) = world.get_entity_mut(entity) {
+            visitor.remove::<Loitering>();
+            if owns_prompt {
+                visitor.remove::<Interactable>();
+            }
+        }
+    });
 }
 
 /// Sends the smuggler's identity to visibly loiter at an authored
@@ -157,6 +183,7 @@ fn loiter_smuggler(
     shift: Res<Shift>,
     present: Query<&CrewMember, NotResident>,
     social: Option<Res<crate::social::SocialState>>,
+    mut residents: AvailableResidents,
 ) {
     let (Some(script), Some(spawner)) = (script, spawner.as_mut()) else {
         return;
@@ -196,16 +223,47 @@ fn loiter_smuggler(
         role: script.role.clone(),
         color: script.color,
     };
-    let entity = spawn_crew_member(&mut commands, &def, 0.0);
-    commands.entity(entity).insert((
-        Loitering {
-            dwell: LOITER_DWELL_SECONDS,
-        },
-        Interactable::new("Cargo tech, killing time off the manifest."),
-    ));
+    let (resident_exists, resident_busy) = {
+        let mut exists = false;
+        let mut busy = false;
+        for (_, member, body, blood, _, _, action, _, _, ambient, committed) in residents.iter_mut()
+        {
+            if member.name != def.name {
+                continue;
+            }
+            exists = true;
+            busy = !ambient
+                || committed
+                || action.is_some()
+                || body.0.collapsed
+                || blood.0.incapacitated();
+            break;
+        }
+        (exists, busy)
+    };
+    if resident_busy {
+        spawner.timer = Timer::from_seconds(LOITER_RETRY_SECONDS, TimerMode::Once);
+        return;
+    }
+    let Some(entity) = recall_or_spawn_crew_member(&mut commands, &mut residents, &def, 0.0) else {
+        spawner.timer = Timer::from_seconds(LOITER_RETRY_SECONDS, TimerMode::Once);
+        return;
+    };
+    let mut entity_commands = commands.entity(entity);
+    entity_commands.insert(Loitering {
+        dwell: LOITER_DWELL_SECONDS,
+        owns_prompt: !resident_exists,
+    });
+    // A recalled resident already has their authored identity label. Only the
+    // disposable outsider needs this loiter-specific interaction text.
+    if !resident_exists {
+        entity_commands.insert(Interactable::new(
+            "Cargo tech, killing time off the manifest.",
+        ));
+    }
     // Overwrite the default counter-bound arrival route: they are here to be
     // seen, not to be served.
-    commands.entity(entity).insert(CrewRoute::to(spot));
+    entity_commands.insert(CrewRoute::to(spot));
 }
 
 /// Ticks the loiter dwell down once they've actually arrived, and sends them
@@ -238,19 +296,7 @@ fn generate_smuggler_visit(
     shift: Res<Shift>,
     chemists: Query<(), With<Chemist>>,
     social: Option<Res<crate::social::SocialState>>,
-    mut residents: Query<
-        (
-            Entity,
-            &crate::crew::CrewMember,
-            &crate::body::Body,
-            &crate::body::Bloodstream,
-            &mut crate::crew::CrewRoute,
-        ),
-        (
-            With<crate::crew::Ambient>,
-            Without<crate::social::NpcCommitment>,
-        ),
-    >,
+    mut residents: crate::crew::AvailableResidents,
     mut intake: crate::order_intake::Intake,
 ) {
     let (Some(station), Some(script), Some(spawner)) = (station, script, spawner.as_mut()) else {
@@ -276,7 +322,7 @@ fn generate_smuggler_visit(
         .as_deref()
         .is_some_and(|social| social.selected(crate::social::ResidentAntagonist::SatoSmuggler));
     if resident_bound
-        && !residents.iter_mut().any(|(_, member, body, blood, _)| {
+        && !residents.iter_mut().any(|(_, member, body, blood, ..)| {
             member.name == identity && !body.0.collapsed && !blood.0.incapacitated()
         })
     {
@@ -308,7 +354,7 @@ fn generate_smuggler_visit(
     ) else {
         return;
     };
-    threat::dispatch_scripted_visit(
+    if threat::dispatch_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
@@ -323,7 +369,11 @@ fn generate_smuggler_visit(
             amount_units: visit.amount,
             plea: visit.plea.clone(),
         },
-    );
+    )
+    .is_none()
+    {
+        intake.cancel_admission(&identity);
+    }
 }
 
 /// Containers nobody is holding and nothing is holding.
@@ -449,6 +499,7 @@ mod tests {
     use crate::containers::ContainerKind;
     use crate::orders::Outcome;
     use crate::orders::{Department, OrderKind};
+    use bevy::ecs::system::RunSystemOnce;
 
     fn script() -> SmugglerScript {
         ron::from_str(include_str!("../../assets/data/station.smuggler.ron"))
@@ -519,6 +570,107 @@ mod tests {
 
         let mut spawned = app.world_mut().query::<&Loitering>();
         assert_eq!(spawned.iter(app.world()).count(), 0);
+    }
+
+    #[test]
+    fn a_busy_named_resident_is_retried_and_never_cloned_for_loitering() {
+        let mut app = loiter_app();
+        app.world_mut().resource_mut::<Script>().0.name = "Miner Sato".to_string();
+        let sato = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Miner Sato".to_string(),
+                    role: "Cargo".to_string(),
+                },
+                crate::body::Body::default(),
+                crate::body::Bloodstream::default(),
+                crate::crew::StationResident,
+                crate::utility_ai::UtilityControlBundle::new(crate::utility_ai::UtilityAgent::new(
+                    21, 0,
+                )),
+            ))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.1));
+        app.update();
+
+        assert!(app.world().get::<Loitering>(sato).is_none());
+        assert_eq!(
+            app.world_mut()
+                .query::<&CrewMember>()
+                .iter(app.world())
+                .filter(|member| member.name == "Miner Sato")
+                .count(),
+            1,
+            "an atmospheric visit must not clone a busy resident"
+        );
+
+        app.world_mut()
+            .entity_mut(sato)
+            .insert((crate::crew::Ambient::new(30.0), CrewRoute::arrival(0.0)));
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(
+                LOITER_RETRY_SECONDS + 0.1,
+            ));
+        app.update();
+
+        assert!(
+            app.world().get::<Loitering>(sato).is_some(),
+            "the pending loiter beat should reuse Sato once he is idle"
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&CrewMember>()
+                .iter(app.world())
+                .filter(|member| member.name == "Miner Sato")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn canceling_loitering_removes_only_the_prompt_owned_by_the_visit() {
+        let mut app = loiter_app();
+        let outsider = app
+            .world_mut()
+            .spawn((
+                Loitering {
+                    dwell: 10.0,
+                    owns_prompt: true,
+                },
+                Interactable::new("Loiter prompt"),
+            ))
+            .id();
+        let resident = app
+            .world_mut()
+            .spawn((
+                Loitering {
+                    dwell: 10.0,
+                    owns_prompt: false,
+                },
+                Interactable::new("Authored resident prompt"),
+            ))
+            .id();
+
+        app.world_mut()
+            .run_system_once(move |mut commands: Commands| {
+                cancel_smuggler_loitering(&mut commands, outsider);
+                cancel_smuggler_loitering(&mut commands, outsider);
+                cancel_smuggler_loitering(&mut commands, resident);
+            })
+            .unwrap();
+
+        assert!(app.world().get::<Loitering>(outsider).is_none());
+        assert!(app.world().get::<Interactable>(outsider).is_none());
+        assert!(app.world().get::<Loitering>(resident).is_none());
+        assert_eq!(
+            app.world().get::<Interactable>(resident).unwrap().label,
+            "Authored resident prompt"
+        );
     }
 
     /// A beaker sitting out on the counter with nobody holding it.

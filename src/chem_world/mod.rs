@@ -993,11 +993,16 @@ fn respond_to_unwanted_exposure(
     mut radio: Option<ResMut<RadioLog>>,
     areas: Option<Res<crate::lab::WalkableAreas>>,
     mut victims: Query<(
+        Entity,
         &CrewMember,
-        &mut CrewRoute,
+        Option<&mut CrewRoute>,
         &Transform,
         &Bloodstream,
         Option<&ReportedChemicalIncident>,
+        Has<crate::utility_ai::UtilityAgent>,
+        Option<&crate::utility_ai::CurrentAction>,
+        Option<&mut crate::utility_ai::ControlOwner>,
+        Option<&mut crate::utility_ai::LocomotionOwner>,
     )>,
     witnesses: Query<(Entity, &Transform), With<CrewMember>>,
 ) {
@@ -1006,8 +1011,18 @@ fn respond_to_unwanted_exposure(
         if exposure.authorized {
             continue;
         }
-        let Ok((victim, mut route, victim_transform, blood, reported)) =
-            victims.get_mut(exposure.target)
+        let Ok((
+            victim_entity,
+            victim,
+            mut route,
+            victim_transform,
+            blood,
+            reported,
+            utility_agent,
+            action,
+            owner,
+            locomotion,
+        )) = victims.get_mut(exposure.target)
         else {
             continue;
         };
@@ -1037,7 +1052,15 @@ fn respond_to_unwanted_exposure(
             // identify it over the radio while the status is active. Mark the
             // exposure handled so one lingering puddle cannot repeatedly try
             // to manufacture a report from the same event.
-            route.leave();
+            send_exposed_victim_away(
+                &mut commands,
+                victim_entity,
+                route.as_deref_mut(),
+                utility_agent,
+                action,
+                owner,
+                locomotion,
+            );
             commands
                 .entity(exposure.target)
                 .insert(ReportedChemicalIncident);
@@ -1051,7 +1074,15 @@ fn respond_to_unwanted_exposure(
             1
         } + i32::from(witnessed);
 
-        route.leave();
+        send_exposed_victim_away(
+            &mut commands,
+            victim_entity,
+            route.as_deref_mut(),
+            utility_agent,
+            action,
+            owner,
+            locomotion,
+        );
         commands
             .entity(exposure.target)
             .insert(ReportedChemicalIncident);
@@ -1108,6 +1139,49 @@ fn respond_to_unwanted_exposure(
             );
         }
     }
+}
+
+fn send_exposed_victim_away(
+    commands: &mut Commands,
+    entity: Entity,
+    route: Option<&mut CrewRoute>,
+    utility_agent: bool,
+    action: Option<&crate::utility_ai::CurrentAction>,
+    owner: Option<Mut<crate::utility_ai::ControlOwner>>,
+    locomotion: Option<Mut<crate::utility_ai::LocomotionOwner>>,
+) {
+    if !utility_agent {
+        if let Some(route) = route {
+            route.leave();
+        }
+        return;
+    }
+    let (Some(mut owner), Some(mut locomotion)) = (owner, locomotion) else {
+        return;
+    };
+    if crate::utility_ai::interrupt_utility_action(
+        commands,
+        entity,
+        action,
+        &mut owner,
+        &mut locomotion,
+        crate::utility_ai::ControlOwner::ScriptedErrand,
+        crate::utility_ai::LocomotionOwner::CrewRoute,
+    )
+    .is_err()
+    {
+        return;
+    }
+    let mut route_to_leave = CrewRoute::standing();
+    route_to_leave.leave();
+    if let Some(route) = route {
+        *route = route_to_leave;
+    } else {
+        commands.entity(entity).insert(route_to_leave);
+    }
+    commands
+        .entity(entity)
+        .insert(crate::utility_ai::NpcActivity::Traveling);
 }
 
 #[derive(Component)]
@@ -1998,6 +2072,33 @@ mod tests {
             2
         );
         assert_eq!(app.world().resource::<RadioLog>().entries.len(), 1);
+    }
+
+    #[test]
+    fn unwanted_exposure_hands_a_utility_victim_to_one_scripted_route_owner() {
+        let (mut app, actor, victim) = abuse_app(false);
+        let mut control = crate::utility_ai::UtilityControlBundle::new(
+            crate::utility_ai::UtilityAgent::new(91, 0),
+        );
+        control.locomotion = crate::utility_ai::LocomotionOwner::CrewRoute;
+        app.world_mut().entity_mut(victim).insert(control);
+        write_abuse(&mut app, actor, victim);
+
+        app.update();
+
+        assert_eq!(
+            app.world().get::<crate::utility_ai::ControlOwner>(victim),
+            Some(&crate::utility_ai::ControlOwner::ScriptedErrand),
+        );
+        assert_eq!(
+            app.world()
+                .get::<crate::utility_ai::LocomotionOwner>(victim),
+            Some(&crate::utility_ai::LocomotionOwner::CrewRoute),
+        );
+        assert_eq!(
+            app.world().get::<CrewRoute>(victim).unwrap().phase,
+            CrewPhase::Leaving,
+        );
     }
 
     #[test]

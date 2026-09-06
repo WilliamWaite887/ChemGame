@@ -24,6 +24,7 @@
 //! underneath exactly as the key would.
 
 use bevy::prelude::*;
+use bevy::ui::FocusPolicy;
 
 use super::icons::{icon_image, BookIcon, BookIconAssets};
 use super::{BOOK_ACCENT, BOOK_INSET, LABEL_INK, TEXT, TEXT_DIM};
@@ -262,11 +263,30 @@ type TabChrome = (
     &'static mut Node,
     &'static mut GlobalZIndex,
     &'static mut Visibility,
+    &'static mut FocusPolicy,
     &'static BookmarkTint,
     &'static mut BackgroundColor,
     &'static mut BorderColor,
     &'static Interaction,
 );
+
+/// Only the docked ribbon is a control.
+///
+/// Once a tab starts expanding it is presentation layered over the real screen,
+/// not a second full-size close button. Keeping this decision independent from
+/// alpha and visibility also closes the one-frame gap before inherited
+/// visibility is propagated to [`ui_focus_system`](bevy::ui::ui_focus_system).
+fn tab_accepts_click(progress: f32) -> bool {
+    progress <= 0.0
+}
+
+fn tab_focus_policy(progress: f32) -> FocusPolicy {
+    if tab_accepts_click(progress) {
+        FocusPolicy::Block
+    } else {
+        FocusPolicy::Pass
+    }
+}
 
 /// A node whose background carries a tint.
 type TintedBackground = (&'static BookmarkTint, &'static mut BackgroundColor);
@@ -433,21 +453,29 @@ pub(super) fn spawn_bookmarks(mut commands: Commands, icons: Res<BookIconAssets>
                 tab.spawn((
                     icon_image(&icons, bookmark.icon(), 22.0, accent),
                     BookmarkTint(bookmark, accent),
+                    FocusPolicy::Pass,
                 ));
-                tab.spawn(Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(3),
-                    // The tab grows as it flies out; the label column must not
-                    // stretch with it, or the text drifts away from the icon.
-                    flex_shrink: 0.0,
-                    ..default()
-                })
+                tab.spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(3),
+                        // The tab grows as it flies out; the label column must not
+                        // stretch with it, or the text drifts away from the icon.
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                    // Children are decorative. Let the root ribbon own its
+                    // docked hit area, and let the open panel receive input
+                    // through the whole subtree while the ribbon is in flight.
+                    FocusPolicy::Pass,
+                ))
                 .with_children(|stack| {
                     stack.spawn((
                         Text::new(bookmark.title()),
                         TextFont::from_font_size(12.0),
                         TextColor(TEXT),
                         BookmarkTint(bookmark, TEXT),
+                        FocusPolicy::Pass,
                     ));
                     // The key chip. Its text is left empty on purpose: the
                     // binding is written in by `update_bookmark_keys`, so a
@@ -463,6 +491,7 @@ pub(super) fn spawn_bookmarks(mut commands: Commands, icons: Res<BookIconAssets>
                             BackgroundColor(BOOK_INSET),
                             BookmarkTint(bookmark, BOOK_INSET),
                             BookmarkChip,
+                            FocusPolicy::Pass,
                         ))
                         .with_children(|chip| {
                             chip.spawn((
@@ -471,6 +500,7 @@ pub(super) fn spawn_bookmarks(mut commands: Commands, icons: Res<BookIconAssets>
                                 TextColor(TEXT_DIM),
                                 BookmarkTint(bookmark, TEXT_DIM),
                                 BookmarkKeyText(bookmark),
+                                FocusPolicy::Pass,
                             ));
                         });
                 });
@@ -513,7 +543,7 @@ pub(super) fn click_bookmarks(
     }
 
     for (interaction, tab) in &tabs {
-        if *interaction != Interaction::Pressed {
+        if *interaction != Interaction::Pressed || !tab_accepts_click(tab.progress) {
             continue;
         }
         // Clicking the tab of the screen already open closes it; clicking the
@@ -563,8 +593,17 @@ pub(super) fn animate_bookmarks(
     // pass over the children can look one up without walking the hierarchy.
     let mut alphas = [1.0f32; Bookmark::ALL.len()];
 
-    for (mut tab, mut node, mut z, mut visibility, tint, mut background, mut border, interaction) in
-        &mut tabs
+    for (
+        mut tab,
+        mut node,
+        mut z,
+        mut visibility,
+        mut focus_policy,
+        tint,
+        mut background,
+        mut border,
+        interaction,
+    ) in &mut tabs
     {
         let active = is_active(tab.bookmark, mode);
         let hovered = *interaction != Interaction::None;
@@ -605,6 +644,11 @@ pub(super) fn animate_bookmarks(
         if *visibility != wanted {
             *visibility = wanted;
         }
+
+        // The expanded ribbon is only the visual handoff to the real panel.
+        // It must neither block that panel nor interpret the panel's press as a
+        // request to close. Its decorative children are permanently `Pass`.
+        focus_policy.set_if_neq(tab_focus_policy(progress));
 
         node.left = percent(eased * TRAVEL_PERCENT);
         node.width = px(TAB_WIDTH + eased * GROWTH_WIDTH);
@@ -914,6 +958,47 @@ mod tests {
         assert!(
             GROWTH_WIDTH > 0.0 && GROWTH_HEIGHT > 0.0,
             "and it is much larger there than the ribbon on the edge"
+        );
+
+        // Input stops at the instant the ribbon leaves the edge, not only once
+        // its fade and inherited-visibility propagation have caught up.
+        assert!(tab_accepts_click(0.0));
+        assert!(!tab_accepts_click(f32::EPSILON));
+        assert!(!tab_accepts_click(1.0));
+        assert_eq!(tab_focus_policy(0.0), FocusPolicy::Block);
+        assert_eq!(tab_focus_policy(f32::EPSILON), FocusPolicy::Pass);
+        assert_eq!(tab_focus_policy(1.0), FocusPolicy::Pass);
+    }
+
+    /// A press reported on the expanded ghost must never close its screen.
+    ///
+    /// This is distinct from focus pass-through: `Interaction` is retained as
+    /// component state and can still report a changed press on the same frame
+    /// as an underlying pager button. The click handler must reject it too.
+    #[test]
+    fn an_expanded_tab_press_cannot_close_its_screen() {
+        let mut app = App::new();
+        app.add_message::<crate::audio::PlaySfx>()
+            .add_systems(Update, click_bookmarks);
+
+        let player = app
+            .world_mut()
+            .spawn((LocalPlayer, InteractionMode::ReadingBook(None)))
+            .id();
+        app.world_mut().spawn((
+            Interaction::Pressed,
+            BookmarkTab {
+                bookmark: Bookmark::Manual,
+                progress: 1.0,
+            },
+        ));
+
+        app.update();
+
+        assert_eq!(
+            *app.world().entity(player).get::<InteractionMode>().unwrap(),
+            InteractionMode::ReadingBook(None),
+            "the expanded visual must not act as the open book's close button"
         );
     }
 

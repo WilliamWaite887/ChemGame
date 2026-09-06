@@ -37,6 +37,14 @@
         (role: "Service", text: "Service to chemistry. The bar's had complaints, and they're about you."),
         (role: "Service", text: "People have started asking whether there's a chemist on this station at all."),
         (role: "Service", text: "Still shut. Morale's noticed, and morale talks."),
+
+        (role: "Botany", text: "Botany to chemistry. The plots need treatments we cannot mix ourselves."),
+        (role: "Botany", text: "Hydroponics is improvising because chemistry still will not answer."),
+        (role: "Botany", text: "The next harvest is waiting on your lab. So is the harvest after that."),
+
+        (role: "Bridge", text: "Bridge to chemistry. Your status is 'closed'. Confirm that's deliberate."),
+        (role: "Bridge", text: "We're logging a department offline for the third watch running. That escalates."),
+        (role: "Bridge", text: "Command would prefer not to explain an unstaffed lab to the next inspection."),
     ],
 
     // Aired on reopening, but only if they had actually started to care.

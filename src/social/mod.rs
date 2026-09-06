@@ -21,22 +21,38 @@ use crate::net::is_authority;
 use crate::orders::{Department, Shift};
 use crate::player::Chemist;
 use crate::speech::{say, Speech, SpeechTone};
+use crate::utility_ai::UtilityAgent;
 use crate::AppState;
 
 pub const OKONKWO: &str = "Nurse Okonkwo";
 pub const SATO: &str = "Miner Sato";
+pub const RHEE: &str = "Quartermaster Rhee";
 pub const REYES: &str = "Officer Reyes";
 pub const BEX: &str = "Warden Bex";
+pub const DUBOIS: &str = "Chef Dubois";
+pub const AMARI: &str = "Steward Amari";
+pub const IVY: &str = "Botanist Ivy";
+pub const VALE: &str = "Agronomist Vale";
+pub const LINDQVIST: &str = "Tech Lindqvist";
+pub const MORROW: &str = "Chief Engineer Morrow";
+pub const ODERA: &str = "Helmsman Odera";
+pub const SISSEL: &str = "Yeoman Sissel";
 
-pub const RESIDENT_NAMES: [&str; 8] = [
+pub const RESIDENT_NAMES: [&str; 14] = [
     "Dr. Vance",
     OKONKWO,
     REYES,
     BEX,
-    "Tech Lindqvist",
+    LINDQVIST,
+    MORROW,
     SATO,
-    "Botanist Ivy",
-    "Chef Dubois",
+    RHEE,
+    DUBOIS,
+    AMARI,
+    IVY,
+    VALE,
+    ODERA,
+    SISSEL,
 ];
 
 const FAVOR_FIRST_SECONDS: f32 = 120.0;
@@ -51,9 +67,11 @@ pub fn resident_department(name: &str) -> Option<Department> {
     match name {
         "Dr. Vance" | OKONKWO => Some(Department::Medical),
         REYES | BEX => Some(Department::Security),
-        "Tech Lindqvist" => Some(Department::Engineering),
-        SATO => Some(Department::Cargo),
-        "Botanist Ivy" | "Chef Dubois" => Some(Department::Service),
+        LINDQVIST | MORROW => Some(Department::Engineering),
+        SATO | RHEE => Some(Department::Cargo),
+        DUBOIS | AMARI => Some(Department::Service),
+        IVY | VALE => Some(Department::Botany),
+        ODERA | SISSEL => Some(Department::Bridge),
         _ => None,
     }
 }
@@ -299,6 +317,28 @@ impl SocialState {
         migrated
     }
 
+    /// Adds core residents introduced after this social save was written
+    /// without replacing any established profile, relationship, antagonist,
+    /// favor, or shared dialogue. Missing residents start as genuinely new
+    /// acquaintances; their numeric goodwill is migrated separately by
+    /// `shift`, where department averages are owned.
+    pub fn migrate_resident_roster(&mut self) {
+        let defaults = Self::fresh();
+        for name in RESIDENT_NAMES {
+            if !self.profiles.contains_key(name) {
+                self.profiles.insert(
+                    name.to_string(),
+                    defaults
+                        .profiles
+                        .get(name)
+                        .copied()
+                        .expect("fresh social state covers every resident"),
+                );
+            }
+            self.relationships.entry(name.to_string()).or_default();
+        }
+    }
+
     pub fn profile(&self, name: &str) -> Option<SocialProfile> {
         self.profiles.get(name).copied()
     }
@@ -525,7 +565,10 @@ fn restore_active_favor(
     mut commands: Commands,
     social: Res<SocialState>,
     active: Query<(), With<PersonalFavor>>,
-    residents: Query<(Entity, &CrewMember), (With<Ambient>, Without<NpcCommitment>)>,
+    residents: Query<
+        (Entity, &CrewMember),
+        (With<Ambient>, Without<NpcCommitment>, Without<UtilityAgent>),
+    >,
 ) {
     if !active.is_empty() {
         return;
@@ -620,7 +663,7 @@ fn schedule_personal_favor(
     active: Query<(), With<PersonalFavor>>,
     residents: Query<
         (Entity, &CrewMember, &Body, &Bloodstream),
-        (With<Ambient>, Without<NpcCommitment>),
+        (With<Ambient>, Without<NpcCommitment>, Without<UtilityAgent>),
     >,
     mut sounds: MessageWriter<EmitWorldSfx>,
 ) {
@@ -1343,7 +1386,10 @@ fn sync_antagonist_evidence(
 
 fn sync_resolution_prompts(
     social: Res<SocialState>,
-    mut residents: Query<(&CrewMember, &mut Interactable), (With<Ambient>, Without<NpcCommitment>)>,
+    mut residents: Query<
+        (&CrewMember, &mut Interactable),
+        (With<Ambient>, Without<NpcCommitment>, Without<UtilityAgent>),
+    >,
 ) {
     if social.antagonist_resolution != AntagonistResolution::Exposed {
         return;
@@ -1451,6 +1497,59 @@ mod tests {
         assert!(social.initialized);
         assert_eq!(social.resident_antagonist, None);
         assert_eq!(social.profiles.len(), RESIDENT_NAMES.len());
+    }
+
+    #[test]
+    fn roster_migration_adds_new_core_residents_without_rewriting_history() {
+        let mut social = SocialState::fresh();
+        social.profiles.remove(VALE);
+        social.profiles.remove(AMARI);
+        social.relationships.remove(VALE);
+        social.relationships.remove(AMARI);
+        social.relationship_mut(IVY).tier = RelationshipTier::Trusted;
+        social.remember_dialogue(IVY, "Keep the old conversation.");
+        let antagonist = social.resident_antagonist;
+
+        social.migrate_resident_roster();
+
+        assert!(social.profile(VALE).is_some());
+        assert!(social.profile(AMARI).is_some());
+        assert_eq!(social.relationships[VALE], ResidentRelationship::default());
+        assert_eq!(social.relationships[AMARI], ResidentRelationship::default());
+        assert_eq!(social.relationships[IVY].tier, RelationshipTier::Trusted);
+        assert_eq!(social.dialogue_history[IVY].len(), 1);
+        assert_eq!(social.resident_antagonist, antagonist);
+    }
+
+    #[test]
+    fn legacy_favor_system_never_attaches_a_second_intent_to_a_utility_resident() {
+        let mut social = SocialState::fresh();
+        social.active_favor = Some(ActiveFavor {
+            owner: SATO.into(),
+            stage: 1,
+            remaining_seconds: 90,
+        });
+        let mut app = App::new();
+        app.insert_resource(social)
+            .add_systems(Update, restore_active_favor);
+        let resident = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: SATO.into(),
+                    role: "Cargo".into(),
+                },
+                Ambient::new(5.0),
+                crate::utility_ai::UtilityControlBundle::new(crate::utility_ai::UtilityAgent::new(
+                    41, 0,
+                )),
+            ))
+            .id();
+
+        app.update();
+
+        assert!(app.world().get::<PersonalFavor>(resident).is_none());
+        assert!(app.world().get::<NpcCommitment>(resident).is_none());
     }
 
     #[test]

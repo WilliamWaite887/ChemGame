@@ -16,10 +16,11 @@ use crate::body::{Bloodstream, Body};
 use crate::chem_data::ChemDb;
 use crate::chem_world::{assess_exposure, ChemicalExposure, ExposureSource};
 use crate::containers::{
-    spawn_container, Container, ContainerKind, HeldBy, InSlot, InSlotB, InSlotC, Stored,
+    spawn_container, Container, ContainerKind, HeldBy, InSlot, InSlotB, InSlotC, InventorySlot,
+    Stored,
 };
 use crate::crew::{
-    recall_resident_for_order, spawn_crew_member, CrewDef, CrewMember, CrewPhase, CrewRoute,
+    recall_or_spawn_crew_member, AvailableResidents, CrewDef, CrewMember, CrewPhase, CrewRoute,
 };
 use crate::interaction::{InteractRequested, Interactable};
 use crate::knowledge::{research_for_delivery_at_purity, Knowledge};
@@ -35,6 +36,7 @@ use crate::player::Chemist;
 use crate::produce::{Produce, ProduceCatalog};
 use crate::radio::{channel_for, RadioEntry, RadioLog};
 use crate::shift::{current_rules, weighted_pick, CurrentForecast};
+use crate::utility_ai::{ControlOwner, UtilityAgent};
 use crate::AppState;
 
 /// How often a clean delivery earns a sample vial of something unfamiliar.
@@ -55,6 +57,7 @@ impl Plugin for OrderPlugin {
             RonAssetPlugin::<OrderConfig>::new(&["orders.ron"]),
         ))
         .add_message::<OrderResolved>()
+        .add_message::<FulfillmentApplied>()
         .add_message::<ChemicalExposure>()
         .add_server_message::<ShiftSync>(Channel::Ordered)
         .init_resource::<Shift>()
@@ -88,6 +91,9 @@ impl Plugin for OrderPlugin {
                     .chain()
                     .run_if(is_authority),
                 apply_shift.run_if(in_state(ClientState::Connected)),
+                apply_carried_fulfillments
+                    .after(crate::crew::walk_route)
+                    .run_if(is_authority),
             )
                 .run_if(in_state(AppState::Playing)),
         );
@@ -549,6 +555,102 @@ pub struct Order {
     pub waited: f32,
 }
 
+/// Explicit destination-use context for an order whose requester is carrying
+/// material on behalf of somebody or something else.
+///
+/// Absence preserves the legacy personal-consumption order. Presence is the
+/// only authority for separating requester from beneficiary. A role such as
+/// Medical never implies that the doctor at the counter is the patient.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct OrderUse {
+    pub beneficiary: Entity,
+    pub source: Option<Entity>,
+    pub use_destination: Vec3,
+    pub route: Route,
+    pub dose: Units,
+}
+
+impl OrderUse {
+    pub fn medical(
+        beneficiary: Entity,
+        source: Option<Entity>,
+        use_destination: Vec3,
+        route: Route,
+        dose: Units,
+    ) -> Self {
+        Self {
+            beneficiary,
+            source,
+            use_destination,
+            route,
+            dose,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FulfillmentApplicationResult {
+    Applied,
+    Empty,
+    TargetUnavailable,
+}
+
+/// Arrival-side outcome, intentionally separate from [`OrderResolved`]. The
+/// latter grades Chemistry's preparation; this message reports what happened
+/// only after the carrier reached the case and attempted application.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct FulfillmentApplied {
+    pub carrier: Entity,
+    pub beneficiary: Entity,
+    pub source: Option<Entity>,
+    pub container: Entity,
+    pub result: FulfillmentApplicationResult,
+    pub helpful: bool,
+    pub harmful: bool,
+    pub illicit: bool,
+    pub overdose: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FulfillmentTravel {
+    ToUseDestination,
+    ReturningUnresolved,
+}
+
+/// Authority-only custody and application state after Chemistry handoff.
+#[derive(Component, Clone, Copy, Debug)]
+pub(crate) struct CarryingFulfillment {
+    container: Entity,
+    beneficiary: Entity,
+    source: Option<Entity>,
+    use_destination: Vec3,
+    route: Route,
+    dose: Units,
+    supplier: Option<Entity>,
+    believed_label: bool,
+    travel: FulfillmentTravel,
+}
+
+/// Revokes a linked-delivery custody leg when another controller takes the
+/// carrier. The batch remains a physical object at the carrier's last known
+/// location, while the owning Medical case observes that its requester is no
+/// longer carrying and can publish a replacement request.
+pub(crate) fn abandon_carried_fulfillment(
+    commands: &mut Commands,
+    carrier: Entity,
+    fulfillment: &CarryingFulfillment,
+    at: Vec3,
+) {
+    commands
+        .entity(fulfillment.container)
+        .remove::<HeldBy>()
+        .insert(Transform::from_translation(at + Vec3::Y * 0.8));
+    commands
+        .entity(carrier)
+        .remove::<CarryingFulfillment>()
+        .remove::<crate::crew::AtCounter>();
+}
+
 impl Order {
     /// Seconds left before patience runs out, for the HUD countdown.
     pub fn remaining(&self) -> f32 {
@@ -781,7 +883,7 @@ pub struct DeliveryQuality {
 /// A station department whose standing rises and falls with how you treat its
 /// crew.
 ///
-/// Mirrors the five roles `station.crew.ron` actually writes — the same
+/// Mirrors the relationship roles `station.crew.ron` actually writes — the same
 /// vocabulary `radio::channel_for` already matches, for the same reason:
 /// departments are content, not architecture.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -791,15 +893,19 @@ pub enum Department {
     Engineering,
     Cargo,
     Service,
+    Botany,
+    Bridge,
 }
 
 impl Department {
-    pub const ALL: [Department; 5] = [
+    pub const ALL: [Department; 7] = [
         Department::Medical,
         Department::Security,
         Department::Engineering,
         Department::Cargo,
         Department::Service,
+        Department::Botany,
+        Department::Bridge,
     ];
 
     pub fn label(self) -> &'static str {
@@ -809,6 +915,8 @@ impl Department {
             Department::Engineering => "Engineering",
             Department::Cargo => "Cargo",
             Department::Service => "Service",
+            Department::Botany => "Botany",
+            Department::Bridge => "Bridge",
         }
     }
 
@@ -826,6 +934,12 @@ impl Department {
             }
             Department::Cargo => "Wants glassware back in circulation and crates signed for.",
             Department::Service => "Wants the bar and the kitchen kept stocked, not complaining.",
+            Department::Botany => {
+                "Wants healthy plots, safe harvests, and useful specimens put to work."
+            }
+            Department::Bridge => {
+                "Wants the station steady, the logs clean, and no surprises to report."
+            }
         }
     }
 
@@ -838,6 +952,8 @@ impl Department {
             "Engineering" => Some(Department::Engineering),
             "Cargo" => Some(Department::Cargo),
             "Service" => Some(Department::Service),
+            "Botany" => Some(Department::Botany),
+            "Bridge" => Some(Department::Bridge),
             _ => None,
         }
     }
@@ -859,9 +975,11 @@ impl Department {
         match self {
             Department::Medical => &["Dr. Vance", "Nurse Okonkwo"],
             Department::Security => &["Officer Reyes", "Warden Bex"],
-            Department::Engineering => &["Tech Lindqvist"],
-            Department::Cargo => &["Miner Sato"],
-            Department::Service => &["Botanist Ivy", "Chef Dubois"],
+            Department::Engineering => &["Tech Lindqvist", "Chief Engineer Morrow"],
+            Department::Cargo => &["Miner Sato", "Quartermaster Rhee"],
+            Department::Service => &["Chef Dubois", "Steward Amari"],
+            Department::Botany => &["Botanist Ivy", "Agronomist Vale"],
+            Department::Bridge => &["Helmsman Odera", "Yeoman Sissel"],
         }
     }
 }
@@ -903,6 +1021,25 @@ pub struct Requisition {
     /// `orders::generate_orders`, which adds
     /// `shift::COMPED_PATIENCE_BONUS_SECONDS` to the next order's patience.
     pub patience_bonus_orders: u32,
+    /// Owed by an illicit deal, not bought. Granted by
+    /// `utility_ai::deals::grant` as `FavorKind::QuietAccess` and consumed by
+    /// `security::schedule_raid`, which absorbs one instead of arming a raid.
+    ///
+    /// Deliberately a *separate* counter from `raid_wards` rather than adding
+    /// to it: one was paid for at the standing board and the other was earned
+    /// by dealing, and collapsing them would let a balance change to the shop
+    /// silently reprice the underworld. They are spent by the same site, in a
+    /// fixed order — see `Ward::QuietAccess`.
+    #[serde(default)]
+    pub quiet_access_favors: u32,
+    /// `FavorKind::ExpeditedFreight`. Consumed by `freight`, which brings the
+    /// next run in early.
+    #[serde(default)]
+    pub expedited_freight_favors: u32,
+    /// `FavorKind::AdvanceWarning`. Consumed by the department-problem
+    /// director, which airs a warning before the next incident it permits.
+    #[serde(default)]
+    pub advance_warning_favors: u32,
 }
 
 /// What the career looked like when this shift opened.
@@ -1358,13 +1495,7 @@ fn generate_orders(
     mut shift: ResMut<Shift>,
     forecast: Option<Res<CurrentForecast>>,
     mut intake: crate::order_intake::Intake,
-    mut residents: Query<
-        (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
-        (
-            With<crate::crew::Ambient>,
-            Without<crate::social::NpcCommitment>,
-        ),
-    >,
+    mut residents: AvailableResidents,
     development_orders: Query<(), With<DevelopmentOrder>>,
     chemists: Query<(), With<Chemist>>,
     containers: Query<&Container>,
@@ -1494,19 +1625,17 @@ fn generate_orders(
     ) else {
         return;
     };
+    let lane_offset = waiting as f32 * 0.95;
+    let Some(crew) =
+        recall_or_spawn_crew_member(&mut commands, &mut residents, crew_def, lane_offset)
+    else {
+        intake.cancel_admission(&crew_def.name);
+        return;
+    };
     if !is_development && shift.requisition.patience_bonus_orders > 0 {
         shift.requisition.patience_bonus_orders -= 1;
         patience += crate::shift::COMPED_PATIENCE_BONUS_SECONDS;
     }
-    let lane_offset = waiting as f32 * 0.95;
-    let crew = recall_resident_for_order(
-        &mut commands,
-        &mut residents,
-        &crew_def.name,
-        &crew_def.role,
-        lane_offset,
-    )
-    .unwrap_or_else(|| spawn_crew_member(&mut commands, crew_def, lane_offset));
 
     // An ordinary order spawned here always describes what it needs, not
     // the exact chemical — naming one outright is `generate_specific_orders`'
@@ -1570,13 +1699,7 @@ fn generate_specific_orders(
     shift: Res<Shift>,
     forecast: Option<Res<CurrentForecast>>,
     mut intake: crate::order_intake::Intake,
-    mut residents: Query<
-        (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
-        (
-            With<crate::crew::Ambient>,
-            Without<crate::social::NpcCommitment>,
-        ),
-    >,
+    mut residents: AvailableResidents,
     chemists: Query<(), With<Chemist>>,
     containers: Query<&Container>,
     produce: Query<&Produce>,
@@ -1671,14 +1794,12 @@ fn generate_specific_orders(
         return;
     };
     let lane_offset = waiting as f32 * 0.95;
-    let crew = recall_resident_for_order(
-        &mut commands,
-        &mut residents,
-        &crew_def.name,
-        &crew_def.role,
-        lane_offset,
-    )
-    .unwrap_or_else(|| spawn_crew_member(&mut commands, crew_def, lane_offset));
+    let Some(crew) =
+        recall_or_spawn_crew_member(&mut commands, &mut residents, crew_def, lane_offset)
+    else {
+        intake.cancel_admission(&crew_def.name);
+        return;
+    };
 
     let reagent_name = db.reagents.get(reagent).name.clone();
     commands.entity(crew).insert((
@@ -1745,6 +1866,10 @@ pub(crate) fn expire_orders(
         Option<&DevelopmentOrder>,
         Has<crate::order_intake::AcceptedOrder>,
         Has<crate::security_case::OrderHold>,
+        Option<&Body>,
+        Option<&Bloodstream>,
+        Has<UtilityAgent>,
+        Option<&ControlOwner>,
     )>,
 ) {
     // Deliberately *not* gated on `accepting_orders`. The sign stops new
@@ -1765,8 +1890,15 @@ pub(crate) fn expire_orders(
         development,
         accepted,
         security_hold,
+        body,
+        blood,
+        utility_agent,
+        owner,
     ) in &mut orders
     {
+        if !order_visit_can_act(body, blood, utility_agent, owner) {
+            continue;
+        }
         let kind = OrderKind::of_with_hostile(illicit, crisis, counter.is_some(), hostile);
         // Patience only runs down once they have actually arrived, so a slow
         // walk in never counts against the player.
@@ -1844,9 +1976,21 @@ pub(crate) fn expire_orders(
             .remove::<Order>()
             .remove::<crate::security_case::OrderHold>()
             .remove::<crate::order_intake::AcceptedOrder>()
-            .remove::<DevelopmentOrder>();
+            .remove::<DevelopmentOrder>()
+            .remove::<OrderUse>();
         route.leave();
     }
+}
+
+fn order_visit_can_act(
+    body: Option<&Body>,
+    blood: Option<&Bloodstream>,
+    utility_agent: bool,
+    owner: Option<&ControlOwner>,
+) -> bool {
+    !body.is_some_and(|body| body.0.collapsed)
+        && !blood.is_some_and(|blood| blood.0.incapacitated())
+        && (!utility_agent || owner == Some(&ControlOwner::OrderVisit))
 }
 
 /// Applies a resolution's reputation delta to the department the crew
@@ -1929,11 +2073,14 @@ pub(crate) fn handle_delivery(
         &CrewMember,
         &Order,
         &mut CrewRoute,
+        Option<&OrderUse>,
         Has<IllicitOrder>,
         Has<CrisisOrder>,
         Option<&CounterOrder>,
         Has<HostileOrder>,
         Has<DevelopmentOrder>,
+        Has<UtilityAgent>,
+        Option<&ControlOwner>,
     )>,
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
     containers: Query<(Entity, &Container, &HeldBy)>,
@@ -1948,8 +2095,19 @@ pub(crate) fn handle_delivery(
         let Some(player) = chemist_entity(&chemists, request.client_id) else {
             continue;
         };
-        let Ok((member, order, mut route, illicit, crisis, counter, hostile, development)) =
-            crew.get_mut(request.target)
+        let Ok((
+            member,
+            order,
+            mut route,
+            use_plan,
+            illicit,
+            crisis,
+            counter,
+            hostile,
+            development,
+            utility_agent,
+            owner,
+        )) = crew.get_mut(request.target)
         else {
             continue;
         };
@@ -1957,6 +2115,14 @@ pub(crate) fn handle_delivery(
             .get_mut(request.target)
             .ok()
             .map(|(b, blood)| (b.into_inner(), blood.into_inner()));
+        if !order_visit_can_act(
+            body.as_ref().map(|(body, _)| &**body),
+            body.as_ref().map(|(_, blood)| &**blood),
+            utility_agent,
+            owner,
+        ) {
+            continue;
+        }
         let Some((container_entity, container, _)) =
             containers.iter().find(|(_, _, holder)| holder.0 == player)
         else {
@@ -2016,6 +2182,7 @@ pub(crate) fn handle_delivery(
                 development,
                 body,
                 believed,
+                use_plan: use_plan.copied(),
             },
         );
     }
@@ -2045,6 +2212,9 @@ struct Handover<'a> {
     kind: OrderKind,
     counter: Option<CounterOrder>,
     development: bool,
+    /// Explicit linked destination use. Absence alone means the accepting NPC
+    /// is the consumer.
+    use_plan: Option<OrderUse>,
     /// The recipient's body, so `complete_delivery` can route what was
     /// actually handed over into them — every crew member has had one since
     /// M12. `Option` because this struct already follows the "the caller
@@ -2088,6 +2258,7 @@ fn complete_delivery(
         believed,
         counter,
         development,
+        use_plan,
     } = handover;
 
     let (mut outcome, mut matched) = grade(
@@ -2215,73 +2386,85 @@ fn complete_delivery(
         outcome
     );
 
-    // They actually drink what you handed them — whether that was the
-    // medicine they asked for or, through carelessness or malice, something
-    // else entirely. Deliberately independent of `outcome`: a `Wrong`
-    // delivery still gets swallowed, which is exactly what makes handing
-    // over the wrong beaker a real mistake and not just a graded number.
-    if let Some((recipient_body, recipient_blood)) = body {
-        let mut dose = container.solution.clone();
-        if dose.total_volume().is_positive() {
-            let snapshot = dose.clone();
-            let assessment = assess_exposure(
-                &snapshot,
-                Route::Ingested,
-                recipient_body,
-                recipient_blood,
-                db,
-            );
-            recipient_blood
-                .0
-                .receive(&mut dose, Route::Ingested, &mut recipient_body.0, db);
-            exposures.write(ChemicalExposure {
-                actor,
-                target: crew,
-                route: Route::Ingested,
-                source: ExposureSource::Direct,
-                solution: snapshot,
-                // The crew member explicitly requested this handover. Wrong
-                // and overdosed deliveries are already graded and reported by
-                // the order system rather than counted as a second incident.
-                // What they consented to, not merely that they consented.
-                //
-                // This one bool is the entire reveal, and it is what switches
-                // on `chem_world::respond_to_unwanted_exposure` — a complete
-                // consequence system (witness check at 8 m and same room,
-                // severity by illicit/overdose/harmful, the victim leaves,
-                // Security suspicion, a radio report) that every delivery has
-                // been skipping since it was written.
-                //
-                // Three cases, and the middle one is the point:
-                //
-                //  - **Honest.** They asked for a stimulant and got one. No
-                //    incident, whatever it was — this is what lets meth
-                //    answer a stimulant order and cost nothing *here*. Its
-                //    price is `addiction`: they get hooked, and being high in
-                //    front of an officer is what Security eventually notices.
-                //  - **Believed a lie, and it did something.** Harmful,
-                //    illicit or an overdose, taken on a claim that was false.
-                //    That is an incident, and whether it is pinned on you
-                //    depends on who else was in the room to see it.
-                //  - **Believed a lie, and it did nothing.** Water labelled as
-                //    medicine. Disappointing, already graded, not an assault —
-                //    so no incident, and `grade` alone answers for it.
-                authorized: believed.is_none()
-                    || !(assessment.harmful || assessment.illicit || assessment.overdose),
-                helpful: assessment.helpful,
-                harmful: assessment.harmful,
-                illicit: assessment.illicit,
-                overdose: assessment.overdose,
-            });
+    if let Some(use_plan) = use_plan {
+        // A linked order transfers custody. It does not turn possession into
+        // self-application and it does not destroy the batch at the counter.
+        // The exact container and remaining solution now travel with the
+        // requester, who is the initial carrier until a later handoff says
+        // otherwise.
+        commands
+            .entity(container_entity)
+            .remove::<InSlot>()
+            .remove::<InSlotB>()
+            .remove::<InSlotC>()
+            .remove::<Stored>()
+            .remove::<InventorySlot>()
+            .insert(HeldBy(crew));
+        let travel = if use_plan.use_destination.is_finite() {
+            *route = CrewRoute::to(use_plan.use_destination);
+            FulfillmentTravel::ToUseDestination
+        } else {
+            route.leave();
+            FulfillmentTravel::ReturningUnresolved
+        };
+        commands.entity(crew).insert((
+            CarryingFulfillment {
+                container: container_entity,
+                beneficiary: use_plan.beneficiary,
+                source: use_plan.source,
+                use_destination: use_plan.use_destination,
+                route: use_plan.route,
+                dose: use_plan.dose,
+                supplier: actor,
+                believed_label: believed.is_some(),
+                travel,
+            },
+            crate::utility_ai::NpcActivity::Traveling,
+        ));
+    } else {
+        // A personal-consumption order keeps the original behavior. They
+        // actually drink what was handed over, including a wrong batch. This
+        // branch exists only because the order has no explicit linked use.
+        if let Some((recipient_body, recipient_blood)) = body {
+            let mut dose = container.solution.clone();
+            if dose.total_volume().is_positive() {
+                let snapshot = dose.clone();
+                let assessment = assess_exposure(
+                    &snapshot,
+                    Route::Ingested,
+                    recipient_body,
+                    recipient_blood,
+                    db,
+                );
+                recipient_blood
+                    .0
+                    .receive(&mut dose, Route::Ingested, &mut recipient_body.0, db);
+                exposures.write(ChemicalExposure {
+                    actor,
+                    target: crew,
+                    route: Route::Ingested,
+                    source: ExposureSource::Direct,
+                    solution: snapshot,
+                    authorized: believed.is_none()
+                        || !(assessment.harmful || assessment.illicit || assessment.overdose),
+                    helpful: assessment.helpful,
+                    harmful: assessment.harmful,
+                    illicit: assessment.illicit,
+                    overdose: assessment.overdose,
+                });
+            }
         }
+
+        // Legacy personal orders still consume the one-way customer
+        // glassware lifecycle. Linked orders above retain the real entity.
+        commands.entity(container_entity).despawn();
+        route.leave();
     }
 
-    // They walk off with the glassware. Getting it back is someone else's
-    // problem, which is also true in the original.
-    commands.entity(container_entity).despawn();
     commands
         .entity(crew)
         .remove::<Order>()
+        .remove::<OrderUse>()
         .remove::<crate::security_case::OrderHold>()
         .remove::<crate::order_intake::AcceptedOrder>()
         .remove::<DevelopmentOrder>()
@@ -2296,9 +2479,255 @@ fn complete_delivery(
         // Same reasoning as `CrisisOrder`: `arc::generate_counter_orders`
         // reads `Has<CounterOrder>` as "a counter-track request is live", so
         // it has to come off when the request closes.
-        .remove::<CounterOrder>();
-    route.leave();
+        .remove::<CounterOrder>()
+        .remove::<crate::crew::AtCounter>();
     outcome
+}
+
+/// Carries a linked batch through the station and applies it only after the
+/// requester reaches the beneficiary. The first leg honors the incident's
+/// recorded use destination. If the beneficiary has moved, the carrier then
+/// follows the current body rather than dosing themselves or applying at
+/// empty floor.
+#[allow(clippy::type_complexity)]
+fn apply_carried_fulfillments(
+    mut commands: Commands,
+    db: Res<ChemDb>,
+    mut exposures: MessageWriter<ChemicalExposure>,
+    mut applied: MessageWriter<FulfillmentApplied>,
+    mut carriers: Query<
+        (
+            Entity,
+            &Transform,
+            Option<&mut CrewRoute>,
+            &mut CarryingFulfillment,
+            Option<&mut crate::utility_ai::NpcActivity>,
+            Option<&Body>,
+            Option<&Bloodstream>,
+            Has<UtilityAgent>,
+            Option<&ControlOwner>,
+        ),
+        Without<Container>,
+    >,
+    mut targets: Query<
+        (&Transform, &mut Body, &mut Bloodstream),
+        (Without<Container>, Without<CarryingFulfillment>),
+    >,
+    mut containers: Query<(&mut Container, Option<&mut Transform>), Without<CarryingFulfillment>>,
+) {
+    const APPLICATION_REACH: f32 = 1.35;
+
+    for (
+        carrier,
+        carrier_transform,
+        route,
+        mut fulfillment,
+        activity,
+        body,
+        blood,
+        utility_agent,
+        owner,
+    ) in &mut carriers
+    {
+        let Ok((mut container, container_transform)) = containers.get_mut(fulfillment.container)
+        else {
+            if route
+                .as_deref()
+                .is_none_or(|route| route.phase == CrewPhase::Waiting)
+            {
+                applied.write(FulfillmentApplied {
+                    carrier,
+                    beneficiary: fulfillment.beneficiary,
+                    source: fulfillment.source,
+                    container: fulfillment.container,
+                    result: FulfillmentApplicationResult::Empty,
+                    helpful: false,
+                    harmful: false,
+                    illicit: false,
+                    overdose: false,
+                });
+                commands
+                    .entity(carrier)
+                    .remove::<CarryingFulfillment>()
+                    .remove::<crate::crew::AtCounter>();
+                if let Some(mut route) = route {
+                    route.leave();
+                }
+            }
+            continue;
+        };
+
+        let carried_at = carrier_transform.translation + Vec3::Y * 0.8;
+        if let Some(mut transform) = container_transform {
+            transform.translation = carried_at;
+        } else {
+            commands
+                .entity(fulfillment.container)
+                .insert(Transform::from_translation(carried_at));
+        }
+
+        // A utility carrier can apply this batch only while the exact order
+        // visit still owns them. Medical admission and every other handoff
+        // revoke that authority. Return the physical container to the world
+        // and report an unresolved arrival instead of letting a recovered
+        // UtilityAction actor execute stale order intent.
+        if utility_agent && owner != Some(&ControlOwner::OrderVisit) {
+            applied.write(FulfillmentApplied {
+                carrier,
+                beneficiary: fulfillment.beneficiary,
+                source: fulfillment.source,
+                container: fulfillment.container,
+                result: FulfillmentApplicationResult::TargetUnavailable,
+                helpful: false,
+                harmful: false,
+                illicit: false,
+                overdose: false,
+            });
+            abandon_carried_fulfillment(
+                &mut commands,
+                carrier,
+                &fulfillment,
+                carrier_transform.translation,
+            );
+            continue;
+        }
+        if body.is_some_and(|body| body.0.collapsed)
+            || blood.is_some_and(|blood| blood.0.incapacitated())
+        {
+            continue;
+        }
+        let Some(mut route) = route else {
+            applied.write(FulfillmentApplied {
+                carrier,
+                beneficiary: fulfillment.beneficiary,
+                source: fulfillment.source,
+                container: fulfillment.container,
+                result: FulfillmentApplicationResult::TargetUnavailable,
+                helpful: false,
+                harmful: false,
+                illicit: false,
+                overdose: false,
+            });
+            abandon_carried_fulfillment(
+                &mut commands,
+                carrier,
+                &fulfillment,
+                carrier_transform.translation,
+            );
+            continue;
+        };
+
+        if route.phase != CrewPhase::Waiting {
+            continue;
+        }
+
+        if fulfillment.travel == FulfillmentTravel::ReturningUnresolved {
+            applied.write(FulfillmentApplied {
+                carrier,
+                beneficiary: fulfillment.beneficiary,
+                source: fulfillment.source,
+                container: fulfillment.container,
+                result: FulfillmentApplicationResult::TargetUnavailable,
+                helpful: false,
+                harmful: false,
+                illicit: false,
+                overdose: false,
+            });
+            commands
+                .entity(carrier)
+                .remove::<CarryingFulfillment>()
+                .remove::<crate::crew::AtCounter>();
+            continue;
+        }
+
+        let Ok((target_transform, mut target_body, mut target_blood)) =
+            targets.get_mut(fulfillment.beneficiary)
+        else {
+            fulfillment.travel = FulfillmentTravel::ReturningUnresolved;
+            route.leave();
+            commands.entity(carrier).remove::<crate::crew::AtCounter>();
+            if let Some(mut activity) = activity {
+                *activity = crate::utility_ai::NpcActivity::Traveling;
+            }
+            continue;
+        };
+
+        let separation = carrier_transform
+            .translation
+            .distance(target_transform.translation);
+        if separation > APPLICATION_REACH {
+            fulfillment.use_destination = target_transform.translation;
+            *route = CrewRoute::to(target_transform.translation);
+            commands.entity(carrier).remove::<crate::crew::AtCounter>();
+            if let Some(mut activity) = activity {
+                *activity = crate::utility_ai::NpcActivity::Traveling;
+            }
+            continue;
+        }
+
+        if let Some(mut activity) = activity {
+            *activity = crate::utility_ai::NpcActivity::Treating;
+        }
+        let (mut dose, _) = container.mutate(&db, |solution| solution.split(fulfillment.dose));
+        let (result, helpful, harmful, illicit, overdose) = if dose.total_volume().is_positive() {
+            let snapshot = dose.clone();
+            let assessment = assess_exposure(
+                &snapshot,
+                fulfillment.route,
+                &target_body,
+                &target_blood,
+                &db,
+            );
+            target_blood
+                .0
+                .receive(&mut dose, fulfillment.route, &mut target_body.0, &db);
+            exposures.write(ChemicalExposure {
+                actor: fulfillment.supplier,
+                target: fulfillment.beneficiary,
+                route: fulfillment.route,
+                source: ExposureSource::Direct,
+                solution: snapshot,
+                authorized: !fulfillment.believed_label
+                    || !(assessment.harmful || assessment.illicit || assessment.overdose),
+                helpful: assessment.helpful,
+                harmful: assessment.harmful,
+                illicit: assessment.illicit,
+                overdose: assessment.overdose,
+            });
+            (
+                FulfillmentApplicationResult::Applied,
+                assessment.helpful,
+                assessment.harmful,
+                assessment.illicit,
+                assessment.overdose,
+            )
+        } else {
+            (
+                FulfillmentApplicationResult::Empty,
+                false,
+                false,
+                false,
+                false,
+            )
+        };
+
+        applied.write(FulfillmentApplied {
+            carrier,
+            beneficiary: fulfillment.beneficiary,
+            source: fulfillment.source,
+            container: fulfillment.container,
+            result,
+            helpful,
+            harmful,
+            illicit,
+            overdose,
+        });
+        commands
+            .entity(carrier)
+            .remove::<CarryingFulfillment>()
+            .remove::<crate::crew::AtCounter>();
+        route.leave();
+    }
 }
 
 /// Whether `contents` holds anything that would satisfy `order` — the exact
@@ -2485,14 +2914,17 @@ fn handle_window_delivery(
         &CrewMember,
         &Order,
         &mut CrewRoute,
+        Option<&OrderUse>,
         Has<IllicitOrder>,
         Has<CrisisOrder>,
         Option<&CounterOrder>,
         Has<HostileOrder>,
         Has<DevelopmentOrder>,
         Has<crate::order_intake::AcceptedOrder>,
+        Has<UtilityAgent>,
+        Option<&ControlOwner>,
     )>,
-    mut bodies: Query<(&mut Body, &mut Bloodstream)>,
+    mut bodies: Query<(Entity, &mut Body, &mut Bloodstream)>,
     instability: Option<Res<crate::instability::Instability>>,
 ) {
     // `complete_delivery` removes the order through deferred commands. Keep
@@ -2500,6 +2932,12 @@ fn handle_window_delivery(
     // match the same urgent request can be handed to it in this one system
     // pass before the removal becomes visible.
     let mut reserved_recipients = HashSet::new();
+    let unavailable_bodies: HashSet<_> = bodies
+        .iter_mut()
+        .filter_map(|(entity, body, blood)| {
+            (body.0.collapsed || blood.0.incapacitated()).then_some(entity)
+        })
+        .collect();
     for (window, machine, lane) in &windows {
         if machine.kind != MachineKind::DeliveryWindow {
             continue;
@@ -2524,15 +2962,31 @@ fn handle_window_delivery(
                 continue;
             }
 
-            let candidates = crew.iter().map(
-                |(entity, _, order, route, illicit, crisis, counter, hostile, _, accepted)| {
-                    (
+            let candidates = crew.iter().filter_map(
+                |(
+                    entity,
+                    _,
+                    order,
+                    route,
+                    _,
+                    illicit,
+                    crisis,
+                    counter,
+                    hostile,
+                    _,
+                    accepted,
+                    utility_agent,
+                    owner,
+                )| {
+                    (!unavailable_bodies.contains(&entity)
+                        && (!utility_agent || owner == Some(&ControlOwner::OrderVisit)))
+                    .then_some((
                         entity,
                         order,
                         route,
                         OrderKind::of_with_hostile(illicit, crisis, counter.is_some(), hostile),
                         accepted,
-                    )
+                    ))
                 },
             );
             let Some(recipient) = window_recipient(
@@ -2550,12 +3004,15 @@ fn handle_window_delivery(
                 member,
                 order,
                 mut route,
+                use_plan,
                 illicit,
                 crisis,
                 counter,
                 hostile,
                 development,
                 _,
+                utility_agent,
+                owner,
             )) = crew.get_mut(recipient)
             else {
                 continue;
@@ -2564,7 +3021,15 @@ fn handle_window_delivery(
             let body = bodies
                 .get_mut(crew_entity)
                 .ok()
-                .map(|(b, blood)| (b.into_inner(), blood.into_inner()));
+                .map(|(_, b, blood)| (b.into_inner(), blood.into_inner()));
+            if !order_visit_can_act(
+                body.as_ref().map(|(body, _)| &**body),
+                body.as_ref().map(|(_, blood)| &**blood),
+                utility_agent,
+                owner,
+            ) {
+                continue;
+            }
             complete_delivery(
                 &mut commands,
                 &db,
@@ -2588,6 +3053,7 @@ fn handle_window_delivery(
                     // The delivery window is a drop box, not a conversation.
                     // Nobody is standing there to read the bottle.
                     believed: None,
+                    use_plan: use_plan.copied(),
                 },
             );
         }
@@ -2832,6 +3298,320 @@ mod tests {
         app
     }
 
+    fn linked_fulfillment_app() -> App {
+        let data = data();
+        let areas = crate::lab::WalkableAreas::from_floor_plan();
+        let mut app = App::new();
+        app.insert_resource(Knowledge::new(&data))
+            .insert_resource(ChemDb(data))
+            .insert_resource(crate::nav::NavGraph::build(&areas, crate::nav::NAV_RADIUS))
+            .init_resource::<Shift>()
+            .init_resource::<Time>()
+            .init_resource::<crate::crew::Departments>()
+            .init_resource::<crate::lab::DeliveryStations>()
+            .add_message::<OrderResolved>()
+            .add_message::<ChemicalExposure>()
+            .add_message::<FulfillmentApplied>()
+            .add_systems(
+                Update,
+                (
+                    handle_window_delivery,
+                    ApplyDeferred,
+                    crate::crew::walk_route,
+                    ApplyDeferred,
+                    apply_carried_fulfillments,
+                    ApplyDeferred,
+                )
+                    .chain(),
+            );
+        app
+    }
+
+    #[test]
+    fn linked_treatment_is_carried_to_the_patient_instead_of_dosing_the_doctor() {
+        let mut app = linked_fulfillment_app();
+        let kelotane = reagent_id(&app, "kelotane");
+        let incident = crate::lab::ROOMS[crate::lab::REACTION_BAY].center();
+        let patient = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(incident.x, crate::crew::BODY_OFFSET, incident.z),
+                Body::default(),
+                Bloodstream::default(),
+            ))
+            .id();
+        app.world_mut()
+            .get_mut::<Body>(patient)
+            .unwrap()
+            .0
+            .damage
+            .burn = Units::whole(10);
+        let source = app.world_mut().spawn_empty().id();
+        let doctor = waiting_crew_in_lane(
+            &mut app,
+            "Dr. Vance",
+            "kelotane",
+            10,
+            120.0,
+            true,
+            DeliveryLane::Medical,
+        );
+        app.world_mut().entity_mut(doctor).insert((
+            Transform::from_xyz(COUNTER_SPOT.x, crate::crew::BODY_OFFSET, COUNTER_SPOT.z),
+            Body::default(),
+            Bloodstream::default(),
+            crate::crew::AtCounter(DeliveryLane::Medical),
+            crate::crew::ReturnsToDuty,
+            OrderUse::medical(
+                patient,
+                Some(source),
+                Vec3::new(incident.x, crate::crew::BODY_OFFSET, incident.z),
+                Route::Patched,
+                Units::whole(5),
+            ),
+        ));
+        let (_, beaker) = window_with_lane(&mut app, &[("kelotane", 30)], DeliveryLane::Medical);
+
+        app.update();
+
+        assert!(app.world().get_entity(beaker).is_ok());
+        assert_eq!(
+            app.world().get::<HeldBy>(beaker).map(|held| held.0),
+            Some(doctor)
+        );
+        assert!(app.world().get::<CarryingFulfillment>(doctor).is_some());
+        assert!(
+            app.world()
+                .get::<Bloodstream>(doctor)
+                .unwrap()
+                .0
+                .blood
+                .volume_of(kelotane)
+                .is_zero(),
+            "accepting a treatment order must not make the doctor consume it",
+        );
+        assert!(
+            app.world()
+                .get::<Bloodstream>(patient)
+                .unwrap()
+                .0
+                .blood
+                .volume_of(kelotane)
+                .is_zero(),
+            "the patient must not receive treatment before the carrier arrives",
+        );
+
+        for _ in 0..800 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.05));
+            app.update();
+            if app.world().get::<CarryingFulfillment>(doctor).is_none() {
+                break;
+            }
+        }
+
+        assert!(
+            app.world().get::<CarryingFulfillment>(doctor).is_none(),
+            "the doctor never reached and applied the linked treatment",
+        );
+        assert_eq!(
+            app.world()
+                .get::<Bloodstream>(doctor)
+                .unwrap()
+                .0
+                .blood
+                .volume_of(kelotane),
+            Units::ZERO,
+        );
+        assert_eq!(
+            app.world()
+                .get::<Bloodstream>(patient)
+                .unwrap()
+                .0
+                .blood
+                .volume_of(kelotane),
+            Units::whole(5),
+            "only the bounded arrival-side dose belongs in the patient's bloodstream",
+        );
+        assert_eq!(
+            app.world()
+                .get::<Container>(beaker)
+                .unwrap()
+                .solution
+                .volume_of(kelotane),
+            Units::whole(25),
+            "the carried container must retain the unapplied remainder",
+        );
+        let reports: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<FulfillmentApplied>>()
+            .drain()
+            .collect();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].carrier, doctor);
+        assert_eq!(reports[0].beneficiary, patient);
+        assert_eq!(reports[0].source, Some(source));
+        assert_eq!(reports[0].container, beaker);
+        assert_eq!(reports[0].result, FulfillmentApplicationResult::Applied);
+        assert!(reports[0].helpful);
+        assert!(!reports[0].harmful);
+        assert!(!reports[0].illicit);
+        assert!(!reports[0].overdose);
+    }
+
+    #[test]
+    fn a_missing_linked_patient_never_falls_back_to_dosing_the_carrier() {
+        let mut app = linked_fulfillment_app();
+        let kelotane = reagent_id(&app, "kelotane");
+        let missing_patient = app.world_mut().spawn_empty().id();
+        let doctor = waiting_crew_in_lane(
+            &mut app,
+            "Dr. Vance",
+            "kelotane",
+            10,
+            120.0,
+            true,
+            DeliveryLane::Medical,
+        );
+        app.world_mut().entity_mut(doctor).insert((
+            Transform::from_xyz(COUNTER_SPOT.x, crate::crew::BODY_OFFSET, COUNTER_SPOT.z),
+            Body::default(),
+            Bloodstream::default(),
+            crate::crew::AtCounter(DeliveryLane::Medical),
+            crate::crew::ReturnsToDuty,
+            OrderUse::medical(
+                missing_patient,
+                None,
+                Vec3::new(COUNTER_SPOT.x, crate::crew::BODY_OFFSET, COUNTER_SPOT.z),
+                Route::Patched,
+                Units::whole(5),
+            ),
+        ));
+        let (_, beaker) = window_with_lane(&mut app, &[("kelotane", 30)], DeliveryLane::Medical);
+
+        for _ in 0..800 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.05));
+            app.update();
+            if app.world().get::<CarryingFulfillment>(doctor).is_none()
+                && app.world().get::<Order>(doctor).is_none()
+            {
+                break;
+            }
+        }
+
+        assert_eq!(
+            app.world()
+                .get::<Bloodstream>(doctor)
+                .unwrap()
+                .0
+                .blood
+                .volume_of(kelotane),
+            Units::ZERO,
+        );
+        assert_eq!(
+            app.world()
+                .get::<Container>(beaker)
+                .unwrap()
+                .solution
+                .volume_of(kelotane),
+            Units::whole(30),
+            "an unresolved delivery must return with the physical batch intact",
+        );
+        let reports: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<FulfillmentApplied>>()
+            .drain()
+            .collect();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            reports[0].result,
+            FulfillmentApplicationResult::TargetUnavailable
+        );
+    }
+
+    #[test]
+    fn a_down_or_wrongly_owned_resident_cannot_accept_a_window_delivery() {
+        let mut app = window_app();
+        let crew = waiting_crew(&mut app, "Dr. Vance", "kelotane", 20, 180.0, true);
+        let (_, beaker) = window_with(&mut app, &[("kelotane", 20)]);
+        let mut body = Body::default();
+        body.0.collapsed = true;
+        app.world_mut().entity_mut(crew).insert((
+            body,
+            Bloodstream::default(),
+            crate::utility_ai::UtilityControlBundle::new(crate::utility_ai::UtilityAgent::new(
+                71, 0,
+            )),
+        ));
+
+        app.update();
+        assert!(app.world().get::<Order>(crew).is_some());
+        assert!(app.world().get_entity(beaker).is_ok());
+
+        app.world_mut().get_mut::<Body>(crew).unwrap().0.collapsed = false;
+        app.update();
+        assert!(
+            app.world().get::<Order>(crew).is_some(),
+            "consciousness alone cannot revive an order whose controller no longer owns the NPC",
+        );
+        assert!(app.world().get_entity(beaker).is_ok());
+    }
+
+    #[test]
+    fn a_revoked_linked_carrier_drops_the_real_batch_and_reports_unresolved() {
+        let data = data();
+        let mut app = App::new();
+        app.insert_resource(ChemDb(data.clone()))
+            .add_message::<ChemicalExposure>()
+            .add_message::<FulfillmentApplied>()
+            .add_systems(Update, apply_carried_fulfillments);
+        let carrier = app.world_mut().spawn_empty().id();
+        let mut container = Container::new(ContainerKind::Bottle);
+        let reagent = data.reagent("kelotane");
+        let _ = container.solution.add(reagent, Units::whole(10));
+        let batch = app.world_mut().spawn((container, HeldBy(carrier))).id();
+        let beneficiary = app.world_mut().spawn_empty().id();
+        app.world_mut().entity_mut(carrier).insert((
+            Transform::from_xyz(3.0, crate::crew::BODY_OFFSET, 2.0),
+            CrewRoute::standing(),
+            Body::default(),
+            Bloodstream::default(),
+            crate::utility_ai::UtilityControlBundle::new(crate::utility_ai::UtilityAgent::new(
+                72, 0,
+            )),
+            CarryingFulfillment {
+                container: batch,
+                beneficiary,
+                source: None,
+                use_destination: Vec3::ZERO,
+                route: Route::Patched,
+                dose: Units::whole(5),
+                supplier: None,
+                believed_label: false,
+                travel: FulfillmentTravel::ToUseDestination,
+            },
+        ));
+
+        app.update();
+
+        assert!(app.world().get::<CarryingFulfillment>(carrier).is_none());
+        assert!(app.world().get::<HeldBy>(batch).is_none());
+        assert!(app.world().get::<Container>(batch).is_some());
+        let reports: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<FulfillmentApplied>>()
+            .drain()
+            .collect();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            reports[0].result,
+            FulfillmentApplicationResult::TargetUnavailable
+        );
+    }
+
     #[test]
     fn replacement_delivery_removes_security_hold_before_resident_can_take_another_order() {
         let mut app = window_app();
@@ -3057,6 +3837,37 @@ mod tests {
 
         assert!(app.world().get::<Order>(crew).is_none());
         assert_eq!(app.world().resource::<Shift>().botched, 1);
+    }
+
+    #[test]
+    fn incapacity_freezes_a_utility_order_until_the_exact_visit_owner_returns() {
+        let mut app = expiry_app();
+        let crew = waiting_crew(&mut app, "Dr. Vance", "kelotane", 20, 1.0, true);
+        let mut body = Body::default();
+        body.0.collapsed = true;
+        let mut control = crate::utility_ai::UtilityControlBundle::new(
+            crate::utility_ai::UtilityAgent::new(73, 0),
+        );
+        control.control = ControlOwner::Incapacitated;
+        app.world_mut()
+            .entity_mut(crew)
+            .insert((body, Bloodstream::default(), control));
+
+        advance(&mut app, 2.0);
+        assert_eq!(app.world().get::<Order>(crew).unwrap().waited, 0.0);
+
+        app.world_mut().get_mut::<Body>(crew).unwrap().0.collapsed = false;
+        *app.world_mut().get_mut::<ControlOwner>(crew).unwrap() = ControlOwner::UtilityAction;
+        advance(&mut app, 2.0);
+        assert_eq!(
+            app.world().get::<Order>(crew).unwrap().waited,
+            0.0,
+            "a stale order remains frozen while UtilityAction owns the resident",
+        );
+
+        *app.world_mut().get_mut::<ControlOwner>(crew).unwrap() = ControlOwner::OrderVisit;
+        advance(&mut app, 1.5);
+        assert!(app.world().get::<Order>(crew).is_none());
     }
 
     #[test]
@@ -3917,7 +4728,7 @@ mod tests {
     #[test]
     fn every_roster_member_is_exactly_one_departments_own() {
         // `Department::members()` mirrors `station.crew.ron` by hand, the
-        // same way `Department::from_role` already hardcodes the five role
+        // same way `Department::from_role` already hardcodes the relationship role
         // strings. A roster edit that forgets to update it would otherwise
         // silently average over the wrong headcount instead of failing loud.
         let roster: Vec<CrewDef> =
@@ -3960,16 +4771,29 @@ mod tests {
         // shop purchase) must not bleed onto a colleague in the same
         // department, but the displayed department number still reflects it.
         let mut shift = Shift::default();
-        let [ivy, dubois] = Department::Service.members() else {
-            panic!("Service should have exactly two members");
+        let [ivy, vale] = Department::Botany.members() else {
+            panic!("Botany should have exactly two members");
         };
         shift.adjust_npc(ivy, -10);
 
         assert_eq!(shift.npc_standing(ivy), -10);
-        assert_eq!(shift.npc_standing(dubois), 0, "Dubois must be untouched");
+        assert_eq!(shift.npc_standing(vale), 0, "Vale must be untouched");
+        assert_eq!(
+            shift.standing(Department::Botany),
+            -5,
+            "the shown average moves by half the individual delta"
+        );
+
+        let [dubois, amari] = Department::Service.members() else {
+            panic!("Service should have exactly two members");
+        };
+        shift.adjust_npc(dubois, 6);
+
+        assert_eq!(shift.npc_standing(dubois), 6);
+        assert_eq!(shift.npc_standing(amari), 0, "Amari must be untouched");
         assert_eq!(
             shift.standing(Department::Service),
-            -5,
+            3,
             "the shown average moves by half the individual delta"
         );
     }

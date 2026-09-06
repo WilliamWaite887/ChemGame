@@ -44,6 +44,7 @@ use bevy_trenchbroom::prelude::*;
 use crate::AppState;
 
 use crate::crew::{CrewPosts, Departments};
+use crate::utility_ai::UtilitySpots;
 
 use super::{
     machine_kind_named, Bounds, CrisisSpots, DoorSpots, FloorProfile, LabLight, MachineSpots,
@@ -252,6 +253,7 @@ fn collect_loaded_map(
     machine_spots: Query<(&MachineSpot, &Transform)>,
     department_spots: Query<(&DepartmentSpot, &Transform)>,
     crew_post_spots: Query<(&CrewPost, &Transform)>,
+    utility_spot_markers: Query<(&UtilitySpot, &Transform)>,
     crisis_spots: Query<(&CrisisSpot, &Transform)>,
     door_spots: Query<(&DoorSpot, &Transform)>,
     point_lights: Query<&PointLight>,
@@ -268,6 +270,7 @@ fn collect_loaded_map(
     let mut machines = MachineSpots::default();
     let mut departments = Departments::default();
     let mut crew_posts = CrewPosts::default();
+    let mut utility_spots = UtilitySpots::default();
     let mut crises = CrisisSpots::default();
     let mut doors = DoorSpots::default();
 
@@ -346,6 +349,16 @@ fn collect_loaded_map(
             }
         }
 
+        if let Ok((spot, transform)) = utility_spot_markers.get(entity) {
+            let id = spot.id.trim();
+            let capacity = usize::try_from(spot.capacity.max(1)).unwrap_or(1);
+            if id.is_empty() {
+                warn!("ignoring utility_spot with an empty id");
+            } else if !utility_spots.insert(id, transform.translation, capacity) {
+                warn!("duplicate or invalid utility_spot id '{id}'; keeping the first");
+            }
+        }
+
         if let Ok((spot, transform)) = crisis_spots.get(entity) {
             let id = spot.id.trim();
             if id.is_empty() {
@@ -385,6 +398,7 @@ fn collect_loaded_map(
     commands.insert_resource(machines);
     commands.insert_resource(departments);
     commands.insert_resource(crew_posts);
+    commands.insert_resource(utility_spots);
     commands.insert_resource(crises);
     commands.insert_resource(doors);
 }
@@ -451,6 +465,21 @@ pub struct CrisisSpot {
 pub struct CrewPost {
     pub occupant: String,
     pub kind: String,
+}
+
+/// A stable, reservable affordance used by utility actions. `id` is gameplay
+/// data rather than display text. Capacity defaults to one when omitted or
+/// authored below one.
+#[point_class(
+    classname("utility_spot"),
+    base(Transform),
+    color(80 180 255),
+    size(-14 -14 0, 14 14 44),
+)]
+#[derive(Debug, Clone, Default)]
+pub struct UtilitySpot {
+    pub id: String,
+    pub capacity: i32,
 }
 
 /// A fixed world-space station plaque.
@@ -1999,6 +2028,7 @@ impl Plugin for LabTrenchBroomPlugin {
             .register_type::<Walkable>()
             .register_type::<DepartmentSpot>()
             .register_type::<CrewPost>()
+            .register_type::<UtilitySpot>()
             .register_type::<DepartmentDressing>()
             .register_type::<DecorationSpot>()
             .register_type::<ConveyorSpot>()

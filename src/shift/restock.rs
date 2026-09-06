@@ -13,7 +13,9 @@
 use bevy::prelude::*;
 
 use crate::containers::{spawn_container, Container, ContainerKind};
-use crate::crew::{spawn_crew_member, CrewMember, CrewPhase, CrewRoute};
+use crate::crew::{
+    recall_or_spawn_crew_member, AvailableResidents, CrewMember, CrewPhase, CrewRoute,
+};
 use crate::lab::{DeliveryLane, DeliveryStations, COUNTER_TOP};
 use crate::net::is_authority;
 use crate::orders::{Shift, StationData};
@@ -71,6 +73,31 @@ impl GlasswareDelivery {
     }
 }
 
+/// Revokes a courier payload before another controller takes the NPC.
+///
+/// Kept as a queued world command so callers such as Medical can invoke it
+/// without naming the private [`GlasswareDelivery`] component. The delivered
+/// composition is banked into the exact-count purchase fields rather than the
+/// rounded deficit field, so cancellation and retry cannot change the crate.
+/// Calling it for an entity without a delivery is a no-op.
+pub(crate) fn cancel_glassware_delivery(commands: &mut Commands, entity: Entity) {
+    commands.queue(move |world: &mut World| {
+        let Some(delivery) = world.get::<GlasswareDelivery>(entity) else {
+            return;
+        };
+        let (beakers, large) = (delivery.beakers, delivery.large);
+        if let Some(mut pending) = world.get_resource_mut::<PendingRestock>() {
+            pending.purchased_beakers += beakers;
+            pending.purchased_large += large;
+        } else {
+            warn!("could not requeue canceled glassware delivery: PendingRestock is unavailable");
+        }
+        if let Ok(mut courier) = world.get_entity_mut(entity) {
+            courier.remove::<GlasswareDelivery>();
+        }
+    });
+}
+
 /// A crate that has been decided on but not yet handed to a courier.
 ///
 /// Ordering and dispatching are separate because the courier may be
@@ -124,14 +151,23 @@ fn order_glassware(
     station: Option<Res<StationData>>,
     glassware: Query<&Container>,
 ) {
+    // An `ExpeditedFreight` favor skips the wait entirely: whoever owed the
+    // player a quiet word with Cargo made this run happen now instead of at
+    // the next check. Spent here rather than at the delivery itself so it
+    // cannot be banked against a check that was already due anyway.
+    let expedited = shift.requisition.expedited_freight_favors > 0
+        && timer.as_ref().is_some_and(|t| !t.just_finished());
     let due = match timer.as_mut() {
         Some(t) => t.tick(time.delta()).just_finished(),
         // Nothing scheduled yet: this is the first frame, and the lab should
         // not sit unchecked for a full interval before the first delivery.
         None => true,
     };
-    if !due {
+    if !due && !expedited {
         return;
+    }
+    if !due && expedited {
+        shift.requisition.expedited_freight_favors -= 1;
     }
     *timer = Some(Timer::from_seconds(
         GLASSWARE_CHECK_SECONDS,
@@ -188,6 +224,7 @@ fn dispatch_glassware(
     mut pending: ResMut<PendingRestock>,
     station: Option<Res<StationData>>,
     present: Query<&CrewMember, crate::crew::NotResident>,
+    mut residents: AvailableResidents,
 ) {
     if pending.is_empty() {
         return;
@@ -221,7 +258,13 @@ fn dispatch_glassware(
     let beakers = deficit_beakers + pending.purchased_beakers;
     let large = deficit_large + pending.purchased_large;
     // His own lane at the counter, clear of whoever is queuing for an order.
-    let courier = spawn_crew_member(&mut commands, def, -1.1);
+    let Some(courier) = recall_or_spawn_crew_member(&mut commands, &mut residents, def, -1.1)
+    else {
+        // This identity exists, but its current owner has not released it.
+        // Keep the exact crate contents queued until Sato is free instead of
+        // manufacturing a second body or silently losing a paid requisition.
+        return;
+    };
     commands
         .entity(courier)
         .insert(GlasswareDelivery { beakers, large });
@@ -304,7 +347,10 @@ fn describe(delivery: &GlasswareDelivery) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::body::{Bloodstream, Body};
+    use crate::crew::{Ambient, StationResident};
     use crate::orders::OrderConfig;
+    use bevy::ecs::system::RunSystemOnce;
 
     fn delivery(beakers: usize, large: usize) -> GlasswareDelivery {
         GlasswareDelivery { beakers, large }
@@ -405,6 +451,99 @@ mod tests {
             !pending.is_empty(),
             "the purchase must stay queued, not be lost"
         );
+    }
+
+    #[test]
+    fn an_idle_resident_sato_carries_the_crate_without_a_duplicate_body() {
+        let mut app = restock_app();
+        let supply = station().config.supply;
+        let sato = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: supply.courier.clone(),
+                    role: "Cargo".to_string(),
+                },
+                Body::default(),
+                Bloodstream::default(),
+                CrewRoute::arrival(0.0),
+                Ambient::new(30.0),
+                StationResident,
+            ))
+            .id();
+        queue_glassware_purchase(&mut app.world_mut().resource_mut::<PendingRestock>(), 4, 0);
+
+        app.update();
+
+        assert!(app.world().get::<GlasswareDelivery>(sato).is_some());
+        let same_name = app
+            .world_mut()
+            .query::<&CrewMember>()
+            .iter(app.world())
+            .filter(|member| member.name == supply.courier)
+            .count();
+        assert_eq!(
+            same_name, 1,
+            "dispatch must reuse the station resident rather than clone Sato"
+        );
+        assert!(app.world().resource::<PendingRestock>().is_empty());
+    }
+
+    #[test]
+    fn a_busy_resident_sato_keeps_the_crate_queued_without_a_duplicate_body() {
+        let mut app = restock_app();
+        let supply = station().config.supply;
+        app.world_mut().spawn((
+            CrewMember {
+                name: supply.courier.clone(),
+                role: "Cargo".to_string(),
+            },
+            Body::default(),
+            Bloodstream::default(),
+            StationResident,
+        ));
+        queue_glassware_purchase(&mut app.world_mut().resource_mut::<PendingRestock>(), 4, 0);
+
+        app.update();
+
+        let same_name = app
+            .world_mut()
+            .query::<&CrewMember>()
+            .iter(app.world())
+            .filter(|member| member.name == supply.courier)
+            .count();
+        assert_eq!(same_name, 1, "a busy resident must never be cloned");
+        assert!(
+            app.world_mut()
+                .query::<&GlasswareDelivery>()
+                .iter(app.world())
+                .next()
+                .is_none(),
+            "the busy resident must keep its existing commitment"
+        );
+        assert!(
+            !app.world().resource::<PendingRestock>().is_empty(),
+            "the exact crate contents should retry once Sato is free"
+        );
+    }
+
+    #[test]
+    fn canceling_a_courier_requeues_the_exact_crate_once() {
+        let mut app = restock_app();
+        let courier = app.world_mut().spawn(delivery(3, 2)).id();
+
+        app.world_mut()
+            .run_system_once(move |mut commands: Commands| {
+                cancel_glassware_delivery(&mut commands, courier);
+                cancel_glassware_delivery(&mut commands, courier);
+            })
+            .unwrap();
+
+        assert!(app.world().get::<GlasswareDelivery>(courier).is_none());
+        let pending = app.world().resource::<PendingRestock>();
+        assert_eq!(pending.purchased_beakers, 3);
+        assert_eq!(pending.purchased_large, 2);
+        assert_eq!(pending.deficit, 0, "exact counts must not be rerounded");
     }
 
     #[test]

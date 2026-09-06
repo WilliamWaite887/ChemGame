@@ -4,7 +4,7 @@
 //! such as the counter or a department, and navigation supplies safe doorway
 //! and corridor waypoints.
 
-mod fluff;
+pub(crate) mod fluff;
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -84,7 +84,9 @@ impl Plugin for CrewPlugin {
                         // After `walk_route`, so an errand set in reaction to
                         // an arrival this frame starts walking on the next one
                         // rather than half a frame late.
-                        run_errands.run_if(crate::session::career_session),
+                        run_errands
+                            .in_set(crate::utility_ai::UtilityAiSet::Navigate)
+                            .run_if(crate::session::career_session),
                         handle_crew_collapse.run_if(crate::session::career_session),
                     )
                         .chain()
@@ -548,12 +550,9 @@ impl CrewRoute {
 
     /// A route that has already finished: standing exactly where they are.
     ///
-    /// Test-only, because production never builds one — every real route is
-    /// created with somewhere to go and *becomes* this by having `walk_route`
-    /// consume its waypoints. `speech`'s exchange tests need a resident who is
-    /// demonstrably not walking, which is otherwise only reachable by standing
-    /// up the whole nav stack to walk one there.
-    #[cfg(test)]
+    /// Utility actions restore this after an errand resolves so the resident
+    /// remains eligible for the existing order-recall and presentation paths
+    /// without inventing a destination or leaving two locomotion modes active.
     pub(crate) fn standing() -> Self {
         CrewRoute {
             waypoints: Vec::new(),
@@ -830,6 +829,7 @@ pub fn spawn_crew_member(commands: &mut Commands, def: &CrewDef, lane: f32) -> E
             Transform::from_translation(position),
             Body::default(),
             Bloodstream::default(),
+            NeedsDepartmentPlacement,
             // The route stays server-side; clients see the resulting Transform.
             bevy_replicon::prelude::Replicated,
             crate::until_we_leave_the_lab(),
@@ -978,6 +978,7 @@ fn drive_crew_animation(
     routes: Query<&CrewRoute>,
     errands: Query<&Errand>,
     pursuits: Query<&crate::showdown::Pursuit>,
+    postures: Query<&crate::utility_ai::NpcPosture>,
     members: Query<&CrewMember>,
     transforms: Query<&Transform>,
     mut players: Query<(
@@ -1006,6 +1007,17 @@ fn drive_crew_animation(
                 .get(controller.crew)
                 .is_ok_and(crate::showdown::Pursuit::is_moving);
         let mut desired = desired_character_animation(&blood.0, moving);
+        if !moving {
+            desired = match postures.get(controller.crew).copied() {
+                Ok(crate::utility_ai::NpcPosture::Lying) => CharacterAnimation::Collapsed,
+                Ok(crate::utility_ai::NpcPosture::Sitting)
+                    if desired == CharacterAnimation::Idle =>
+                {
+                    CharacterAnimation::Sitting
+                }
+                _ => desired,
+            };
+        }
         // Neither `Working` nor `Sitting` has a bloodstream signal of its
         // own — both are a presentation choice layered on top of an
         // otherwise-plain `Idle`, derived from comparing the resident's own
@@ -1129,14 +1141,112 @@ fn handle_crew_collapse(
     mut commands: Commands,
     mut shift: ResMut<Shift>,
     mut radio: ResMut<RadioLog>,
+    time: Option<Res<Time>>,
+    mut incidents: Option<ResMut<crate::utility_ai::IncidentLedger>>,
+    mut incident_created: Option<ResMut<Messages<crate::utility_ai::IncidentCreated>>>,
+    mut casualty_seen: Option<ResMut<Messages<crate::utility_ai::Stimulus>>>,
     speech: Option<Res<crate::threat::Authored<crate::speech::SpeechScript>>>,
-    mut crew: Query<(Entity, &Body, &CrewMember, &mut CrewRoute), Changed<Body>>,
+    mut crew: Query<
+        (
+            Entity,
+            &Body,
+            Option<&Bloodstream>,
+            &CrewMember,
+            Option<&Transform>,
+            Option<&crate::utility_ai::NpcJobProfile>,
+            Option<&mut CrewRoute>,
+            Has<crate::utility_ai::UtilityAgent>,
+            Has<CrewCollapseReported>,
+        ),
+        (
+            Or<(Changed<Body>, Changed<Bloodstream>)>,
+            Or<(With<CrewRoute>, With<crate::utility_ai::UtilityAgent>)>,
+        ),
+    >,
 ) {
-    for (entity, body, member, mut route) in &mut crew {
-        if !body.0.collapsed || route.phase == CrewPhase::Leaving {
+    for (entity, body, blood, member, transform, profile, route, utility_agent, already_reported) in
+        &mut crew
+    {
+        let chemically_incapacitated = blood.is_some_and(|blood| blood.0.incapacitated());
+        let down = body.0.collapsed || (utility_agent && chemically_incapacitated);
+        if !down {
+            if already_reported {
+                commands.entity(entity).remove::<CrewCollapseReported>();
+            }
             continue;
         }
-        route.leave();
+        if already_reported
+            || (!utility_agent
+                && route
+                    .as_deref()
+                    .is_some_and(|route| route.phase == CrewPhase::Leaving))
+        {
+            continue;
+        }
+        if !utility_agent {
+            let Some(mut route) = route else {
+                continue;
+            };
+            route.leave();
+        } else if let (Some(incidents), Some(profile)) = (incidents.as_deref_mut(), profile) {
+            // A migrated resident always enters the same incident -> Medical
+            // case pipeline. Never create a second diagnosis for an incident
+            // that a department adapter (Cargo burns, for example) already
+            // recorded for this exact body.
+            let already_tracked = incidents.active_for(entity).any(|incident| {
+                matches!(
+                    incident.kind,
+                    crate::utility_ai::IncidentKind::Burn
+                        | crate::utility_ai::IncidentKind::BruteInjury
+                        | crate::utility_ai::IncidentKind::Poisoning
+                )
+            });
+            if !already_tracked {
+                let kind = utility_casualty_kind(body, blood);
+                let severity = utility_casualty_severity(body);
+                let created_at = time.as_deref().map(Time::elapsed_secs).unwrap_or_default();
+                let location = transform.map_or(Vec3::ZERO, |transform| transform.translation);
+                // Announce the fall *here*, where and when it happens.
+                //
+                // `medical::open_cases_from_incidents` also emits one, but only
+                // once a case already exists — which is too late to be the
+                // thing that summons help. Emitting at the collapse gives
+                // perception a chance to decide who actually saw it, which is
+                // what `report_casualty_to_medical` then acts on. An unwitnessed
+                // collapse in an empty room still produces this stimulus and
+                // still reaches nobody, which is the correct outcome.
+                if let Some(messages) = casualty_seen.as_deref_mut() {
+                    messages.write(
+                        crate::utility_ai::Stimulus::new(
+                            crate::utility_ai::StimulusKind::Casualty,
+                            location,
+                        )
+                        .about(entity)
+                        .with_strength(severity.get().clamp(0.2, 1.0)),
+                    );
+                }
+                if let Ok(id) = incidents.create(
+                    kind,
+                    profile.primary,
+                    entity,
+                    None,
+                    location,
+                    severity,
+                    created_at,
+                ) {
+                    if let Some(messages) = incident_created.as_deref_mut() {
+                        messages.write(crate::utility_ai::IncidentCreated {
+                            id,
+                            kind,
+                            department: profile.primary,
+                            subject: entity,
+                            location,
+                            severity,
+                        });
+                    }
+                }
+            }
+        }
         // Said in the room, on the way down, before the radio's report of it
         // reaches anyone. `speech` owns the pool and the picking; this system
         // owns *when* someone falls over, and there is deliberately only one
@@ -1159,23 +1269,45 @@ fn handle_crew_collapse(
             .negative()
             .urgent(),
         );
+        commands.entity(entity).insert(CrewCollapseReported);
     }
 }
 
-/// Advances each crew member along their waypoints, and despawns them once
-/// they are back outside.
-/// A crew member who lives on the station rather than visiting the lab.
-///
-/// Ambient crew never queue and never carry an [`Order`](crate::orders::Order):
-/// they walk between their department and the corridor, and they are what makes
-/// the place feel inhabited rather than a shop with a door. In every other
-/// respect they are ordinary [`CrewMember`]s — `dress_crew` draws them, smoke
-/// reaches them, they can get hooked — which is the point. Reacting to a crisis
-/// is only interesting if the people reacting were already there.
-///
-/// Every query that hunts for a customer at the counter excludes them by this
-/// marker; see the `Without<Ambient>` filters in `orders`, `produce`, `quack`
-/// and `rogue_security`.
+pub(crate) fn utility_casualty_kind(
+    body: &Body,
+    blood: Option<&Bloodstream>,
+) -> crate::utility_ai::IncidentKind {
+    let damage = body.0.damage;
+    if !body.0.collapsed && blood.is_some_and(|blood| blood.0.incapacitated()) {
+        return crate::utility_ai::IncidentKind::Poisoning;
+    }
+    if damage.burn >= damage.brute && damage.burn >= damage.toxin && damage.burn >= damage.oxygen {
+        crate::utility_ai::IncidentKind::Burn
+    } else if damage.toxin >= damage.brute && damage.toxin >= damage.oxygen {
+        crate::utility_ai::IncidentKind::Poisoning
+    } else {
+        // Brute is also the safe medical fallback for oxygen collapse until a
+        // dedicated oxygen-debt incident/treatment contract exists.
+        crate::utility_ai::IncidentKind::BruteInjury
+    }
+}
+
+pub(crate) fn utility_casualty_severity(body: &Body) -> crate::utility_ai::Normalized {
+    let collapse = chem_sim::body::COLLAPSE.as_f32();
+    let severity = (body.0.total().as_f32() / (collapse * 2.0)).clamp(0.5, 1.0);
+    crate::utility_ai::Normalized::new(severity)
+        .expect("clamped utility casualty severity is normalized")
+}
+
+/// Suppresses repeated collapse consequences while a body remains down. It is
+/// removed on recovery so a later, distinct collapse is reported normally.
+#[derive(Component)]
+struct CrewCollapseReported;
+
+/// Legacy idle/wander eligibility for a resident who is not currently recalled
+/// or committed to another activity. Permanent identity lives on
+/// [`StationResident`], so temporarily removing this component never turns a
+/// resident into a disposable visitor.
 #[derive(Component)]
 pub struct Ambient {
     /// Seconds to stand still before picking somewhere new to be.
@@ -1186,22 +1318,23 @@ impl Ambient {
     /// A dwell of `0.0` is a legitimate value, not a footgun: `ambient_behaviour`
     /// needs `&mut CrewRoute` to do anything, so a caller that also strips
     /// `CrewRoute` (a stationed guard, say) gets a component that only ever
-    /// does the one job callers actually want from it here — being excluded
-    /// from [`NotResident`] — with zero risk of triggering wander behaviour.
+    /// does the one job callers actually want from it here: being classified as
+    /// idle without any risk of triggering wander behavior.
     pub(crate) fn new(dwell: f32) -> Self {
         Self { dwell }
     }
 }
 
-/// Query filter for crew who are *visiting* the lab, excluding the residents
-/// who simply live on the station.
+/// Query filter for crew who are *visiting* the lab, excluding permanent
+/// station residents even while those residents are recalled, treating a
+/// patient, or executing utility work without [`Ambient`].
 ///
 /// Every gate that counts how busy the counter is has to use this. Counting
 /// bare [`CrewMember`]s instead includes the residents — already more than
 /// `orders::max_active_cap` on its own — and orders stop arriving entirely,
 /// with no error and nothing in the log. That is exactly how it broke the first
 /// time.
-pub type NotResident = Without<Ambient>;
+pub type NotResident = Without<StationResident>;
 
 /// How long an idle crew member lingers before moving on.
 const DWELL_SECONDS: (f32, f32) = (4.0, 11.0);
@@ -1224,7 +1357,7 @@ fn populate_departments(
     departments: Res<Departments>,
     crew_posts: Res<CrewPosts>,
     station: Option<Res<crate::orders::StationData>>,
-    resident: Query<&CrewMember, With<Ambient>>,
+    existing: Query<(Entity, &CrewMember, Has<StationResident>)>,
 ) {
     let Some(station) = station else {
         return;
@@ -1242,7 +1375,19 @@ fn populate_departments(
         // One resident per person on the roster, not per department: the roster
         // is already the cast, and spawning a second Dr. Vance would put the
         // same named individual in two places.
-        if resident.iter().any(|member| member.name == def.name) {
+        if let Some((entity, _, is_resident)) = existing
+            .iter()
+            .find(|(_, member, _)| member.name == def.name)
+        {
+            // A generated visit can win the frame before resident population.
+            // Adopt that exact body into the permanent roster instead of
+            // creating a same-name clone. Once its current visit finishes,
+            // ReturnsToDuty restores the ordinary ambient resident lifecycle.
+            if !is_resident {
+                commands
+                    .entity(entity)
+                    .insert((StationResident, ReturnsToDuty));
+            }
             continue;
         }
 
@@ -1257,9 +1402,10 @@ fn populate_departments(
         // `Interactable` at all, so `Focus` never locks onto them and no
         // verb reaches them, apply-held (inject/splash) included, since it
         // reads the same focused target every other interaction does.
-        commands
-            .entity(crew)
-            .insert(Interactable::new(format!("{} — {}", def.name, def.role)));
+        commands.entity(crew).insert((
+            StationResident,
+            Interactable::new(format!("{} — {}", def.name, def.role)),
+        ));
     }
 }
 
@@ -1284,8 +1430,38 @@ pub(crate) struct ReturnsToDuty;
 /// Distinct from [`ReturnsToDuty`], which marks *one* recalled trip and is
 /// stripped on arrival. This is a standing property of the body, so it survives
 /// the trip and the second panic after it.
-#[derive(Component)]
+#[derive(Component, Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct StationResident;
+
+/// One-shot marker for a body that has just been created and may begin at its
+/// authored department or personal post. A freshly inserted [`CrewRoute`] is
+/// not proof of a fresh spawn: utility resolution and Medical recovery both
+/// restore a standing route on an existing body.
+#[derive(Component)]
+pub(crate) struct NeedsDepartmentPlacement;
+
+/// Registry query used to find a permanent resident and decide whether that
+/// exact body can currently be recalled. It deliberately includes busy and
+/// incapacitated residents so callers can distinguish "present but busy" from
+/// "this identity does not exist on the station" before considering a spawn.
+pub type AvailableResidents<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static CrewMember,
+        &'static Body,
+        &'static Bloodstream,
+        Option<&'static mut CrewRoute>,
+        Has<crate::utility_ai::UtilityAgent>,
+        Option<&'static crate::utility_ai::CurrentAction>,
+        Option<&'static mut crate::utility_ai::ControlOwner>,
+        Option<&'static mut crate::utility_ai::LocomotionOwner>,
+        Has<Ambient>,
+        Has<crate::social::NpcCommitment>,
+    ),
+    With<StationResident>,
+>;
 
 /// Sends an existing off-duty resident to the counter to collect an order,
 /// instead of spawning a second, unlinked entity under the same name.
@@ -1304,40 +1480,43 @@ pub(crate) struct StationResident;
 ///
 /// Reused rather than respawned so the walk starts from wherever the
 /// resident actually is this instant, not a fresh off-screen door spawn.
-/// `route` is written through the live query rather than via
-/// `Commands::insert`, which would re-trigger [`start_crew_at_their_department`]'s
-/// Added-`CrewRoute` teleport and snap them home first.
+/// `route` is written through the live query to avoid unnecessary component
+/// churn. Department placement is separately protected by the spawn-only
+/// [`NeedsDepartmentPlacement`] marker, so restoring a route on an existing
+/// resident can never snap them home.
 ///
 /// `None` if nobody by that name is currently free to be pulled off duty —
 /// no map loaded at all (residents never populate without one), or the one
 /// resident by that name is down. The caller falls back to spawning an
 /// ordinary, disposable customer in that case, exactly as before this
 /// existed.
-pub type AvailableResidents<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static CrewMember,
-        &'static Body,
-        &'static Bloodstream,
-        &'static mut CrewRoute,
-    ),
-    (With<Ambient>, Without<crate::social::NpcCommitment>),
->;
-
 pub fn recall_resident_for_order(
     commands: &mut Commands,
-    residents: &mut Query<
-        (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
-        (With<Ambient>, Without<crate::social::NpcCommitment>),
-    >,
+    residents: &mut AvailableResidents,
     name: &str,
     role: &str,
     lane_offset: f32,
 ) -> Option<Entity> {
-    for (entity, member, body, blood, mut route) in residents.iter_mut() {
-        if member.name != name || body.0.collapsed || blood.0.incapacitated() {
+    for (
+        entity,
+        member,
+        body,
+        blood,
+        route,
+        utility_agent,
+        action,
+        owner,
+        locomotion,
+        ambient,
+        committed,
+    ) in residents.iter_mut()
+    {
+        if member.name != name
+            || !ambient
+            || committed
+            || body.0.collapsed
+            || blood.0.incapacitated()
+        {
             continue;
         }
         let lane = if role == "Medical" {
@@ -1345,7 +1524,33 @@ pub fn recall_resident_for_order(
         } else {
             DeliveryLane::Public
         };
-        *route = CrewRoute::arrival_for(lane, lane_offset);
+        if utility_agent {
+            let (Some(mut owner), Some(mut locomotion)) = (owner, locomotion) else {
+                continue;
+            };
+            if crate::utility_ai::interrupt_utility_action(
+                commands,
+                entity,
+                action,
+                &mut owner,
+                &mut locomotion,
+                crate::utility_ai::ControlOwner::OrderVisit,
+                crate::utility_ai::LocomotionOwner::CrewRoute,
+            )
+            .is_err()
+            {
+                continue;
+            }
+            commands
+                .entity(entity)
+                .insert(crate::utility_ai::NpcActivity::Traveling);
+        }
+        let route_to_counter = CrewRoute::arrival_for(lane, lane_offset);
+        if let Some(mut route) = route {
+            *route = route_to_counter;
+        } else {
+            commands.entity(entity).insert(route_to_counter);
+        }
         commands
             .entity(entity)
             .remove::<Ambient>()
@@ -1353,6 +1558,30 @@ pub fn recall_resident_for_order(
         return Some(entity);
     }
     None
+}
+
+/// Reuses the station resident when possible, spawns only when that identity
+/// is genuinely absent, and returns `None` while the one real body is busy.
+/// This is the required fallback for generated visits: blindly treating a
+/// failed recall as absence creates duplicate named NPCs.
+pub fn recall_or_spawn_crew_member(
+    commands: &mut Commands,
+    residents: &mut AvailableResidents,
+    def: &CrewDef,
+    lane_offset: f32,
+) -> Option<Entity> {
+    if let Some(entity) =
+        recall_resident_for_order(commands, residents, &def.name, &def.role, lane_offset)
+    {
+        return Some(entity);
+    }
+    if residents
+        .iter_mut()
+        .any(|(_, member, ..)| member.name == def.name)
+    {
+        return None;
+    }
+    Some(spawn_crew_member(commands, def, lane_offset))
 }
 
 /// Sends idle crew somewhere new, and sends everyone to their post when a
@@ -1367,7 +1596,10 @@ fn ambient_behaviour(
     departments: Res<Departments>,
     crew_posts: Res<CrewPosts>,
     crisis: Query<(&Transform, &crate::crisis::CrisisResponse)>,
-    mut residents: Query<(&CrewMember, &mut Ambient, &mut CrewRoute, &Transform)>,
+    mut residents: Query<
+        (&CrewMember, &mut Ambient, &mut CrewRoute, &Transform),
+        Without<crate::utility_ai::UtilityAgent>,
+    >,
 ) {
     let emergency = crisis.iter().next();
 
@@ -1501,11 +1733,15 @@ fn face_authored_posts(
 /// the station's layout to ask for a customer. They spawn off-screen either way,
 /// so moving them the same frame is invisible.
 pub(crate) fn start_crew_at_their_department(
+    mut commands: Commands,
     departments: Res<Departments>,
     crew_posts: Res<CrewPosts>,
-    mut arriving: Query<(&CrewMember, &mut Transform), Added<CrewRoute>>,
+    mut arriving: Query<
+        (Entity, &CrewMember, &mut Transform),
+        (With<NeedsDepartmentPlacement>, Without<ReturnsToDuty>),
+    >,
 ) {
-    for (member, mut transform) in &mut arriving {
+    for (entity, member, mut transform) in &mut arriving {
         let home = crew_posts
             .work(&member.name)
             .or_else(|| departments.home(&member.role));
@@ -1513,6 +1749,7 @@ pub(crate) fn start_crew_at_their_department(
             transform.translation.x = home.x;
             transform.translation.z = home.z;
         }
+        commands.entity(entity).remove::<NeedsDepartmentPlacement>();
     }
 }
 
@@ -1522,7 +1759,10 @@ pub(crate) fn start_crew_at_their_department(
 /// A chemically incapacitated person remains down until the sedative clears;
 /// their already-marked leaving route then resumes toward help.
 fn react_to_chemical_statuses(
-    mut crew: Query<(&Bloodstream, &mut CrewRoute, Option<&mut Ambient>)>,
+    mut crew: Query<
+        (&Bloodstream, &mut CrewRoute, Option<&mut Ambient>),
+        Without<crate::utility_ai::UtilityAgent>,
+    >,
 ) {
     for (blood, mut route, ambient) in &mut crew {
         let sedated = blood.0.status(StatusKind::Sedated).intensity > 0.0;
@@ -1565,14 +1805,17 @@ fn evacuation_prompt(member: &CrewMember) -> String {
 /// retained locally and restored if treatment wakes the resident first.
 fn sync_medical_evacuation_prompt(
     mut commands: Commands,
-    mut crew: Query<(
-        Entity,
-        &CrewMember,
-        &Bloodstream,
-        Option<&mut Interactable>,
-        Option<&mut EvacuationPromptState>,
-        Has<NeedsMedicalEvacuation>,
-    )>,
+    mut crew: Query<
+        (
+            Entity,
+            &CrewMember,
+            &Bloodstream,
+            Option<&mut Interactable>,
+            Option<&mut EvacuationPromptState>,
+            Has<NeedsMedicalEvacuation>,
+        ),
+        Without<crate::utility_ai::UtilityAgent>,
+    >,
 ) {
     for (entity, member, blood, interactable, state, marked) in &mut crew {
         let needs_evacuation = blood.0.incapacitated();
@@ -1652,7 +1895,13 @@ fn handle_medical_evacuation(
     mut requests: MessageReader<FromClient<EvacuateCrewRequested>>,
     chemists: Query<(Entity, &Chemist)>,
     actors: Query<(&Transform, &InteractionMode, &Body, &Bloodstream), With<Chemist>>,
-    residents: Query<(&CrewMember, &Transform, &Bloodstream), With<NeedsMedicalEvacuation>>,
+    residents: Query<
+        (&CrewMember, &Transform, &Bloodstream),
+        (
+            With<NeedsMedicalEvacuation>,
+            Without<crate::utility_ai::UtilityAgent>,
+        ),
+    >,
     mut radio: ResMut<RadioLog>,
 ) {
     let mut evacuated = HashSet::new();
@@ -1733,9 +1982,13 @@ pub(crate) fn walk_route(
         &mut Transform,
         &mut CrewRoute,
         Option<&CrewMember>,
+        Option<&Body>,
         Option<&Bloodstream>,
         Has<ReturnsToDuty>,
         Has<StationResident>,
+        Has<crate::utility_ai::UtilityAgent>,
+        Option<&mut crate::utility_ai::ControlOwner>,
+        Option<&mut crate::utility_ai::LocomotionOwner>,
     )>,
     mut motion: Option<ResMut<crate::npc_motion::NpcMotion>>,
 ) {
@@ -1745,11 +1998,36 @@ pub(crate) fn walk_route(
         .collect();
     walkers.sort();
     for (_, entity) in walkers {
-        let Ok((_, mut transform, mut route, member, blood, returns_to_duty, station_resident)) =
-            crew.get_mut(entity)
+        let Ok((
+            _,
+            mut transform,
+            mut route,
+            member,
+            body,
+            blood,
+            returns_to_duty,
+            station_resident,
+            utility_agent,
+            owner,
+            locomotion,
+        )) = crew.get_mut(entity)
         else {
             continue;
         };
+        if body.is_some_and(|body| body.0.collapsed)
+            || blood.is_some_and(|blood| {
+                blood.0.status(StatusKind::Sedated).intensity > 0.0 || blood.0.incapacitated()
+            })
+        {
+            route.stall.restart();
+            continue;
+        }
+        if utility_agent
+            && !utility_route_is_owned(owner.as_deref().copied(), locomotion.as_deref().copied())
+        {
+            route.stall.restart();
+            continue;
+        }
         if motion.as_ref().is_some_and(|m| m.waiting(entity)) {
             route.stall.restart();
         }
@@ -1758,15 +2036,6 @@ pub(crate) fn walk_route(
         // briskly walk home immediately after deciding to leave contradicts
         // both the status presentation and the treatment response. Their
         // already-marked Leaving route can resume once the sedative clears.
-        if blood.is_some_and(|blood| {
-            blood.0.status(StatusKind::Sedated).intensity > 0.0 || blood.0.incapacitated()
-        }) {
-            // Standing still on purpose is not being stuck, and the watchdog
-            // below cannot tell the two apart on its own.
-            route.stall.restart();
-            continue;
-        }
-
         // Turn a new destination into a path, once, the frame it is set.
         if let Some(mut requested_goal) = route.pending {
             if route.counter_bound {
@@ -1860,15 +2129,58 @@ pub(crate) fn walk_route(
                     body.insert(Ambient::new(rand::random_range(
                         DWELL_SECONDS.0..=DWELL_SECONDS.1,
                     )));
-                    route.phase = CrewPhase::Arriving;
+                    if utility_agent {
+                        if let Some(mut owner) = owner {
+                            let current = *owner;
+                            if matches!(
+                                current,
+                                crate::utility_ai::ControlOwner::OrderVisit
+                                    | crate::utility_ai::ControlOwner::ScriptedErrand
+                            ) {
+                                let _ = crate::utility_ai::try_handoff(
+                                    &mut owner,
+                                    current,
+                                    crate::utility_ai::ControlOwner::UtilityAction,
+                                );
+                            }
+                        }
+                        if let Some(mut locomotion) = locomotion {
+                            *locomotion = crate::utility_ai::LocomotionOwner::None;
+                        }
+                        body.insert(crate::utility_ai::NpcActivity::Idle);
+                    }
+                    // The return trip ends at the resident's department, not
+                    // at an order counter. Marking this Arriving would make
+                    // the next frame add AtCounter and briefly re-enrol the
+                    // resident as a customer.
+                    route.phase = CrewPhase::Waiting;
+                    body.remove::<AtCounter>();
                 } else {
                     commands.entity(entity).despawn();
                 }
             } else if route.phase == CrewPhase::Arriving {
                 route.phase = CrewPhase::Waiting;
-                commands
-                    .entity(entity)
-                    .insert(AtCounter(route.delivery_lane));
+                if utility_agent {
+                    if owner.as_deref().is_some_and(|owner| {
+                        *owner == crate::utility_ai::ControlOwner::UtilityAction
+                    }) {
+                        if let Some(mut locomotion) = locomotion {
+                            *locomotion = crate::utility_ai::LocomotionOwner::None;
+                        }
+                        commands
+                            .entity(entity)
+                            .remove::<AtCounter>()
+                            .insert(crate::utility_ai::NpcActivity::Idle);
+                    } else {
+                        commands
+                            .entity(entity)
+                            .insert(AtCounter(route.delivery_lane));
+                    }
+                } else {
+                    commands
+                        .entity(entity)
+                        .insert(AtCounter(route.delivery_lane));
+                }
             }
             continue;
         };
@@ -2066,6 +2378,23 @@ pub(crate) fn walk_route(
     }
 }
 
+fn utility_route_is_owned(
+    owner: Option<crate::utility_ai::ControlOwner>,
+    locomotion: Option<crate::utility_ai::LocomotionOwner>,
+) -> bool {
+    matches!(
+        (owner, locomotion),
+        (
+            Some(
+                crate::utility_ai::ControlOwner::UtilityAction
+                    | crate::utility_ai::ControlOwner::OrderVisit
+                    | crate::utility_ai::ControlOwner::ScriptedErrand
+            ),
+            Some(crate::utility_ai::LocomotionOwner::CrewRoute)
+        )
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Errands
 // ---------------------------------------------------------------------------
@@ -2202,10 +2531,23 @@ pub struct ErrandResolved {
 ///
 /// The `CrewRoute` removal is not the caller's to remember — see [`Errand`].
 pub fn send_on_errand(commands: &mut Commands, walker: Entity, goal: ErrandGoal) {
-    commands
-        .entity(walker)
-        .remove::<CrewRoute>()
-        .insert(Errand::new(goal));
+    send_on_errand_with_reach(commands, walker, goal, ERRAND_REACH);
+}
+
+/// Sends a body on an errand with a caller-owned interaction radius.
+///
+/// Moving-object errands use [`send_on_errand`]'s arm-length default. Utility
+/// work posts need a tighter radius so someone operating a console actually
+/// stands at it instead of resolving from over a metre away.
+pub fn send_on_errand_with_reach(
+    commands: &mut Commands,
+    walker: Entity,
+    goal: ErrandGoal,
+    arrive_within: f32,
+) {
+    let mut errand = Errand::new(goal);
+    errand.arrive_within = arrive_within.max(ARRIVE_EPSILON);
+    commands.entity(walker).remove::<CrewRoute>().insert(errand);
 }
 
 /// Walks everyone who is on an errand, and reports the ones that ended.
@@ -2221,7 +2563,16 @@ pub(crate) fn run_errands(
     areas: Option<Res<crate::lab::WalkableAreas>>,
     mut resolved: MessageWriter<ErrandResolved>,
     mut runners: Query<
-        (Entity, &mut Transform, &mut Errand, Option<&Bloodstream>),
+        (
+            Entity,
+            &mut Transform,
+            &mut Errand,
+            Option<&Body>,
+            Option<&Bloodstream>,
+            Has<crate::utility_ai::UtilityAgent>,
+            Option<&crate::utility_ai::ControlOwner>,
+            Option<&crate::utility_ai::LocomotionOwner>,
+        ),
         Without<CrewRoute>,
     >,
     goals: Query<&Transform, Without<Errand>>,
@@ -2229,14 +2580,19 @@ pub(crate) fn run_errands(
 ) {
     let dt = time.delta_secs();
 
-    for (entity, mut transform, mut errand, blood) in &mut runners {
+    for (entity, mut transform, mut errand, body, blood, utility_agent, owner, locomotion) in
+        &mut runners
+    {
         // Sedation stops a body mid-errand, exactly as `walk_route` already
         // stops a sedated crew member on an ordinary route. A saboteur you
         // put down on their way to the beaker does not keep walking, and the
         // errand is not cancelled either — it resumes if they come round.
-        if blood.is_some_and(|blood| {
-            blood.0.status(StatusKind::Sedated).intensity > 0.0 || blood.0.incapacitated()
-        }) {
+        if body.is_some_and(|body| body.0.collapsed)
+            || blood.is_some_and(|blood| {
+                blood.0.status(StatusKind::Sedated).intensity > 0.0 || blood.0.incapacitated()
+            })
+            || (utility_agent && !utility_errand_is_owned(owner.copied(), locomotion.copied()))
+        {
             errand.moving = false;
             continue;
         }
@@ -2309,6 +2665,25 @@ pub(crate) fn run_errands(
             errand.moving = true;
         }
     }
+}
+
+fn utility_errand_is_owned(
+    owner: Option<crate::utility_ai::ControlOwner>,
+    locomotion: Option<crate::utility_ai::LocomotionOwner>,
+) -> bool {
+    matches!(
+        (owner, locomotion),
+        (
+            Some(crate::utility_ai::ControlOwner::UtilityAction),
+            Some(crate::utility_ai::LocomotionOwner::Errand)
+        ) | (
+            Some(crate::utility_ai::ControlOwner::ScriptedErrand),
+            Some(crate::utility_ai::LocomotionOwner::Errand)
+        ) | (
+            Some(crate::utility_ai::ControlOwner::MedicalTransport),
+            Some(crate::utility_ai::LocomotionOwner::MedicalTransport)
+        )
+    )
 }
 
 #[cfg(test)]
@@ -2445,6 +2820,7 @@ mod tests {
                 },
                 Transform::from_translation(at),
                 CrewRoute::arrival(0.0),
+                NeedsDepartmentPlacement,
             ))
             .id()
     }
@@ -2662,6 +3038,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn restoring_a_route_on_an_existing_body_does_not_teleport_it_home() {
+        let mut app = walking_app();
+        let home = Vec3::new(-21.0, 0.0, 18.0);
+        let current = Vec3::new(4.0, BODY_OFFSET, -3.0);
+        app.world_mut()
+            .resource_mut::<Departments>()
+            .set("Medical".into(), home);
+        let resident = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Dr. Vance".into(),
+                    role: "Medical".into(),
+                },
+                Transform::from_translation(current),
+                CrewRoute::standing(),
+            ))
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            app.world().get::<Transform>(resident).unwrap().translation,
+            current,
+            "route restoration is not a spawn event and must preserve position",
+        );
+    }
+
     fn crew_roster() -> Vec<CrewDef> {
         ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap()
     }
@@ -2745,6 +3150,50 @@ mod tests {
              change that gave Departments its data — not some later update \
              that never actually comes",
         );
+    }
+
+    #[test]
+    fn resident_population_adopts_an_existing_named_visit_instead_of_cloning_it() {
+        let roster = crew_roster();
+        let existing_def = roster.first().expect("test roster is non-empty").clone();
+        let mut app = App::new();
+        app.insert_resource(crate::orders::StationData {
+            crew: roster.clone(),
+            config: order_config(),
+        })
+        .init_resource::<Departments>()
+        .init_resource::<CrewPosts>()
+        .add_systems(Update, populate_departments);
+        let existing = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: existing_def.name.clone(),
+                    role: existing_def.role.clone(),
+                },
+                CrewRoute::arrival(0.0),
+                crate::social::NpcCommitment,
+            ))
+            .id();
+        {
+            let mut departments = app.world_mut().resource_mut::<Departments>();
+            for role in roster.iter().map(|def| def.role.as_str()) {
+                departments.set(role.to_string(), Vec3::new(-1.0, 0.0, -1.0));
+            }
+        }
+
+        app.update();
+
+        let matching: Vec<_> = app
+            .world_mut()
+            .query::<(Entity, &CrewMember)>()
+            .iter(app.world())
+            .filter(|(_, member)| member.name == existing_def.name)
+            .map(|(entity, _)| entity)
+            .collect();
+        assert_eq!(matching, vec![existing]);
+        assert!(app.world().get::<StationResident>(existing).is_some());
+        assert!(app.world().get::<ReturnsToDuty>(existing).is_some());
     }
 
     #[test]
@@ -2886,15 +3335,13 @@ mod tests {
                 Body::default(),
                 Bloodstream::default(),
                 Ambient::new(5.0),
+                StationResident,
             ))
             .id();
 
         fn recall_dr_vance(
             mut commands: Commands,
-            mut residents: Query<
-                (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
-                (With<Ambient>, Without<crate::social::NpcCommitment>),
-            >,
+            mut residents: AvailableResidents,
         ) -> Option<Entity> {
             recall_resident_for_order(&mut commands, &mut residents, "Dr. Vance", "Medical", 0.0)
         }
@@ -2923,6 +3370,60 @@ mod tests {
     }
 
     #[test]
+    fn a_busy_resident_is_never_replaced_by_a_duplicate_visit_body() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        fn attempt_visit(
+            mut commands: Commands,
+            mut residents: AvailableResidents,
+        ) -> Option<Entity> {
+            recall_or_spawn_crew_member(
+                &mut commands,
+                &mut residents,
+                &CrewDef {
+                    name: "Dr. Vance".into(),
+                    role: "Medical".into(),
+                    color: [0.2, 0.4, 0.8],
+                },
+                0.0,
+            )
+        }
+
+        let mut app = App::new();
+        let mut control = crate::utility_ai::UtilityControlBundle::new(
+            crate::utility_ai::UtilityAgent::new(29, 0),
+        );
+        control.control = crate::utility_ai::ControlOwner::MedicalTransport;
+        control.locomotion = crate::utility_ai::LocomotionOwner::MedicalTransport;
+        app.world_mut().spawn((
+            CrewMember {
+                name: "Dr. Vance".into(),
+                role: "Medical".into(),
+            },
+            Body::default(),
+            Bloodstream::default(),
+            CrewRoute::standing(),
+            Ambient::new(5.0),
+            StationResident,
+            control,
+        ));
+
+        assert_eq!(
+            app.world_mut().run_system_once(attempt_visit).unwrap(),
+            None
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&CrewMember>()
+                .iter(app.world())
+                .filter(|member| member.name == "Dr. Vance")
+                .count(),
+            1,
+            "a failed recall means busy, not absent",
+        );
+    }
+
+    #[test]
     fn a_recalled_resident_resumes_ambient_duty_instead_of_vanishing_when_the_visit_ends() {
         use bevy::ecs::system::RunSystemOnce;
 
@@ -2941,16 +3442,11 @@ mod tests {
                 Body::default(),
                 Bloodstream::default(),
                 Ambient::new(5.0),
+                StationResident,
             ))
             .id();
 
-        fn recall_dr_vance(
-            mut commands: Commands,
-            mut residents: Query<
-                (Entity, &CrewMember, &Body, &Bloodstream, &mut CrewRoute),
-                (With<Ambient>, Without<crate::social::NpcCommitment>),
-            >,
-        ) {
+        fn recall_dr_vance(mut commands: Commands, mut residents: AvailableResidents) {
             recall_resident_for_order(&mut commands, &mut residents, "Dr. Vance", "Medical", 0.0);
         }
         app.world_mut().run_system_once(recall_dr_vance).unwrap();
@@ -3083,6 +3579,7 @@ mod tests {
         app.world_mut().entity_mut(visitor).insert((
             Body::default(),
             Bloodstream::default(),
+            NeedsDepartmentPlacement,
             crate::orders::Order {
                 reagent: chem_sim::ReagentId(0),
                 specific: false,
@@ -3306,6 +3803,37 @@ mod tests {
         let report = app.world().resource::<RadioLog>().entries.back().unwrap();
         assert_eq!(report.channel, crate::radio::RadioChannel::Medical);
         assert!(report.text.contains("Down Patient was evacuated"));
+    }
+
+    #[test]
+    fn legacy_evacuation_never_despawns_a_utility_patient() {
+        let mut app = evacuation_app();
+        let client_entity = app.world_mut().spawn_empty().id();
+        let client = ClientId::Client(client_entity);
+        app.world_mut().spawn((
+            Chemist { client },
+            Transform::from_xyz(0.5, BODY_OFFSET, 0.0),
+            InteractionMode::Roaming,
+            Body::default(),
+            Bloodstream::default(),
+        ));
+        let patient = incapacitated_resident(&mut app, Vec3::ZERO);
+        app.world_mut().entity_mut(patient).insert((
+            crate::utility_ai::UtilityAgent::new(31, 0),
+            NeedsMedicalEvacuation,
+        ));
+
+        app.update();
+        app.world_mut().write_message(FromClient {
+            client_id: client,
+            message: EvacuateCrewRequested { target: patient },
+        });
+        app.update();
+
+        assert!(
+            app.world().get_entity(patient).is_ok(),
+            "Medical utility owns this exact body and the legacy path must not despawn it",
+        );
     }
 
     #[test]
@@ -3887,6 +4415,9 @@ mod tests {
             Vec3::new(door_x(), 0.93, spawn_z()),
             CrewRoute::arrival(0.0),
         );
+        app.world_mut()
+            .entity_mut(crew)
+            .insert(NeedsDepartmentPlacement);
         tick(&mut app, 0.01);
 
         // Loose on purpose: they are placed and then immediately take their
@@ -4133,8 +4664,16 @@ mod tests {
                     role: role.into(),
                 },
                 Ambient { dwell: 1.0 },
+                StationResident,
             ));
         }
+        app.world_mut().spawn((
+            CrewMember {
+                name: "Recalled Resident".into(),
+                role: "Medical".into(),
+            },
+            StationResident,
+        ));
         let visitor = app.world_mut().spawn(CrewMember {
             name: "Customer".into(),
             role: "Service".into(),
@@ -4142,7 +4681,7 @@ mod tests {
         let visitor = visitor.id();
 
         let mut all = app.world_mut().query::<&CrewMember>();
-        assert_eq!(all.iter(app.world()).count(), 4, "four crew exist");
+        assert_eq!(all.iter(app.world()).count(), 5, "five crew exist");
 
         let mut visiting = app
             .world_mut()
@@ -4152,6 +4691,57 @@ mod tests {
             counted,
             vec![visitor],
             "only the customer may count towards the counter being busy",
+        );
+    }
+
+    #[test]
+    fn utility_agent_is_never_driven_by_legacy_ambient_behaviour() {
+        let mut app = station_app();
+        let resident = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Cargo Utility Pilot".into(),
+                    role: "Cargo".into(),
+                },
+                Transform::from_translation(Vec3::new(0.0, BODY_OFFSET, 0.0)),
+                CrewRoute::standing(),
+                // A legacy resident would choose a destination immediately.
+                Ambient { dwell: 0.0 },
+                crate::utility_ai::UtilityAgent::new(7, 0),
+            ))
+            .id();
+
+        tick(&mut app, 0.5);
+
+        assert!(
+            !app.world().get::<CrewRoute>(resident).unwrap().is_moving(),
+            "legacy ambient selected a destination for a utility-controlled resident"
+        );
+    }
+
+    #[test]
+    fn utility_agent_is_never_rerouted_by_legacy_chemical_behavior() {
+        let mut app = App::new();
+        app.add_systems(Update, react_to_chemical_statuses);
+        let mut blood = Bloodstream::default();
+        blood.0.add_status(StatusKind::Paranoid, 10.0, 1.0);
+        let resident = app
+            .world_mut()
+            .spawn((
+                blood,
+                CrewRoute::standing(),
+                Ambient { dwell: 0.0 },
+                crate::utility_ai::UtilityAgent::new(7, 0),
+            ))
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            app.world().get::<CrewRoute>(resident).unwrap().phase,
+            CrewPhase::Waiting,
+            "legacy chemical behavior took intent away from utility AI",
         );
     }
 
@@ -4344,6 +4934,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn utility_route_moves_only_for_its_declared_owner_and_while_conscious() {
+        let mut areas = crate::lab::WalkableAreas::default();
+        areas.push(
+            crate::lab::Bounds {
+                min_x: 0.0,
+                max_x: 12.0,
+                min_z: 0.0,
+                max_z: 4.0,
+            },
+            None,
+        );
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Departments>()
+            .init_resource::<DeliveryStations>()
+            .insert_resource(crate::nav::NavGraph::build(&areas, crate::nav::NAV_RADIUS))
+            .insert_resource(areas)
+            .add_systems(Update, walk_route);
+        let start = Vec3::new(1.0, BODY_OFFSET, 2.0);
+        let goal = Vec3::new(10.0, BODY_OFFSET, 2.0);
+        let mut control = crate::utility_ai::UtilityControlBundle::new(
+            crate::utility_ai::UtilityAgent::new(9, 0),
+        );
+        control.control = crate::utility_ai::ControlOwner::Incapacitated;
+        let resident = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(start),
+                CrewRoute::to(goal),
+                Body::default(),
+                Bloodstream::default(),
+                control,
+            ))
+            .id();
+
+        tick(&mut app, 0.1);
+        assert_eq!(
+            app.world().get::<Transform>(resident).unwrap().translation,
+            start
+        );
+
+        *app.world_mut()
+            .get_mut::<crate::utility_ai::ControlOwner>(resident)
+            .unwrap() = crate::utility_ai::ControlOwner::UtilityAction;
+        *app.world_mut()
+            .get_mut::<crate::utility_ai::LocomotionOwner>(resident)
+            .unwrap() = crate::utility_ai::LocomotionOwner::CrewRoute;
+        tick(&mut app, 0.1);
+        let moved = app.world().get::<Transform>(resident).unwrap().translation;
+        assert!(
+            moved.x > start.x,
+            "the matching owner should permit its route"
+        );
+
+        app.world_mut()
+            .get_mut::<Body>(resident)
+            .unwrap()
+            .0
+            .collapsed = true;
+        tick(&mut app, 0.1);
+        assert_eq!(
+            app.world().get::<Transform>(resident).unwrap().translation,
+            moved,
+            "physiological collapse overrides otherwise valid locomotion ownership",
+        );
+    }
+
     fn flatten(app: &mut App, crew: Entity) {
         app.world_mut()
             .get_mut::<Body>(crew)
@@ -4393,6 +5051,97 @@ mod tests {
             COLLAPSE_PENALTY,
             "the penalty is for going down, not for staying down"
         );
+    }
+
+    #[test]
+    fn a_utility_collapse_is_reported_once_until_recovery() {
+        let mut app = collapse_app();
+        let mut down = Body::default();
+        down.0.collapsed = true;
+        let crew = app
+            .world_mut()
+            .spawn((
+                down,
+                CrewMember {
+                    name: "Utility Subject".into(),
+                    role: "Cargo".into(),
+                },
+                crate::utility_ai::UtilityAgent::new(17, 0),
+            ))
+            .id();
+
+        app.update();
+        app.world_mut()
+            .get_mut::<Body>(crew)
+            .unwrap()
+            .0
+            .damage
+            .brute = Units::whole(1);
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Medical),
+            COLLAPSE_PENALTY,
+        );
+
+        app.world_mut().get_mut::<Body>(crew).unwrap().0.collapsed = false;
+        app.update();
+        app.world_mut().get_mut::<Body>(crew).unwrap().0.collapsed = true;
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Shift>()
+                .standing(Department::Medical),
+            COLLAPSE_PENALTY * 2,
+            "a later collapse after recovery remains a new consequence",
+        );
+    }
+
+    #[test]
+    fn an_untracked_utility_collapse_enters_the_shared_incident_ledger_once() {
+        let mut app = collapse_app();
+        app.init_resource::<crate::utility_ai::IncidentLedger>();
+        let mut down = Body::default();
+        down.0
+            .apply(Damage::of(DamageKind::Brute, Units::whole(120)));
+        let crew = app
+            .world_mut()
+            .spawn((
+                down,
+                Bloodstream::default(),
+                Transform::from_xyz(4.0, BODY_OFFSET, -2.0),
+                CrewMember {
+                    name: "Utility Casualty".into(),
+                    role: "Cargo".into(),
+                },
+                crate::utility_ai::UtilityAgent::new(23, 0),
+                crate::utility_ai::NpcJobProfile::new(
+                    crate::utility_ai::JobDomain::Cargo,
+                    crate::utility_ai::NarrativeTier::Support,
+                    [crate::utility_ai::JobCapability::new("cargo.sort")],
+                ),
+            ))
+            .id();
+
+        app.update();
+        app.world_mut()
+            .get_mut::<Body>(crew)
+            .unwrap()
+            .0
+            .damage
+            .brute = Units::whole(121);
+        app.update();
+
+        let ledger = app.world().resource::<crate::utility_ai::IncidentLedger>();
+        let incidents: Vec<_> = ledger.active_for(crew).collect();
+        assert_eq!(incidents.len(), 1);
+        assert_eq!(
+            incidents[0].kind,
+            crate::utility_ai::IncidentKind::BruteInjury
+        );
+        assert_eq!(incidents[0].department, crate::utility_ai::JobDomain::Cargo);
+        assert_eq!(incidents[0].location, Vec3::new(4.0, BODY_OFFSET, -2.0));
     }
 
     #[test]
@@ -4520,6 +5269,47 @@ mod tests {
                 break;
             }
         }
+    }
+
+    #[test]
+    fn utility_errand_moves_only_for_its_declared_owner_and_while_conscious() {
+        let mut app = errand_app();
+        let start = in_reaction_bay();
+        let walker = errand_runner(&mut app, start);
+        let goal = start + Vec3::new(3.0, 0.0, 0.0);
+        let mut control = crate::utility_ai::UtilityControlBundle::new(
+            crate::utility_ai::UtilityAgent::new(23, 0),
+        );
+        control.control = crate::utility_ai::ControlOwner::Incapacitated;
+        app.world_mut().entity_mut(walker).insert((
+            Body::default(),
+            Bloodstream::default(),
+            control,
+        ));
+        send(&mut app, walker, ErrandGoal::Point(goal));
+
+        tick(&mut app, 0.05);
+        assert_eq!(
+            app.world().get::<Transform>(walker).unwrap().translation,
+            start
+        );
+
+        *app.world_mut()
+            .get_mut::<crate::utility_ai::ControlOwner>(walker)
+            .unwrap() = crate::utility_ai::ControlOwner::UtilityAction;
+        *app.world_mut()
+            .get_mut::<crate::utility_ai::LocomotionOwner>(walker)
+            .unwrap() = crate::utility_ai::LocomotionOwner::Errand;
+        tick(&mut app, 0.05);
+        let moved = app.world().get::<Transform>(walker).unwrap().translation;
+        assert!(moved.distance(start) > 0.001);
+
+        app.world_mut().get_mut::<Body>(walker).unwrap().0.collapsed = true;
+        tick(&mut app, 0.05);
+        assert_eq!(
+            app.world().get::<Transform>(walker).unwrap().translation,
+            moved
+        );
     }
 
     #[test]

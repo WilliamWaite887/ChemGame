@@ -9,6 +9,7 @@ mod asset_pack_format;
 mod audio;
 mod bent_guard;
 mod body;
+mod botanist;
 /// Screenshot-capture dev tool: HUD hide + free camera. See its own doc
 /// comment for why this is safe to toggle mid-session.
 mod capture;
@@ -65,6 +66,8 @@ mod textbook;
 mod threat;
 mod tutorial;
 mod ui;
+pub mod utility_ai;
+mod voice;
 mod world_state;
 
 use bevy::prelude::*;
@@ -156,7 +159,13 @@ fn main() {
             inspection::InspectionPlugin,
             analysis_reports::AnalysisReportPlugin,
         ),
-        crew::CrewPlugin,
+        (
+            crew::CrewPlugin,
+            // Registered after crew because utility actions reuse its movement
+            // and arrival contracts. No resident is opted in by default yet,
+            // so this remains an inert migration seam until the Cargo pilot.
+            utility_ai::UtilityAiPlugin,
+        ),
         knowledge::KnowledgePlugin,
         (
             orders::OrderPlugin,
@@ -226,10 +235,15 @@ fn main() {
             // every save regardless of which main antagonist was drawn.
             // Security's legacy state remains for earned rewards and saves;
             // the unified Reyes case pilot owns new corruption incidents.
-            obsessed::ObsessedPlugin,
-            smuggler::SmugglerPlugin,
-            saboteur::SaboteurPlugin,
-            quack::QuackPlugin,
+            // The department minors, grouped: one per department, all running
+            // in every save. Nested because `add_plugins` tuples cap at 15.
+            (
+                obsessed::ObsessedPlugin,
+                smuggler::SmugglerPlugin,
+                saboteur::SaboteurPlugin,
+                quack::QuackPlugin,
+                botanist::BotanistPlugin,
+            ),
             // After `security`, whose `Requisition::raid_wards` a sale to
             // him banks, and after `antagonist`, whose illicit-resolution
             // handler charges that sale the ordinary way.

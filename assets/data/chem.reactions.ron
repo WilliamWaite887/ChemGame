@@ -1577,4 +1577,25 @@
             "Combine equal Mindbreaker Toxin, Multiver, and Sodium with two parts Sodium Chloride at pH 5–9; inputs must average at least 30% purity.",
         ],
     ),
+    (
+        // Botany's minor thread depends on this being makeable. A player-only
+        // reagent that no player can synthesise is a contradiction: the whole
+        // point is that the supply choice belongs to the player, which means
+        // the player has to be able to make it. `dispensable: false` keeps it
+        // off the ChemMaster, so it costs a deliberate synthesis rather than a
+        // button press.
+        //
+        // The precursors are the grower's own earlier asks, which is the tell a
+        // careful player can read before the last one: he has been walking the
+        // route in pieces.
+        id: "quiet_rot",
+        reactants: [("ammonia", 2), ("diethylamine", 1), ("phenol", 1)],
+        products: [("quiet_rot", 2)],
+        min_ph: Some(6.0), optimal_ph: Some(6.5), max_ph: Some(8.0),
+        priority: 48,
+        hints: [
+            "A nitrogen feed and a growth compound carry an aromatic toxin into something that keeps in food.",
+            "Two parts Ammonia to one each of Diethylamine and Phenol, kept mildly acidic to neutral.",
+        ],
+    ),
 ]

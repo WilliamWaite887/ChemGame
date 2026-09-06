@@ -41,6 +41,7 @@ pub enum RequestSource {
     Saboteur,
     BentGuard,
     Security,
+    MedicalCase,
 }
 
 #[derive(Component, Clone, Copy, Debug)]
@@ -162,6 +163,16 @@ impl Intake<'_, '_> {
             greeting,
             step: None,
         })
+    }
+
+    /// Releases a same-frame admission when its caller could not complete the
+    /// promised spawn or resident handoff. Without this, one failed linked
+    /// Medical requester could occupy the intake's private name reservation
+    /// until the session ended.
+    pub fn cancel_admission(&mut self, name: &str) {
+        if let Some(state) = self.state.as_mut() {
+            state.reserved.remove(name);
+        }
     }
 }
 
@@ -303,17 +314,21 @@ fn update_pending(
         &mut AwaitingConversation,
         &mut CrewRoute,
         Option<&queue::QueuePosition>,
+        Option<&Body>,
         Option<&Bloodstream>,
         &Transform,
     )>,
 ) {
-    for (entity, member, mut request, mut visible, mut route, place, blood, at) in &mut pending {
+    for (entity, member, mut request, mut visible, mut route, place, body, blood, at) in
+        &mut pending
+    {
         let obsolete = request.context.campaign.is_some_and(|id| {
             !campaign
                 .as_deref()
                 .is_some_and(|c| c.active_by_id(id).is_some_and(|a| a.outcome.is_none()))
         });
-        let unable = blood.is_some_and(|b| b.0.incapacitated());
+        let unable =
+            body.is_some_and(|b| b.0.collapsed) || blood.is_some_and(|b| b.0.incapacitated());
         let abandoned = route.phase == crate::crew::CrewPhase::Leaving;
         let ended_step = request.context.source == RequestSource::Cult
             && request
@@ -425,6 +440,7 @@ fn withdraw(commands: &mut Commands, entity: Entity, route: &mut CrewRoute) {
             crate::orders::CounterOrder,
             crate::orders::HostileOrder,
             crate::orders::IllicitOrder,
+            crate::orders::OrderUse,
             queue::QueuePosition,
         )>()
         .insert(Interactable::new("Crew member"));

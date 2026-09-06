@@ -79,9 +79,18 @@ impl Plugin for HazardPlugin {
                 Update,
                 (
                     (
-                        spawn_hazards.in_set(ReactionHazards),
-                        apply_electrical_pulses,
-                        apply_chemical_impulses,
+                        spawn_hazards
+                            .in_set(ReactionHazards)
+                            .before(crate::utility_ai::UtilityAiSet::Observe),
+                        apply_electrical_pulses.before(crate::utility_ai::UtilityAiSet::Observe),
+                        // Forced motion is an explicit post-navigation
+                        // override. Utility routes, errands and Medical
+                        // attachment finish first, then the blast displacement
+                        // wins deterministically instead of racing a second
+                        // Transform writer.
+                        apply_chemical_impulses
+                            .after(crate::utility_ai::UtilityAiSet::Navigate)
+                            .before(crate::utility_ai::UtilityAiSet::Attach),
                         expose_to_smoke,
                         fade_smoke,
                     )

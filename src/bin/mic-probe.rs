@@ -13,8 +13,8 @@
 
 use std::time::{Duration, Instant};
 
-use rodio::microphone::{available_inputs, MicrophoneBuilder};
 use rodio::cpal::traits::DeviceTrait;
+use rodio::microphone::{available_inputs, MicrophoneBuilder};
 use rodio::Source;
 
 /// What voice capture actually wants: Opus is defined at 48 kHz, and speech is

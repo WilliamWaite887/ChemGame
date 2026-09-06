@@ -652,7 +652,7 @@ fn generate_cult_visit(
         return;
     };
     context.step = Some(progress.next_stage);
-    let visitor = threat::dispatch_scripted_visit(
+    let Some(visitor) = threat::dispatch_scripted_visit(
         &mut commands,
         &db,
         &mut rng,
@@ -667,7 +667,10 @@ fn generate_cult_visit(
             amount_units: stage.amount,
             plea: stage.pretext.clone(),
         },
-    );
+    ) else {
+        intake.cancel_admission(&script.name);
+        return;
+    };
     commands
         .entity(visitor)
         .insert((crate::orders::HostileOrder, CultHerald));

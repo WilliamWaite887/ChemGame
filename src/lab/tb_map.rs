@@ -1689,7 +1689,14 @@ fn every_department_on_the_crew_roster_has_somewhere_to_live() {
         .filter_map(|entity| property(entity, "department"))
         .collect();
 
-    for department in ["Medical", "Security", "Engineering", "Cargo", "Service"] {
+    for department in [
+        "Medical",
+        "Security",
+        "Engineering",
+        "Cargo",
+        "Service",
+        "Botany",
+    ] {
         assert!(
             roster.contains(&format!("role: \"{department}\"")),
             "{department} is not on the crew roster any more; the map still has a wing for it",
@@ -1729,6 +1736,7 @@ fn every_named_crew_member_has_a_work_post() {
         "Warden Bex",
         "Tech Lindqvist",
         "Miner Sato",
+        "Quartermaster Rhee",
         "Botanist Ivy",
         "Chef Dubois",
     ] {
@@ -4638,6 +4646,86 @@ fn every_crew_post_kind_is_one_the_loader_handles() {
 }
 
 #[test]
+fn utility_spots_are_unique_walkable_and_routable() {
+    let map = parse();
+    let areas = authored_walkable_areas();
+    let graph = NavGraph::build(&areas, NAV_RADIUS);
+    let spots: Vec<_> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("utility_spot"))
+        .collect();
+    let expected = [
+        "cargo.manifest",
+        "cargo.weigh",
+        "cargo.sort",
+        "cargo.dispatch",
+        "cargo.requisition",
+        "medical.bed.1",
+        "medical.bed.2",
+        "botany.plot.inspect",
+        "botany.irrigation",
+        "botany.plot.tend",
+        "botany.harvest.process",
+        "botany.output.shelf",
+        "engineering.generator.inspect",
+        "engineering.breaker.maintenance",
+        "engineering.coolant.manifold",
+        "engineering.power.monitor",
+        "service.kitchen.prep",
+        "service.meal.pass",
+        "service.table.host",
+        "service.cleanup",
+        "service.lounge.seat.1",
+        "service.lounge.seat.2",
+        "service.lounge.gather",
+        "security.dispatch",
+        "security.desk",
+        "security.evidence",
+        "security.interview.room",
+        "bridge.helm",
+        "bridge.comms",
+        "bridge.station.monitor",
+        "bridge.briefing",
+        // One voluntary-aid intake per department — see `utility_ai::aid`.
+        // A player must stand within reach of these to donate, and workers
+        // walk to them to assess, so both halves need the walkable and
+        // routable checks below.
+        "medical.aid_intake",
+        "security.aid_intake",
+        "engineering.aid_intake",
+        "cargo.aid_intake",
+        "service.aid_intake",
+        "botany.aid_intake",
+        "bridge.aid_intake",
+    ];
+    assert_eq!(spots.len(), expected.len());
+
+    let mut ids = std::collections::HashSet::new();
+    for spot in spots {
+        let id = property(spot, "id").unwrap_or_default();
+        assert!(
+            expected.contains(&id.as_str()),
+            "unexpected utility spot '{id}'"
+        );
+        assert!(ids.insert(id.clone()), "duplicate utility spot '{id}'");
+        let capacity = property(spot, "capacity")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        assert!(capacity > 0, "utility spot '{id}' has no capacity");
+        let (x, z) = origin_xz(spot).expect("utility_spot has a valid origin");
+        let at = Vec3::new(x, 0.0, z);
+        assert!(
+            areas.regions().iter().any(|region| region.bounds.holds(at)),
+            "utility spot '{id}' at {at} is not on walkable floor",
+        );
+        assert!(
+            graph.path(at, COUNTER_SPOT).is_some(),
+            "utility spot '{id}' at {at} cannot route to the counter",
+        );
+    }
+}
+
+#[test]
 fn work_posts_name_a_roster_member_and_communal_posts_do_not() {
     // Both halves are silent failures otherwise. A `work` post with no
     // occupant is dropped by the loader with a warning; an occupant on a
@@ -4882,6 +4970,7 @@ fn every_entity_in_the_map_is_a_class_the_game_registers() {
         "chemist_start",
         "department_spot",
         "crew_post",
+        "utility_spot",
         "queue_point",
         "department_dressing",
         "decoration_spot",
