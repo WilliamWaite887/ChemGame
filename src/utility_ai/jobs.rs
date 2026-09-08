@@ -381,6 +381,80 @@ impl UtilitySpots {
     }
 }
 
+/// When each standing post may next be advertised.
+///
+/// Security and Bridge publish *watches* rather than finite work: a console
+/// does not stop wanting to be staffed, so their tickets are republished as
+/// soon as the board is empty of them. Without a cooldown that happens the very
+/// frame the post is vacated, and the officer still standing on it re-claims it
+/// immediately — legal, but it reads as a stuck loop and, worse, it means the
+/// officer never walks anywhere. A department whose job is noticing has to move
+/// through rooms to notice anything.
+#[derive(Resource, Default)]
+pub struct StandingPostCooldowns {
+    until: HashMap<JobTicketId, f32>,
+}
+
+impl StandingPostCooldowns {
+    /// Whether this post may be advertised again yet.
+    pub fn ready(&self, id: JobTicketId, now: f32) -> bool {
+        self.until.get(&id).is_none_or(|until| now >= *until)
+    }
+
+    pub fn begin(&mut self, id: JobTicketId, now: f32) {
+        self.until.insert(id, now + STANDING_POST_COOLDOWN_SECONDS);
+    }
+
+    pub fn clear(&mut self) {
+        self.until.clear();
+    }
+}
+
+/// How long a worked post stays off the board.
+///
+/// Long enough that the vacating worker's decision clock (0.35-0.75s) fires
+/// several times against a board without it, so they pick something else and
+/// the rotation — and the travel — becomes visible.
+const STANDING_POST_COOLDOWN_SECONDS: f32 = 8.0;
+
+/// Takes completed standing-post tickets off the board so they can be
+/// republished.
+///
+/// The half Security and Bridge were missing. Every other department has an
+/// `apply_*_job_results` system that consumes its completions; those two had
+/// none, so a finished ticket stayed `Completed(owner)` forever, the
+/// `board.ticket(id).is_some()` guard in their publishers stayed true, and each
+/// department published its posts exactly once per shift and then went silent.
+/// Live, that read as `Security 3/0` and `Bridge 4/0` in every snapshot of a
+/// 500-second run.
+///
+/// Unlike a department adapter there is no world state to change — the post is
+/// simply released. Shared rather than copy-pasted into both files because they
+/// need identical logic, and `security.rs` already records that Engineering
+/// shipped a migration bug exactly that way.
+pub(super) fn take_completed_standing_posts(
+    domain: JobDomain,
+    results: &[(JobTicketId, ReservationOwner)],
+    board: &mut JobBoard,
+    cooldowns: &mut StandingPostCooldowns,
+    now: f32,
+) -> usize {
+    let mut taken = 0;
+    for (id, claim) in results {
+        let Some(ticket) = board.ticket(*id) else {
+            continue;
+        };
+        if ticket.domain != domain || ticket.state != JobTicketState::Completed(*claim) {
+            continue;
+        }
+        if board.take_completed(*id, *claim).is_ok() {
+            cooldowns.begin(*id, now);
+            taken += 1;
+        }
+    }
+    taken
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3207,6 +3207,327 @@ accidentally revert, and both have falsification tests
 
 ## Decision log
 
+### 2026-09-06, the station was not idle, it was blind
+
+Twenty-one of the thirty residents had no Routine candidate at all, and the
+reason was in the map rather than the code.
+
+- **The census.** `crew_post` markers by kind: 9 `work`, 9 `duty`, 18 `visit`,
+  2 `relax`, 1 `loiter`. The nine `work` posts name Vance, Okonkwo, Reyes, Bex,
+  Lindqvist, Sato, Rhee, Ivy, Dubois. Everyone else — including five *core*
+  crew (Morrow, Amari, Vale, Odera, Sissel) and all sixteen support — got
+  `CrewPosts::work(name) == None`.
+- **Why a missing post deleted the action rather than lowering it.**
+  `MaintainPost` carries `HasTarget` as a consideration, and
+  `UtilityCandidate::score` returns `Normalized::ZERO` the moment *any*
+  consideration is zero. So a nameless resident did not get a cheap
+  `MaintainPost`; they got none, and `IdleObserve` was the only candidate left
+  in any bucket for the entire shift.
+- **Buckets make this invisible in the aggregate.** `UtilityBucket` is a strict
+  priority class — only the highest non-empty bucket competes. The previous
+  trace's `IdleObserve` ~8700 against `PerformJob` ~125 therefore was never a
+  tuning problem, and no reweighting could have touched it. Every one of those
+  8700 picks was proof the Routine bucket was *empty*.
+- **The fix was already authored and simply never wired up.** `CrewPosts.duty`
+  is a communal pool whose own doc comment calls it "a communal work spot:
+  standing at one reads as working, whoever you are" — exactly the fallback
+  needed, and unread by `utility_ai`. Selection now takes the personal `work`
+  post when one exists and otherwise the nearest reachable `duty` post.
+- **By route, not at random, and this is load-bearing.**
+  `CrewPosts::random_duty` already existed and is wrong here: a candidate's
+  `target_key` is its identity, hysteresis holds an action by comparing that
+  key, and a destination redrawn every decision would give the same intention a
+  new identity each tick — nothing could ever be held. `duty_points()` hands
+  back the whole pool and `NavGraph::nearest_reachable` picks deterministically,
+  by walking distance rather than straight line. Pinned by
+  `a_duty_fallback_target_is_stable_across_decisions`, which fails with
+  `Some(Vec3(5.0, 0.0, 0.0))` against `Some(Vec3(4.0, 0.0, 0.0))` when
+  `random_duty` is swapped in.
+- **`NavGraph` is required, not `Option<Res<_>>`.** An absent graph makes the
+  fallback silently find nothing and reproduces the bug while reporting a pass —
+  the `NpcMotion` trap again. Nine harnesses failed on the new parameter, which
+  is the correct failure; `UtilityAiPlugin` now also `init_resource`s the graph,
+  because it genuinely depends on one and two plugin-schedule tests proved it
+  did not guarantee it.
+- **Falsified.** Removing the `or_else` makes
+  `a_resident_without_a_personal_post_still_has_routine_work` fail with
+  `left: Some(IdleObserve)` / `right: Some(MaintainPost)` — the production
+  defect, reproduced in a test. `the_whole_authored_cast_can_maintain_a_post`
+  checks all thirty residents by name and fails when the `duty` markers are
+  removed.
+- **Live, at 4x, fresh save.** `IdleObserve` picks: **zero**, against ~8700 in
+  the previous trace. All thirty residents appear as actors. The mechanism is
+  visible in one line:
+  `PICK Ensign Park -> MaintainPost/… score=0.75  vs IdleObserve 1.00` —
+  `IdleObserve` scores *higher* and still loses, which is strict-priority
+  bucketing working as designed.
+
+### 2026-09-07, four seats for thirty people
+
+Service was the station's worst room by measurement, not impression, and it is
+the room the next stage sends everybody to.
+
+- **What was measured.** 0.8 decorations per 100 m² against a station norm of
+  2.4-4.1 (Bridge 4.1, Security 3.0, Botany 2.4, Medical 2.4, Engineering 1.8);
+  six props in a 24×24 m room. Root cause is upstream of the map:
+  `generate_service_modules.py` is 6.5 KB against 21-46 KB for every other
+  department's generator, so Service received roughly a seventh the authoring
+  effort of its neighbours.
+- **Four usable places for thirty residents** — `service.lounge.seat.1`/`.2` at
+  capacity 1 each and `service.lounge.gather` at 2. Four dining tables at
+  capacity 4 bring it to twenty. This had to land *before* the hunger stage:
+  driving a crowd to a room that seats four means the occupancy filter admits
+  four and bounces the rest back to `MaintainPost`, which reads as people
+  pressing at a door — worse than the empty room it replaced.
+- **Half the room was unused.** Every prop and spot sat in the eastern third
+  around z 15-33; the tables now occupy the middle, and `service.cleanup` moved
+  from x −45 — marooned 17 m west, in the strip the room's own workers never
+  cross — to beside the kitchen.
+- **Falsified.** `the_service_room_seats_a_real_fraction_of_the_crew` fails with
+  "Service seats 4" when the `service.table.*` markers are removed;
+  `every_service_seat_is_reachable_from_the_meal_pass` route-checks each seat
+  from the counter, which is the failure the collision-extent registration makes
+  easy.
+
+**The part I got wrong, twice.** The first pass authored four wall boards at the
+*walkable brush* boundary and they shipped floating in mid-air — the player's
+words were "lots of floating signs". A brush edge is where the floor stops,
+which is not where a wall is.
+
+- I then moved them four more times on successive guesses, each one wrong. A
+  scan of the actual floor showed why: the east wall at x −23.62 is solid only
+  at z 16-21, 25-28 and 32-38 — the gaps are doorways — and Service opens
+  northward past z 43 with no wall there at all. The room's interior geometry
+  simply is not derivable from the numbers I had.
+- **I also wrote a test that could not do its job.** A wall-backing check based
+  on "is the tile behind this non-walkable" flagged the *original*, correct
+  boards too, because mid-room dividers and doorway jambs are indistinguishable
+  from open floor that way. A test that fails on known-good content is not a
+  test; it was removed rather than weakened into uselessness.
+- **What shipped instead:** the four `svc.bench` props, which are
+  `Mount::Floor`, sit beside the tables, and needed no wall at all. Density
+  landed at 2.7 per 100 m², inside the station band. Wall dressing is deferred
+  until the room's actual wall lines are read out of the brush geometry rather
+  than guessed at.
+- **A near miss worth recording.** A scripted map edit anchored on a
+  non-unique string deleted **3866 lines** of `lab.map` — 166 decorations and
+  much else. It was recoverable only because `lab.map` was committed and
+  unmodified before the session, so `git checkout` cost nothing. Every
+  subsequent map edit asserts its anchor is unique *and* prints a before/after
+  marker count. In a worktree carrying months of uncommitted work, a one-line
+  script can be unrecoverable.
+
+### 2026-09-07, the duty post that was somebody's desk
+
+Renewable work for Engineering, Botany and Service, and a crowding regression
+the player caught before the metric did.
+
+- **Engineering was finite by construction.** Four authored assets, each
+  serviceable once, then `Operational` for ever — nine completions across a
+  500-second run with the last at 4.3 seconds. `tick_engineering_maintenance`
+  now returns one `Operational` asset to its own due state every
+  `MAINTENANCE_INTERVAL_SECONDS`, following `tick_cargo_arrivals` including its
+  `+=` re-arm, which is what stops the cadence drifting with frame time. The
+  due state is keyed off the authored spot rather than a new field, because
+  `Operational` deliberately erases which work an asset last had.
+  `scheduled_maintenance_never_overwrites_a_fault` pins the other half: a fault
+  carries an `IncidentId` only a repair resolves, and quietly downgrading one to
+  routine maintenance would strand that incident open — the immortal-incident
+  failure, re-earned.
+- **Botany retired its plots.** `MAX_HARVESTS_PER_PLOT = 1` meant a plot that
+  gave its crop was done for the shift; thirteen completions, last at 25.5s, and
+  Service — entirely downstream of Botany produce — died with it. A plot now
+  *rests* (`regrow_in`) and is replanted. Unbounded harvests are safe because
+  the harvest cap was never what bounded entity count: `MAX_PHYSICAL_OUTPUT` and
+  the shelf-occupancy gate already refuse to publish a `ProcessHarvest` while
+  the shelf is full, so backpressure comes from a world fact the player can see
+  and empty.
+- **The Botany contention fix was three lines.** The reservation key was
+  `utility.spot.{kind.spot()}` against capacity-1 spots, so four plots that had
+  converged on one stage collided on one key — the board advertised four jobs
+  where the occupancy filter permitted one, and three of four workers were
+  locked out every tick. Keyed per plot now. `target` still points at the shared
+  workstation, which `JobTicket::subject` explicitly sanctions. No map edit was
+  needed; `four_plots_in_the_same_state_are_all_claimable` fails with "only 1
+  were" when the old key is restored.
+
+**The regression, and how it was found.** The first Stage 3 run measured
+`crowding: 11` — worse than the 8 that started this whole thread — climbing 6 →
+8 → 11 at one point and staying there. The player saw it first and said where:
+*"all around one object at the left of the door."*
+
+- **Cause.** Every Bridge `duty` post is authored at **exactly** the coordinates
+  of a Bridge `utility_spot` — 0.0 m apart, because both describe the same
+  console. Six Bridge crew against four watch posts means two are always without
+  one, and Stage 1's fallback sent those two to stand on the very consoles the
+  other four had reserved and were working at. Reservations cannot prevent this:
+  `MaintainPost` takes no reservation, being the thing a resident does when they
+  could not get one. The exclusion had to be positional.
+- **And the dispersion itself was wrong.** Falling back to a department point
+  spread residents by golden angle on `seed % 360`, which *reads* as evenly
+  distributed and is not — measured against the real roster it put Medical's
+  four crew **0.08 m** apart, inside a 0.54 m clearance, because two seeds
+  landed on nearly the same ray and no radius separates points on one ray.
+  Replaced with the resident's rank within their own department roster, which
+  cannot collide: worst case is now 1.60 m for the six-person Bridge.
+  `a_department_falling_back_to_its_own_point_does_not_stand_in_itself` runs
+  against all seven real rosters and fails with that same 0.08 m under the old
+  scheme. **A synthetic fixture would never have caught this** — the collision
+  is a property of the actual names.
+- **Result.** Worst crowding 5, no longer climbing, and it now *moves* between
+  snapshots rather than accumulating at one spot.
+
+**Two process notes.** `cargo check --tests` does not check the binary:
+`roster_of` was `#[cfg(test)]`, so the whole test suite passed while
+`cargo run` failed to compile. Check both. And `cargo fmt --all` reformatted
+the voice agent's in-flight files in this shared worktree; reverted by hand,
+since `git checkout` would have destroyed their uncommitted work. Format only
+your own files here.
+
+**Live, 4x, fresh save.** Six of seven departments sustain to the end of a
+220-second run with their full worker complement — Botany 13 → **74**, Service
+15 → **50**, Engineering 4 → **9**, alongside Cargo 107, Bridge 93, Security 63.
+Medical's single completion is correct rather than a stall: one Cargo casualty
+occurred, Medical claimed the ticket, and the incident **resolved** — 36 of 41
+snapshots show no open incident at all.
+
+### 2026-09-07, the fallback that outranked the job
+
+Security and Bridge completed **zero** jobs in a 500-second run —
+`Security 3/0` and `Bridge 4/0` in all twenty-five snapshots, work published
+and never once claimed. The plan predicted this and predicted the wrong cause.
+
+- **The expected cause was real but not sufficient.** Neither adapter had an
+  `apply_*_job_results` system, so a completed post ticket stayed
+  `Completed(owner)` for ever, the publisher's `board.ticket(id).is_some()`
+  guard stayed true, and each department advertised its posts exactly once per
+  shift. That is fixed by `take_completed_standing_posts` in `jobs.rs`, shared
+  rather than copied into both files — `security.rs` already records that
+  Engineering shipped a migration bug exactly that way.
+- **The cause that actually kept them idle was one this stage created.**
+  `MaintainPost` carried `base_weight: Normalized::ONE`, scoring 0.75 after
+  `DutyPressure`. Security authors 0.30–0.45 and Bridge 0.30–0.50; every
+  department that *does* work authors 0.90–1.0. So the fallback outscored those
+  two departments' entire job lists. The log said so plainly and I had not
+  looked: `vs … PerformJob 0.45, PerformJob 0.35` losing to
+  `MaintainPost 0.75`, on every line.
+- **Which repair, and why.** Raising Security and Bridge to match would have
+  destroyed the thing their low numbers buy — `security.rs` says a department
+  whose job is *noticing* should stay interruptible, and the Bridge "notices
+  problems and reports them; it does not respond to them". The mispriced thing
+  was standing at a post, not the work. `MAINTAIN_POST_WEIGHT` is now 0.25,
+  deliberately below 0.30, the lowest urgency any department authors. A
+  fallback must lose to every real ticket, or it is a competitor.
+- **The cooldown is not decoration.** Without it a post is re-advertised the
+  frame it is vacated and the officer still standing on it retakes it — legal,
+  and it reads as a stuck loop, but the real cost is that the officer never
+  *walks* anywhere. Perception is local; a department whose job is noticing has
+  to move through rooms to notice anything.
+- **Falsified, all four.** Restoring `Normalized::ONE` fails
+  `standing_at_a_post_loses_to_the_least_urgent_real_work` with "0.75 against
+  0.3" — the live numbers, reproduced. Neutering the shared helper fails
+  `security_republishes_a_post_after_it_is_worked` and
+  `bridge_republishes_a_post_after_it_is_worked` with "never taken off the
+  board". Removing the `cooldowns.ready` gate fails
+  `a_worked_security_post_is_not_immediately_re_advertised`. Bridge needs its
+  own test rather than trusting Security's: a shared helper does not prove
+  either department is *wired up to it*, and wiring was the missing thing.
+- **Live, 4x, fresh save.** Security 0 → **57 completions across all four
+  officers**; Bridge 0 → **101 across all six**; both sustained to 167.8s of a
+  169s run. Station-wide, 288 completions in 169 seconds against 96 in 500
+  seconds before — and `Socialize` and `EatFood` began firing at all, which
+  they never had while the fallback was winning.
+
+**Still open after this stage.** Botany (13 completions, last at 25.5s),
+Engineering (4, last at 4.3s), Service (15, last at 104.5s) and Medical (1) all
+still exhaust. Engineering completing exactly four is its four hardcoded
+assets; Botany is `MAX_HARVESTS_PER_PLOT = 1`, which starves Service
+downstream. That is stage 3, and it is now the only thing between the station
+and every department working indefinitely.
+
+### 2026-09-06, the metric that could not fail
+
+Two corrections to the entry above, both found by the player looking at the
+screen while the log said everything was fine. Worth recording as process
+rather than as bugs.
+
+- **"29 distinct targets, so the fallback disperses rather than clumps" was
+  meaningless.** For `MaintainPost` the `target_key` is
+  `stable_text_key(&member.name)` — the *resident's* identity, not the
+  destination's. Twenty-nine distinct keys meant twenty-nine distinct people
+  and nothing whatever about where they stood. The screenshot showed a dozen
+  bodies packed against one wall of the Bridge while that number was being
+  reported as evidence against exactly that. **A metric that cannot fail is not
+  evidence**, and the log is good at counts and blind to arrangement.
+- **The cause.** All nine authored `duty` posts sit on the Bridge — they exist
+  to give the Bridge's support crew somewhere to stand, which
+  `the_bridge_has_somewhere_to_pretend_to_work` says outright. An unfiltered
+  "nearest reachable duty post" therefore sent every postless resident in the
+  station to Ops. The plan had predicted this follow-up; it shipped anyway
+  because the chosen metric could not see it.
+- **Fixed in three tiers**, each answering the failure the previous one caused:
+  own `work` post; else a duty post within `DUTY_POST_DEPARTMENT_REACH` of the
+  resident's *own* department point; else the department point itself. Then
+  both fallbacks needed *dispersing* — taking the single nearest candidate gave
+  everyone sharing an anchor an identical coordinate, so Bridge, Engineering
+  and Security piled onto one post (eight bodies inside two metres). Reachable
+  candidates are now ranked and indexed by the agent's own seed, and the
+  department-point tier gets a golden-angle ring offset. Both are seed-derived,
+  so the target is identical every decision and hysteresis still holds.
+- **The log now measures position, not identity.** The `STATION` snapshot
+  carries a `crowding:` field — the largest number of crew within
+  `HUDDLE_RADIUS` of any one of them, and where. Worst huddle went 8 → 5 across
+  the fix. The residual 5 is an authoring artifact, not behaviour: two duty
+  posts are authored 0.87 m apart, closer than two bodies can stand, so anyone
+  at either is inside one huddle radius of the other.
+- **Body clearance was too aggressive, and this was a real finding.**
+  `CLEARANCE` was `BODY_RADIUS * 2.0 + 0.02` = 0.72 m, but `BODY_RADIUS` is
+  `NAV_RADIUS`, which is deliberately the *player's* 0.35 rather than the 0.28
+  crew capsule — correct for planning one nav graph that fits the widest
+  walker, wrong for standing next to somebody. Two crew were held 0.72 m apart
+  when their bodies are 0.56 m wide together, so a gathered department read as
+  strangers avoiding each other. Now a plain `0.54`, slightly inside true body
+  width so shoulders overlap a little in a crowd.
+- **The floor was measured, not chosen, after guessing wrong twice.**
+  `continuous_aisle_prevents_a_pickup_line_sealing_an_incoming_route` is
+  two-sided — it asserts an *unprotected* queue seals a corridor as well as
+  that a protected one does not — and it failed at 0.50. Two attempts to derive
+  the threshold analytically were both wrong; sweeping the constant against the
+  untouched fixture answered it in one command: **0.52 still seals, 0.50 does
+  not.** 0.54 keeps a margin. Three hardcoded `0.70` literals in that file were
+  also bound to the constant, since they were the old value baked in and would
+  have silently mis-asserted forever.
+- **The rule this leaves behind.** For anything spatial, read coordinates
+  rather than identifiers, and state what the metric cannot see alongside the
+  number. For a threshold, sweep it rather than reason about the geometry. When
+  the player's eyes and the log disagree, the log is wrong until proven
+  otherwise — that is now twice.
+
+**What it exposed, and the next packet.** With everyone finally scoring
+`MaintainPost` at a flat 0.75, Security and Bridge stopped working entirely:
+`Security 3/0` and `Bridge 4/0` in all twenty snapshots — tickets available,
+claimed by nobody, all run. Reyes, Bex, Odera and Park each picked
+`MaintainPost` ~200 times and `PerformJob` never.
+
+The cause is not the missing `apply_*_job_results` half that was expected. The
+tickets *are* published and *are* offered as candidates — the log shows
+`vs … PerformJob 0.45, PerformJob 0.35` against `MaintainPost 0.75`. Security
+authors 0.30–0.45 and Bridge 0.30–0.50, while every department that *does* work
+authors 0.90–1.0. Those low numbers were deliberate — `security.rs` says "all
+routine, all modest. Nothing here should ever outrank answering a question
+about an incident" — but they were chosen when those residents had no
+`MaintainPost` to lose to, so "modest" still meant "the only thing available."
+This change moved the floor under them.
+
+So the standing-post work has two halves, not one: the results system that lets
+a worked post be republished, *and* a resolution of the urgency inversion. The
+second cannot be fixed by raising Security and Bridge to 0.9 — that would
+restore exactly the "noticing department pinned to a console" failure the low
+numbers exist to prevent. The honest fix is that `MaintainPost` should not
+score a flat 0.75 against real department work at all; a fallback ought to lose
+to a real ticket. Recorded here rather than fixed in place, because it is a
+change to the shared selector and belongs with the standing-post packet.
+
 ### 2026-09-06, the medical round trip, confirmed end to end
 
 The errand-deadline fix was verified in a live run rather than only in tests,

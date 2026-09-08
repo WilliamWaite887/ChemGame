@@ -17,6 +17,7 @@ use crate::crew::{
     send_on_errand_with_reach, CrewMember, CrewPosts, CrewRoute, Errand, ErrandGoal, ErrandOutcome,
     ErrandResolved,
 };
+use crate::nav::NavGraph;
 
 mod aid;
 mod botany;
@@ -105,7 +106,18 @@ impl Plugin for UtilityAiPlugin {
         // panics on a bad one, so a broken station fails to start here rather
         // than behaving strangely later.
         app.insert_resource(NeedsTuning::authored().clone())
+            // Selection routes the communal duty fallback through the nav
+            // graph, so this plugin now depends on one existing. `NavPlugin`
+            // owns it in a real session and rebuilds it from the floor plan;
+            // this is only the floor, for a schedule that is built without it.
+            // Idempotent — `init_resource` leaves an already-built graph alone.
+            .init_resource::<NavGraph>()
+            // Same reasoning: selection anchors the duty fallback on the
+            // resident's own department point, so this plugin depends on the
+            // map having been read. `CrewPlugin` fills it in a real session.
+            .init_resource::<crate::crew::Departments>()
             .init_resource::<ReservationBook>()
+            .init_resource::<jobs::StandingPostCooldowns>()
             .init_resource::<UtilityDecisionLog>()
             .init_resource::<JobBoard>()
             .init_resource::<UtilitySpots>()
@@ -1454,6 +1466,20 @@ pub(crate) fn clear_opportunity_buffer(mut buffer: ResMut<UtilityOpportunityBuff
 const MIN_DECISION_SECONDS: f32 = 0.35;
 const DECISION_SPREAD_SECONDS: f32 = 0.4;
 const AT_TARGET_DISTANCE: f32 = 0.3;
+/// How far from their own department point a resident will take a communal
+/// duty post as a fallback.
+///
+/// Deliberately generous enough to cover a large room and its immediate
+/// approach, and deliberately far short of the station. The nine authored duty
+/// posts all sit on the Bridge, so an unbounded search sent every postless
+/// resident there — a dozen bodies packed against one wall, which is what the
+/// first live run of the fallback actually produced.
+const DUTY_POST_DEPARTMENT_REACH: f32 = 18.0;
+
+/// How far from a shared department point a resident stands when that point is
+/// all they have. Comfortably more than one body clearance, so a department's
+/// worth of people form a loose group rather than a pile.
+const DEPARTMENT_SPREAD_RADIUS: f32 = 1.6;
 
 /// How close an action may require a body to get to *another body*, in metres.
 ///
@@ -1472,6 +1498,18 @@ const AT_TARGET_DISTANCE: f32 = 0.3;
 const AT_BODY_DISTANCE: f32 = crate::npc_motion::CLEARANCE + AT_TARGET_DISTANCE;
 const IDLE_OBSERVE_SECONDS: f32 = 0.6;
 const MAINTAIN_POST_SECONDS: f32 = 1.2;
+
+/// Base weight for standing at a post with nothing else to do.
+///
+/// Deliberately below the lowest urgency any department publishes — 0.30, which
+/// Security's `WorkDesk` and Bridge's `Brief` share — so that *any* real ticket
+/// outranks the fallback. `MaintainPost` still multiplies this by
+/// `DutyPressure`, so the score a resident actually carries is lower again.
+///
+/// This is what makes `MaintainPost` a floor rather than a competitor. It is
+/// the only thing standing between a resident and idling when their board is
+/// empty, and it must never be the reason a board *stays* empty.
+const MAINTAIN_POST_WEIGHT: Normalized = Normalized(0.25);
 
 fn sync_utility_incapacity(
     mut commands: Commands,
@@ -1949,6 +1987,13 @@ fn select_reference_actions(
     mut commands: Commands,
     time: Res<Time>,
     posts: Res<CrewPosts>,
+    departments: Res<crate::crew::Departments>,
+    spots: Res<UtilitySpots>,
+    // Required for the same reason `reservations` is. Without a graph the duty
+    // fallback below silently finds nothing, every unposted resident loses
+    // `MaintainPost` again, and a harness would measure exactly the bug this
+    // parameter exists to fix while reporting a pass.
+    nav: Res<NavGraph>,
     jobs: Option<Res<JobBoard>>,
     // Required, not optional, deliberately: a harness without it would silently
     // lose the occupancy filter below and measure a station where every
@@ -2003,8 +2048,89 @@ fn select_reference_actions(
 
         let can_act = !body.is_some_and(|body| body.0.collapsed)
             && !blood.is_some_and(|blood| blood.0.incapacitated());
+        // `MaintainPost` carries `HasTarget` as a multiplicative consideration,
+        // and a zero consideration deletes a candidate outright rather than
+        // merely lowering it. So a resident the map never gave a personal post
+        // to had no Routine candidate at all and idled the whole shift — which
+        // was twenty-one of the thirty, five core crew among them.
+        //
+        // Three tiers, each answering a failure the one before it caused:
+        //
+        // 1. The resident's own `work` post, when the map authors one.
+        // 2. A communal `duty` post near their *own* department. The pool is
+        //    the station's own idea — `CrewPosts` calls a duty post a place
+        //    "the station's business gets done", true for whoever stands in it
+        //    — but all nine authored posts sit on the Bridge, so an unfiltered
+        //    search marched Medical, Service and Botany across the station to
+        //    stand in Ops. The department anchor keeps a fallback a fallback.
+        // 3. Their department point, when nothing is authored near it.
+        //
+        // Tiers 2 and 3 both need *dispersing*, and this is the part the first
+        // live run got wrong twice. Taking the single nearest candidate gives
+        // every resident who shares an anchor the identical coordinate, so
+        // Bridge, Engineering and Security all piled onto one duty post: eight
+        // bodies inside two metres. Ranking the reachable candidates and then
+        // indexing by the agent's own seed spreads them deterministically —
+        // same resident, same slot, every decision, so the `target_key` stays
+        // stable and hysteresis still holds.
+        let home = departments.home(&member.role);
         let target = posts
             .work(&member.name)
+            .or_else(|| {
+                let home = home?;
+                let mut reachable: Vec<(Vec3, f32)> = posts
+                    .duty_points()
+                    .filter(|point| {
+                        crate::nav::flat_distance(*point, home) <= DUTY_POST_DEPARTMENT_REACH
+                    })
+                    // Never loiter on somebody's workstation. Every Bridge duty
+                    // post is authored at *exactly* the coordinates of a Bridge
+                    // `utility_spot` — 0.0 m apart — because both describe the
+                    // same console. Six Bridge crew against four watch posts
+                    // means two are always without one, and before this they
+                    // fell back onto the very consoles the other four had
+                    // reserved and were standing at. That is what the player
+                    // saw: a row of bodies pressed together at the comms desk,
+                    // growing across the run as more departments idled into it.
+                    //
+                    // Reservations cannot prevent this. `MaintainPost` takes no
+                    // reservation — it is the thing a resident does when they
+                    // could not get one — so the exclusion has to be positional.
+                    .filter(|point| {
+                        !spots.iter().any(|(_, spot)| {
+                            crate::nav::flat_distance(spot.at, *point) < AT_TARGET_DISTANCE
+                        })
+                    })
+                    .filter_map(|point| {
+                        nav.nearest_reachable(transform.translation, [(point, point)])
+                    })
+                    .collect();
+                if reachable.is_empty() {
+                    return None;
+                }
+                // Nearest first, then a stable tiebreak so the order cannot
+                // depend on map iteration order.
+                reachable.sort_by(|a, b| {
+                    a.1.total_cmp(&b.1)
+                        .then_with(|| a.0.x.total_cmp(&b.0.x))
+                        .then_with(|| a.0.z.total_cmp(&b.0.z))
+                });
+                let slot = (agent.seed % reachable.len() as u64) as usize;
+                Some(reachable[slot].0)
+            })
+            // Nothing authored nearby: stand near the department point itself.
+            // Worse than a console, still their own room, and still a Routine
+            // candidate rather than a shift spent idling — but offset per
+            // resident, because a department point is one coordinate and four
+            // people sent to it stand inside each other.
+            .or_else(|| {
+                let home = home?;
+                let (slot, occupants) = profile
+                    .map(|profile| roster_of(profile.primary))
+                    .and_then(|roster| roster.standing_slot(&member.name))
+                    .unwrap_or((0, 1));
+                Some(home + department_spread(slot, occupants, DEPARTMENT_SPREAD_RADIUS))
+            })
             .map(|point| point.with_y(transform.translation.y));
         let at_target = target.is_some_and(|point| {
             transform.translation.distance_squared(point) <= AT_TARGET_DISTANCE * AT_TARGET_DISTANCE
@@ -2047,7 +2173,21 @@ fn select_reference_actions(
                 action: UtilityActionId::MaintainPost,
                 bucket: UtilityBucket::Routine,
                 target_key,
-                base_weight: Normalized::ONE,
+                // A fallback must lose to real work, and this used to be
+                // `Normalized::ONE`. At full strength it scored 0.75 after
+                // `DutyPressure`, which beat every ticket Security (0.30-0.45)
+                // and Bridge (0.30-0.50) publish — so the moment those
+                // residents finally *had* a post to stand at, they stopped
+                // doing their jobs entirely: `Security 3/0` and `Bridge 4/0`
+                // in all twenty-five snapshots of a live run, tickets offered
+                // as candidates and never once claimed.
+                //
+                // Raising those departments to match instead would be the
+                // wrong repair. Their low numbers are deliberate — a
+                // department whose job is *noticing* should be interruptible,
+                // and `security.rs` says so — and it was standing at a post
+                // that was mispriced, not the work.
+                base_weight: MAINTAIN_POST_WEIGHT,
                 considerations: vec![
                     Consideration {
                         fact: UtilityFactId::CanAct,
@@ -2305,7 +2445,10 @@ fn decision_interval(seed: u64, serial: u64) -> f32 {
 /// Each department owns its own roster constant, so this is the only place the
 /// seven are visible together. That makes it the only place a cross-department
 /// invariant — "every department can claim its own tickets" — can be stated.
-#[cfg(test)]
+///
+/// No longer test-only: selection reads it to give a resident their rank within
+/// their own department, which is what spreads a department falling back to its
+/// single shared point around a ring instead of into one pile.
 pub(crate) fn roster_of(domain: JobDomain) -> department::DepartmentRoster {
     match domain {
         JobDomain::Medical => medical::MEDICAL_ROSTER,
@@ -2316,6 +2459,24 @@ pub(crate) fn roster_of(domain: JobDomain) -> department::DepartmentRoster {
         JobDomain::Botany => botany::BOTANY_ROSTER,
         JobDomain::Bridge => bridge::BRIDGE_ROSTER,
     }
+}
+
+/// A per-resident standing place on a ring around a shared point.
+///
+/// A department point is a single coordinate, so everyone falling back to one is
+/// asked to stand in the same place; `npc_motion` then refuses the last few
+/// centimetres and they bunch against each other instead.
+///
+/// `slot` must be the resident's *rank* among the people who share this anchor,
+/// and `occupants` how many that is — not a hash. The first version placed
+/// bodies by golden angle on `seed % 360`, which reads as evenly spread and is
+/// not: measured against the real roster it put Medical's four crew **0.08 m**
+/// apart, because two of their seeds happened to land on nearly the same ray and
+/// no radius separates points on one ray. Ranking cannot collide.
+fn department_spread(slot: usize, occupants: usize, radius: f32) -> Vec3 {
+    let occupants = occupants.max(1);
+    let turn = slot as f32 / occupants as f32 * std::f32::consts::TAU;
+    Vec3::new(turn.cos() * radius, 0.0, turn.sin() * radius)
 }
 
 fn stable_text_key(text: &str) -> u64 {
@@ -3084,6 +3245,9 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<NavGraph>()
             .init_resource::<ReservationBook>()
             .init_resource::<UtilityDecisionLog>()
             .init_resource::<JobBoard>()
@@ -3370,6 +3534,9 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<NavGraph>()
             .init_resource::<ReservationBook>()
             .init_resource::<UtilityDecisionLog>()
             .init_resource::<JobBoard>()
@@ -3487,6 +3654,9 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<NavGraph>()
             .init_resource::<ReservationBook>()
             .init_resource::<UtilityDecisionLog>()
             .init_resource::<JobBoard>()
@@ -3938,7 +4108,11 @@ mod tests {
         let areas = crate::lab::WalkableAreas::from_floor_plan();
         app.init_resource::<Time>()
             .init_resource::<crate::crew::Departments>()
+            .init_resource::<UtilitySpots>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<NavGraph>()
             .init_resource::<crate::lab::DeliveryStations>()
             .init_resource::<ReservationBook>()
             .init_resource::<ResolutionLog>()
@@ -4101,6 +4275,8 @@ mod tests {
         let areas = crate::lab::WalkableAreas::from_floor_plan();
         app.init_resource::<Time>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
+            .init_resource::<UtilitySpots>()
             .init_resource::<ReservationBook>()
             .init_resource::<UtilityDecisionLog>()
             .init_resource::<ResolutionLog>()
@@ -4178,6 +4354,238 @@ mod tests {
         );
     }
 
+    /// Most of the station has no post of its own, and used to have no work.
+    ///
+    /// Only nine `crew_post` markers carry an occupant, so twenty-one of the
+    /// thirty residents — five core crew among them — never matched
+    /// `CrewPosts::work`. That returned `None`, which set `HasTarget` to zero,
+    /// which zeroed a *multiplicative* consideration, which deletes a candidate
+    /// outright rather than lowering it. `MaintainPost` therefore vanished from
+    /// their candidate set and `IdleObserve` was the only thing left in any
+    /// bucket, for the whole shift.
+    ///
+    /// Falsifies the duty fallback: drop the `or_else` in
+    /// `select_reference_actions` and this resident selects `IdleObserve`.
+    #[test]
+    fn a_resident_without_a_personal_post_still_has_routine_work() {
+        let mut app = App::new();
+        let areas = crate::lab::WalkableAreas::from_floor_plan();
+        app.init_resource::<Time>()
+            .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<ReservationBook>()
+            .init_resource::<UtilityDecisionLog>()
+            .init_resource::<JobBoard>()
+            .insert_resource(crate::nav::NavGraph::build(&areas, crate::nav::NAV_RADIUS))
+            .insert_resource(areas)
+            .add_message::<UtilityActionResolved>()
+            .add_systems(Update, (select_reference_actions, ApplyDeferred).chain());
+
+        // A communal duty spot, and deliberately no `set_work` for this name.
+        // The department point is what makes the spot *theirs*: the fallback is
+        // scoped to the resident's own department so it cannot march Medical
+        // across the station to stand on the Bridge.
+        let duty = Vec3::new(2.0, 0.0, 0.0);
+        app.world_mut()
+            .resource_mut::<CrewPosts>()
+            .add_duty(duty, Quat::IDENTITY);
+        app.world_mut()
+            .resource_mut::<crate::crew::Departments>()
+            .set("Bridge".into(), duty);
+
+        let resident = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Ensign Park".into(),
+                    role: "Bridge".into(),
+                },
+                Transform::from_translation(Vec3::new(-2.0, crate::crew::BODY_OFFSET, 0.0)),
+                Body::default(),
+                Bloodstream::default(),
+                CrewRoute::standing(),
+                UtilityControlBundle::new(UtilityAgent::new(23, 0)),
+            ))
+            .id();
+
+        // Step in small frames: a single large advance can sail past the
+        // decision clock rather than landing on it.
+        let mut chosen = None;
+        for _ in 0..40 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+            if let Some(action) = app.world().get::<CurrentAction>(resident) {
+                chosen = Some(action.key.action);
+                break;
+            }
+        }
+
+        assert_eq!(
+            chosen,
+            Some(UtilityActionId::MaintainPost),
+            "a resident with no personal post fell through to idling instead of \
+             taking the communal duty spot",
+        );
+    }
+
+    /// Standing at a post must lose to the least urgent real job on the board.
+    ///
+    /// `MaintainPost` used to carry `base_weight: Normalized::ONE`, scoring
+    /// 0.75 after `DutyPressure`. That beat every ticket Security (0.30-0.45)
+    /// and Bridge (0.30-0.50) publish, so the moment stage 1 gave those
+    /// residents a post to stand at they stopped working entirely — live,
+    /// `Security 3/0` and `Bridge 4/0` in all twenty-five snapshots of a
+    /// 500-second run, with the tickets visibly offered as losing candidates.
+    ///
+    /// 0.30 is the floor any department authors, so the fallback is pinned
+    /// below it here rather than in one adapter: raising Security and Bridge to
+    /// match would have destroyed the interruptibility their low numbers exist
+    /// to buy.
+    ///
+    /// Falsifies the reweighting: restore `Normalized::ONE` and the fallback
+    /// outscores the job.
+    #[test]
+    fn standing_at_a_post_loses_to_the_least_urgent_real_work() {
+        const LOWEST_AUTHORED_URGENCY: f32 = 0.30;
+
+        let mut facts = UtilityFacts::default();
+        for (fact, value) in [
+            (UtilityFactId::CanAct, 1.0),
+            (UtilityFactId::HasTarget, 1.0),
+            (UtilityFactId::DutyPressure, 0.75),
+        ] {
+            facts.set(fact, value).expect("in range");
+        }
+
+        let maintain = UtilityCandidate {
+            action: UtilityActionId::MaintainPost,
+            bucket: UtilityBucket::Routine,
+            target_key: 1,
+            base_weight: MAINTAIN_POST_WEIGHT,
+            considerations: vec![
+                Consideration {
+                    fact: UtilityFactId::CanAct,
+                    curve: ResponseCurve::Linear,
+                    weight: 1.0,
+                },
+                Consideration {
+                    fact: UtilityFactId::HasTarget,
+                    curve: ResponseCurve::Linear,
+                    weight: 1.0,
+                },
+                Consideration {
+                    fact: UtilityFactId::DutyPressure,
+                    curve: ResponseCurve::Linear,
+                    weight: 1.0,
+                },
+            ],
+        };
+        // A real ticket, scored the way `select_reference_actions` scores one.
+        let job = UtilityCandidate {
+            action: UtilityActionId::PerformJob,
+            bucket: UtilityBucket::Routine,
+            target_key: 2,
+            base_weight: Normalized::new(LOWEST_AUTHORED_URGENCY).expect("in range"),
+            considerations: vec![Consideration {
+                fact: UtilityFactId::CanAct,
+                curve: ResponseCurve::Linear,
+                weight: 1.0,
+            }],
+        };
+
+        let (standing, working) = (maintain.score(&facts).get(), job.score(&facts).get());
+        assert!(
+            working > standing,
+            "standing at a post scored {standing} against the least urgent real \
+             work at {working}, so a department that authors modest urgencies \
+             can never be staffed",
+        );
+    }
+
+    /// Everyone falling back to one department point needs their own place.
+    ///
+    /// Pinned against the *real* rosters rather than an invented one, because
+    /// the bug this replaces was invisible to any synthetic case. The first
+    /// version spread bodies by golden angle on `seed % 360`, which looks evenly
+    /// distributed and is not — two Medical seeds landed on nearly the same ray
+    /// and put four crew **0.08 m** apart, inside a 0.54 m clearance, so they
+    /// stood in each other and `npc_motion` refused the last step.
+    ///
+    /// Falsifies rank-based slotting: derive the angle from the name or seed
+    /// instead of the roster rank and Medical collapses again.
+    #[test]
+    fn a_department_falling_back_to_its_own_point_does_not_stand_in_itself() {
+        for domain in JobDomain::ALL {
+            let roster = roster_of(domain);
+            let places: Vec<Vec3> = roster
+                .core
+                .iter()
+                .chain(roster.support.iter())
+                .filter_map(|name| roster.standing_slot(name))
+                .map(|(slot, occupants)| {
+                    department_spread(slot, occupants, DEPARTMENT_SPREAD_RADIUS)
+                })
+                .collect();
+            assert_eq!(
+                places.len(),
+                roster.core.len() + roster.support.len(),
+                "{domain:?} lost a resident between the roster and the ring",
+            );
+            for (index, here) in places.iter().enumerate() {
+                for there in &places[index + 1..] {
+                    let gap = crate::nav::flat_distance(*here, *there);
+                    assert!(
+                        gap >= crate::npc_motion::CLEARANCE,
+                        "{domain:?} places two residents {gap:.2}m apart, inside \
+                         the {:.2}m two bodies need, so they stand in each other",
+                        crate::npc_motion::CLEARANCE,
+                    );
+                }
+            }
+        }
+    }
+
+    /// The fallback must name the same spot every time it is asked.
+    ///
+    /// Selection hysteresis holds an action across ticks by comparing
+    /// `ActionKey`, and a destination redrawn at random would give the same
+    /// intention a new identity on every decision — nothing could ever be
+    /// held, and the resident would re-pick their way around the room forever.
+    /// This is why the fallback uses route length rather than
+    /// `CrewPosts::random_duty`.
+    ///
+    /// Falsifies determinism: swap `nearest_reachable` for `random_duty` and
+    /// the chosen point stops being stable across repeated selections.
+    #[test]
+    fn a_duty_fallback_target_is_stable_across_decisions() {
+        let areas = crate::lab::WalkableAreas::from_floor_plan();
+        let nav = crate::nav::NavGraph::build(&areas, crate::nav::NAV_RADIUS);
+        let mut posts = CrewPosts::default();
+        // Several candidates, so a random pick would almost surely differ.
+        for offset in [2.0_f32, 3.0, 4.0, 5.0, 6.0] {
+            posts.add_duty(Vec3::new(offset, 0.0, 0.0), Quat::IDENTITY);
+        }
+
+        let from = Vec3::new(-2.0, crate::crew::BODY_OFFSET, 0.0);
+        let pick = || {
+            nav.nearest_reachable(from, posts.duty_points().map(|point| (point, point)))
+                .map(|(point, _)| point)
+        };
+
+        let first = pick().expect("an authored duty post is reachable");
+        for _ in 0..16 {
+            assert_eq!(
+                pick(),
+                Some(first),
+                "the duty fallback moved between decisions, so hysteresis can \
+                 never hold the action",
+            );
+        }
+    }
+
     /// A worker sent to another person must actually get there.
     ///
     /// `npc_motion` refuses any step that would bring two crew within
@@ -4199,6 +4607,9 @@ mod tests {
         let areas = crate::lab::WalkableAreas::from_floor_plan();
         app.init_resource::<Time>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<NavGraph>()
             .init_resource::<ReservationBook>()
             .init_resource::<UtilityDecisionLog>()
             .init_resource::<ResolutionLog>()
@@ -4373,6 +4784,9 @@ mod tests {
         let areas = crate::lab::WalkableAreas::from_floor_plan();
         app.init_resource::<Time>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<NavGraph>()
             .init_resource::<ReservationBook>()
             .init_resource::<UtilityDecisionLog>()
             .init_resource::<ResolutionLog>()
@@ -4497,6 +4911,9 @@ mod tests {
         let areas = crate::lab::WalkableAreas::from_floor_plan();
         app.init_resource::<Time>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<NavGraph>()
             .init_resource::<ReservationBook>()
             .init_resource::<UtilityDecisionLog>()
             .init_resource::<ResolutionLog>()
@@ -4601,6 +5018,9 @@ mod tests {
         let areas = crate::lab::WalkableAreas::from_floor_plan();
         app.init_resource::<Time>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<NavGraph>()
             .init_resource::<ReservationBook>()
             .init_resource::<UtilityDecisionLog>()
             .init_resource::<ResolutionLog>()
@@ -4791,6 +5211,9 @@ mod tests {
         let areas = crate::lab::WalkableAreas::from_floor_plan();
         app.init_resource::<Time>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<NavGraph>()
             .init_resource::<ReservationBook>()
             .init_resource::<UtilityDecisionLog>()
             .init_resource::<ResolutionLog>()

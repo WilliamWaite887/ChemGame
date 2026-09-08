@@ -95,7 +95,10 @@ pub enum DeviceStatus {
 /// saved and when the saved id no longer resolves to a present device.
 fn choose_device_id<'a>(preferred: Option<&str>, available: &'a [String]) -> Option<&'a str> {
     let preferred = preferred?;
-    available.iter().find(|id| id.as_str() == preferred).map(String::as_str)
+    available
+        .iter()
+        .find(|id| id.as_str() == preferred)
+        .map(String::as_str)
 }
 
 /// (Re)opens the capture device when nothing is open, the setting changed, or
@@ -287,7 +290,12 @@ fn capture_and_send_voice(
         return;
     }
 
-    let channels = state.microphone.as_ref().expect("checked above").channels().get();
+    let channels = state
+        .microphone
+        .as_ref()
+        .expect("checked above")
+        .channels()
+        .get();
     let gain = settings.mic_gain;
 
     let mut completed = Vec::new();

@@ -61,7 +61,12 @@ const BOTANY_SPOTS: [&str; 5] = [
     OUTPUT_SHELF_SPOT,
 ];
 
-const MAX_HARVESTS_PER_PLOT: u32 = 1;
+/// How long a processed plot rests before it is replanted.
+///
+/// Long enough that a plot visibly lies fallow rather than the greenhouse
+/// reading as a conveyor belt, short enough that four plots keep the department
+/// — and Service downstream of it — in continuous work.
+const REGROW_SECONDS: f32 = 90.0;
 const MAX_PHYSICAL_OUTPUT: usize = 4;
 const OUTPUT_SHELF_RADIUS_SQUARED: f32 = 1.0;
 const BOTANY_TOXIC_EXPOSURE: &str = "botany.processing.toxic_exposure";
@@ -88,19 +93,37 @@ pub enum BotanyPlotState {
 
 /// One stable authored crop plot. `produce` is the same interned identity used
 /// by the grinder, inventory, replication, and save system.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BotanyPlot {
     pub id: String,
     pub state: BotanyPlotState,
     pub produce: ProduceId,
     pub hazardous: bool,
     pub harvests_completed: u32,
+    /// Seconds of rest left before a processed plot is replanted, or `None`
+    /// when the plot is already in the working cycle.
+    ///
+    /// A plot that has just given up its crop should look spent for a while —
+    /// this is what stops the department reading as a conveyor belt — but it
+    /// must eventually come back, which the old one-harvest cap never did.
+    pub regrow_in: Option<f32>,
 }
 
-/// A bounded Botany shift. Each plot produces at most one physical item in the
-/// first slice, so absent player consumption the department cannot create an
-/// unbounded entity or ticket backlog.
-#[derive(Resource, Clone, Debug, PartialEq, Eq)]
+/// A running Botany shift.
+///
+/// Was bounded to one harvest per plot, which measured as thirteen completions
+/// with the last at 25.5 seconds — and took Service down with it, since Service
+/// is entirely downstream of Botany produce. A plot now *rests* after a harvest
+/// instead of retiring: `regrow_in` counts it back to `Dry` and the cycle runs
+/// again.
+///
+/// Unbounded harvests are safe because the entity count was never bounded by
+/// the harvest cap in the first place. `MAX_PHYSICAL_OUTPUT` and the shelf
+/// occupancy gate in `publish_botany_tickets` already refuse to publish a
+/// `ProcessHarvest` while the shelf is full, so backpressure comes from the
+/// shelf — a world fact the player can see and empty — rather than from a
+/// counter that silently ends the department's day.
+#[derive(Resource, Clone, Debug, PartialEq)]
 pub struct BotanyWorkState {
     pub plots: Vec<BotanyPlot>,
     pub completed_batches: u32,
@@ -116,6 +139,7 @@ impl Default for BotanyWorkState {
                     produce: ProduceId(0),
                     hazardous: false,
                     harvests_completed: 0,
+                    regrow_in: None,
                 },
                 BotanyPlot {
                     id: "botany.plot.greenhouse.beta".into(),
@@ -123,6 +147,7 @@ impl Default for BotanyWorkState {
                     produce: ProduceId(3),
                     hazardous: false,
                     harvests_completed: 0,
+                    regrow_in: None,
                 },
                 BotanyPlot {
                     id: "botany.plot.workroom.toxin".into(),
@@ -132,6 +157,7 @@ impl Default for BotanyWorkState {
                     produce: ProduceId(12),
                     hazardous: true,
                     harvests_completed: 0,
+                    regrow_in: None,
                 },
                 BotanyPlot {
                     id: "botany.plot.nursery.aloe".into(),
@@ -139,6 +165,7 @@ impl Default for BotanyWorkState {
                     produce: ProduceId(1),
                     hazardous: false,
                     harvests_completed: 0,
+                    regrow_in: None,
                 },
             ],
             completed_batches: 0,
@@ -159,7 +186,11 @@ impl BotanyWorkState {
         if plot.state == BotanyPlotState::Quarantined {
             return Some(BotanyJobKind::CleanQuarantine);
         }
-        if plot.harvests_completed >= MAX_HARVESTS_PER_PLOT {
+        // Resting, not retired. This used to be a hard harvest cap, which meant
+        // a plot that had given its crop was finished for the shift and Botany
+        // simply ran out of work — and Service, which is entirely downstream of
+        // Botany produce, ran out with it.
+        if plot.regrow_in.is_some() {
             return None;
         }
         Some(match plot.state {
@@ -190,6 +221,8 @@ impl BotanyWorkState {
             BotanyJobKind::ProcessHarvest => {
                 plot.harvests_completed = plot.harvests_completed.saturating_add(1);
                 self.completed_batches = self.completed_batches.saturating_add(1);
+                // Spent, and replanted after a rest rather than retired.
+                plot.regrow_in = Some(REGROW_SECONDS);
                 BotanyPlotState::Dry
             }
             BotanyJobKind::CleanQuarantine => BotanyPlotState::Dry,
@@ -329,7 +362,8 @@ pub(super) fn register(app: &mut App) {
         )
         .add_systems(
             Update,
-            publish_botany_tickets
+            (tick_botany_regrowth, publish_botany_tickets)
+                .chain()
                 .in_set(super::UtilityAiSet::BuildContext)
                 .run_if(crate::net::is_authority)
                 .run_if(in_state(crate::AppState::Playing))
@@ -450,6 +484,24 @@ fn output_shelf_count(
         .count()
 }
 
+/// Counts resting plots back into the working cycle.
+///
+/// Follows `cargo_pilot::tick_cargo_arrivals`, including the subtract-then-take
+/// shape rather than assigning a fresh interval, so the cadence does not drift
+/// with frame time.
+fn tick_botany_regrowth(time: Res<Time>, mut state: ResMut<BotanyWorkState>) {
+    let delta = time.delta_secs();
+    for plot in &mut state.plots {
+        let Some(remaining) = plot.regrow_in.as_mut() else {
+            continue;
+        };
+        *remaining -= delta;
+        if *remaining <= 0.0 {
+            plot.regrow_in = None;
+        }
+    }
+}
+
 fn publish_botany_tickets(
     time: Res<Time>,
     state: Res<BotanyWorkState>,
@@ -488,8 +540,24 @@ fn publish_botany_tickets(
                 kind: kind.id().into(),
                 target: ActionTarget::Point(spot.at),
                 subject: None,
-                reservation: ReservationKey(format!("utility.spot.{}", kind.spot())),
-                reservation_capacity: spot.capacity,
+                // Keyed per *plot*, not per job kind, and this is the whole
+                // Botany contention fix. The spots are shared and authored at
+                // capacity 1, so keying on `kind.spot()` meant four plots that
+                // had converged on the same stage collided on one key: the
+                // board advertised four jobs when the occupancy filter would
+                // permit exactly one, and three of four workers were locked out
+                // every tick. Measured as 171 `ReservationUnavailable` failures
+                // in ninety seconds.
+                //
+                // `target` still points at the shared workstation, which is
+                // legal and precedented — `JobTicket::subject` documents that
+                // "target is only where the worker walks" — so this changes who
+                // may start, not where they go. Physical crowding at the shared
+                // point is a separate question, answered by the arrival-reach
+                // widening in the kernel and, if the log ever shows bodies
+                // stacking, by authoring per-plot spots.
+                reservation: ReservationKey(format!("botany.plot.{}", plot.id)),
+                reservation_capacity: 1,
                 bucket: UtilityBucket::Routine,
                 urgency: Normalized::new(kind.urgency()).expect("Botany urgency is normalized"),
                 required_capability: JobCapability::new(kind.capability()),
@@ -892,12 +960,132 @@ mod tests {
         assert!(state.work_for(&state.plots[target]).is_none());
     }
 
+    /// Four plots in the same state must be four claimable jobs.
+    ///
+    /// The reservation key used to be `utility.spot.{kind.spot()}`, and the
+    /// spots are authored at capacity 1, so four plots that had converged on the
+    /// same stage collided on one key. The board advertised four jobs when the
+    /// occupancy filter would permit exactly one, and three of four workers were
+    /// locked out on every tick — 171 `ReservationUnavailable` failures in
+    /// ninety seconds of live play.
+    ///
+    /// Falsifies the per-plot key: restore `kind.spot()` in
+    /// `publish_botany_tickets` and only one of the four tickets is claimable.
+    #[test]
+    fn four_plots_in_the_same_state_are_all_claimable() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<JobBoard>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<ReservationBook>()
+            .init_resource::<BotanyWorkState>()
+            .insert_resource(produce_catalog())
+            .add_systems(Update, publish_botany_tickets);
+        insert_test_spots(&mut app);
+
+        // Every plot wanting the same service is the case that collided.
+        {
+            let mut state = app.world_mut().resource_mut::<BotanyWorkState>();
+            for plot in &mut state.plots {
+                plot.state = BotanyPlotState::Stressed;
+                plot.regrow_in = None;
+            }
+        }
+        app.update();
+
+        let tickets: Vec<_> = app
+            .world()
+            .resource::<JobBoard>()
+            .iter()
+            .filter(|ticket| ticket.domain == JobDomain::Botany)
+            .map(|ticket| (ticket.reservation.clone(), ticket.reservation_capacity))
+            .collect();
+        assert_eq!(tickets.len(), 4, "one ticket per plot: {tickets:?}");
+
+        // The kernel's occupancy filter is `claims_on(key) < capacity`, so what
+        // matters is that holding one claim never blocks the other three.
+        let mut book = ReservationBook::default();
+        let mut startable = 0;
+        for (index, (key, capacity)) in tickets.iter().enumerate() {
+            if book.claims_on(key) < (*capacity).max(1) {
+                startable += 1;
+                let owner = super::super::ReservationOwner {
+                    agent: Entity::from_raw_u32(index as u32 + 1).expect("a valid test entity"),
+                    action_instance: 1,
+                };
+                let _ = book.reserve(key.clone(), *capacity, owner);
+            }
+        }
+        assert_eq!(
+            startable, 4,
+            "all four plots must be workable at once; only {startable} were, so \
+             the rest of Botany is locked out every tick",
+        );
+    }
+
+    /// A plot that has given its crop must come back.
+    ///
+    /// `MAX_HARVESTS_PER_PLOT = 1` retired each plot after one harvest, so
+    /// Botany produced thirteen completions and stopped at 25.5 seconds — and
+    /// Service, which is entirely downstream of Botany produce, stopped with it.
+    ///
+    /// Falsifies regrowth: remove `tick_botany_regrowth` and the rested plot
+    /// never returns to the working cycle.
+    #[test]
+    fn a_rested_plot_returns_to_work() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<JobBoard>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<BotanyWorkState>()
+            .insert_resource(produce_catalog())
+            .add_systems(
+                Update,
+                (tick_botany_regrowth, publish_botany_tickets).chain(),
+            );
+        insert_test_spots(&mut app);
+
+        {
+            let mut state = app.world_mut().resource_mut::<BotanyWorkState>();
+            for plot in &mut state.plots {
+                plot.state = BotanyPlotState::Dry;
+                plot.harvests_completed = 1;
+                plot.regrow_in = Some(REGROW_SECONDS);
+            }
+        }
+        app.update();
+        assert!(
+            app.world().resource::<JobBoard>().is_empty(),
+            "a resting plot must not advertise work"
+        );
+
+        // Step in small frames rather than jumping the interval: a single large
+        // advance can sail past the transition under test.
+        let mut back = false;
+        for _ in 0..((REGROW_SECONDS / 0.5) as usize + 20) {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.5));
+            app.update();
+            if !app.world().resource::<JobBoard>().is_empty() {
+                back = true;
+                break;
+            }
+        }
+        assert!(
+            back,
+            "a rested plot never came back, so Botany ends its shift after one \
+             pass and starves Service downstream",
+        );
+    }
+
     #[test]
     fn four_workers_advance_named_plots_into_bounded_physical_produce() {
         let mut app = App::new();
         let areas = crate::lab::WalkableAreas::from_floor_plan();
         app.init_resource::<Time>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
             .init_resource::<ReservationBook>()
             .init_resource::<UtilityDecisionLog>()
             .init_resource::<JobBoard>()
@@ -968,10 +1156,16 @@ mod tests {
 
         let state = app.world().resource::<BotanyWorkState>();
         assert_eq!(state.completed_batches, state.plots.len() as u32);
-        assert!(state
-            .plots
-            .iter()
-            .all(|plot| plot.harvests_completed == MAX_HARVESTS_PER_PLOT));
+        // Each plot has produced, and is now resting rather than retired. This
+        // used to assert `== MAX_HARVESTS_PER_PLOT`, which pinned the very
+        // exhaustion that ended Botany's day at 25 seconds; what actually
+        // matters is that the shift converges without the board running away,
+        // which the `largest_board` and emptiness assertions below still check.
+        assert!(state.plots.iter().all(|plot| plot.harvests_completed >= 1));
+        assert!(
+            state.plots.iter().all(|plot| plot.regrow_in.is_some()),
+            "a processed plot must be resting, so it can come back"
+        );
         assert!(largest_board <= state.plots.len());
         assert!(app.world().resource::<JobBoard>().is_empty());
         assert_eq!(

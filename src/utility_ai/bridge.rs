@@ -22,10 +22,11 @@
 use bevy::prelude::*;
 
 use super::department::{control_for_resident, DepartmentRoster};
-use super::jobs::UtilitySpots;
+use super::jobs::{take_completed_standing_posts, StandingPostCooldowns, UtilitySpots};
 use super::{
-    stable_text_key, ActionTarget, JobBoard, JobCapability, JobDomain, JobTicket, JobTicketId,
-    JobTicketState, Normalized, ReservationKey, UtilityBucket,
+    stable_text_key, ActionResult, ActionTarget, JobBoard, JobCapability, JobDomain, JobTicket,
+    JobTicketId, JobTicketState, Normalized, ReservationKey, UtilityActionId,
+    UtilityActionResolved, UtilityBucket,
 };
 use crate::crew::{CrewMember, CrewRoute, StationResident};
 
@@ -137,10 +138,21 @@ fn bridge_ticket_id(kind: BridgeJobKind) -> JobTicketId {
 /// Like Security's, these are always available: a console does not stop wanting
 /// to be staffed. Six residents against four posts is deliberate — the Bridge
 /// should look staffed without every officer being pinned to a station.
-fn publish_bridge_tickets(time: Res<Time>, spots: Res<UtilitySpots>, mut board: ResMut<JobBoard>) {
+fn publish_bridge_tickets(
+    time: Res<Time>,
+    spots: Res<UtilitySpots>,
+    cooldowns: Res<StandingPostCooldowns>,
+    mut board: ResMut<JobBoard>,
+) {
+    let now = time.elapsed_secs();
     for kind in BRIDGE_JOBS {
         let id = bridge_ticket_id(kind);
         if board.ticket(id).is_some() {
+            continue;
+        }
+        // After the `is_some` check, so the once-per-spot publishing test keeps
+        // its meaning — this gates re-advertising, not first publication.
+        if !cooldowns.ready(id, now) {
             continue;
         }
         let Some(spot) = spots.get(kind.spot()) else {
@@ -203,10 +215,39 @@ fn activate_bridge_workers(
     }
 }
 
+/// Releases a worked watch station so it can be staffed again.
+///
+/// The Bridge had the same missing half as Security: see
+/// [`take_completed_standing_posts`].
+fn apply_bridge_post_results(
+    time: Res<Time>,
+    mut results: MessageReader<UtilityActionResolved>,
+    mut board: ResMut<JobBoard>,
+    mut cooldowns: ResMut<StandingPostCooldowns>,
+) {
+    let completed: Vec<_> = results
+        .read()
+        .filter(|result| {
+            result.key.action == UtilityActionId::PerformJob
+                && result.result == ActionResult::Completed
+        })
+        .map(|result| (JobTicketId(result.key.target_key), result.claim))
+        .collect();
+    take_completed_standing_posts(
+        JobDomain::Bridge,
+        &completed,
+        &mut board,
+        &mut cooldowns,
+        time.elapsed_secs(),
+    );
+}
+
 fn reset_bridge_work(
     mut board: ResMut<JobBoard>,
+    mut cooldowns: ResMut<StandingPostCooldowns>,
     mut reservations: ResMut<super::ReservationBook>,
 ) {
+    cooldowns.clear();
     BRIDGE_ROSTER
         .validate()
         .expect("the Bridge utility roster must be valid");
@@ -234,6 +275,15 @@ pub(super) fn register(app: &mut App) {
         Update,
         publish_bridge_tickets
             .in_set(super::UtilityAiSet::BuildContext)
+            .run_if(crate::net::is_authority)
+            .run_if(in_state(crate::AppState::Playing))
+            .run_if(crate::session::career_session),
+    )
+    .add_systems(
+        Update,
+        apply_bridge_post_results
+            .after(super::resolve_reference_actions)
+            .in_set(super::UtilityAiSet::Resolve)
             .run_if(crate::net::is_authority)
             .run_if(in_state(crate::AppState::Playing))
             .run_if(crate::session::career_session),
@@ -355,6 +405,7 @@ mod tests {
         app.init_resource::<Time>()
             .init_resource::<JobBoard>()
             .init_resource::<UtilitySpots>()
+            .init_resource::<StandingPostCooldowns>()
             .add_systems(Update, publish_bridge_tickets);
         for kind in BRIDGE_JOBS {
             app.world_mut()
@@ -377,6 +428,80 @@ mod tests {
         assert!(
             board.iter().all(|ticket| ticket.subject.is_none()),
             "watch duty is common knowledge and must never be memory-gated"
+        );
+    }
+
+    /// A worked watch station must go back on the board.
+    ///
+    /// The Bridge needs its own test rather than trusting Security's: the
+    /// shared helper does not prove either department is *wired up to it*, and
+    /// wiring is precisely what was missing. Live, the Bridge sat at `4/0` for
+    /// all twenty-five snapshots of a 500-second run.
+    ///
+    /// Falsifies the registration: drop `apply_bridge_post_results` and the
+    /// ticket never returns.
+    #[test]
+    fn bridge_republishes_a_post_after_it_is_worked() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<JobBoard>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<StandingPostCooldowns>()
+            .add_message::<UtilityActionResolved>()
+            .add_systems(
+                Update,
+                (apply_bridge_post_results, publish_bridge_tickets).chain(),
+            );
+        for kind in BRIDGE_JOBS {
+            app.world_mut()
+                .resource_mut::<UtilitySpots>()
+                .insert(kind.spot(), Vec3::ZERO, 1);
+        }
+        app.update();
+
+        let worker = app.world_mut().spawn_empty().id();
+        let id = bridge_ticket_id(BridgeJobKind::StandHelm);
+        let claim = super::super::ReservationOwner {
+            agent: worker,
+            action_instance: 1,
+        };
+        {
+            let mut board = app.world_mut().resource_mut::<JobBoard>();
+            board.claim(id, claim).expect("the watch is available");
+            board
+                .resolve(id, claim, ActionResult::Completed)
+                .expect("the claim is ours");
+        }
+        app.world_mut().write_message(UtilityActionResolved {
+            agent: worker,
+            key: super::super::ActionKey {
+                action: UtilityActionId::PerformJob,
+                target_key: id.0,
+            },
+            claim,
+            result: ActionResult::Completed,
+        });
+
+        let mut back = false;
+        for _ in 0..200 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+            if app
+                .world()
+                .resource::<JobBoard>()
+                .ticket(id)
+                .is_some_and(|ticket| ticket.state == JobTicketState::Available)
+            {
+                back = true;
+                break;
+            }
+        }
+        assert!(
+            back,
+            "a completed Bridge watch was never taken off the board, so it \
+             could never be advertised again"
         );
     }
 

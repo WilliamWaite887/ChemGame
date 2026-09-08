@@ -3636,7 +3636,7 @@
 }
 {
 "classname" "utility_spot"
-"origin" "-1320 1800 0"
+"origin" "-1320 1260 0"
 "id" "service.cleanup"
 "capacity" "1"
 }
@@ -3661,6 +3661,61 @@
 "origin" "-1110 1240 0"
 "id" "service.lounge.gather"
 "capacity" "2"
+}
+// Dining tables. Service is the one room the whole station visits and it
+// had two seats for thirty residents; a hunger drive would have sent a
+// crowd to a room that could seat four. Capacity 4 apiece, so a table
+// reads as shared rather than as four separate chairs.
+{
+"classname" "utility_spot"
+"origin" "-860 1220 0"
+"id" "service.table.a"
+"capacity" "4"
+}
+{
+"classname" "utility_spot"
+"origin" "-860 1040 0"
+"id" "service.table.b"
+"capacity" "4"
+}
+{
+"classname" "utility_spot"
+"origin" "-1180 1380 0"
+"id" "service.table.c"
+"capacity" "4"
+}
+{
+"classname" "utility_spot"
+"origin" "-1160 1140 0"
+"id" "service.table.d"
+"capacity" "4"
+}
+// Benches beside the tables, and boards on the west and north walls.
+// Service measured 0.8 decorations per 100 m2 against a station norm of
+// 2.4-4.1, and its whole northern half was bare floor.
+{
+"classname" "decoration_spot"
+"origin" "-816 1220 0"
+"angles" "0 0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-816 1040 0"
+"angles" "0 0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1136 1380 0"
+"angles" "0 0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1116 1140 0"
+"angles" "0 0 0"
+"kind" "svc.bench"
 }
 // Security work affordances. Interviews happen wherever the witness is, so
 // only the department's own fixed stations need authoring. Verified against

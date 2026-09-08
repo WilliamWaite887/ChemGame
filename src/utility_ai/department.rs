@@ -31,6 +31,24 @@ pub enum DepartmentRosterError {
 }
 
 impl DepartmentRoster {
+    /// This resident's stable rank among their department, and the department's
+    /// size.
+    ///
+    /// Used to give everyone falling back to a shared point their own place on a
+    /// ring around it. Ranking rather than hashing is deliberate: a hash of the
+    /// name reads as evenly spread and is not — the first version put Medical's
+    /// four crew 0.08 m apart because two seeds landed on nearly the same ray.
+    /// `core` then `support` is the same order `validate` walks, so it is
+    /// already the department's canonical listing.
+    pub fn standing_slot(self, name: &str) -> Option<(usize, usize)> {
+        let total = self.core.len() + self.support.len();
+        self.core
+            .iter()
+            .chain(self.support.iter())
+            .position(|member| *member == name)
+            .map(|rank| (rank, total))
+    }
+
     pub fn validate(self) -> Result<(), DepartmentRosterError> {
         if self.core.len() != 2 {
             return Err(DepartmentRosterError::CoreCount {

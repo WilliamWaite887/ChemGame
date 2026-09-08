@@ -2042,11 +2042,17 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
     };
     // Service is drawn as three brushes; every module here sits in the wide
     // eastern one.
+    //
+    // `max_z` used to stop at 28.6 — not because the room did, but because
+    // nothing had ever been placed further north. The walkable brush runs to
+    // z 39 (see `station_v2_rooms_are_where_the_plan_says`), and the whole
+    // northern half was bare floor, which is most of why Service measured 0.8
+    // decorations per 100 m² against a station norm of 2.4-4.1.
     const SERVICE_EAST: Bounds = Bounds {
         min_x: -38.7,
         max_x: -23.5,
         min_z: 15.0,
-        max_z: 28.6,
+        max_z: 39.0,
     };
     // Botany is one continuous greenhouse across the old maintenance spine.
     // Its floor fixtures are carved out of the walkable brushes, but placement
@@ -3272,15 +3278,6 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             depth: 0.36,
         },
         Placement {
-            kind: "svc.pass_hatch",
-            origin: "-605 1120 0",
-            angles: "0 0 0",
-            mount: Mount::Wall,
-            room: SERVICE_EAST,
-            width: 1.60,
-            depth: 0.44,
-        },
-        Placement {
             kind: "svc.drinks_board",
             origin: "-760 945 0",
             angles: "0 -90 0",
@@ -3288,6 +3285,15 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             room: SERVICE_EAST,
             width: 1.35,
             depth: 0.28,
+        },
+        Placement {
+            kind: "svc.pass_hatch",
+            origin: "-605 1120 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: SERVICE_EAST,
+            width: 1.60,
+            depth: 0.44,
         },
         // Both benches sit at the exact same raw origins as the two "relax"
         // `crew_post` markers in the Service hall (`assets/maps/lab.map`),
@@ -3670,6 +3676,47 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         Placement {
             kind: "svc.bench",
             origin: "-900 1350 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        // The canteen rebuild: a bench beside each dining table, and boards on
+        // the west and north walls, which were bare floor with nothing to look
+        // at. Service measured 0.8 decorations per 100 m² against a station
+        // norm of 2.4-4.1 — the least dressed room, and the one every resident
+        // has a reason to visit.
+        Placement {
+            kind: "svc.bench",
+            origin: "-816 1220 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-816 1040 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-1136 1380 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-1116 1140 0",
             angles: "0 0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -4744,6 +4791,12 @@ fn utility_spots_are_unique_walkable_and_routable() {
         "service.lounge.seat.1",
         "service.lounge.seat.2",
         "service.lounge.gather",
+        // Dining tables, capacity 4 apiece. Service is the one room the whole
+        // station visits and it had two seats for thirty residents.
+        "service.table.a",
+        "service.table.b",
+        "service.table.c",
+        "service.table.d",
         "security.dispatch",
         "security.desk",
         "security.evidence",
@@ -4791,6 +4844,89 @@ fn utility_spots_are_unique_walkable_and_routable() {
     }
 }
 
+/// Service must be able to seat a real fraction of the station.
+///
+/// It is the one room the whole crew has a reason to visit, and it had **two**
+/// seats — `service.lounge.seat.1` and `.2`, capacity 1 each — for thirty
+/// residents. Anything that drives people there (hunger, a break, a meal) would
+/// have sent a crowd to a room that could seat two, and the occupancy filter
+/// would have bounced the rest back to standing at their posts: a queue at a
+/// bench, which reads worse than the empty room it replaced.
+///
+/// Falsifies the rebuild: delete the `service.table.*` markers from the map and
+/// the room drops back to four places.
+#[test]
+fn the_service_room_seats_a_real_fraction_of_the_crew() {
+    /// Enough that a shift change or a mealtime looks like a canteen rather
+    /// than a queue. Deliberately well under thirty — not everyone eats at
+    /// once, and a room with a seat per resident would be mostly empty chairs.
+    const ENOUGH_SEATS: usize = 12;
+
+    let map = parse();
+    let seats: usize = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("utility_spot"))
+        .filter(|entity| {
+            property(entity, "id").is_some_and(|id| {
+                id.starts_with("service.table.") || id.starts_with("service.lounge.seat")
+            })
+        })
+        .filter_map(|entity| property(entity, "capacity")?.parse::<usize>().ok())
+        .sum();
+
+    assert!(
+        seats >= ENOUGH_SEATS,
+        "Service seats {seats}; a station of thirty needs at least \
+         {ENOUGH_SEATS} places or everyone sent there stands up",
+    );
+}
+
+/// Every seat must be reachable from the counter people collect food at.
+///
+/// A table walled off by its own furniture is the failure the collision-extent
+/// registration makes easy, and it would present as a resident who selects a
+/// meal, walks, fails, and re-selects for ever.
+#[test]
+fn every_service_seat_is_reachable_from_the_meal_pass() {
+    let map = parse();
+    let areas = authored_walkable_areas();
+    let graph = NavGraph::build(&areas, NAV_RADIUS);
+
+    let spot = |wanted: &str| {
+        map.iter()
+            .filter(|entity| classname(entity).as_deref() == Some("utility_spot"))
+            .find(|entity| property(entity, "id").as_deref() == Some(wanted))
+            .and_then(origin_xz)
+            .map(|(x, z)| Vec3::new(x, 0.0, z))
+    };
+    let pass = spot("service.meal.pass").expect("Service authors a meal pass");
+
+    let mut checked = 0;
+    for entity in map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("utility_spot"))
+    {
+        let Some(id) = property(entity, "id") else {
+            continue;
+        };
+        if !(id.starts_with("service.table.") || id.starts_with("service.lounge.seat")) {
+            continue;
+        }
+        let (x, z) = origin_xz(entity).expect("utility_spot has a valid origin");
+        assert!(
+            graph.path(pass, Vec3::new(x, 0.0, z)).is_some(),
+            "'{id}' cannot be walked to from the meal pass, so anyone sent \
+             there to eat never arrives",
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 6,
+        "only {checked} seats were checked; this test is silently covering \
+         almost nothing",
+    );
+}
+
 #[test]
 fn work_posts_name_a_roster_member_and_communal_posts_do_not() {
     // Both halves are silent failures otherwise. A `work` post with no
@@ -4817,6 +4953,95 @@ fn work_posts_name_a_roster_member_and_communal_posts_do_not() {
                 "{kind} crew_post is communal but names an occupant '{occupant}'",
             );
         }
+    }
+}
+
+/// Every resident must have somewhere the utility AI can send them.
+///
+/// `MaintainPost` is the Routine-bucket floor: when a department's board is
+/// momentarily empty it is the only thing standing between a resident and
+/// idling for the rest of the shift. It needs a target, and a missing target
+/// does not lower its score — `HasTarget` is a multiplicative consideration,
+/// so zero deletes the candidate outright.
+///
+/// The map authors only nine `work` posts against a cast of thirty, so
+/// twenty-one residents depend entirely on reaching a communal `duty` post.
+/// This asserts every one of them can, by route rather than by straight line.
+///
+/// Falsifies the whole arrangement: delete the `duty` markers from the map and
+/// this names the twenty-one people who would have nothing to do.
+#[test]
+fn the_whole_authored_cast_can_maintain_a_post() {
+    let map = parse();
+    let areas = authored_walkable_areas();
+    let graph = NavGraph::build(&areas, NAV_RADIUS);
+
+    let posts: Vec<(String, String, Vec3)> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("crew_post"))
+        .filter_map(|entity| {
+            let kind = property(entity, "kind")?;
+            let (x, z) = origin_xz(entity)?;
+            Some((
+                kind,
+                property(entity, "occupant").unwrap_or_default(),
+                Vec3::new(x, 0.0, z),
+            ))
+        })
+        .collect();
+    let duty: Vec<Vec3> = posts
+        .iter()
+        .filter(|(kind, _, _)| kind == "duty")
+        .map(|(_, _, at)| *at)
+        .collect();
+    assert!(!duty.is_empty(), "the map authors no communal duty posts");
+
+    // Where each resident starts the shift: their department's gathering point.
+    let homes: Vec<(String, Vec3)> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("department_spot"))
+        .filter_map(|entity| {
+            let department = property(entity, "department")?;
+            let (x, z) = origin_xz(entity)?;
+            Some((department, Vec3::new(x, 0.0, z)))
+        })
+        .collect();
+
+    let roster: Vec<crate::crew::CrewDef> =
+        ron::from_str(include_str!("../../assets/data/station.crew.ron")).unwrap();
+    let cast: Vec<(String, String)> = roster
+        .iter()
+        .map(|member| (member.name.clone(), member.role.clone()))
+        .chain(
+            crate::crew::fluff::support_crew()
+                .iter()
+                .map(|(name, role)| ((*name).to_string(), (*role).to_string())),
+        )
+        .collect();
+    assert_eq!(
+        cast.len(),
+        30,
+        "the station is authored for thirty residents; this test is covering {} \
+         and would silently miss the rest",
+        cast.len(),
+    );
+
+    for (name, role) in &cast {
+        if posts
+            .iter()
+            .any(|(kind, occupant, _)| kind == "work" && occupant == name)
+        {
+            continue;
+        }
+        let Some((_, home)) = homes.iter().find(|(department, _)| department == role) else {
+            panic!("{name} has role '{role}', which has no department_spot to start from");
+        };
+        assert!(
+            duty.iter().any(|at| graph.path(*home, *at).is_some()),
+            "{name} ({role}) has no personal work post and cannot walk to any \
+             communal duty post from their department point — they would idle \
+             for the whole shift the moment their department's board emptied",
+        );
     }
 }
 

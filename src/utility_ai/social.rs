@@ -22,7 +22,22 @@ use crate::crew::CrewMember;
 /// Authored break and social affordances. These are ordinary map-validated
 /// `utility_spot` markers, so they are reservable and route-checked like any
 /// workstation.
-const LOUNGE_SEATS: [&str; 2] = ["service.lounge.seat.1", "service.lounge.seat.2"];
+/// Somewhere to sit in Service, in the order a resident should prefer.
+///
+/// The two lounge seats used to be the whole list, which meant the station's
+/// only social room could seat *two* of its thirty residents — and the seats are
+/// capacity 1, so a third arrival was filtered out by occupancy and fell back to
+/// standing at their post. The four dining tables are capacity 4 apiece, so a
+/// meal or a break now reads as people sharing a table rather than queueing for
+/// a bench. Tables first: a resident with a choice should sit *with* somebody.
+const LOUNGE_SEATS: [&str; 6] = [
+    "service.table.a",
+    "service.table.b",
+    "service.table.c",
+    "service.table.d",
+    "service.lounge.seat.1",
+    "service.lounge.seat.2",
+];
 const GATHER_SPOT: &str = "service.lounge.gather";
 
 // Thresholds, durations, recovery amounts, standing gain, the pair cooldown and
@@ -468,6 +483,7 @@ mod tests {
         let areas = crate::lab::WalkableAreas::from_floor_plan();
         app.init_resource::<Time>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
             .init_resource::<ReservationBook>()
             .init_resource::<UtilityDecisionLog>()
             .init_resource::<UtilitySpots>()

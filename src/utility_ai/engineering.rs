@@ -57,6 +57,17 @@ const ENGINEERING_SPOTS: [&str; 4] = [
     POWER_MONITOR_SPOT,
 ];
 
+/// How often one Engineering asset falls due for service again.
+///
+/// Four assets on this cycle is roughly one job every 40 seconds, comparable to
+/// Cargo's throughput without making Engineering the busiest room on the
+/// station. Expect a second-order effect and do not mistake it for a bug:
+/// `opening_grace` counts *completed jobs*, and Engineering has never before
+/// completed enough to reach it, so renewable work means the department starts
+/// generating equipment faults for the first time. `ENGINEERING_PROBLEM_POLICY`
+/// is what bounds them.
+const MAINTENANCE_INTERVAL_SECONDS: f32 = 160.0;
+
 const ENGINEERING_EQUIPMENT_FAULT: &str = "engineering.equipment_fault";
 const ENGINEERING_PROBLEM_POLICY: DepartmentProblemPolicy = DepartmentProblemPolicy {
     domain: JobDomain::Engineering,
@@ -89,13 +100,21 @@ pub struct EngineeringAsset {
     pub state: EngineeringAssetState,
 }
 
-/// A finite Engineering shift. No timer creates routine tickets in this slice;
-/// each authored fact can be completed once unless a bounded fault reopens it.
+/// A running Engineering shift.
+///
+/// Was finite: four authored assets, each completable once unless a bounded
+/// fault reopened it, which measured as exactly four completions in a live run
+/// with the last at 4.3 seconds. Machinery that is inspected once and then
+/// never again is not machinery. `maintenance_in` now returns the
+/// longest-serviced asset to its own due state on a cycle, the same way Cargo's
+/// freight arrives.
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub struct EngineeringWorkState {
     pub assets: Vec<EngineeringAsset>,
     pub completed_jobs: u32,
     pub resolved_faults: u32,
+    /// Seconds until the next asset falls due again.
+    pub maintenance_in: f32,
 }
 
 impl Default for EngineeringWorkState {
@@ -125,6 +144,7 @@ impl Default for EngineeringWorkState {
             ],
             completed_jobs: 0,
             resolved_faults: 0,
+            maintenance_in: MAINTENANCE_INTERVAL_SECONDS,
         }
     }
 }
@@ -136,6 +156,22 @@ impl EngineeringWorkState {
 
     pub fn asset_mut(&mut self, id: &str) -> Option<&mut EngineeringAsset> {
         self.assets.iter_mut().find(|asset| asset.id == id)
+    }
+
+    /// The service this asset wants when it next falls due.
+    ///
+    /// Keyed off the authored spot rather than a new field, because the map
+    /// already gives every asset exactly one workstation and
+    /// `EngineeringJobKind::spot` is the same mapping read the other way.
+    /// `Operational` deliberately erases *which* work an asset last had, so
+    /// something has to say what it returns to.
+    fn due_state(asset: &EngineeringAsset) -> EngineeringAssetState {
+        match asset.spot {
+            GENERATOR_INSPECTION_SPOT => EngineeringAssetState::InspectionDue,
+            BREAKER_MAINTENANCE_SPOT => EngineeringAssetState::MaintenanceDue,
+            COOLANT_MANIFOLD_SPOT => EngineeringAssetState::CoolantCheckDue,
+            _ => EngineeringAssetState::PowerCheckDue,
+        }
     }
 
     fn work_for(&self, asset: &EngineeringAsset) -> Option<EngineeringJobKind> {
@@ -263,7 +299,8 @@ pub(super) fn register(app: &mut App) {
         )
         .add_systems(
             Update,
-            publish_engineering_tickets
+            (tick_engineering_maintenance, publish_engineering_tickets)
+                .chain()
                 .in_set(super::UtilityAiSet::BuildContext)
                 .run_if(crate::net::is_authority)
                 .run_if(in_state(crate::AppState::Playing))
@@ -363,6 +400,30 @@ fn activate_engineering_workers(
 
 fn asset_ticket_id(asset_id: &str) -> JobTicketId {
     JobTicketId(stable_text_key(&format!("engineering.ticket.{asset_id}")))
+}
+
+/// Returns one serviced asset to its due state, so the department never runs
+/// out of work.
+///
+/// Follows `cargo_pilot::tick_cargo_arrivals` exactly, including the `+=`
+/// re-arm rather than `=`: assigning the interval would let the cadence drift
+/// with frame time, while adding it preserves the remainder.
+///
+/// A faulted asset is never chosen — a fault is already work, and quietly
+/// converting it into routine maintenance would lose the incident behind it.
+fn tick_engineering_maintenance(time: Res<Time>, mut state: ResMut<EngineeringWorkState>) {
+    state.maintenance_in -= time.delta_secs();
+    if state.maintenance_in > 0.0 {
+        return;
+    }
+    state.maintenance_in += MAINTENANCE_INTERVAL_SECONDS;
+    let next = state
+        .assets
+        .iter()
+        .position(|asset| asset.state == EngineeringAssetState::Operational);
+    if let Some(index) = next {
+        state.assets[index].state = EngineeringWorkState::due_state(&state.assets[index]);
+    }
 }
 
 fn publish_engineering_tickets(
@@ -738,6 +799,101 @@ mod tests {
         }
     }
 
+    /// Machinery that is serviced once and never again is not machinery.
+    ///
+    /// Engineering's four authored assets each completed once, went
+    /// `Operational`, and `work_for` then returned `None` for ever — measured
+    /// live as exactly four completions with the last at 4.3 seconds, after
+    /// which the department was silent for the rest of the run. Only the
+    /// bounded fault director could reopen anything, capped at two per shift.
+    ///
+    /// Falsifies the maintenance timer: remove `tick_engineering_maintenance`
+    /// from the schedule and the board stays empty for ever.
+    #[test]
+    fn an_operational_engineering_asset_becomes_due_again() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<JobBoard>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<EngineeringWorkState>()
+            .add_systems(
+                Update,
+                (tick_engineering_maintenance, publish_engineering_tickets).chain(),
+            );
+        insert_test_spots(&mut app);
+
+        // A department that has finished everything it was authored to do.
+        {
+            let mut state = app.world_mut().resource_mut::<EngineeringWorkState>();
+            for asset in &mut state.assets {
+                asset.state = EngineeringAssetState::Operational;
+            }
+        }
+        app.update();
+        assert!(
+            app.world().resource::<JobBoard>().is_empty(),
+            "a fully serviced department must not advertise work yet"
+        );
+
+        // Small frames, not one jump: a large advance can sail past the
+        // transition being tested.
+        let mut due = false;
+        for _ in 0..((MAINTENANCE_INTERVAL_SECONDS / 0.5) as usize + 20) {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.5));
+            app.update();
+            if !app.world().resource::<JobBoard>().is_empty() {
+                due = true;
+                break;
+            }
+        }
+        assert!(
+            due,
+            "no Engineering asset ever fell due again, so the department goes \
+             silent a few seconds into every shift",
+        );
+    }
+
+    /// A fault must not be quietly downgraded into routine maintenance.
+    ///
+    /// `tick_engineering_maintenance` picks an `Operational` asset precisely so
+    /// it can never overwrite a `Faulted` one — a fault is already work, and it
+    /// carries an `IncidentId` that only a repair resolves. Rewriting it would
+    /// strand the incident open for ever, which is the immortal-incident
+    /// failure this codebase has already paid for once.
+    #[test]
+    fn scheduled_maintenance_never_overwrites_a_fault() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<EngineeringWorkState>()
+            .add_systems(Update, tick_engineering_maintenance);
+
+        let faulted = EngineeringAssetState::Faulted {
+            incident: super::super::IncidentId(7),
+            severity: Normalized::new(0.5).expect("in range"),
+        };
+        {
+            let mut state = app.world_mut().resource_mut::<EngineeringWorkState>();
+            for asset in &mut state.assets {
+                asset.state = faulted;
+            }
+        }
+
+        for _ in 0..((MAINTENANCE_INTERVAL_SECONDS / 0.5) as usize + 20) {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.5));
+            app.update();
+        }
+
+        let state = app.world().resource::<EngineeringWorkState>();
+        assert!(
+            state.assets.iter().all(|asset| asset.state == faulted),
+            "scheduled maintenance overwrote a fault, stranding its incident",
+        );
+    }
+
     #[test]
     fn authored_engineering_cast_has_distinct_tiers_and_qualifications() {
         ENGINEERING_ROSTER.validate().unwrap();
@@ -945,6 +1101,7 @@ mod tests {
         let areas = crate::lab::WalkableAreas::from_floor_plan();
         app.init_resource::<Time>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
             .init_resource::<ReservationBook>()
             .init_resource::<UtilityDecisionLog>()
             .init_resource::<JobBoard>()

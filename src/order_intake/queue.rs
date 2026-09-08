@@ -487,7 +487,7 @@ mod tests {
                     .translation = at;
                 for slot in &slots {
                     assert!(
-                        crate::nav::flat_distance(at, *slot) >= 0.70,
+                        crate::nav::flat_distance(at, *slot) >= crate::npc_motion::CLEARANCE,
                         "incoming body crossed a waiting customer"
                     );
                 }
@@ -613,7 +613,7 @@ mod tests {
                     for (i, a) in positions.iter().enumerate() {
                         for b in positions.iter().skip(i + 1) {
                             assert!(
-                                a.distance(*b) >= 0.70,
+                                a.distance(*b) >= crate::npc_motion::CLEARANCE,
                                 "{lane:?}: overlapping bodies {a:?}, {b:?}"
                             );
                         }
@@ -725,7 +725,7 @@ mod tests {
                 for (i, a) in positions.iter().enumerate() {
                     for b in positions.iter().skip(i + 1) {
                         assert!(
-                            a.distance(*b) >= 0.70,
+                            a.distance(*b) >= crate::npc_motion::CLEARANCE,
                             "NPC bodies overlapped: {a:?} and {b:?}"
                         );
                     }

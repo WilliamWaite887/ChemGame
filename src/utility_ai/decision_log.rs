@@ -49,6 +49,13 @@ use crate::crew::CrewMember;
 /// enough to localise "everything stopped at about the eight-minute mark".
 const SNAPSHOT_SECONDS: f32 = 20.0;
 
+/// How close two crew must be to count as part of the same huddle.
+///
+/// A little over three body clearances, so a working pair or a short queue is
+/// not flagged while a genuine pile is. This is a diagnostic threshold, not a
+/// physical one — nothing enforces it.
+const HUDDLE_RADIUS: f32 = 2.0;
+
 /// How many rejected candidates to print beside the winner.
 ///
 /// The point is to see what nearly won, not to dump the whole candidate set:
@@ -331,6 +338,7 @@ fn log_station_snapshot(
     board: Option<Res<JobBoard>>,
     incidents: Option<Res<super::IncidentLedger>>,
     controlled: Query<(&ControlOwner, Option<&CurrentAction>)>,
+    bodies: Query<&Transform, With<CrewMember>>,
     log: Option<ResMut<AiLog>>,
 ) {
     let Some(mut log) = log else { return };
@@ -399,9 +407,42 @@ fn log_station_snapshot(
         per_domain.join("  ")
     });
 
+    // Where the bodies actually are, which no count can answer.
+    //
+    // Added after a live run where the per-agent log looked healthy — everyone
+    // acting, targets spread across distinct keys — while the screen showed a
+    // dozen people packed against one wall of the Bridge. The "distinct
+    // targets" reading was a `target_key`, which for `MaintainPost` is the
+    // *person's* name hash, so it counted residents and could never have seen
+    // crowding at all. A metric that cannot fail is not evidence.
+    //
+    // This reads positions instead: the largest number of crew standing within
+    // one huddle radius of any one of them, and where that huddle is. A rising
+    // `worst` across snapshots is a pile forming, whatever the counts say.
+    let crowding = {
+        let at: Vec<Vec3> = bodies.iter().map(|body| body.translation).collect();
+        let mut worst = 0usize;
+        let mut worst_at = Vec3::ZERO;
+        for anchor in &at {
+            let near = at
+                .iter()
+                .filter(|other| crate::nav::flat_distance(**other, *anchor) <= HUDDLE_RADIUS)
+                .count();
+            if near > worst {
+                worst = near;
+                worst_at = *anchor;
+            }
+        }
+        format!(
+            "{worst} within {HUDDLE_RADIUS:.0}m of ({:.0},{:.0})",
+            worst_at.x, worst_at.z
+        )
+    };
+
     log.write(&format!(
-        "STATION utility-controlled={utility} acting={acting} idle={} | tickets(avail/claimed): {} | incidents(open/oldest): {}",
+        "STATION utility-controlled={utility} acting={acting} idle={} | crowding: {} | tickets(avail/claimed): {} | incidents(open/oldest): {}",
         utility.saturating_sub(acting),
+        crowding,
         tickets.unwrap_or_else(|| "no board".into()),
         incidents.unwrap_or_else(|| "no ledger".into()),
     ));

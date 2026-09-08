@@ -343,6 +343,23 @@ impl CrewPosts {
         Self::random_post_of(&self.duty)
     }
 
+    /// Every communal work spot, in authored order.
+    ///
+    /// Deliberately not [`Self::random_duty`], which is right for the legacy
+    /// ambient controller and wrong for a utility agent. A utility candidate
+    /// carries a `target_key` derived from where it is going, and selection
+    /// hysteresis only holds an action across ticks when that key is stable. A
+    /// destination redrawn at random every decision would give the same
+    /// intention a new identity each time, so nothing could ever be held and a
+    /// resident would re-pick their way around the room forever.
+    ///
+    /// Handing back the whole pool lets the caller choose deterministically —
+    /// in practice by route length, so the spot a resident falls back to is the
+    /// one they can actually walk to soonest.
+    pub fn duty_points(&self) -> impl Iterator<Item = Vec3> + '_ {
+        self.duty.iter().map(|post| post.at)
+    }
+
     /// Whether `at` is close enough to a communal work spot to count as
     /// standing at it. Presentation-only, exactly as [`Self::is_near_relax`]
     /// is — see [`post_presentation_animation`].

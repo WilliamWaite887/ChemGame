@@ -1279,6 +1279,7 @@ mod tests {
         let areas = crate::lab::WalkableAreas::from_floor_plan();
         app.init_resource::<Time>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
             .init_resource::<ReservationBook>()
             .init_resource::<UtilityDecisionLog>()
             .init_resource::<JobBoard>()
@@ -1566,6 +1567,7 @@ mod tests {
         let areas = crate::lab::WalkableAreas::from_floor_plan();
         app.init_resource::<Time>()
             .init_resource::<CrewPosts>()
+            .init_resource::<crate::crew::Departments>()
             .insert_resource(super::super::NeedsTuning::authored().clone())
             .init_resource::<ReservationBook>()
             .init_resource::<UtilityDecisionLog>()

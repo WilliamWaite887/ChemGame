@@ -16,7 +16,29 @@ pub const BODY_RADIUS: f32 = crate::nav::NAV_RADIUS;
 /// within this of another body, so no walking system can deliver someone closer
 /// than this to a person. Anything that asks a body to *arrive at* another body
 /// must budget for it, or it is asking for a walk that can never end.
-pub const CLEARANCE: f32 = BODY_RADIUS * 2.0 + 0.02;
+///
+/// Deliberately **not** derived from [`BODY_RADIUS`], which it used to be.
+/// `BODY_RADIUS` is `NAV_RADIUS`, and that is the *player's* 0.35 rather than
+/// the 0.28 crew capsule, chosen so a single nav graph is never too tight for
+/// the widest thing that walks. That is right for planning a route and wrong
+/// for standing next to somebody: it made two crew keep 0.72 m apart when their
+/// actual bodies are 0.56 m wide together, so a gathered department read as a
+/// group of strangers avoiding each other.
+///
+/// Set slightly *below* true body width (0.56), so shoulders overlap a little
+/// in a crowd rather than leaving a visible air gap. Crowding is the common
+/// case here — a queue at a counter, a department gathering — and a few
+/// centimetres of clipping reads as people standing together, while the gap
+/// read as a bug.
+///
+/// The lower bound is measured, not chosen.
+/// `continuous_aisle_prevents_a_pickup_line_sealing_an_incoming_route` is
+/// two-sided: it asserts an *unprotected* queue seals a corridor as well as
+/// that a protected one does not. Sweeping this constant against that fixture,
+/// 0.52 still seals and 0.50 no longer does — below roughly 0.52 a body slips
+/// through a line that is supposed to block it and the negative control
+/// silently stops controlling. 0.54 keeps a margin above that edge.
+pub const CLEARANCE: f32 = 0.54;
 
 #[derive(Resource, Default)]
 pub struct NpcMotion {

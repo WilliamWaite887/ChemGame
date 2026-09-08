@@ -139,8 +139,22 @@ const NAME_ADJECTIVES: [&str; 16] = [
 ];
 
 const NAME_NOUNS: [&str; 16] = [
-    "Beaker", "Flask", "Burner", "Pipette", "Vial", "Titrant", "Reagent", "Catalyst", "Solvent",
-    "Distillate", "Crucible", "Retort", "Funnel", "Filtrate", "Isotope", "Buret",
+    "Beaker",
+    "Flask",
+    "Burner",
+    "Pipette",
+    "Vial",
+    "Titrant",
+    "Reagent",
+    "Catalyst",
+    "Solvent",
+    "Distillate",
+    "Crucible",
+    "Retort",
+    "Funnel",
+    "Filtrate",
+    "Isotope",
+    "Buret",
 ];
 
 /// A stable, readable label for an account, with no name ever typed anywhere.

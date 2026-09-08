@@ -556,7 +556,13 @@ pub(crate) fn settings_body(panel: &mut ChildSpawnerCommands, settings: &Setting
             ScrollPane,
         ))
         .with_children(|pane| {
-            for knob in [Knob::Sensitivity, Knob::Fov, Knob::Volume, Knob::VoiceVolume, Knob::MicGain] {
+            for knob in [
+                Knob::Sensitivity,
+                Knob::Fov,
+                Knob::Volume,
+                Knob::VoiceVolume,
+                Knob::MicGain,
+            ] {
                 slider_row(pane, knob, settings);
             }
             display_section(pane, settings);
@@ -1592,7 +1598,13 @@ mod tests {
         // screen showing a fill that does not match the setting, and there
         // would be no way to drag back to what the player has been using.
         let settings = Settings::default();
-        for knob in [Knob::Sensitivity, Knob::Fov, Knob::Volume, Knob::VoiceVolume, Knob::MicGain] {
+        for knob in [
+            Knob::Sensitivity,
+            Knob::Fov,
+            Knob::Volume,
+            Knob::VoiceVolume,
+            Knob::MicGain,
+        ] {
             let (lo, hi) = knob.range();
             let value = knob.read(&settings);
             assert!(
@@ -1605,7 +1617,13 @@ mod tests {
 
     #[test]
     fn a_dial_reads_back_what_was_dragged_onto_it() {
-        for knob in [Knob::Sensitivity, Knob::Fov, Knob::Volume, Knob::VoiceVolume, Knob::MicGain] {
+        for knob in [
+            Knob::Sensitivity,
+            Knob::Fov,
+            Knob::Volume,
+            Knob::VoiceVolume,
+            Knob::MicGain,
+        ] {
             for fraction in [0.0, 0.25, 0.5, 1.0] {
                 let value = value_at(knob, fraction);
                 assert!(
@@ -1621,7 +1639,13 @@ mod tests {
     fn dragging_past_either_end_of_a_dial_clamps() {
         // The drag reads a raw cursor position, which is routinely outside the
         // track — pulling toward an end is how you reach it.
-        for knob in [Knob::Sensitivity, Knob::Fov, Knob::Volume, Knob::VoiceVolume, Knob::MicGain] {
+        for knob in [
+            Knob::Sensitivity,
+            Knob::Fov,
+            Knob::Volume,
+            Knob::VoiceVolume,
+            Knob::MicGain,
+        ] {
             let (lo, hi) = knob.range();
             assert_eq!(value_at(knob, -3.0), lo);
             assert_eq!(value_at(knob, 4.0), hi);

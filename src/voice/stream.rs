@@ -325,7 +325,11 @@ const JITTER_LOG_INTERVAL: Duration = Duration::from_secs(10);
 /// real connection instead of guesswork. Logs only a speaker whose buffer is
 /// currently held or has ever lost/concealed a frame, so a clean LAN
 /// connection between two players produces nothing at all.
-fn log_voice_jitter_health(players: NonSend<VoicePlayers>, mut since_log: Local<f32>, time: Res<Time>) {
+fn log_voice_jitter_health(
+    players: NonSend<VoicePlayers>,
+    mut since_log: Local<f32>,
+    time: Res<Time>,
+) {
     *since_log += time.delta_secs();
     if *since_log < JITTER_LOG_INTERVAL.as_secs_f32() {
         return;
@@ -335,15 +339,24 @@ fn log_voice_jitter_health(players: NonSend<VoicePlayers>, mut since_log: Local<
     for (speaker, entry) in &players.entries {
         let stats = entry.jitter.stats();
         let held = entry.jitter.held();
-        if held == 0 && stats.late == 0 && stats.duplicate == 0 && stats.overflow == 0
-            && stats.underflow == 0 && stats.concealed == 0
+        if held == 0
+            && stats.late == 0
+            && stats.duplicate == 0
+            && stats.overflow == 0
+            && stats.underflow == 0
+            && stats.concealed == 0
         {
             continue;
         }
         info!(
             "voice jitter {speaker:?}: held={held} accepted={} late={} duplicate={} \
              overflow={} underflow={} concealed={}",
-            stats.accepted, stats.late, stats.duplicate, stats.overflow, stats.underflow, stats.concealed,
+            stats.accepted,
+            stats.late,
+            stats.duplicate,
+            stats.overflow,
+            stats.underflow,
+            stats.concealed,
         );
     }
 }
@@ -452,7 +465,11 @@ fn spawn_nameplates(
     // the same chain so it never lags a full extra frame behind arrivals.
 }
 
-fn despawn_stale_nameplates(mut commands: Commands, chemists: Query<(), With<Chemist>>, plates: Query<(Entity, &Nameplate)>) {
+fn despawn_stale_nameplates(
+    mut commands: Commands,
+    chemists: Query<(), With<Chemist>>,
+    plates: Query<(Entity, &Nameplate)>,
+) {
     for (entity, plate) in &plates {
         if !chemists.contains(plate.chemist) {
             commands.entity(entity).despawn();
@@ -486,10 +503,16 @@ fn place_nameplates(
         let shown = chemists
             .get(plate.chemist)
             .ok()
-            .filter(|transform| eye.distance_squared(transform.translation) <= super::PROXIMITY_RANGE * super::PROXIMITY_RANGE)
+            .filter(|transform| {
+                eye.distance_squared(transform.translation)
+                    <= super::PROXIMITY_RANGE * super::PROXIMITY_RANGE
+            })
             .and_then(|transform| {
                 camera
-                    .world_to_viewport(camera_transform, transform.translation + Vec3::Y * HEAD_HEIGHT)
+                    .world_to_viewport(
+                        camera_transform,
+                        transform.translation + Vec3::Y * HEAD_HEIGHT,
+                    )
                     .ok()
             });
 

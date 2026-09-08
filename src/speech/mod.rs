@@ -711,10 +711,29 @@ pub(crate) fn collapse_line(
 /// Reuses an already-credited one-shot rather than introducing an asset, the
 /// same way the radio channel-ident palette does (see `CREDITS.md`). A
 /// dedicated sample would be better and is worth doing before launch.
-fn announce_speech(mut spoken: MessageWriter<PlaySfx>, started: Query<(), Added<Speech>>) {
+fn announce_speech(
+    mut spoken: MessageWriter<PlaySfx>,
+    camera: Query<&GlobalTransform, With<PlayerCamera>>,
+    started: Query<&Transform, Added<Speech>>,
+) {
+    // Only for a line the player could actually be hearing. Without this the
+    // cue was global: somebody talking in Botany ticked in your ear while you
+    // stood in Chemistry, which reads as a UI noise rather than as a person.
+    //
+    // Gated on the camera and on `EARSHOT`, which is exactly the test
+    // `place_bubbles` already applies to the bubble itself — the sound and the
+    // thing it tells you to look at must agree about what is nearby, or the
+    // cue sends you looking for a bubble that was never drawn.
+    let Ok(camera) = camera.single() else {
+        return;
+    };
+    let eye = camera.translation();
     // One cue however many people spoke this frame — two lines landing
     // together are still one thing to look up at.
-    if !started.is_empty() {
+    if started
+        .iter()
+        .any(|at| eye.distance_squared(at.translation + Vec3::Y * HEAD_HEIGHT) <= EARSHOT * EARSHOT)
+    {
         spoken.write(PlaySfx(Sfx::Speak));
     }
 }
@@ -1663,6 +1682,57 @@ mod tests {
     }
 
     const DEPARTMENTS: [&str; 5] = ["Medical", "Security", "Engineering", "Cargo", "Service"];
+
+    /// The speech cue must be local, and must agree with the bubble.
+    ///
+    /// It used to fire on *any* new `Speech` anywhere on the station, so
+    /// somebody talking in Botany ticked in your ear while you stood in
+    /// Chemistry. Worse than noise: the cue exists to make you look up, and
+    /// there was no bubble to look at — `place_bubbles` culls at the same
+    /// `EARSHOT` this now uses.
+    ///
+    /// Falsifies the range gate: drop the distance test in `announce_speech`
+    /// and the far speaker rings.
+    #[test]
+    fn a_line_from_across_the_station_makes_no_sound() {
+        fn app_with_speaker_at(distance: f32) -> App {
+            let mut app = App::new();
+            app.add_message::<PlaySfx>()
+                .add_systems(Update, announce_speech);
+            let chemist = app.world_mut().spawn_empty().id();
+            app.world_mut().spawn((
+                PlayerCamera { chemist },
+                GlobalTransform::from_translation(Vec3::ZERO),
+            ));
+            app.world_mut().spawn((
+                Speech {
+                    text: "over here".into(),
+                    tone: SpeechTone::default(),
+                },
+                Transform::from_translation(Vec3::new(distance, 0.0, 0.0)),
+            ));
+            app.update();
+            app
+        }
+
+        let heard = |app: &App| {
+            !app.world()
+                .resource::<Messages<PlaySfx>>()
+                .iter_current_update_messages()
+                .count()
+                .eq(&0)
+        };
+
+        assert!(
+            heard(&app_with_speaker_at(EARSHOT * 0.5)),
+            "a line spoken beside the player must still cue them to look up",
+        );
+        assert!(
+            !heard(&app_with_speaker_at(EARSHOT * 3.0)),
+            "a line spoken across the station rang in the player's ear with no \
+             bubble anywhere to look at",
+        );
+    }
 
     #[test]
     fn every_situation_has_a_role_agnostic_line() {

@@ -18,10 +18,11 @@
 use bevy::prelude::*;
 
 use super::department::{control_for_resident, DepartmentRoster};
-use super::jobs::UtilitySpots;
+use super::jobs::{take_completed_standing_posts, StandingPostCooldowns, UtilitySpots};
 use super::{
-    stable_text_key, ActionTarget, JobBoard, JobCapability, JobDomain, JobTicket, JobTicketId,
-    JobTicketState, Normalized, ReservationKey, UtilityBucket,
+    stable_text_key, ActionResult, ActionTarget, JobBoard, JobCapability, JobDomain, JobTicket,
+    JobTicketId, JobTicketState, Normalized, ReservationKey, UtilityActionId,
+    UtilityActionResolved, UtilityBucket,
 };
 use crate::crew::{CrewMember, CrewRoute, StationResident};
 
@@ -136,11 +137,20 @@ fn security_ticket_id(kind: SecurityJobKind) -> JobTicketId {
 fn publish_security_tickets(
     time: Res<Time>,
     spots: Res<UtilitySpots>,
+    cooldowns: Res<StandingPostCooldowns>,
     mut board: ResMut<JobBoard>,
 ) {
+    let now = time.elapsed_secs();
     for kind in SECURITY_JOBS {
         let id = security_ticket_id(kind);
         if board.ticket(id).is_some() {
+            continue;
+        }
+        // After the `is_some` check deliberately, so
+        // `security_publishes_its_routine_work_once_per_spot` keeps meaning
+        // what it did: this gates *re*-advertising a worked post, not the
+        // first publication.
+        if !cooldowns.ready(id, now) {
             continue;
         }
         let Some(spot) = spots.get(kind.spot()) else {
@@ -205,10 +215,40 @@ fn activate_security_workers(
     }
 }
 
+/// Releases a worked post so it can be staffed again.
+///
+/// See [`take_completed_standing_posts`] for why this had to exist: without it
+/// a completed Security ticket stayed terminal on the board forever and the
+/// department published its three posts exactly once per shift.
+fn apply_security_post_results(
+    time: Res<Time>,
+    mut results: MessageReader<UtilityActionResolved>,
+    mut board: ResMut<JobBoard>,
+    mut cooldowns: ResMut<StandingPostCooldowns>,
+) {
+    let completed: Vec<_> = results
+        .read()
+        .filter(|result| {
+            result.key.action == UtilityActionId::PerformJob
+                && result.result == ActionResult::Completed
+        })
+        .map(|result| (JobTicketId(result.key.target_key), result.claim))
+        .collect();
+    take_completed_standing_posts(
+        JobDomain::Security,
+        &completed,
+        &mut board,
+        &mut cooldowns,
+        time.elapsed_secs(),
+    );
+}
+
 fn reset_security_work(
     mut board: ResMut<JobBoard>,
+    mut cooldowns: ResMut<StandingPostCooldowns>,
     mut reservations: ResMut<super::ReservationBook>,
 ) {
+    cooldowns.clear();
     SECURITY_ROSTER
         .validate()
         .expect("the Security utility roster must be valid");
@@ -236,6 +276,15 @@ pub(super) fn register(app: &mut App) {
         Update,
         publish_security_tickets
             .in_set(super::UtilityAiSet::BuildContext)
+            .run_if(crate::net::is_authority)
+            .run_if(in_state(crate::AppState::Playing))
+            .run_if(crate::session::career_session),
+    )
+    .add_systems(
+        Update,
+        apply_security_post_results
+            .after(super::resolve_reference_actions)
+            .in_set(super::UtilityAiSet::Resolve)
             .run_if(crate::net::is_authority)
             .run_if(in_state(crate::AppState::Playing))
             .run_if(crate::session::career_session),
@@ -323,6 +372,7 @@ mod tests {
         app.init_resource::<Time>()
             .init_resource::<JobBoard>()
             .init_resource::<UtilitySpots>()
+            .init_resource::<StandingPostCooldowns>()
             .add_systems(Update, publish_security_tickets);
         for kind in SECURITY_JOBS {
             app.world_mut()
@@ -346,6 +396,149 @@ mod tests {
             board.iter().all(|ticket| ticket.subject.is_none()),
             "routine station work is common knowledge and must never be memory-gated"
         );
+    }
+
+    /// A worked post must go back on the board.
+    ///
+    /// Security had no `apply_*_job_results` system at all, so a completed
+    /// ticket stayed `Completed(owner)` forever, the publisher's
+    /// `board.ticket(id).is_some()` guard stayed true, and the department
+    /// advertised its three posts exactly once per shift. Live, that was
+    /// `Security 3/0` in all twenty-five snapshots of a 500-second run:
+    /// available work that no officer ever claimed twice.
+    ///
+    /// Falsifies the results system: drop `apply_security_post_results` from
+    /// the schedule and the ticket never returns.
+    #[test]
+    fn security_republishes_a_post_after_it_is_worked() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<JobBoard>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<StandingPostCooldowns>()
+            .add_message::<UtilityActionResolved>()
+            .add_systems(
+                Update,
+                (apply_security_post_results, publish_security_tickets).chain(),
+            );
+        for kind in SECURITY_JOBS {
+            app.world_mut()
+                .resource_mut::<UtilitySpots>()
+                .insert(kind.spot(), Vec3::ZERO, 1);
+        }
+        app.update();
+
+        // Work one post through to completion, exactly as the lifecycle does.
+        let worker = app.world_mut().spawn_empty().id();
+        let id = security_ticket_id(SecurityJobKind::ManDispatch);
+        let claim = super::super::ReservationOwner {
+            agent: worker,
+            action_instance: 1,
+        };
+        {
+            let mut board = app.world_mut().resource_mut::<JobBoard>();
+            board.claim(id, claim).expect("the post is available");
+            board
+                .resolve(id, claim, ActionResult::Completed)
+                .expect("the claim is ours");
+        }
+        app.world_mut().write_message(UtilityActionResolved {
+            agent: worker,
+            key: super::super::ActionKey {
+                action: UtilityActionId::PerformJob,
+                target_key: id.0,
+            },
+            claim,
+            result: ActionResult::Completed,
+        });
+
+        // Step in small frames past the cooldown rather than jumping it: a
+        // single large advance can sail over the window under test.
+        let mut back = false;
+        for _ in 0..200 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+            if app
+                .world()
+                .resource::<JobBoard>()
+                .ticket(id)
+                .is_some_and(|ticket| ticket.state == JobTicketState::Available)
+            {
+                back = true;
+                break;
+            }
+        }
+        assert!(
+            back,
+            "a completed Security post was never taken off the board, so it \
+             could never be advertised again"
+        );
+    }
+
+    /// The post must not be re-advertised the instant it is vacated.
+    ///
+    /// Without a cooldown the console reappears on the board the same frame the
+    /// officer steps away from it, and the officer standing on it re-claims it
+    /// immediately — legal, but it reads as a stuck loop and means an officer
+    /// never walks anywhere. A department whose job is noticing has to move
+    /// through rooms to notice anything.
+    ///
+    /// Falsifies the cooldown: remove the `cooldowns.ready` gate and the ticket
+    /// is back on the very next frame.
+    #[test]
+    fn a_worked_security_post_is_not_immediately_re_advertised() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<JobBoard>()
+            .init_resource::<UtilitySpots>()
+            .init_resource::<StandingPostCooldowns>()
+            .add_message::<UtilityActionResolved>()
+            .add_systems(
+                Update,
+                (apply_security_post_results, publish_security_tickets).chain(),
+            );
+        for kind in SECURITY_JOBS {
+            app.world_mut()
+                .resource_mut::<UtilitySpots>()
+                .insert(kind.spot(), Vec3::ZERO, 1);
+        }
+        app.update();
+
+        let worker = app.world_mut().spawn_empty().id();
+        let id = security_ticket_id(SecurityJobKind::ManDispatch);
+        let claim = super::super::ReservationOwner {
+            agent: worker,
+            action_instance: 1,
+        };
+        {
+            let mut board = app.world_mut().resource_mut::<JobBoard>();
+            board.claim(id, claim).unwrap();
+            board.resolve(id, claim, ActionResult::Completed).unwrap();
+        }
+        app.world_mut().write_message(UtilityActionResolved {
+            agent: worker,
+            key: super::super::ActionKey {
+                action: UtilityActionId::PerformJob,
+                target_key: id.0,
+            },
+            claim,
+            result: ActionResult::Completed,
+        });
+
+        // Just past the take, well inside the cooldown window.
+        for _ in 0..10 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.1));
+            app.update();
+            assert!(
+                app.world().resource::<JobBoard>().ticket(id).is_none(),
+                "the vacated post was advertised again inside its cooldown, so \
+                 the officer standing on it can simply retake it"
+            );
+        }
     }
 
     /// The join between this adapter and `interviews.rs`, end to end.

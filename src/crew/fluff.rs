@@ -76,6 +76,18 @@ const FLUFF_CREW: &[(&str, &str)] = &[
     (SECURITY_SUPPORT_NAMES[1], "Security"),
 ];
 
+/// The support cast, as `(name, role)`.
+///
+/// Exposed so tests can assert over the *whole* thirty-resident station rather
+/// than the fourteen on the customer roster. The support crew are the larger
+/// half and are exactly the half that authored data does not mention, so a
+/// check that reads only `station.crew.ron` silently covers less than half the
+/// people who actually walk around.
+#[cfg(test)]
+pub(crate) fn support_crew() -> &'static [(&'static str, &'static str)] {
+    FLUFF_CREW
+}
+
 /// Uniform tint. Presentation only — `CrewAssets::theme_for` picks the actual
 /// model, and an unrecognised role lands on the neutral one.
 const FLUFF_COLOR: [f32; 3] = [0.62, 0.66, 0.74];
