@@ -37,10 +37,21 @@ pub enum SessionKind {
     #[default]
     Career,
     Training,
+    /// Disposable developer recording session, excluded from career writes.
+    Trailer,
 }
 
 pub fn career_session(kind: Option<Res<SessionKind>>) -> bool {
-    !matches!(kind.as_deref(), Some(SessionKind::Training))
+    matches!(kind.as_deref(), None | Some(SessionKind::Career))
+}
+
+/// Shared NPC movement is registered once. Recording fixtures reuse it without
+/// enabling career progression or adding ambiguous copies to the schedule.
+pub(crate) fn career_or_trailer_session(kind: Option<Res<SessionKind>>) -> bool {
+    matches!(
+        kind.as_deref(),
+        None | Some(SessionKind::Career | SessionKind::Trailer)
+    )
 }
 
 pub fn training_session(kind: Option<Res<SessionKind>>) -> bool {
@@ -203,6 +214,25 @@ mod tests {
     }
 
     use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn recording_enables_shared_movement_without_enabling_career_or_training() {
+        let mut world = World::new();
+        assert!(world.run_system_once(career_or_trailer_session).unwrap());
+        for (kind, movement, career, training) in [
+            (SessionKind::Career, true, true, false),
+            (SessionKind::Trailer, true, false, false),
+            (SessionKind::Training, false, false, true),
+        ] {
+            world.insert_resource(kind);
+            assert_eq!(
+                world.run_system_once(career_or_trailer_session).unwrap(),
+                movement
+            );
+            assert_eq!(world.run_system_once(career_session).unwrap(), career);
+            assert_eq!(world.run_system_once(training_session).unwrap(), training);
+        }
+    }
 
     #[test]
     fn a_new_session_does_not_inherit_the_last_ones_career() {

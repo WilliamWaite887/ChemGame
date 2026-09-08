@@ -858,6 +858,15 @@ fn handle_machine_interact(
                     MachineSlot::B => item.insert(InSlotB(request.target)),
                     MachineSlot::C => item.insert(InSlotC(request.target)),
                 };
+                crate::stagecraft::action(
+                    &mut commands,
+                    crate::stagecraft::ActionCue {
+                        actor: player,
+                        item: None,
+                        kind: crate::stagecraft::ActionKind::Apply,
+                        target: transform.translation + offset,
+                    },
+                );
             }
             _ => {
                 if !machine.available_to(player) {
@@ -2133,6 +2142,15 @@ pub(crate) fn place_output(
     } else {
         item.insert(Transform::from_translation(drop_at));
     }
+    crate::stagecraft::action(
+        commands,
+        crate::stagecraft::ActionCue {
+            actor: player,
+            item: None,
+            kind: crate::stagecraft::ActionKind::Apply,
+            target: drop_at,
+        },
+    );
 }
 
 /// Ejecting hands the container straight to the chemist rather than guessing

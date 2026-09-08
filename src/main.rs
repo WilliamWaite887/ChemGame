@@ -62,6 +62,7 @@ mod showdown;
 mod smuggler;
 mod social;
 mod speech;
+mod stagecraft;
 mod textbook;
 mod threat;
 mod tutorial;
@@ -317,6 +318,7 @@ fn main() {
     // reason as `freight` — a dev-only screenshot tool, unrelated to any of
     // the groupings above, so it has no natural home in one of them anyway.
     app.add_plugins(capture::CapturePlugin);
+    app.add_plugins(stagecraft::StagecraftPlugin);
 
     // Kept out of the tuple above (already near Bevy's 16-plugin limit) and
     // added only when Steam actually initialised — its systems assume

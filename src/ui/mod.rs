@@ -1362,6 +1362,7 @@ fn sync_panel(
             },
             GlobalZIndex(30),
             PanelRoot,
+            crate::capture::CapturePanel,
             crate::until_we_leave_the_lab(),
         ))
         .with_children(|screen| {

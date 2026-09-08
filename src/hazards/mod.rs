@@ -713,6 +713,7 @@ fn spawn_hazards(
         }
 
         if power > 0.0 {
+            crate::stagecraft::blast(&mut commands, origin, power);
             if power >= 1.0 {
                 if let Some(sounds) = &mut sounds {
                     sounds.write(EmitWorldSfx::new(Sfx::HazardExplosion, origin));

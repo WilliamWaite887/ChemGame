@@ -144,6 +144,12 @@ pub(crate) enum CharacterAnimation {
     /// A held pose for a resident at a communal relax spot's seat. Selected
     /// the same way `Working` is — see its doc comment.
     Sitting = 8,
+    Apply = 9,
+    Charge = 10,
+    CultAttack = 11,
+    CultNotice = 12,
+    Pour = 13,
+    Stagger = 14,
 }
 
 fn load_character_lab_assets(
@@ -464,6 +470,12 @@ pub(crate) fn character_animation_speed(
         // there is no bloodstream signal to scale either by.
         CharacterAnimation::Working => 1.0,
         CharacterAnimation::Sitting => 1.0,
+        CharacterAnimation::Apply
+        | CharacterAnimation::Charge
+        | CharacterAnimation::CultAttack
+        | CharacterAnimation::CultNotice
+        | CharacterAnimation::Pour
+        | CharacterAnimation::Stagger => 1.0,
     }
 }
 

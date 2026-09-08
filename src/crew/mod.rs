@@ -86,7 +86,7 @@ impl Plugin for CrewPlugin {
                         // rather than half a frame late.
                         run_errands
                             .in_set(crate::utility_ai::UtilityAiSet::Navigate)
-                            .run_if(crate::session::career_session),
+                            .run_if(crate::session::career_or_trailer_session),
                         handle_crew_collapse.run_if(crate::session::career_session),
                     )
                         .chain()
@@ -130,7 +130,9 @@ impl Plugin for CrewPlugin {
                         configure_crew_faces.after(dress_crew),
                         tag_crew_surfaces.after(dress_crew),
                         attach_crew_animation.after(dress_crew),
-                        drive_crew_animation.after(attach_crew_animation),
+                        drive_crew_animation
+                            .after(attach_crew_animation)
+                            .after(crate::stagecraft::PresentActions),
                     )
                         .after(assign_crew_appearances),
                     assign_crew_appearances.run_if(is_authority),
@@ -690,7 +692,7 @@ impl CrewAssets {
 struct CrewModelAsset {
     scene: Handle<WorldAsset>,
     animation_graph: Handle<AnimationGraph>,
-    animation_nodes: [AnimationNodeIndex; 9],
+    animation_nodes: [AnimationNodeIndex; 15],
 }
 
 fn load_crew_model(
@@ -703,23 +705,14 @@ fn load_crew_model(
     // `character_lab::load_character_lab_assets`'s own mapping — the two
     // load the same rig's clips, just per-department GLBs instead of one
     // shared test-subject GLB.
-    let (graph, nodes) = AnimationGraph::from_clips([
-        asset_server.load(GltfAssetLabel::Animation(1).from_asset(path)), // Idle
-        asset_server.load(GltfAssetLabel::Animation(4).from_asset(path)), // Stimulated
-        asset_server.load(GltfAssetLabel::Animation(2).from_asset(path)), // Sedated
-        asset_server.load(GltfAssetLabel::Animation(5).from_asset(path)), // Unsteady
-        asset_server.load(GltfAssetLabel::Animation(0).from_asset(path)), // Collapsed
-        asset_server.load(GltfAssetLabel::Animation(6).from_asset(path)), // Walk
-        asset_server.load(GltfAssetLabel::Animation(7).from_asset(path)), // WalkDrunk
-        asset_server.load(GltfAssetLabel::Animation(8).from_asset(path)), // Working
-        asset_server.load(GltfAssetLabel::Animation(3).from_asset(path)), // Sitting
-    ]);
+    let (graph, nodes) =
+        AnimationGraph::from_clips(crate::stagecraft::character_clips(asset_server, path));
     CrewModelAsset {
         scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset(path)),
         animation_graph: animation_graphs.add(graph),
         animation_nodes: nodes
             .try_into()
-            .expect("the shared crew rig has exactly nine clips"),
+            .expect("the shared crew rig has fifteen clips"),
     }
 }
 
@@ -813,6 +806,8 @@ struct CrewAnimationController {
     crew: Entity,
     theme: usize,
     current: CharacterAnimation,
+    last_position: Option<Vec3>,
+    motion_hold: f32,
 }
 
 /// Spawns a crew member outside the door, walking in.
@@ -954,6 +949,8 @@ fn attach_crew_animation(
                 crew: visual.crew,
                 theme: visual.theme,
                 current: initial,
+                last_position: None,
+                motion_hold: 0.0,
             },
         ));
     }
@@ -989,7 +986,9 @@ fn post_presentation_animation(
 
 #[allow(clippy::too_many_arguments)]
 fn drive_crew_animation(
+    time: Res<Time>,
     assets: Option<Res<CrewAssets>>,
+    performances: Query<&crate::stagecraft::Performance>,
     crew_posts: Res<CrewPosts>,
     bloods: Query<&Bloodstream>,
     routes: Query<&CrewRoute>,
@@ -1018,7 +1017,20 @@ fn drive_crew_animation(
         // animated as standing still while gliding across the floor. That had
         // been true of every assailant and cultist in the game since `Pursuit`
         // was written; errands would have made it a daylight problem.
-        let moving = routes.get(controller.crew).is_ok_and(CrewRoute::is_moving)
+        // Errand and pursuit ownership stay on the authority. Observers use
+        // replicated displacement, with a short hold between network updates.
+        controller.motion_hold = (controller.motion_hold - time.delta_secs()).max(0.0);
+        if let Ok(at) = transforms.get(controller.crew) {
+            if controller
+                .last_position
+                .is_some_and(|old| old.distance_squared(at.translation) > 0.000004)
+            {
+                controller.motion_hold = 0.15;
+            }
+            controller.last_position = Some(at.translation);
+        }
+        let moving = controller.motion_hold > 0.0
+            || routes.get(controller.crew).is_ok_and(CrewRoute::is_moving)
             || errands.get(controller.crew).is_ok_and(Errand::is_moving)
             || pursuits
                 .get(controller.crew)
@@ -1054,6 +1066,13 @@ fn drive_crew_animation(
             }
         }
         let model = &assets.models[controller.theme];
+        if let Some(action) = performances
+            .get(controller.crew)
+            .ok()
+            .and_then(|p| p.animation(&blood.0))
+        {
+            desired = action;
+        }
         let node = model.animation_nodes[desired as usize];
         let speed = character_animation_speed(&blood.0, desired);
         if desired != controller.current {

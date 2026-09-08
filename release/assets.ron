@@ -13,6 +13,9 @@
         (
             file: "content_01.cgp",
             include: [
+                // Shared gameplay assets for the trailer also ship here:
+                // chem_actions.glb, chem_beaker.glb, chem_large_beaker.glb,
+                // chem_bottle.glb, chem_syringe.glb and chem_charge.glb.
                 (root: "3dassets/glb", extensions: ["glb"]),
                 (root: "3dassets/station_starter_kit/glb", extensions: ["glb"]),
             ],
@@ -64,6 +67,18 @@
         "3dassets/station_starter_kit/preview_medical_ward.png",
         "3dassets/station_starter_kit/preview_security_decor.png",
         "3dassets/station_starter_kit/preview_service_decor.png",
+        // Editable chemistry asset sources and preview output. The exported
+        // GLBs above are protected; these authoring files never ship loose.
+        "3dassets/chemistry_props.blend",
+        "3dassets/chemistry_actions.blend",
+        "3dassets/build_chemistry_props.py",
+        "3dassets/build_chemistry_actions.py",
+        "3dassets/preview_chemistry_actions.py",
+        "3dassets/previews/chemistry_props/lineup.png",
+        "3dassets/previews/chemistry_actions/Stagger.png",
+        "3dassets/previews/chemistry_actions/Pour.png",
+        "3dassets/previews/chemistry_actions/CultAttack.png",
+        "3dassets/previews/chemistry_actions/Apply.png",
         "textures/clip.png",
         "textures/floor_cargo.png",
         "textures/floor_engineering.png",

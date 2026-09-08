@@ -73,7 +73,9 @@ impl Plugin for PlayerPlugin {
                         configure_chemist_faces.after(dress_chemists),
                         tag_chemist_surfaces.after(dress_chemists),
                         attach_chemist_animation.after(dress_chemists),
-                        drive_chemist_animation.after(attach_chemist_animation),
+                        drive_chemist_animation
+                            .after(attach_chemist_animation)
+                            .after(crate::stagecraft::PresentActions),
                         adopt_my_chemist,
                         hide_own_body,
                         // Reading the mouse and keyboard on the player's
@@ -479,7 +481,7 @@ fn adopt_my_chemist(mut commands: Commands, mut assigned: MessageReader<YouAreCh
 pub(crate) struct ChemistAssets {
     model: Handle<WorldAsset>,
     animation_graph: Handle<AnimationGraph>,
-    animation_nodes: [AnimationNodeIndex; 7],
+    animation_nodes: [AnimationNodeIndex; 15],
 }
 
 pub(crate) fn load_chemist_assets(
@@ -488,21 +490,14 @@ pub(crate) fn load_chemist_assets(
     mut animation_graphs: ResMut<Assets<AnimationGraph>>,
 ) {
     let path = "3dassets/glb/first_char_player.glb";
-    let (graph, nodes) = AnimationGraph::from_clips([
-        asset_server.load(GltfAssetLabel::Animation(1).from_asset(path)),
-        asset_server.load(GltfAssetLabel::Animation(3).from_asset(path)),
-        asset_server.load(GltfAssetLabel::Animation(2).from_asset(path)),
-        asset_server.load(GltfAssetLabel::Animation(4).from_asset(path)),
-        asset_server.load(GltfAssetLabel::Animation(0).from_asset(path)),
-        asset_server.load(GltfAssetLabel::Animation(5).from_asset(path)),
-        asset_server.load(GltfAssetLabel::Animation(6).from_asset(path)),
-    ]);
+    let (graph, nodes) =
+        AnimationGraph::from_clips(crate::stagecraft::character_clips(&asset_server, path));
     commands.insert_resource(ChemistAssets {
         model: asset_server.load(GltfAssetLabel::Scene(0).from_asset(path)),
         animation_graph: animation_graphs.add(graph),
         animation_nodes: nodes
             .try_into()
-            .expect("the shared player rig has exactly seven clips"),
+            .expect("the shared player rig has fifteen clips"),
     });
 }
 
@@ -694,6 +689,7 @@ fn attach_chemist_animation(
 
 fn drive_chemist_animation(
     assets: Option<Res<ChemistAssets>>,
+    performances: Query<&crate::stagecraft::Performance>,
     bloods: Query<&Bloodstream>,
     intents: Query<&MoveIntent>,
     mut players: Query<(
@@ -712,7 +708,11 @@ fn drive_chemist_animation(
         let moving = intents
             .get(controller.chemist)
             .is_ok_and(|intent| intent.direction != Vec2::ZERO);
-        let desired = desired_character_animation(&blood.0, moving);
+        let desired = performances
+            .get(controller.chemist)
+            .ok()
+            .and_then(|p| p.animation(&blood.0))
+            .unwrap_or_else(|| desired_character_animation(&blood.0, moving));
         let node = assets.animation_nodes[desired as usize];
         let speed = character_animation_speed(&blood.0, desired);
         if desired != controller.current {
@@ -733,12 +733,14 @@ fn drive_chemist_animation(
 /// halves arrive in either order: on a client the chemist can be replicated in
 /// before the message naming it, or after.
 fn hide_own_body(
+    capture: Option<Res<crate::capture::CaptureState>>,
     local: Query<Entity, With<LocalPlayer>>,
     mut parts: Query<(&ChemistBody, &mut Visibility)>,
 ) {
     let me = local.single().ok();
     for (part, mut visibility) in &mut parts {
-        let wanted = if Some(part.chemist) == me {
+        let wanted = if Some(part.chemist) == me && !capture.as_ref().is_some_and(|s| s.free_camera)
+        {
             Visibility::Hidden
         } else {
             Visibility::Inherited
@@ -1561,7 +1563,7 @@ mod tests {
                 (dress_chemists, adopt_my_chemist, hide_own_body).chain(),
             );
         let (graph, nodes) =
-            AnimationGraph::from_clips(std::array::from_fn::<Handle<AnimationClip>, 7, _>(|_| {
+            AnimationGraph::from_clips(std::array::from_fn::<Handle<AnimationClip>, 15, _>(|_| {
                 Handle::default()
             }));
         let animation_graph = app

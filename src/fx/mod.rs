@@ -45,7 +45,9 @@ impl Plugin for FxPlugin {
                     // ordering constraint, not a same-plugin `.chain()`):
                     // every effect here nudges the camera the base placement
                     // already set this frame, never replaces it.
-                    apply_camera_fx.after(crate::player::follow_chemist),
+                    apply_camera_fx
+                        .after(crate::player::follow_chemist)
+                        .after(crate::capture::fly_camera),
                     update_status_readout,
                     update_hallucination_cue,
                     animate_chemist_body,
@@ -322,6 +324,7 @@ fn apply_camera_fx(
     time: Res<Time>,
     mut fx: ResMut<ScreenFx>,
     settings: Res<Settings>,
+    capture: Option<Res<crate::capture::CaptureState>>,
     local: Query<&Bloodstream, With<LocalPlayer>>,
     mut cameras: Query<(&mut Transform, &mut Projection), With<PlayerCamera>>,
     mut overlay: Query<&mut BackgroundColor, With<ScreenOverlay>>,
@@ -332,6 +335,18 @@ fn apply_camera_fx(
     // Hazard kick decays fast — it is a jolt, not a mood.
     fx.shake = (fx.shake - fx.shake.max(0.3) * 3.5 * dt).max(0.0);
     fx.flash_alpha = (fx.flash_alpha - 1.4 * dt).max(0.0);
+
+    if crate::capture::clean_camera(capture.as_deref()) {
+        for (_, mut projection) in &mut cameras {
+            if let Projection::Perspective(p) = &mut *projection {
+                p.fov = settings.fov_degrees.to_radians();
+            }
+        }
+        for mut color in &mut overlay {
+            color.0 = Color::NONE;
+        }
+        return;
+    }
 
     let Ok(blood) = local.single() else {
         return;

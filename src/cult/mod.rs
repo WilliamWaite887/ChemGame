@@ -86,12 +86,7 @@ impl Plugin for CultPlugin {
                 .run_if(in_state(AppState::Playing))
                 .run_if(crate::session::career_session),
         );
-        app.add_systems(
-            Update,
-            dress_incidents
-                .run_if(in_state(AppState::Playing))
-                .run_if(crate::session::career_session),
-        );
+        app.add_systems(Update, dress_incidents.run_if(in_state(AppState::Playing)));
     }
 }
 
@@ -1020,7 +1015,7 @@ const GUARD_AGGRO_RADIUS: f32 = 6.0;
 type IdleCultists<'w, 's> =
     Query<'w, 's, (Entity, &'static Transform), (With<Cultist>, Without<crate::showdown::Pursuit>)>;
 
-fn aggro_cultists(
+pub(crate) fn aggro_cultists(
     mut commands: Commands,
     arc_script: Option<Res<crate::arc::Script>>,
     idle: IdleCultists,
@@ -1039,13 +1034,23 @@ fn aggro_cultists(
                 <= detection_radius * detection_radius
         });
         if noticed {
-            commands
-                .entity(entity)
-                .insert(crate::showdown::Pursuit::new(
+            commands.entity(entity).insert(
+                crate::showdown::Pursuit::new(
                     tuning.speed,
                     tuning.hit_every_seconds,
                     tuning.hit_brute,
-                ));
+                )
+                .with_notice(),
+            );
+            crate::stagecraft::action(
+                &mut commands,
+                crate::stagecraft::ActionCue {
+                    actor: entity,
+                    item: None,
+                    kind: crate::stagecraft::ActionKind::CultNotice,
+                    target: transform.translation,
+                },
+            );
         }
     }
 }

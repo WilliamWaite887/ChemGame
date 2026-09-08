@@ -396,6 +396,15 @@ fn handle_apply_held(
                     }
                     if let Ok(transform) = transforms.get(target) {
                         emit_world_sfx(&mut sounds, Sfx::DirectPour, transform.translation);
+                        crate::stagecraft::action(
+                            &mut commands,
+                            crate::stagecraft::ActionCue {
+                                actor: player,
+                                item: Some(held_entity),
+                                kind: crate::stagecraft::ActionKind::Pour,
+                                target: transform.translation,
+                            },
+                        );
                     }
                 }
                 continue;
@@ -676,6 +685,15 @@ fn handle_apply_held(
         });
         if let Ok(transform) = transforms.get(patient) {
             emit_world_sfx(&mut sounds, Sfx::Inject, transform.translation);
+            crate::stagecraft::action(
+                &mut commands,
+                crate::stagecraft::ActionCue {
+                    actor: player,
+                    item: Some(held_entity),
+                    kind: crate::stagecraft::ActionKind::Apply,
+                    target: transform.translation,
+                },
+            );
         }
     }
 }
@@ -686,6 +704,7 @@ fn handle_consume(
     mut requests: MessageReader<FromClient<ConsumeRequested>>,
     chemists: Query<(Entity, &Chemist)>,
     transforms: Query<&Transform>,
+    solids: Query<(&Transform, &crate::lab::Solid)>,
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
     held: Query<(Entity, &HeldBy)>,
     mut containers: Query<&mut Container>,
@@ -710,10 +729,17 @@ fn handle_consume(
         };
 
         if let Some(fuse) = container.kind.charge_fuse() {
-            let position = transforms
+            let ahead = transforms
                 .get(player)
                 .map(|transform| transform.translation + transform.forward() * 0.45)
                 .unwrap_or(Vec3::ZERO);
+            let surfaces: Vec<_> = solids
+                .iter()
+                .map(|(t, s)| (t.translation, s.half_extents))
+                .collect();
+            let fallback = transforms.get(player).map_or(ahead, |t| t.translation);
+            let position = crate::lab::resting_place(ahead, fallback, &surfaces)
+                + Vec3::Y * crate::containers::set_down_lift(Some(&container));
             commands.entity(entity).remove::<HeldBy>().insert((
                 ArmedCharge {
                     remaining_secs: fuse,
@@ -722,6 +748,15 @@ fn handle_consume(
                 Transform::from_translation(position),
             ));
             commands.entity(entity).remove::<InventorySlot>();
+            crate::stagecraft::action(
+                &mut commands,
+                crate::stagecraft::ActionCue {
+                    actor: player,
+                    item: Some(entity),
+                    kind: crate::stagecraft::ActionKind::Charge,
+                    target: position,
+                },
+            );
             continue;
         }
         if container.kind == ContainerKind::SmokeProjector {

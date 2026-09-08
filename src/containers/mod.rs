@@ -535,6 +535,32 @@ pub struct LiquidVisual {
     pub container: Entity,
 }
 
+/// Animated locally; the replicated interaction root never moves for a gesture.
+#[derive(Component)]
+pub(crate) struct ContainerVisual(pub Entity);
+
+pub(crate) fn model_path(kind: ContainerKind) -> Option<&'static str> {
+    Some(match kind {
+        ContainerKind::Beaker => "3dassets/glb/chem_beaker.glb",
+        ContainerKind::LargeBeaker => "3dassets/glb/chem_large_beaker.glb",
+        ContainerKind::Bottle => "3dassets/glb/chem_bottle.glb",
+        ContainerKind::Syringe => "3dassets/glb/chem_syringe.glb",
+        ContainerKind::ChemicalCharge5
+        | ContainerKind::ChemicalCharge10
+        | ContainerKind::ChemicalCharge20 => "3dassets/glb/chem_charge.glb",
+        _ => return None,
+    })
+}
+
+fn liquid_geometry(kind: ContainerKind) -> (f32, f32, f32) {
+    let (radius, height) = kind.dimensions();
+    match kind {
+        ContainerKind::Bottle => (0.030, 0.064, -0.015),
+        ContainerKind::Syringe => (0.009, 0.051, -0.003),
+        _ => (radius * 0.86, height * 0.92, 0.0),
+    }
+}
+
 /// Materials shared by all glassware of a given kind.
 ///
 /// One material per [`ContainerKind`] rather than one shared glass material:
@@ -543,6 +569,7 @@ pub struct LiquidVisual {
 #[derive(Resource)]
 pub struct ContainerAssets {
     materials: std::collections::HashMap<ContainerKind, Handle<StandardMaterial>>,
+    scenes: std::collections::HashMap<ContainerKind, Handle<WorldAsset>>,
 }
 
 impl ContainerAssets {
@@ -617,7 +644,21 @@ pub(crate) fn load_container_assets(
         })
         .collect();
 
-    commands.insert_resource(ContainerAssets { materials: by_kind });
+    let scenes = ContainerKind::ALL
+        .into_iter()
+        .filter_map(|kind| {
+            model_path(kind).map(|path| {
+                (
+                    kind,
+                    asset_server.load(GltfAssetLabel::Scene(0).from_asset(path)),
+                )
+            })
+        })
+        .collect();
+    commands.insert_resource(ContainerAssets {
+        materials: by_kind,
+        scenes,
+    });
 }
 
 /// Builds the glass for every container that has appeared, however it got here.
@@ -640,10 +681,25 @@ pub(crate) fn dress_containers(
         let kind = container.kind;
         let (radius, height) = kind.dimensions();
 
-        commands.entity(entity).insert((
-            Mesh3d(meshes.add(Cylinder::new(radius, height))),
-            MeshMaterial3d(assets.material(kind)),
-        ));
+        commands.entity(entity).insert_if_new(Visibility::Inherited);
+        let visual = commands
+            .spawn((
+                ContainerVisual(entity),
+                Transform::default(),
+                Visibility::Inherited,
+                ChildOf(entity),
+            ))
+            .id();
+        if let Some(scene) = assets.scenes.get(&kind) {
+            commands
+                .entity(visual)
+                .insert(WorldAssetRoot(scene.clone()));
+        } else {
+            commands.entity(visual).insert((
+                Mesh3d(meshes.add(Cylinder::new(radius, height))),
+                MeshMaterial3d(assets.material(kind)),
+            ));
+        }
         // Most glassware uses its kind as the prompt. Debug fixtures and
         // future authored samples may arrive with a more useful replicated
         // label already, and presentation must not erase gameplay data just
@@ -655,18 +711,22 @@ pub(crate) fn dress_containers(
         // The liquid is a child cylinder, scaled down as the container empties.
         // It starts invisible because a fresh container is empty; the first
         // run of `update_liquid_visuals` corrects a full one.
+        if !is_glassware(kind) {
+            continue;
+        }
+        let (liquid_radius, liquid_height, _) = liquid_geometry(kind);
         let liquid_material = materials.add(StandardMaterial {
             base_color: Color::srgb(0.5, 0.5, 0.5),
             perceptual_roughness: 0.25,
             ..default()
         });
         commands.spawn((
-            Mesh3d(meshes.add(Cylinder::new(radius * 0.86, height * 0.92))),
+            Mesh3d(meshes.add(Cylinder::new(liquid_radius, liquid_height))),
             MeshMaterial3d(liquid_material),
             Transform::default(),
             Visibility::Hidden,
             LiquidVisual { container: entity },
-            ChildOf(entity),
+            ChildOf(visual),
         ));
     }
 }
@@ -960,10 +1020,11 @@ fn handle_drop(
 /// server replicated, which is all anyone needs to see.
 fn carry_held_containers(
     mut commands: Commands,
-    newly_held: Query<(Entity, &HeldBy), Added<HeldBy>>,
+    newly_held: Query<(Entity, &HeldBy, Option<&ChildOf>, &Transform)>,
     mut dropped: RemovedComponents<HeldBy>,
     local: Query<Entity, With<LocalPlayer>>,
     cameras: Query<(Entity, &PlayerCamera)>,
+    capture: Option<Res<crate::capture::CaptureState>>,
 ) {
     let Ok(me) = local.single() else {
         return;
@@ -972,13 +1033,21 @@ fn carry_held_containers(
         return;
     };
 
-    for (container, holder) in &newly_held {
-        if holder.0 != me {
-            continue;
+    for (container, holder, parent, transform) in &newly_held {
+        let first_person = holder.0 == me && !capture.as_ref().is_some_and(|s| s.free_camera);
+        let anchor = if first_person { camera } else { holder.0 };
+        let offset = if first_person {
+            HOLD_OFFSET
+        } else {
+            Vec3::new(0.28, -0.28, -0.26)
+        };
+        if parent.is_none_or(|p| p.parent() != anchor)
+            || *transform != Transform::from_translation(offset)
+        {
+            commands
+                .entity(container)
+                .insert((ChildOf(anchor), Transform::from_translation(offset)));
         }
-        commands
-            .entity(container)
-            .insert((ChildOf(camera), Transform::from_translation(HOLD_OFFSET)));
     }
 
     for container in dropped.read() {
@@ -1069,8 +1138,8 @@ fn update_liquid_visuals(
         transform.scale.y = fill;
         // Cylinders are centred on their origin, so shrinking alone would
         // leave the liquid floating in the middle of the glass.
-        let (_, height) = container.kind.dimensions();
-        transform.translation.y = -(1.0 - fill) * height * 0.46;
+        let (_, height, center) = liquid_geometry(container.kind);
+        transform.translation.y = center - (1.0 - fill) * height * 0.5;
 
         if let Some(material) = materials.get_mut(&material.0).as_mut() {
             let [r, g, b] = container.solution.color(&db.reagents);
@@ -1164,6 +1233,7 @@ mod tests {
             .init_asset::<Mesh>()
             .init_asset::<Image>()
             .init_asset::<StandardMaterial>()
+            .init_asset::<WorldAsset>()
             .add_systems(Startup, load_container_assets)
             .add_systems(Update, dress_containers);
 
@@ -1174,9 +1244,16 @@ mod tests {
 
         app.update();
 
-        assert!(
-            app.world().get::<Mesh3d>(arrived).is_some(),
-            "an undressed beaker is an invisible one"
+        let visuals: Vec<_> = app
+            .world_mut()
+            .query::<(&ContainerVisual, &WorldAssetRoot, &ChildOf)>()
+            .iter(app.world())
+            .map(|(visual, _, parent)| (visual.0, parent.parent()))
+            .collect();
+        assert_eq!(
+            visuals,
+            vec![(arrived, arrived)],
+            "the arriving beaker needs its authored visual child"
         );
         assert!(
             app.world().get::<Interactable>(arrived).is_some(),
@@ -1205,6 +1282,7 @@ mod tests {
             .init_asset::<Mesh>()
             .init_asset::<Image>()
             .init_asset::<StandardMaterial>()
+            .init_asset::<WorldAsset>()
             .add_systems(Startup, load_container_assets)
             .add_systems(Update, dress_containers);
 
@@ -1235,6 +1313,7 @@ mod tests {
             .init_asset::<Mesh>()
             .init_asset::<Image>()
             .init_asset::<StandardMaterial>()
+            .init_asset::<WorldAsset>()
             .add_systems(Startup, load_container_assets)
             .add_systems(Update, dress_containers);
 

@@ -63,7 +63,7 @@ pub mod steam;
 /// Explicit revision for replicated Rust types that are not represented by
 /// the authored chemistry catalogs below. Bump it when one of those wire
 /// shapes changes incompatibly.
-const PROTOCOL_REVISION: u64 = 15;
+const PROTOCOL_REVISION: u64 = 16;
 
 /// FNV-1a is deliberately small and `const`: the protocol id is derived at
 /// compile time from every catalog whose list position crosses the wire.
@@ -383,6 +383,16 @@ pub fn parse_speed(args: impl IntoIterator<Item = String>) -> Option<f32> {
 /// or a `+connect_lobby` gets no slot: the guest reads the host's notebook and
 /// career.
 pub fn apply_command_line(app: &mut App) {
+    #[cfg(debug_assertions)]
+    if std::env::args().any(|arg| arg == "--trailer") {
+        let mode = LaunchMode::from_args().unwrap_or(LaunchMode::Singleplayer);
+        app.insert_resource(mode).insert_resource(LaunchedFromArgs);
+        if !matches!(mode, LaunchMode::Join(_) | LaunchMode::JoinSteam(_)) {
+            app.insert_resource(crate::session::SessionKind::Trailer);
+            app.insert_resource(crate::capture::trailer::TrailerSession::default());
+        }
+        return;
+    }
     // Before the mode check: `--speed` is orthogonal to how the session was
     // started, and is just as useful on a run launched through the menu.
     if let Some(speed) = parse_speed(std::env::args().skip(1)) {
@@ -1387,12 +1397,19 @@ mod tests {
             "the replicated ChemMaster 5000 must receive its authored GLB visual",
         );
 
-        let mut beakers = client.world_mut().query::<(&Container, &Mesh3d)>();
+        let mut beakers = client
+            .world_mut()
+            .query::<(&crate::containers::ContainerVisual, &WorldAssetRoot)>();
+        let dressed: Vec<_> = beakers
+            .iter(client.world())
+            .map(|(visual, _)| visual.0)
+            .collect();
         assert_eq!(
-            beakers.iter(client.world()).count(),
+            dressed.len(),
             1,
             "the beaker must arrive and be built: {beaker} on the server"
         );
+        assert!(client.world().get::<Container>(dressed[0]).is_some());
 
         let mut chemists = client.world_mut().query::<(&Player, &Visibility)>();
         assert_eq!(

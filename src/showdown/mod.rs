@@ -68,12 +68,12 @@ impl Plugin for ShowdownPlugin {
                 Update,
                 (
                     (
-                        arm_showdown,
-                        run_siege,
-                        handle_breach_delivery,
-                        turn_hostile_on_arrival,
-                        run_pursuers,
-                        resolve_showdown,
+                        arm_showdown.run_if(crate::session::career_session),
+                        run_siege.run_if(crate::session::career_session),
+                        handle_breach_delivery.run_if(crate::session::career_session),
+                        turn_hostile_on_arrival.run_if(crate::session::career_session),
+                        run_pursuers.run_if(crate::session::career_or_trailer_session),
+                        resolve_showdown.run_if(crate::session::career_session),
                     )
                         .chain()
                         .run_if(is_authority)
@@ -82,10 +82,9 @@ impl Plugin for ShowdownPlugin {
                     // here — it is a `CrewMember`, so `crew::dress_crew` already
                     // draws it — but a breach is not crew and has no mesh
                     // otherwise.
-                    dress_breach,
+                    dress_breach.run_if(crate::session::career_session),
                 )
-                    .run_if(in_state(AppState::Playing))
-                    .run_if(crate::session::career_session),
+                    .run_if(in_state(AppState::Playing)),
             );
     }
 }
@@ -127,6 +126,9 @@ pub struct RequestShowdown {
 /// antagonist-specific; only what inserts `Pursuit` differs per caller.
 #[derive(Component)]
 pub struct Pursuit {
+    notice_remaining: f32,
+    telegraph_attacks: bool,
+    attack_announced: bool,
     speed: f32,
     /// Seconds until this one can land another hit.
     cooldown: f32,
@@ -148,6 +150,9 @@ impl Pursuit {
     /// it arrives" behaviour `turn_hostile_on_arrival` always had.
     pub(crate) fn new(speed: f32, hit_every: f32, hit_brute: i32) -> Self {
         Self {
+            notice_remaining: 0.0,
+            telegraph_attacks: false,
+            attack_announced: false,
             speed,
             cooldown: hit_every,
             hit_every,
@@ -158,6 +163,13 @@ impl Pursuit {
             trail: Trail::default(),
             moving: false,
         }
+    }
+
+    /// Cult guards first acknowledge the player, then telegraph each strike.
+    pub(crate) fn with_notice(mut self) -> Self {
+        self.notice_remaining = 1.0;
+        self.telegraph_attacks = true;
+        self
     }
 
     /// Whether they are actually closing on someone right now.
@@ -607,6 +619,7 @@ fn turn_hostile_on_arrival(
 /// victim's camera. Nothing about how a chemist takes damage is new here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_pursuers(
+    mut commands: Commands,
     time: Res<Time>,
     nav: Option<Res<NavGraph>>,
     areas: Option<Res<WalkableAreas>>,
@@ -643,6 +656,11 @@ pub(crate) fn run_pursuers(
             continue;
         }
         pursuit.cooldown -= dt;
+        if pursuit.notice_remaining > 0.0 {
+            pursuit.notice_remaining = (pursuit.notice_remaining - dt).max(0.0);
+            pursuit.moving = false;
+            continue;
+        }
         // Cleared up front, so nobody to chase, no route, or standing in reach
         // hitting all leave them still rather than holding last tick's stride.
         pursuit.moving = false;
@@ -693,9 +711,23 @@ pub(crate) fn run_pursuers(
                 .is_some();
             continue;
         }
+        if pursuit.telegraph_attacks && !pursuit.attack_announced && pursuit.cooldown <= 0.4 {
+            pursuit.attack_announced = true;
+            pursuit.cooldown = 0.4;
+            crate::stagecraft::action(
+                &mut commands,
+                crate::stagecraft::ActionCue {
+                    actor: entity,
+                    item: None,
+                    kind: crate::stagecraft::ActionKind::CultAttack,
+                    target,
+                },
+            );
+        }
         if pursuit.cooldown > 0.0 {
             continue;
         }
+        pursuit.attack_announced = false;
         pursuit.cooldown = pursuit.hit_every;
 
         // In reach and off cooldown: hit whoever is in reach, once.
@@ -1378,6 +1410,58 @@ mod tests {
             ))
             .id();
         (assailant, chemist)
+    }
+
+    #[test]
+    fn cult_notice_and_strike_cue_precede_real_damage() {
+        let mut areas = WalkableAreas::default();
+        areas.push(
+            Bounds {
+                min_x: -4.0,
+                max_x: 4.0,
+                min_z: -2.0,
+                max_z: 2.0,
+            },
+            None,
+        );
+        let mut app = pursuit_app(areas);
+        app.add_message::<crate::stagecraft::ActionCue>();
+        let (hunter, target) = spawn_pursuit_pair(&mut app, Vec3::ZERO, Vec3::X * 0.5);
+        app.world_mut()
+            .entity_mut(hunter)
+            .insert(Pursuit::new(1.6, 1.5, 5).with_notice());
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f32(0.1));
+        for _ in 0..10 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().get::<Body>(target).unwrap().0.total(),
+            Units::ZERO
+        );
+        for _ in 0..2 {
+            app.update();
+        }
+        let cues: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<crate::stagecraft::ActionCue>>()
+            .drain()
+            .collect();
+        assert!(cues.iter().any(
+            |cue| cue.actor == hunter && cue.kind == crate::stagecraft::ActionKind::CultAttack
+        ));
+        assert_eq!(
+            app.world().get::<Body>(target).unwrap().0.total(),
+            Units::ZERO
+        );
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().get::<Body>(target).unwrap().0.total(),
+            Units::whole(5)
+        );
     }
 
     #[test]

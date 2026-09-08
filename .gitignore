@@ -70,3 +70,14 @@ docs/label-first-chemistry-plan.md
 promo-art/README.md
 src/bin/promo-studio.rs
 promo-art/convert-app-icon.ps1
+assets/3dassets/previews/chemistry_props/lineup.png
+assets/3dassets/build_chemistry_actions.py
+assets/3dassets/build_chemistry_props.py
+tools/validate_trailer_assets.py
+tools/assemble-trailer.ps1
+assets/3dassets/previews/chemistry_actions/Stagger.png
+assets/3dassets/previews/chemistry_actions/Pour.png
+assets/3dassets/previews/chemistry_actions/CultAttack.png
+assets/3dassets/previews/chemistry_actions/Apply.png
+docs/store/trailer-storyboard.md
+assets/3dassets/preview_chemistry_actions.py
