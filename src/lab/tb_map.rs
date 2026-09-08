@@ -3287,6 +3287,357 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             depth: 0.28,
         },
         Placement {
+            kind: "svc.bar_counter",
+            origin: "-998 1174 0",
+            angles: "0 -60.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.02,
+            depth: 0.68,
+        },
+        Placement {
+            kind: "svc.bar_counter",
+            origin: "-1026 1202 0",
+            angles: "0 -30.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.02,
+            depth: 0.68,
+        },
+        Placement {
+            kind: "svc.bar_counter",
+            origin: "-1036 1240 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.02,
+            depth: 0.68,
+        },
+        Placement {
+            kind: "svc.bar_counter",
+            origin: "-1026 1278 0",
+            angles: "0 30.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.02,
+            depth: 0.68,
+        },
+        Placement {
+            kind: "svc.bar_counter",
+            origin: "-998 1306 0",
+            angles: "0 60.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.02,
+            depth: 0.68,
+        },
+        Placement {
+            kind: "svc.bar_counter",
+            origin: "-960 1316 0",
+            angles: "0 90.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.02,
+            depth: 0.68,
+        },
+        Placement {
+            kind: "svc.bar_counter",
+            origin: "-922 1306 0",
+            angles: "0 120.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.02,
+            depth: 0.68,
+        },
+        Placement {
+            kind: "svc.bar_counter",
+            origin: "-894 1278 0",
+            angles: "0 150.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.02,
+            depth: 0.68,
+        },
+        Placement {
+            kind: "svc.bar_counter",
+            origin: "-884 1240 0",
+            angles: "0 180.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.02,
+            depth: 0.68,
+        },
+        Placement {
+            kind: "svc.bar_counter",
+            origin: "-894 1202 0",
+            angles: "0 210.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.02,
+            depth: 0.68,
+        },
+        Placement {
+            kind: "svc.bar_counter",
+            origin: "-922 1174 0",
+            angles: "0 240.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.02,
+            depth: 0.68,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-1041 1159 0",
+            angles: "0 135.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-1070 1210 0",
+            angles: "0 165.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-1070 1270 0",
+            angles: "0 195.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-1041 1321 0",
+            angles: "0 225.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-990 1350 0",
+            angles: "0 255.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-850 1270 0",
+            angles: "0 345.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-850 1210 0",
+            angles: "0 375.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-879 1159 0",
+            angles: "0 405.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.dining_table",
+            origin: "-1180 1420 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.10,
+            depth: 1.10,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1208 1392 0",
+            angles: "0 135.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1208 1448 0",
+            angles: "0 225.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1152 1448 0",
+            angles: "0 315.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1152 1392 0",
+            angles: "0 405.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_table",
+            origin: "-1180 1080 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.10,
+            depth: 1.10,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1208 1052 0",
+            angles: "0 135.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1208 1108 0",
+            angles: "0 225.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1152 1108 0",
+            angles: "0 315.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1152 1052 0",
+            angles: "0 405.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_table",
+            origin: "-1380 1420 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.10,
+            depth: 1.10,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1408 1392 0",
+            angles: "0 135.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1408 1448 0",
+            angles: "0 225.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1352 1448 0",
+            angles: "0 315.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1352 1392 0",
+            angles: "0 405.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_table",
+            origin: "-1392 1100 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.10,
+            depth: 1.10,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1420 1072 0",
+            angles: "0 135.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1420 1128 0",
+            angles: "0 225.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1364 1128 0",
+            angles: "0 315.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1364 1072 0",
+            angles: "0 405.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
             kind: "svc.pass_hatch",
             origin: "-605 1120 0",
             angles: "0 0 0",
@@ -3687,42 +4038,6 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         // at. Service measured 0.8 decorations per 100 m² against a station
         // norm of 2.4-4.1 — the least dressed room, and the one every resident
         // has a reason to visit.
-        Placement {
-            kind: "svc.bench",
-            origin: "-816 1220 0",
-            angles: "0 0 0",
-            mount: Mount::Floor,
-            room: SERVICE_EAST,
-            width: 0.42,
-            depth: 0.42,
-        },
-        Placement {
-            kind: "svc.bench",
-            origin: "-816 1040 0",
-            angles: "0 0 0",
-            mount: Mount::Floor,
-            room: SERVICE_EAST,
-            width: 0.42,
-            depth: 0.42,
-        },
-        Placement {
-            kind: "svc.bench",
-            origin: "-1136 1380 0",
-            angles: "0 0 0",
-            mount: Mount::Floor,
-            room: SERVICE_EAST,
-            width: 0.42,
-            depth: 0.42,
-        },
-        Placement {
-            kind: "svc.bench",
-            origin: "-1116 1140 0",
-            angles: "0 0 0",
-            mount: Mount::Floor,
-            room: SERVICE_EAST,
-            width: 0.42,
-            depth: 0.42,
-        },
     ];
 
     let map = parse();
@@ -3785,7 +4100,33 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
                 min_z: z - half_width,
                 max_z: z + half_width,
             },
-            other => panic!("unsupported decoration angle {other}"),
+            // Any other yaw, for fixtures arranged on a curve rather than
+            // against an axis — the galley's bar ring is eleven segments at
+            // thirty-degree steps, and its stools and chairs face inward.
+            //
+            // The four cases above stay written out rather than folded into
+            // this one: they are exact for an axis-aligned fixture, while this
+            // takes the rotated footprint's axis-aligned extent, which is
+            // correct but slightly generous on the diagonal.
+            other => {
+                let yaw = other
+                    .strip_prefix("0 ")
+                    .and_then(|rest| rest.strip_suffix(" 0"))
+                    .and_then(|degrees| degrees.parse::<f32>().ok())
+                    .unwrap_or_else(|| panic!("unsupported decoration angle {other}"));
+                let (sin, cos) = yaw.to_radians().sin_cos();
+                let depth = behind + ahead;
+                let centre_z = z + (ahead - depth * 0.5) * cos;
+                let centre_x = x + (ahead - depth * 0.5) * sin;
+                let extent_x = half_width * cos.abs() + depth * 0.5 * sin.abs();
+                let extent_z = half_width * sin.abs() + depth * 0.5 * cos.abs();
+                Bounds {
+                    min_x: centre_x - extent_x,
+                    max_x: centre_x + extent_x,
+                    min_z: centre_z - extent_z,
+                    max_z: centre_z + extent_z,
+                }
+            }
         };
         assert!(
             bounds.min_x >= placement.room.min_x
@@ -3862,6 +4203,16 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
                 | "sec.brig_bunk"
                 | "sec.interrogation_table"
                 | "svc.bench"
+                // The galley furniture, for the same reason as `svc.bench` and
+                // Security's fixtures: each has a matching runtime `Solid`
+                // envelope in `tb.rs`, so its visible geometry is what stops the
+                // player. Carving the bar ring and every chair out of the floor
+                // would also cut the room into a maze of holes that the crew's
+                // `NavGraph` has to squeeze between — and the seats are places
+                // residents are explicitly routed *to*.
+                | "svc.bar_counter"
+                | "svc.dining_table"
+                | "svc.dining_chair"
                 | "chapel.pew"
                 | "chapel.plinth"
                 | "chapel.runner"
@@ -4413,8 +4764,8 @@ fn every_station_kit_glb_parses_with_bevys_gltf_parser() {
         });
     }
     assert_eq!(
-        count, 126,
-        "the station starter kit should contain 126 GLBs, including the modular Chemistry fixtures"
+        count, 129,
+        "the station starter kit should contain 129 GLBs, including the modular Chemistry fixtures          and the galley's bar segment, table, and chair"
     );
 }
 

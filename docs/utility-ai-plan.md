@@ -3262,6 +3262,49 @@ reason was in the map rather than the code.
   `IdleObserve` scores *higher* and still loses, which is strict-priority
   bucketing working as designed.
 
+### 2026-09-07, the galley gets a middle
+
+The first Service rebuild put tables and stools on the floor and the player's
+verdict was "this is not good enough" — a screenshot of loose stools scattered
+across open floor, which reads as a waiting area rather than a canteen. The
+room had no *centre*.
+
+- **A central circular bar**, eleven segments on a 1.9 m ring with one segment
+  left out as the way in: staff work inside, crew sit around the outside. Eight
+  stools face it from the ring's outside, skipping the gap. Four tables with
+  four chairs apiece fill the northern half, which was bare floor.
+- **Three new props, built rather than borrowed.** `generate_service_modules.py`
+  was the smallest generator in the kit at 6.5 KB and built exactly one asset;
+  it now builds four. `svc.bar_counter` is deliberately one *arc segment*
+  rather than a whole ring: the map places decorations one marker at a time
+  with a yaw, so a repeating segment is the piece that fits that contract, and
+  a single ring mesh would have to carry its own gap orientation and could
+  never be re-spaced. `svc.dining_chair` has a back, which is most of what
+  separates "sit down for a while" from `svc.bench`, the backless stool that
+  stays what it is and belongs at the bar.
+- **Seat height 0.45 m on both**, matching the rig's `Sitting` pose for the
+  reason the generator's own docstring already gives — not guessed a second
+  time.
+- **Two engine-side constraints this surfaced.** A floor fixture must either be
+  carved out of the walkable volume *or* carry a runtime `Solid` envelope; the
+  galley furniture takes the second path, on the same exemption Security's
+  fixtures use, because carving a bar ring and sixteen chairs would cut the
+  room into a maze of holes for the nav graph — and the seats are places crew
+  are explicitly routed *to*. And
+  `decoration_markers_have_known_assets_and_fit_their_rooms` handled only four
+  cardinal yaws, which a ring at thirty-degree steps cannot use; it now takes
+  the rotated footprint's axis-aligned extent for any other angle, with the
+  four exact cases left written out.
+- **The bug worth recording.** `service.table.a` was authored at (−30.5, 21.5)
+  in the first pass. The bar ring is centred at (−31, 24) with radius 1.9 — so
+  that seat now sat *inside the bar*, and hungry residents would have been
+  routed to sit in the middle of it. All four seat spots were moved onto the
+  actual table positions. **Furniture and the spots that reference it are two
+  separate authorings, and moving one silently invalidates the other.**
+- Density is 12.3 decorations per 100 m² against the station's 2.4-4.1 band.
+  Deliberately outside it: that band was measured on rooms carrying *scattered*
+  dressing, and a furnished canteen holds more furniture than a corridor does.
+
 ### 2026-09-07, four seats for thirty people
 
 Service was the station's worst room by measurement, not impression, and it is

@@ -3662,61 +3662,276 @@
 "id" "service.lounge.gather"
 "capacity" "2"
 }
+// The galley. A central circular bar with one segment left out as the way
+// in: staff work inside the ring, crew sit around the outside, and the
+// room finally has a centre. Tables with chairs are spread across the
+// northern half, which was bare floor. Replaces a scatter of loose
+// stools that read as a waiting area rather than a canteen.
+{
+"classname" "decoration_spot"
+"origin" "-998 1174 0"
+"angles" "0 -60.0 0"
+"kind" "svc.bar_counter"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1026 1202 0"
+"angles" "0 -30.0 0"
+"kind" "svc.bar_counter"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1036 1240 0"
+"angles" "0 0.0 0"
+"kind" "svc.bar_counter"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1026 1278 0"
+"angles" "0 30.0 0"
+"kind" "svc.bar_counter"
+}
+{
+"classname" "decoration_spot"
+"origin" "-998 1306 0"
+"angles" "0 60.0 0"
+"kind" "svc.bar_counter"
+}
+{
+"classname" "decoration_spot"
+"origin" "-960 1316 0"
+"angles" "0 90.0 0"
+"kind" "svc.bar_counter"
+}
+{
+"classname" "decoration_spot"
+"origin" "-922 1306 0"
+"angles" "0 120.0 0"
+"kind" "svc.bar_counter"
+}
+{
+"classname" "decoration_spot"
+"origin" "-894 1278 0"
+"angles" "0 150.0 0"
+"kind" "svc.bar_counter"
+}
+{
+"classname" "decoration_spot"
+"origin" "-884 1240 0"
+"angles" "0 180.0 0"
+"kind" "svc.bar_counter"
+}
+{
+"classname" "decoration_spot"
+"origin" "-894 1202 0"
+"angles" "0 210.0 0"
+"kind" "svc.bar_counter"
+}
+{
+"classname" "decoration_spot"
+"origin" "-922 1174 0"
+"angles" "0 240.0 0"
+"kind" "svc.bar_counter"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1041 1159 0"
+"angles" "0 135.0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1070 1210 0"
+"angles" "0 165.0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1070 1270 0"
+"angles" "0 195.0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1041 1321 0"
+"angles" "0 225.0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-990 1350 0"
+"angles" "0 255.0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-850 1270 0"
+"angles" "0 345.0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-850 1210 0"
+"angles" "0 375.0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-879 1159 0"
+"angles" "0 405.0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1180 1420 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_table"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1208 1392 0"
+"angles" "0 135.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1208 1448 0"
+"angles" "0 225.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1152 1448 0"
+"angles" "0 315.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1152 1392 0"
+"angles" "0 405.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1180 1080 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_table"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1208 1052 0"
+"angles" "0 135.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1208 1108 0"
+"angles" "0 225.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1152 1108 0"
+"angles" "0 315.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1152 1052 0"
+"angles" "0 405.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1380 1420 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_table"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1408 1392 0"
+"angles" "0 135.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1408 1448 0"
+"angles" "0 225.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1352 1448 0"
+"angles" "0 315.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1352 1392 0"
+"angles" "0 405.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1392 1100 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_table"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1420 1072 0"
+"angles" "0 135.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1420 1128 0"
+"angles" "0 225.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1364 1128 0"
+"angles" "0 315.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1364 1072 0"
+"angles" "0 405.0 0"
+"kind" "svc.dining_chair"
+}
 // Dining tables. Service is the one room the whole station visits and it
 // had two seats for thirty residents; a hunger drive would have sent a
 // crowd to a room that could seat four. Capacity 4 apiece, so a table
 // reads as shared rather than as four separate chairs.
 {
 "classname" "utility_spot"
-"origin" "-860 1220 0"
+"origin" "-1180 1420 0"
 "id" "service.table.a"
 "capacity" "4"
 }
 {
 "classname" "utility_spot"
-"origin" "-860 1040 0"
+"origin" "-1180 1080 0"
 "id" "service.table.b"
 "capacity" "4"
 }
 {
 "classname" "utility_spot"
-"origin" "-1180 1380 0"
+"origin" "-1380 1420 0"
 "id" "service.table.c"
 "capacity" "4"
 }
 {
 "classname" "utility_spot"
-"origin" "-1160 1140 0"
+"origin" "-1392 1100 0"
 "id" "service.table.d"
 "capacity" "4"
 }
 // Benches beside the tables, and boards on the west and north walls.
 // Service measured 0.8 decorations per 100 m2 against a station norm of
 // 2.4-4.1, and its whole northern half was bare floor.
-{
-"classname" "decoration_spot"
-"origin" "-816 1220 0"
-"angles" "0 0 0"
-"kind" "svc.bench"
-}
-{
-"classname" "decoration_spot"
-"origin" "-816 1040 0"
-"angles" "0 0 0"
-"kind" "svc.bench"
-}
-{
-"classname" "decoration_spot"
-"origin" "-1136 1380 0"
-"angles" "0 0 0"
-"kind" "svc.bench"
-}
-{
-"classname" "decoration_spot"
-"origin" "-1116 1140 0"
-"angles" "0 0 0"
-"kind" "svc.bench"
-}
 // Security work affordances. Interviews happen wherever the witness is, so
 // only the department's own fixed stations need authoring. Verified against
 // "Security" (X -400..80, Y 3340..4380) and "Security Back Room"

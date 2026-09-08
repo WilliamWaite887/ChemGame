@@ -1627,6 +1627,18 @@ const DECORATION_KINDS: &[(&str, &str)] = &[
         "3dassets/station_starter_kit/glb/decor_svc_bench.glb",
     ),
     (
+        "svc.bar_counter",
+        "3dassets/station_starter_kit/glb/decor_svc_bar_counter.glb",
+    ),
+    (
+        "svc.dining_table",
+        "3dassets/station_starter_kit/glb/decor_svc_dining_table.glb",
+    ),
+    (
+        "svc.dining_chair",
+        "3dassets/station_starter_kit/glb/decor_svc_dining_chair.glb",
+    ),
+    (
         "bridge.holomap_island",
         "3dassets/station_starter_kit/glb/decor_bridge_holomap_island.glb",
     ),
@@ -1893,6 +1905,11 @@ const FLOOR_COLLIDER_ENVELOPES: &[(&str, Vec3)] = &[
     // their_rooms` already carves out for Security's own walk-up fixtures.
     // Real top is 0.47 m, nowhere near `SET_DOWN_REACH` (1.4 m), so no bump.
     ("svc.bench", Vec3::new(0.21, 0.47, 0.21)),
+    // The galley furniture. Crew ignore `Solid` entirely and path from
+    // `WalkableAreas`, so these only ever stop the player walking through them.
+    ("svc.bar_counter", Vec3::new(0.51, 1.05, 0.34)),
+    ("svc.dining_table", Vec3::new(0.55, 0.76, 0.55)),
+    ("svc.dining_chair", Vec3::new(0.22, 0.86, 0.23)),
     ("chapel.pew", Vec3::new(0.725, 0.90, 0.275)),
     ("chapel.plinth", Vec3::new(0.675, 1.05, 0.325)),
 ];
