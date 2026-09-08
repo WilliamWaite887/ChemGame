@@ -43,6 +43,10 @@ pub(crate) mod tb_map;
 #[cfg(feature = "trenchbroom")]
 pub mod tb;
 
+mod ceiling;
+#[cfg(feature = "trenchbroom")]
+mod installations;
+
 pub const ROOM_HEIGHT: f32 = 3.2;
 
 /// TrenchBroom units per metre. Must match what the map was drawn at.
@@ -584,6 +588,10 @@ impl Plugin for LabPlugin {
     fn build(&self, app: &mut App) {
         #[cfg(feature = "trenchbroom")]
         app.add_plugins(tb::LabTrenchBroomPlugin);
+
+        app.add_plugins(ceiling::CeilingPlugin);
+        #[cfg(feature = "trenchbroom")]
+        app.add_plugins(installations::InstallationsPlugin);
 
         // Where a body may stand. Under the `trenchbroom` feature this is
         // filled from the map's `func_walkable` volumes by [`tb`]'s map-ready

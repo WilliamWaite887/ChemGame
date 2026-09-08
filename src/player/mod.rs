@@ -6,9 +6,11 @@
 //! yaw and pitch, so turning your head never waits on a round trip. Only
 //! walking does, which is the tolerable half of the trade.
 
+use bevy::anti_alias::fxaa::Fxaa;
 use bevy::ecs::entity::MapEntities;
 use bevy::gltf::GltfAssetLabel;
 use bevy::input::mouse::MouseMotion;
+use bevy::pbr::{ScreenSpaceAmbientOcclusion, ScreenSpaceAmbientOcclusionQualityLevel};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use bevy_replicon::prelude::*;
@@ -464,6 +466,14 @@ fn adopt_my_chemist(mut commands: Commands, mut assigned: MessageReader<YouAreCh
             ));
         commands.spawn((
             Camera3d::default(),
+            // Small contact shading ties furniture feet and wall mounts to
+            // the station. FXAA keeps edges readable without temporal blur.
+            ScreenSpaceAmbientOcclusion {
+                quality_level: ScreenSpaceAmbientOcclusionQualityLevel::High,
+                constant_object_thickness: 0.25,
+            },
+            Msaa::Off,
+            Fxaa::default(),
             // Physical station sounds use the camera as the listener so
             // panning follows the chemist's head, not the replicated body.
             SpatialListener::new(0.18),

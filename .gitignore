@@ -64,6 +64,11 @@ tools/gen_item_textures.py
 tools/gen_produce_textures.py
 assets/textures/items/README.md
 assets/3dassets/station_starter_kit/generate_cult_modules.py
+assets/3dassets/station_starter_kit/generate_security_expansion.py
+assets/3dassets/station_starter_kit/generate_medical_expansion.py
+assets/3dassets/station_starter_kit/generate_engineering_expansion.py
+assets/3dassets/station_starter_kit/generate_shared_expansion.py
+assets/3dassets/station_starter_kit/expand_station.py
 .gitignore
 docs/label-first-chemistry-verification.md
 docs/label-first-chemistry-plan.md
@@ -81,3 +86,7 @@ assets/3dassets/previews/chemistry_actions/CultAttack.png
 assets/3dassets/previews/chemistry_actions/Apply.png
 docs/store/trailer-storyboard.md
 assets/3dassets/preview_chemistry_actions.py
+docs/station-asset-session.md
+assets/textures/ceiling_metal.png
+.gitignore
+assets/textures/ceiling_casing.png

@@ -1935,6 +1935,76 @@ fn every_department_dressing_marker_has_an_exported_glb() {
     }
 }
 
+const ASSET_SESSION_KINDS: &[&str] = &[
+    "hall.waiting_bench",
+    "hall.wall_light",
+    "hall.planter",
+    "hall.waste_station",
+    "chapel.pew",
+    "chapel.plinth",
+    "chapel.votive_stand",
+    "chapel.lectern",
+    "quiet.armchair",
+    "quiet.reading_shelf",
+    "quiet.side_table_lamp",
+    "quiet.acoustic_panel",
+    "med.patient_bay",
+    "med.nurse_station",
+    "med.supply_shelf",
+    "med.crash_cart",
+    "med.examination_couch",
+    "med.diagnostic_stand",
+    "med.privacy_screen",
+    "med.hygiene_cabinet",
+    "sec.dispatch_console",
+    "sec.equipment_locker_bank",
+    "sec.interrogation_table",
+    "sec.wall_camera",
+    "sec.radio_charger",
+    "sec.restraint_display",
+    "sec.report_shelf",
+    "sec.personal_effects",
+    "eng.generator_turbine",
+    "eng.smes_bank",
+    "eng.parts_workbench",
+    "eng.pump_assembly",
+    "eng.tool_trolley",
+    "eng.cable_junction",
+    "eng.hose_reel",
+    "eng.parts_shelf",
+];
+
+const ASSET_SESSION_FLOOR_KINDS: &[&str] = &[
+    "hall.waiting_bench",
+    "hall.planter",
+    "hall.waste_station",
+    "chapel.pew",
+    "chapel.plinth",
+    "chapel.votive_stand",
+    "chapel.lectern",
+    "quiet.armchair",
+    "quiet.reading_shelf",
+    "quiet.side_table_lamp",
+    "med.patient_bay",
+    "med.nurse_station",
+    "med.crash_cart",
+    "med.examination_couch",
+    "med.diagnostic_stand",
+    "med.privacy_screen",
+    "sec.dispatch_console",
+    "sec.equipment_locker_bank",
+    "sec.interrogation_table",
+    "eng.generator_turbine",
+    "eng.smes_bank",
+    "eng.parts_workbench",
+    "eng.pump_assembly",
+    "eng.tool_trolley",
+    "med.waiting_row",
+    "med.cryo_pod",
+    "med.cryo_pod_occupied",
+    "med.cryo_monitor_bay",
+];
+
 #[test]
 fn decoration_markers_have_known_assets_and_fit_their_rooms() {
     /// How a module's envelope relates to its marker origin.
@@ -1993,8 +2063,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         max_z: -3.0,
     };
 
-    // Security and Service take wall modules only, so their walkable
-    // rectangle and their floor are the same thing. Engineering's own floor
+    // Security and Service retain continuous floors with runtime furniture
+    // collision. Engineering's original floor
     // fixtures sit in the west sliver, a corner its walkable volume no
     // longer covers (world x -109.5..-102, z 23..28.6), so this is the
     // room's full floor — matching how `MEDICAL_FLOOR` differs from
@@ -2097,6 +2167,21 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         max_z: -3.0,
     };
 
+    const MAIN_HALL: Bounds = Bounds {
+        min_x: -80.0,
+        max_x: -40.0,
+        min_z: 10.0,
+        max_z: 15.0,
+    };
+    const QUIET_ROOM: Bounds = Bounds {
+        min_x: -47.5,
+        max_x: -41.5,
+        min_z: 44.0,
+        max_z: 51.0,
+    };
+
+    // Metre measurements, including the 3.14m waiting row, are not angles.
+    #[allow(clippy::approx_constant)]
     const PLACEMENTS: &[Placement] = &[
         Placement {
             kind: "chem.supply_shelf",
@@ -2270,22 +2355,13 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             depth: 0.30,
         },
         Placement {
-            kind: "med.ward_bay",
-            origin: "-180 1499 0",
-            angles: "0 90 0",
-            mount: Mount::Floor,
-            room: MEDICAL_FLOOR,
-            width: 4.50,
-            depth: 2.20,
-        },
-        Placement {
             kind: "med.waiting_row",
-            origin: "-336 1529 0",
-            angles: "0 90 0",
+            origin: "98 890 0",
+            angles: "0 0 0",
             mount: Mount::Floor,
             room: MEDICAL_FLOOR,
-            width: 3.10,
-            depth: 0.70,
+            width: 3.14,
+            depth: 0.59,
         },
         Placement {
             kind: "med.specimen_cold",
@@ -4411,6 +4487,421 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         // at. Service measured 0.8 decorations per 100 m² against a station
         // norm of 2.4-4.1 — the least dressed room, and the one every resident
         // has a reason to visit.
+        // Station expansion; repeat placements do not increase the asset count.
+        Placement {
+            kind: "sec.wall_camera",
+            origin: "20 3345 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: SECURITY,
+            width: 0.64,
+            depth: 0.58,
+        },
+        Placement {
+            kind: "sec.radio_charger",
+            origin: "75 3500 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: SECURITY,
+            width: 1.45,
+            depth: 0.36,
+        },
+        Placement {
+            kind: "sec.restraint_display",
+            origin: "85 4000 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: SECURITY_BACK,
+            width: 1.50,
+            depth: 0.32,
+        },
+        Placement {
+            kind: "sec.report_shelf",
+            origin: "-395 3680 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: SECURITY,
+            width: 1.70,
+            depth: 0.44,
+        },
+        Placement {
+            kind: "sec.personal_effects",
+            origin: "355 3740 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: SECURITY_BACK,
+            width: 1.80,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "med.patient_bay",
+            origin: "-288 1448 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: MEDICAL_FLOOR,
+            width: 2.70,
+            depth: 2.40,
+        },
+        Placement {
+            kind: "med.patient_bay",
+            origin: "-8 1448 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: MEDICAL_FLOOR,
+            width: 2.70,
+            depth: 2.40,
+        },
+        Placement {
+            kind: "med.nurse_station",
+            origin: "-304 820 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: MEDICAL_FLOOR,
+            width: 3.00,
+            depth: 2.40,
+        },
+        Placement {
+            kind: "med.crash_cart",
+            origin: "80 1240 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: MEDICAL_FLOOR,
+            width: 0.92,
+            depth: 0.70,
+        },
+        Placement {
+            kind: "med.examination_couch",
+            origin: "24 900 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: MEDICAL_FLOOR,
+            width: 0.90,
+            depth: 1.95,
+        },
+        Placement {
+            kind: "med.diagnostic_stand",
+            origin: "70 1000 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: MEDICAL_FLOOR,
+            width: 0.68,
+            depth: 0.62,
+        },
+        Placement {
+            kind: "med.privacy_screen",
+            origin: "-32 900 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: MEDICAL_FLOOR,
+            width: 1.40,
+            depth: 0.62,
+        },
+        Placement {
+            kind: "med.hygiene_cabinet",
+            origin: "115 740 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: MEDICAL_FLOOR,
+            width: 1.10,
+            depth: 0.32,
+        },
+        Placement {
+            kind: "med.cryo_pod",
+            origin: "308 1472 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: QUARANTINE_FLOOR,
+            width: 1.30,
+            depth: 1.30,
+        },
+        Placement {
+            kind: "med.cryo_pod_occupied",
+            origin: "164 1472 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: QUARANTINE_FLOOR,
+            width: 1.30,
+            depth: 1.30,
+        },
+        Placement {
+            kind: "med.cryo_monitor_bay",
+            origin: "240 1456 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: QUARANTINE_FLOOR,
+            width: 1.70,
+            depth: 1.30,
+        },
+        Placement {
+            kind: "eng.pump_assembly",
+            origin: "-1080 2160 0",
+            angles: "0 -90 0",
+            mount: Mount::Floor,
+            room: ATMOS_UTILITY,
+            width: 1.55,
+            depth: 0.90,
+        },
+        Placement {
+            kind: "eng.tool_trolley",
+            origin: "-1012 4220 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: ENGINEERING,
+            width: 0.95,
+            depth: 0.65,
+        },
+        Placement {
+            kind: "eng.cable_junction",
+            origin: "-605 3760 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: ENGINEERING,
+            width: 1.20,
+            depth: 0.24,
+        },
+        Placement {
+            kind: "eng.hose_reel",
+            origin: "-680 2105 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: ATMOS_UTILITY,
+            width: 0.95,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "eng.parts_shelf",
+            origin: "-700 4375 0",
+            angles: "0 90 0",
+            mount: Mount::Wall,
+            room: ENGINEERING,
+            width: 1.55,
+            depth: 0.38,
+        },
+        Placement {
+            kind: "hall.waiting_bench",
+            origin: "-420 2960 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: MAIN_HALL,
+            width: 2.10,
+            depth: 0.65,
+        },
+        Placement {
+            kind: "hall.waiting_bench",
+            origin: "-420 2600 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: MAIN_HALL,
+            width: 2.10,
+            depth: 0.65,
+        },
+        Placement {
+            kind: "hall.waiting_bench",
+            origin: "-420 2000 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: MAIN_HALL,
+            width: 2.10,
+            depth: 0.65,
+        },
+        Placement {
+            kind: "hall.planter",
+            origin: "-420 3032 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: MAIN_HALL,
+            width: 0.90,
+            depth: 0.65,
+        },
+        Placement {
+            kind: "hall.planter",
+            origin: "-420 2672 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: MAIN_HALL,
+            width: 0.90,
+            depth: 0.65,
+        },
+        Placement {
+            kind: "hall.planter",
+            origin: "-420 2072 0",
+            angles: "0 0 0",
+            mount: Mount::Floor,
+            room: MAIN_HALL,
+            width: 0.90,
+            depth: 0.65,
+        },
+        Placement {
+            kind: "hall.waste_station",
+            origin: "-582 2800 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: MAIN_HALL,
+            width: 1.15,
+            depth: 0.55,
+        },
+        Placement {
+            kind: "hall.waste_station",
+            origin: "-582 2200 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: MAIN_HALL,
+            width: 1.15,
+            depth: 0.55,
+        },
+        Placement {
+            kind: "hall.wall_light",
+            origin: "-405 3080 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: MAIN_HALL,
+            width: 0.95,
+            depth: 0.18,
+        },
+        Placement {
+            kind: "hall.wall_light",
+            origin: "-405 2760 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: MAIN_HALL,
+            width: 0.95,
+            depth: 0.18,
+        },
+        Placement {
+            kind: "hall.wall_light",
+            origin: "-405 2120 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: MAIN_HALL,
+            width: 0.95,
+            depth: 0.18,
+        },
+        Placement {
+            kind: "hall.wall_light",
+            origin: "-405 1800 0",
+            angles: "0 0 0",
+            mount: Mount::Wall,
+            room: MAIN_HALL,
+            width: 0.95,
+            depth: 0.18,
+        },
+        Placement {
+            kind: "hall.wall_light",
+            origin: "-595 3040 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: MAIN_HALL,
+            width: 0.95,
+            depth: 0.18,
+        },
+        Placement {
+            kind: "hall.wall_light",
+            origin: "-595 2560 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: MAIN_HALL,
+            width: 0.95,
+            depth: 0.18,
+        },
+        Placement {
+            kind: "hall.wall_light",
+            origin: "-595 2260 0",
+            angles: "0 180 0",
+            mount: Mount::Wall,
+            room: MAIN_HALL,
+            width: 0.95,
+            depth: 0.18,
+        },
+        Placement {
+            kind: "chapel.votive_stand",
+            origin: "-1992 980 0",
+            angles: "0 -90 0",
+            mount: Mount::Floor,
+            room: CHAPEL,
+            width: 0.90,
+            depth: 0.58,
+        },
+        Placement {
+            kind: "chapel.votive_stand",
+            origin: "-1796 980 0",
+            angles: "0 -90 0",
+            mount: Mount::Floor,
+            room: CHAPEL,
+            width: 0.90,
+            depth: 0.58,
+        },
+        Placement {
+            kind: "chapel.lectern",
+            origin: "-1832 1012 0",
+            angles: "0 -90 0",
+            mount: Mount::Floor,
+            room: CHAPEL,
+            width: 0.80,
+            depth: 0.62,
+        },
+        Placement {
+            kind: "quiet.armchair",
+            origin: "-1972 1864 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: QUIET_ROOM,
+            width: 0.92,
+            depth: 0.86,
+        },
+        Placement {
+            kind: "quiet.armchair",
+            origin: "-1972 1696 0",
+            angles: "0 -90 0",
+            mount: Mount::Floor,
+            room: QUIET_ROOM,
+            width: 0.92,
+            depth: 0.86,
+        },
+        Placement {
+            kind: "quiet.side_table_lamp",
+            origin: "-1916 1866 0",
+            angles: "0 90 0",
+            mount: Mount::Floor,
+            room: QUIET_ROOM,
+            width: 0.62,
+            depth: 0.55,
+        },
+        Placement {
+            kind: "quiet.side_table_lamp",
+            origin: "-1916 1694 0",
+            angles: "0 -90 0",
+            mount: Mount::Floor,
+            room: QUIET_ROOM,
+            width: 0.62,
+            depth: 0.55,
+        },
+        Placement {
+            kind: "quiet.reading_shelf",
+            origin: "-2026 1780 0",
+            angles: "0 180 0",
+            mount: Mount::Floor,
+            room: QUIET_ROOM,
+            width: 1.35,
+            depth: 0.38,
+        },
+        Placement {
+            kind: "quiet.acoustic_panel",
+            origin: "-1840 1895 0",
+            angles: "0 90 0",
+            mount: Mount::Wall,
+            room: QUIET_ROOM,
+            width: 1.05,
+            depth: 0.13,
+        },
+        Placement {
+            kind: "quiet.acoustic_panel",
+            origin: "-1840 1670 0",
+            angles: "0 -90 0",
+            mount: Mount::Wall,
+            room: QUIET_ROOM,
+            width: 1.05,
+            depth: 0.13,
+        },
     ];
 
     let map = parse();
@@ -4511,7 +5002,9 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             placement.room,
         );
 
-        if placement.mount == Mount::Wall && placement.kind.starts_with("chem.") {
+        let session_asset = ASSET_SESSION_KINDS.contains(&placement.kind);
+        if session_asset || (placement.mount == Mount::Wall && placement.kind.starts_with("chem."))
+        {
             let doorway_bridges: Vec<Bounds> = map
                 .iter()
                 .filter(|entity| {
@@ -4524,35 +5017,37 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
                 doorway_bridges
                     .iter()
                     .all(|bridge| bridge.intersection(&bounds).is_none()),
-                "wall fixture {} at {bounds:?} hangs into a doorway bridge",
+                "fixture {} at {bounds:?} obstructs a doorway bridge",
                 placement.kind,
             );
 
-            // Three samples across the mount width must land on tall physical
-            // world geometry immediately behind the model. This catches a
-            // shelf placed across an opening even when its centre happens to
-            // be close to a remaining wall return.
-            let (back, lateral) = match placement.angles {
-                "0 0 0" => (Vec3::NEG_Z, Vec3::X),
-                "0 90 0" => (Vec3::NEG_X, Vec3::Z),
-                "0 180 0" => (Vec3::Z, Vec3::X),
-                "0 -90 0" => (Vec3::X, Vec3::Z),
-                other => panic!("unsupported Chemistry wall angle {other}"),
-            };
-            let world = map
-                .iter()
-                .find(|entity| classname(entity).as_deref() == Some("worldspawn"))
-                .expect("worldspawn");
-            for offset in [-half_width + 0.05, 0.0, half_width - 0.05] {
-                let sample = Vec3::new(x, 0.0, z) + back * 0.20 + lateral * offset;
-                assert!(
-                    world.brushes.iter().any(|brush| {
-                        let (bottom, top) = vertical_span(brush);
-                        top - bottom > 1.0 && footprint(brush).holds(sample)
-                    }),
-                    "wall fixture {} has no backing wall at {sample}",
-                    placement.kind,
-                );
+            if placement.mount == Mount::Wall {
+                // Three samples across the mount width must land on tall physical
+                // world geometry immediately behind the model. This catches a
+                // shelf placed across an opening even when its centre happens to
+                // be close to a remaining wall return.
+                let (back, lateral) = match placement.angles {
+                    "0 0 0" => (Vec3::NEG_Z, Vec3::X),
+                    "0 90 0" => (Vec3::NEG_X, Vec3::Z),
+                    "0 180 0" => (Vec3::Z, Vec3::X),
+                    "0 -90 0" => (Vec3::X, Vec3::Z),
+                    other => panic!("unsupported wall angle {other}"),
+                };
+                let world = map
+                    .iter()
+                    .find(|entity| classname(entity).as_deref() == Some("worldspawn"))
+                    .expect("worldspawn");
+                for offset in [-half_width + 0.05, 0.0, half_width - 0.05] {
+                    let sample = Vec3::new(x, 0.0, z) + back * 0.20 + lateral * offset;
+                    assert!(
+                        world.brushes.iter().any(|brush| {
+                            let (bottom, top) = vertical_span(brush);
+                            top - bottom > 1.0 && footprint(brush).holds(sample)
+                        }),
+                        "wall fixture {} has no backing wall at {sample}",
+                        placement.kind,
+                    );
+                }
             }
         }
 
@@ -4589,7 +5084,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
                 | "chapel.pew"
                 | "chapel.plinth"
                 | "chapel.runner"
-        );
+        ) || ASSET_SESSION_FLOOR_KINDS
+            .contains(&placement.kind);
         if placement.mount == Mount::Floor && !collider_backed_walkable_fixture {
             let walkable: Vec<Bounds> = map
                 .iter()
@@ -4617,7 +5113,7 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             }
         }
 
-        visual_envelopes.push((placement.origin, bounds));
+        visual_envelopes.push((placement.kind, placement.origin, bounds));
     }
 
     let blockers = [
@@ -4785,13 +5281,85 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
     let overlaps = |a: Bounds, b: Bounds| {
         a.min_x < b.max_x && a.max_x > b.min_x && a.min_z < b.max_z && a.max_z > b.min_z
     };
-    for (origin, decoration) in visual_envelopes {
+    for (kind, origin, decoration) in &visual_envelopes {
         assert!(
             blockers
                 .iter()
-                .all(|blocker| !overlaps(decoration, *blocker)),
+                .all(|blocker| !overlaps(*decoration, *blocker)),
             "decoration at {origin} overlaps a machine, working point, delivery window, or door",
         );
+        if !ASSET_SESSION_KINDS.contains(kind) {
+            continue;
+        }
+        for spot in map.iter().filter(|entity| {
+            classname(entity).as_deref() == Some("utility_spot")
+                || classname(entity).as_deref() == Some("crew_post")
+        }) {
+            let (x, z) = origin_xz(spot).expect("work point origin");
+            // Crew need body-width clearance around work and treatment
+            // approaches, including where the point itself is just outside a
+            // furniture envelope. This catches a bedside cart across a route.
+            let approach = Bounds {
+                min_x: x - NAV_RADIUS,
+                max_x: x + NAV_RADIUS,
+                min_z: z - NAV_RADIUS,
+                max_z: z + NAV_RADIUS,
+            };
+            assert!(
+                !overlaps(*decoration, approach),
+                "{kind} at {origin} obstructs work approach {:?} at ({x}, {z})",
+                property(spot, "id").or_else(|| property(spot, "occupant")),
+            );
+        }
+    }
+
+    for (index, (kind, origin, bounds)) in visual_envelopes.iter().enumerate() {
+        for (other_kind, other_origin, other_bounds) in &visual_envelopes[index + 1..] {
+            if !(ASSET_SESSION_KINDS.contains(kind)
+                || ASSET_SESSION_KINDS.contains(other_kind))
+                // Flat chapel runners are intentional floor layering.
+                || *kind == "chapel.runner"
+                || *other_kind == "chapel.runner"
+            {
+                continue;
+            }
+            assert!(
+                !overlaps(*bounds, *other_bounds),
+                "{kind} at {origin} overlaps {other_kind} at {other_origin}",
+            );
+        }
+    }
+}
+
+#[test]
+fn station_asset_session_places_all_36_distinct_deliverables() {
+    let map = parse();
+    let placed: std::collections::HashSet<String> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("decoration_spot"))
+        .filter_map(|entity| property(entity, "kind"))
+        .collect();
+    assert_eq!(ASSET_SESSION_KINDS.len(), 36);
+    assert_eq!(
+        ASSET_SESSION_KINDS
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        36,
+        "repeated placements and recolors do not count as new assets",
+    );
+    for kind in ASSET_SESSION_KINDS {
+        assert!(
+            placed.contains(*kind),
+            "approved asset {kind} is not placed"
+        );
+    }
+    for kind in [
+        "med.cryo_pod",
+        "med.cryo_pod_occupied",
+        "med.cryo_monitor_bay",
+    ] {
+        assert!(placed.contains(kind), "Quarantine lost its reused {kind}");
     }
 }
 
@@ -5109,6 +5677,106 @@ fn every_decoration_kind_has_an_exported_glb() {
             "bot.irrigation_panel",
             "assets/3dassets/station_starter_kit/glb/decor_bot_irrigation_panel.glb",
         ),
+        (
+            "hall.waiting_bench",
+            "assets/3dassets/station_starter_kit/glb/decor_hall_waiting_bench.glb",
+        ),
+        (
+            "hall.wall_light",
+            "assets/3dassets/station_starter_kit/glb/decor_hall_wall_light.glb",
+        ),
+        (
+            "hall.planter",
+            "assets/3dassets/station_starter_kit/glb/decor_hall_planter.glb",
+        ),
+        (
+            "hall.waste_station",
+            "assets/3dassets/station_starter_kit/glb/decor_hall_waste_station.glb",
+        ),
+        (
+            "chapel.votive_stand",
+            "assets/3dassets/station_starter_kit/glb/decor_chapel_votive_stand.glb",
+        ),
+        (
+            "chapel.lectern",
+            "assets/3dassets/station_starter_kit/glb/decor_chapel_lectern.glb",
+        ),
+        (
+            "quiet.armchair",
+            "assets/3dassets/station_starter_kit/glb/decor_quiet_armchair.glb",
+        ),
+        (
+            "quiet.reading_shelf",
+            "assets/3dassets/station_starter_kit/glb/decor_quiet_reading_shelf.glb",
+        ),
+        (
+            "quiet.side_table_lamp",
+            "assets/3dassets/station_starter_kit/glb/decor_quiet_side_table_lamp.glb",
+        ),
+        (
+            "quiet.acoustic_panel",
+            "assets/3dassets/station_starter_kit/glb/decor_quiet_acoustic_panel.glb",
+        ),
+        (
+            "med.crash_cart",
+            "assets/3dassets/station_starter_kit/glb/decor_med_crash_cart.glb",
+        ),
+        (
+            "med.examination_couch",
+            "assets/3dassets/station_starter_kit/glb/decor_med_examination_couch.glb",
+        ),
+        (
+            "med.diagnostic_stand",
+            "assets/3dassets/station_starter_kit/glb/decor_med_diagnostic_stand.glb",
+        ),
+        (
+            "med.privacy_screen",
+            "assets/3dassets/station_starter_kit/glb/decor_med_privacy_screen.glb",
+        ),
+        (
+            "med.hygiene_cabinet",
+            "assets/3dassets/station_starter_kit/glb/decor_med_hygiene_cabinet.glb",
+        ),
+        (
+            "sec.wall_camera",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_wall_camera.glb",
+        ),
+        (
+            "sec.radio_charger",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_radio_charger.glb",
+        ),
+        (
+            "sec.restraint_display",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_restraint_display.glb",
+        ),
+        (
+            "sec.report_shelf",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_report_shelf.glb",
+        ),
+        (
+            "sec.personal_effects",
+            "assets/3dassets/station_starter_kit/glb/decor_sec_personal_effects.glb",
+        ),
+        (
+            "eng.pump_assembly",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_pump_assembly.glb",
+        ),
+        (
+            "eng.tool_trolley",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_tool_trolley.glb",
+        ),
+        (
+            "eng.cable_junction",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_cable_junction.glb",
+        ),
+        (
+            "eng.hose_reel",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_hose_reel.glb",
+        ),
+        (
+            "eng.parts_shelf",
+            "assets/3dassets/station_starter_kit/glb/decor_eng_parts_shelf.glb",
+        ),
     ] {
         let bytes = std::fs::read(path)
             .unwrap_or_else(|error| panic!("{kind} decoration is missing at {path}: {error}"));
@@ -5137,8 +5805,8 @@ fn every_station_kit_glb_parses_with_bevys_gltf_parser() {
         });
     }
     assert_eq!(
-        count, 129,
-        "the station starter kit should contain 129 GLBs, including the modular Chemistry fixtures          and the galley's bar segment, table, and chair"
+        count, 154,
+        "the station starter kit should contain 154 GLBs, including the 25 new department and shared-space assets"
     );
 }
 

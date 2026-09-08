@@ -17,12 +17,16 @@
                 // chem_actions.glb, chem_beaker.glb, chem_large_beaker.glb,
                 // chem_bottle.glb, chem_syringe.glb and chem_charge.glb.
                 (root: "3dassets/glb", extensions: ["glb"]),
+                // Includes all 36 department/shared-space expansion deliverables
+                // (25 additions, 11 replacements), with materials embedded.
                 (root: "3dassets/station_starter_kit/glb", extensions: ["glb"]),
             ],
         ),
         (
             file: "content_02.cgp",
             include: [
+                // Includes ceiling_casing.png and ceiling_metal.png. Runtime
+                // copies are protected; kit authoring originals stay ignored.
                 (root: "textures", extensions: ["png"]),
                 (root: "ui/chemistry_book/icons", extensions: ["png"]),
             ],
@@ -62,6 +66,10 @@
         "3dassets/station_starter_kit/preview_department_decor.png",
         "3dassets/station_starter_kit/preview_departments.png",
         "3dassets/station_starter_kit/preview_engineering_decor.png",
+        "3dassets/station_starter_kit/preview_expansion_shared.png",
+        "3dassets/station_starter_kit/preview_expansion_security.png",
+        "3dassets/station_starter_kit/preview_expansion_medical.png",
+        "3dassets/station_starter_kit/preview_expansion_engineering.png",
         "3dassets/station_starter_kit/preview_machines.png",
         "3dassets/station_starter_kit/preview_medical_decor.png",
         "3dassets/station_starter_kit/preview_medical_ward.png",

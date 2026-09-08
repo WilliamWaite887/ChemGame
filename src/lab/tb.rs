@@ -1785,6 +1785,107 @@ const DECORATION_KINDS: &[(&str, &str)] = &[
         "chapel.plinth",
         "3dassets/station_starter_kit/glb/decor_chapel_plinth.glb",
     ),
+    // Station expansion: reusable department and shared-space props.
+    (
+        "hall.waiting_bench",
+        "3dassets/station_starter_kit/glb/decor_hall_waiting_bench.glb",
+    ),
+    (
+        "hall.wall_light",
+        "3dassets/station_starter_kit/glb/decor_hall_wall_light.glb",
+    ),
+    (
+        "hall.planter",
+        "3dassets/station_starter_kit/glb/decor_hall_planter.glb",
+    ),
+    (
+        "hall.waste_station",
+        "3dassets/station_starter_kit/glb/decor_hall_waste_station.glb",
+    ),
+    (
+        "chapel.votive_stand",
+        "3dassets/station_starter_kit/glb/decor_chapel_votive_stand.glb",
+    ),
+    (
+        "chapel.lectern",
+        "3dassets/station_starter_kit/glb/decor_chapel_lectern.glb",
+    ),
+    (
+        "quiet.armchair",
+        "3dassets/station_starter_kit/glb/decor_quiet_armchair.glb",
+    ),
+    (
+        "quiet.reading_shelf",
+        "3dassets/station_starter_kit/glb/decor_quiet_reading_shelf.glb",
+    ),
+    (
+        "quiet.side_table_lamp",
+        "3dassets/station_starter_kit/glb/decor_quiet_side_table_lamp.glb",
+    ),
+    (
+        "quiet.acoustic_panel",
+        "3dassets/station_starter_kit/glb/decor_quiet_acoustic_panel.glb",
+    ),
+    (
+        "med.crash_cart",
+        "3dassets/station_starter_kit/glb/decor_med_crash_cart.glb",
+    ),
+    (
+        "med.examination_couch",
+        "3dassets/station_starter_kit/glb/decor_med_examination_couch.glb",
+    ),
+    (
+        "med.diagnostic_stand",
+        "3dassets/station_starter_kit/glb/decor_med_diagnostic_stand.glb",
+    ),
+    (
+        "med.privacy_screen",
+        "3dassets/station_starter_kit/glb/decor_med_privacy_screen.glb",
+    ),
+    (
+        "med.hygiene_cabinet",
+        "3dassets/station_starter_kit/glb/decor_med_hygiene_cabinet.glb",
+    ),
+    (
+        "sec.wall_camera",
+        "3dassets/station_starter_kit/glb/decor_sec_wall_camera.glb",
+    ),
+    (
+        "sec.radio_charger",
+        "3dassets/station_starter_kit/glb/decor_sec_radio_charger.glb",
+    ),
+    (
+        "sec.restraint_display",
+        "3dassets/station_starter_kit/glb/decor_sec_restraint_display.glb",
+    ),
+    (
+        "sec.report_shelf",
+        "3dassets/station_starter_kit/glb/decor_sec_report_shelf.glb",
+    ),
+    (
+        "sec.personal_effects",
+        "3dassets/station_starter_kit/glb/decor_sec_personal_effects.glb",
+    ),
+    (
+        "eng.pump_assembly",
+        "3dassets/station_starter_kit/glb/decor_eng_pump_assembly.glb",
+    ),
+    (
+        "eng.tool_trolley",
+        "3dassets/station_starter_kit/glb/decor_eng_tool_trolley.glb",
+    ),
+    (
+        "eng.cable_junction",
+        "3dassets/station_starter_kit/glb/decor_eng_cable_junction.glb",
+    ),
+    (
+        "eng.hose_reel",
+        "3dassets/station_starter_kit/glb/decor_eng_hose_reel.glb",
+    ),
+    (
+        "eng.parts_shelf",
+        "3dassets/station_starter_kit/glb/decor_eng_parts_shelf.glb",
+    ),
 ];
 
 #[derive(Resource)]
@@ -1841,6 +1942,8 @@ fn load_decoration_assets(mut commands: Commands, assets: Res<AssetServer>) {
 /// those get bumped a few centimetres above their visual top instead. The
 /// briefing table is the one deliberate exception — its real ~0.80 m top is
 /// left alone because a table *should* be settable-on.
+// Measured dimensions can resemble mathematical constants by coincidence.
+#[allow(clippy::approx_constant)]
 const FLOOR_COLLIDER_ENVELOPES: &[(&str, Vec3)] = &[
     // Chemistry's modular benches replace the old solid map brushes. Their
     // collider tops deliberately match the authored worktops, so the existing
@@ -1850,10 +1953,10 @@ const FLOOR_COLLIDER_ENVELOPES: &[(&str, Vec3)] = &[
     ("chem.clean_workbench", Vec3::new(1.30, 0.95, 0.45)),
     ("chem.sample_bench", Vec3::new(1.10, 0.90, 0.40)),
     ("chem.fume_hood", Vec3::new(0.75, 2.50, 0.375)),
-    ("eng.smes_bank", Vec3::new(1.10, 2.10, 0.50)),
-    ("eng.generator_turbine", Vec3::new(1.30, 2.30, 1.00)),
+    ("eng.smes_bank", Vec3::new(1.085, 2.100, 0.491)),
+    ("eng.generator_turbine", Vec3::new(1.215, 2.300, 0.954)),
     ("eng.hardsuit_locker", Vec3::new(0.90, 2.10, 0.425)),
-    ("eng.parts_workbench", Vec3::new(0.95, 1.45, 0.475)),
+    ("eng.parts_workbench", Vec3::new(0.930, 1.450, 0.475)),
     ("eng.cable_spool_rack", Vec3::new(0.75, 1.45, 0.45)),
     ("eng.gas_canister_rack", Vec3::new(0.80, 1.50, 0.40)),
     ("eng.filtration_scrubber", Vec3::new(0.60, 2.15, 0.60)),
@@ -1899,20 +2002,17 @@ const FLOOR_COLLIDER_ENVELOPES: &[(&str, Vec3)] = &[
     // bunk is deliberately raised to the standard non-surface collider height
     // so its restraint rails do not become a convenient beaker shelf.
     ("sec.booking_desk", Vec3::new(1.70, 2.15, 0.80)),
-    ("sec.dispatch_console", Vec3::new(1.20, 1.70, 0.60)),
+    ("sec.dispatch_console", Vec3::new(1.190, 1.667, 0.580)),
     ("sec.officer_desk_bank", Vec3::new(1.70, 1.43, 0.85)),
     ("sec.evidence_locker_bank", Vec3::new(1.10, 2.10, 0.45)),
-    ("sec.equipment_locker_bank", Vec3::new(1.10, 2.10, 0.45)),
+    ("sec.equipment_locker_bank", Vec3::new(1.080, 2.090, 0.443)),
     ("sec.brig_bunk", Vec3::new(0.525, 1.45, 1.10)),
-    ("sec.interrogation_table", Vec3::new(1.10, 1.25, 0.95)),
+    ("sec.interrogation_table", Vec3::new(0.765, 1.242, 0.934)),
     ("sec.processing_scanner", Vec3::new(0.70, 2.10, 0.55)),
-    // The ward-and-cryo pass. None of these five sit anywhere near
-    // SET_DOWN_REACH (the closest real top is the research desk's screen at
-    // 1.54 m), so every one keeps its real nominal envelope with no bump —
-    // unlike `med.ward_bay`/`med.waiting_row`, which predate this table and
-    // still have no collider at all.
-    ("med.patient_bay", Vec3::new(1.35, 2.20, 1.20)),
-    ("med.nurse_station", Vec3::new(1.50, 1.80, 1.20)),
+    // Medical's treatment and reception fixtures now use measured footprints;
+    // the reused cryo modules keep their established envelopes.
+    ("med.patient_bay", Vec3::new(1.340, 2.085, 1.170)),
+    ("med.nurse_station", Vec3::new(1.500, 1.800, 1.010)),
     ("med.cryo_pod", Vec3::new(0.65, 2.60, 0.65)),
     ("med.cryo_pod_occupied", Vec3::new(0.65, 2.60, 0.65)),
     ("med.cryo_monitor_bay", Vec3::new(0.85, 1.90, 0.65)),
@@ -1938,8 +2038,24 @@ const FLOOR_COLLIDER_ENVELOPES: &[(&str, Vec3)] = &[
     ("svc.bar_counter", Vec3::new(0.51, 1.05, 0.34)),
     ("svc.dining_table", Vec3::new(0.55, 0.76, 0.55)),
     ("svc.dining_chair", Vec3::new(0.22, 0.86, 0.23)),
-    ("chapel.pew", Vec3::new(0.725, 0.90, 0.275)),
-    ("chapel.plinth", Vec3::new(0.675, 1.05, 0.325)),
+    ("chapel.pew", Vec3::new(0.718, 0.880, 0.260)),
+    ("chapel.plinth", Vec3::new(0.670, 0.980, 0.323)),
+    // Perimeter and retreat furniture uses measured visible footprints.
+    ("hall.waiting_bench", Vec3::new(1.000, 0.891, 0.303)),
+    ("hall.planter", Vec3::new(0.438, 1.152, 0.318)),
+    ("hall.waste_station", Vec3::new(0.550, 1.000, 0.264)),
+    ("chapel.votive_stand", Vec3::new(0.420, 1.268, 0.275)),
+    ("chapel.lectern", Vec3::new(0.385, 1.190, 0.283)),
+    ("quiet.armchair", Vec3::new(0.460, 0.996, 0.420)),
+    ("quiet.reading_shelf", Vec3::new(0.668, 1.235, 0.185)),
+    ("quiet.side_table_lamp", Vec3::new(0.305, 1.070, 0.270)),
+    ("med.crash_cart", Vec3::new(0.455, 1.323, 0.343)),
+    ("med.examination_couch", Vec3::new(0.448, 0.960, 0.935)),
+    ("med.diagnostic_stand", Vec3::new(0.325, 1.690, 0.285)),
+    ("med.privacy_screen", Vec3::new(0.700, 1.895, 0.290)),
+    ("eng.pump_assembly", Vec3::new(0.775, 1.280, 0.440)),
+    ("eng.tool_trolley", Vec3::new(0.474, 1.038, 0.316)),
+    ("med.waiting_row", Vec3::new(1.570, 1.900, 0.295)),
 ];
 
 fn floor_collider_envelope(kind: &str) -> Option<Vec3> {
@@ -2396,6 +2512,142 @@ mod tests {
             Some(&authored),
             "decoration must preserve the transform authored in TrenchBroom",
         );
+    }
+
+    #[test]
+    fn expanded_furniture_collides_at_its_exported_footprint_and_walls_remain_visual() {
+        let kinds = [
+            ("hall.waiting_bench", true),
+            ("hall.wall_light", false),
+            ("hall.planter", true),
+            ("hall.waste_station", true),
+            ("chapel.pew", true),
+            ("chapel.plinth", true),
+            ("chapel.votive_stand", true),
+            ("chapel.lectern", true),
+            ("quiet.armchair", true),
+            ("quiet.reading_shelf", true),
+            ("quiet.side_table_lamp", true),
+            ("quiet.acoustic_panel", false),
+            ("med.patient_bay", true),
+            ("med.nurse_station", true),
+            ("med.supply_shelf", false),
+            ("med.crash_cart", true),
+            ("med.examination_couch", true),
+            ("med.diagnostic_stand", true),
+            ("med.privacy_screen", true),
+            ("med.hygiene_cabinet", false),
+            ("sec.dispatch_console", true),
+            ("sec.equipment_locker_bank", true),
+            ("sec.interrogation_table", true),
+            ("sec.wall_camera", false),
+            ("sec.radio_charger", false),
+            ("sec.restraint_display", false),
+            ("sec.report_shelf", false),
+            ("sec.personal_effects", false),
+            ("eng.generator_turbine", true),
+            ("eng.smes_bank", true),
+            ("eng.parts_workbench", true),
+            ("eng.pump_assembly", true),
+            ("eng.tool_trolley", true),
+            ("eng.cable_junction", false),
+            ("eng.hose_reel", false),
+            ("eng.parts_shelf", false),
+        ];
+        let mut app = App::new();
+        app.insert_resource(DecorationAssets {
+            scenes: DECORATION_KINDS
+                .iter()
+                .map(|(kind, _)| (*kind, default()))
+                .collect(),
+        })
+        .add_systems(Update, dress_decorations);
+        let authored = Transform::from_xyz(-20.0, 0.0, 12.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let markers: Vec<_> = kinds
+            .iter()
+            .map(|(kind, floor)| {
+                let entity = app
+                    .world_mut()
+                    .spawn((
+                        DecorationSpot {
+                            kind: (*kind).to_string(),
+                        },
+                        authored,
+                    ))
+                    .id();
+                (entity, *kind, *floor)
+            })
+            .collect();
+        app.update();
+        for (entity, kind, floor) in markers {
+            let (_, path) = DECORATION_KINDS
+                .iter()
+                .find(|(candidate, _)| *candidate == kind)
+                .unwrap_or_else(|| panic!("unregistered expansion kind {kind}"));
+            let bytes = std::fs::read(format!("assets/{path}")).expect("exported expansion GLB");
+            let gltf = bevy::gltf::gltf::Gltf::from_slice(&bytes).expect("valid expansion GLB");
+            let mut stack: Vec<_> = gltf
+                .document
+                .scenes()
+                .flat_map(|scene| scene.nodes())
+                .map(|node| (node, Mat4::IDENTITY))
+                .collect();
+            let mut minimum = Vec3::splat(f32::INFINITY);
+            let mut maximum = Vec3::splat(f32::NEG_INFINITY);
+            while let Some((node, parent)) = stack.pop() {
+                let transform = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
+                if let Some(mesh) = node.mesh() {
+                    for primitive in mesh.primitives() {
+                        let reader = primitive.reader(|_| gltf.blob.as_deref());
+                        for vertex in reader.read_positions().expect("exported mesh positions") {
+                            let point = transform.transform_point3(Vec3::from_array(vertex));
+                            minimum = minimum.min(point);
+                            maximum = maximum.max(point);
+                        }
+                    }
+                }
+                stack.extend(node.children().map(|child| (child, transform)));
+            }
+            assert!(
+                minimum.is_finite() && maximum.is_finite(),
+                "{kind} has no measured geometry"
+            );
+            let solid = app.world().get::<Solid>(entity);
+            if floor {
+                let solid = solid.unwrap_or_else(|| panic!("{kind} has no furniture collider"));
+                let half_width = minimum.x.abs().max(maximum.x.abs());
+                let half_depth = minimum.z.abs().max(maximum.z.abs());
+                // Compare actual exported vertices with the spawned quarter-
+                // turned Solid. This catches missing kinds, bad yaw and
+                // invisible collision margins without sharing the table.
+                for (actual, expected) in [
+                    (solid.half_extents.x, half_depth),
+                    (solid.half_extents.z, half_width),
+                ] {
+                    assert!(
+                        actual >= expected - 0.002 && actual <= expected + 0.025,
+                        "{kind} collider {actual} does not fit exported half-span {expected}"
+                    );
+                }
+                assert!(
+                    solid.half_extents.y + 0.002 >= maximum.y,
+                    "{kind} collider ends below its exported geometry"
+                );
+            } else {
+                assert!(
+                    solid.is_none(),
+                    "wall-mounted {kind} gained floor collision"
+                );
+                assert!(
+                    minimum.z >= -0.001,
+                    "{kind} extends through its mounting wall"
+                );
+                assert!(minimum.y >= 0.30, "{kind} reaches the floor");
+            }
+            assert!(app.world().get::<WorldAssetRoot>(entity).is_some());
+            assert_eq!(app.world().get::<Transform>(entity), Some(&authored));
+        }
     }
 
     #[test]

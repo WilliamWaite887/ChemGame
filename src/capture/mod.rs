@@ -6,11 +6,15 @@ use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use std::collections::HashMap;
 #[cfg(debug_assertions)]
+pub(crate) mod asset_tour;
+#[cfg(debug_assertions)]
 pub(crate) mod trailer;
 pub struct CapturePlugin;
 impl Plugin for CapturePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CaptureState>();
+        #[cfg(debug_assertions)]
+        asset_tour::register(app);
         #[cfg(debug_assertions)]
         app.add_plugins(trailer::TrailerPlugin)
             .add_systems(OnEnter(AppState::Playing), build_title)

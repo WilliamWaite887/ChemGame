@@ -1,0 +1,71 @@
+// The station clock: what time it is, and what the crew do about it.
+//
+// This is the station's own day, deliberately independent of everything the
+// player does. It is NOT built on `Shift::station_age_seconds`, which
+// `instability::advance_station` scales by whether the lab is accepting orders
+// — a clock built on that would make the station's noon depend on the sign
+// hanging on the chemistry counter.
+//
+// Every value is validated on load (`ClockTuning::validate`). A file that says
+// something impossible — a meal that closes before it opens, two overlapping
+// windows, a day of zero length — fails the game to start rather than producing
+// a station whose rhythm is quietly wrong.
+//
+// What is NOT here, on purpose:
+//
+// - How fast anyone gets hungry. That is `station.needs.ron`'s `rates`. This
+//   file only says how the *shape* of the day bends those rates, so there is
+//   exactly one place a need's speed is decided.
+// - Anything the map decides. Where people eat is `lab.map` geometry.
+// - Lighting. The clock says what time it is; nothing renders it yet.
+(
+    // One station day in real seconds.
+    //
+    // 1200 is not arbitrary and must not drift casually: `station.needs.ron`
+    // authors `hunger_per_second: 0.000833`, which is full hunger after exactly
+    // 1200 s. So **one station day is one hunger cycle**, and the crew's
+    // appetite lines up with the clock by construction rather than by tuning.
+    // `a_station_day_is_one_hunger_cycle` asserts the two files agree; change
+    // one and that test tells you to change the other.
+    day_seconds: 1200.0,
+
+    // When the galley is busy, as fractions of a day (0.0 = midnight,
+    // 0.5 = noon). Each window ramps appetite up toward `peak` and back down by
+    // `closes`, so crew converge on the galley around the peak instead of
+    // trickling in at whatever moment their own hunger happens to cross the
+    // eating threshold.
+    //
+    // Two meals rather than three: at a 20-minute day a third window would put
+    // mealtimes ~4 real minutes apart, which reads as continuous eating rather
+    // than as a rhythm.
+    meals: [
+        // Lunch, ~11:00 to ~14:00, peaking at noon.
+        (opens: 0.46, peak: 0.50, closes: 0.58),
+        // Dinner, ~17:00 to ~20:00, peaking at 18:00.
+        (opens: 0.71, peak: 0.75, closes: 0.83),
+    ],
+
+    // How far ahead of a window Service starts cooking, as a fraction of a day.
+    // 0.02 of 1200 s is ~24 s — enough for a `PrepareMeal` (7 s) and a
+    // `ServeMeal` (4 s) to finish before the first hungry resident arrives.
+    //
+    // Without this the kitchen only reacts to a rush that has already formed,
+    // and the first arrivals queue at an empty pass.
+    kitchen_lead: 0.02,
+
+    // How hard the clock bends the hunger rate at a window's peak, as a
+    // multiplier on top of the authored rate: 0.6 means hunger climbs 1.6x as
+    // fast at noon as it does at 03:00.
+    //
+    // This shapes the *rate*, never the value, and that is the whole design.
+    // A resident who ate an hour ago starts the window with low hunger and
+    // skips it; one who worked through arrives late to an emptying room. The
+    // clock is a shared baseline that individual actions push people off, not a
+    // schedule that marches everyone to the galley together.
+    appetite_swing: 0.6,
+
+    // The station's small hours, wrapping past midnight. Nothing enforces a
+    // curfew — this is read for presentation and for the decision log, so a
+    // quiet station at 03:00 is legible as night rather than as a bug.
+    quiet_hours: (opens: 0.92, closes: 0.25),
+)

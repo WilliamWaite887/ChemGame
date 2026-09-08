@@ -4239,7 +4239,7 @@
 // (X 80..360, Y 3340..4380); each sits clear of its fixture collider.
 {
 "classname" "utility_spot"
-"origin" "-40 3400 0"
+"origin" "0 3452 0"
 "id" "security.dispatch"
 "capacity" "1"
 }
@@ -6644,18 +6644,12 @@
 "angles" "0 180 0"
 }
 // entity 250
-{
-"classname" "decoration_spot"
-"origin" "-180 1499 0"
-"kind" "med.ward_bay"
-"angles" "0 90 0"
-}
 // entity 251
 {
 "classname" "decoration_spot"
-"origin" "-336 1529 0"
+"origin" "98 890 0"
 "kind" "med.waiting_row"
-"angles" "0 90 0"
+"angles" "0 0 0"
 }
 // entity 252
 {
@@ -8128,4 +8122,282 @@
 "origin" "-176 2450 0"
 "id" "bridge.aid_intake"
 "capacity" "1"
+}
+
+// Station asset session: perimeter work equipment and shared-space dressing.
+{
+"classname" "decoration_spot"
+"origin" "20 3345 0"
+"kind" "sec.wall_camera"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "75 3500 0"
+"kind" "sec.radio_charger"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "85 4000 0"
+"kind" "sec.restraint_display"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-395 3680 0"
+"kind" "sec.report_shelf"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "355 3740 0"
+"kind" "sec.personal_effects"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-288 1448 0"
+"kind" "med.patient_bay"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-8 1448 0"
+"kind" "med.patient_bay"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-304 820 0"
+"kind" "med.nurse_station"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "80 1240 0"
+"kind" "med.crash_cart"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "24 900 0"
+"kind" "med.examination_couch"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "70 1000 0"
+"kind" "med.diagnostic_stand"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-32 900 0"
+"kind" "med.privacy_screen"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "115 740 0"
+"kind" "med.hygiene_cabinet"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "308 1472 0"
+"kind" "med.cryo_pod"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "164 1472 0"
+"kind" "med.cryo_pod_occupied"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "240 1456 0"
+"kind" "med.cryo_monitor_bay"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1080 2160 0"
+"kind" "eng.pump_assembly"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1012 4220 0"
+"kind" "eng.tool_trolley"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-605 3760 0"
+"kind" "eng.cable_junction"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-680 2105 0"
+"kind" "eng.hose_reel"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-700 4375 0"
+"kind" "eng.parts_shelf"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-420 2960 0"
+"kind" "hall.waiting_bench"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-420 2600 0"
+"kind" "hall.waiting_bench"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-420 2000 0"
+"kind" "hall.waiting_bench"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-420 3032 0"
+"kind" "hall.planter"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-420 2672 0"
+"kind" "hall.planter"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-420 2072 0"
+"kind" "hall.planter"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-582 2800 0"
+"kind" "hall.waste_station"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-582 2200 0"
+"kind" "hall.waste_station"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-405 3080 0"
+"kind" "hall.wall_light"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-405 2760 0"
+"kind" "hall.wall_light"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-405 2120 0"
+"kind" "hall.wall_light"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-405 1800 0"
+"kind" "hall.wall_light"
+"angles" "0 0 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-595 3040 0"
+"kind" "hall.wall_light"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-595 2560 0"
+"kind" "hall.wall_light"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-595 2260 0"
+"kind" "hall.wall_light"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1992 980 0"
+"kind" "chapel.votive_stand"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1796 980 0"
+"kind" "chapel.votive_stand"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1832 1012 0"
+"kind" "chapel.lectern"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1972 1864 0"
+"kind" "quiet.armchair"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1972 1696 0"
+"kind" "quiet.armchair"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1916 1866 0"
+"kind" "quiet.side_table_lamp"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1916 1694 0"
+"kind" "quiet.side_table_lamp"
+"angles" "0 -90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-2026 1780 0"
+"kind" "quiet.reading_shelf"
+"angles" "0 180 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1840 1895 0"
+"kind" "quiet.acoustic_panel"
+"angles" "0 90 0"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1840 1670 0"
+"kind" "quiet.acoustic_panel"
+"angles" "0 -90 0"
 }

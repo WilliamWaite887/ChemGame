@@ -384,6 +384,20 @@ pub fn parse_speed(args: impl IntoIterator<Item = String>) -> Option<f32> {
 /// career.
 pub fn apply_command_line(app: &mut App) {
     #[cfg(debug_assertions)]
+    if crate::capture::asset_tour::output_directory().is_some() {
+        if !cfg!(feature = "trenchbroom") {
+            eprintln!(
+                "--asset-tour requires the trenchbroom feature and the authored station. \
+                 Run cargo run -- --solo --asset-tour <output-directory> with default features."
+            );
+            std::process::exit(2);
+        }
+        app.insert_resource(LaunchMode::Singleplayer)
+            .insert_resource(LaunchedFromArgs)
+            .insert_resource(crate::session::SessionKind::Trailer);
+        return;
+    }
+    #[cfg(debug_assertions)]
     if std::env::args().any(|arg| arg == "--trailer") {
         let mode = LaunchMode::from_args().unwrap_or(LaunchMode::Singleplayer);
         app.insert_resource(mode).insert_resource(LaunchedFromArgs);
