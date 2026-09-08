@@ -27,14 +27,27 @@ use crate::crew::CrewMember;
 /// The two lounge seats used to be the whole list, which meant the station's
 /// only social room could seat *two* of its thirty residents — and the seats are
 /// capacity 1, so a third arrival was filtered out by occupancy and fell back to
-/// standing at their post. The four dining tables are capacity 4 apiece, so a
+/// standing at their post. The twelve dining tables are capacity 4 apiece, so a
 /// meal or a break now reads as people sharing a table rather than queueing for
 /// a bench. Tables first: a resident with a choice should sit *with* somebody.
-const LOUNGE_SEATS: [&str; 6] = [
+///
+/// Forty-eight table places for thirty residents is deliberate headroom, not an
+/// estimate of demand. Occupancy filtering is per spot, so a room sized exactly
+/// to the crew puts the last arrivals back to standing at their posts the moment
+/// two tables happen to fill.
+const LOUNGE_SEATS: [&str; 14] = [
     "service.table.a",
     "service.table.b",
     "service.table.c",
     "service.table.d",
+    "service.table.e",
+    "service.table.f",
+    "service.table.g",
+    "service.table.h",
+    "service.table.i",
+    "service.table.j",
+    "service.table.k",
+    "service.table.l",
     "service.lounge.seat.1",
     "service.lounge.seat.2",
 ];

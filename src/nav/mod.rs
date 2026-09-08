@@ -58,6 +58,11 @@ struct Node {
     profile_bounds: Bounds,
     floor: FloorProfile,
     edges: Vec<Edge>,
+    /// The doorway this region *is*, if it is a doorway bridge rather than a
+    /// room — mirrors `lab::Region::bridge_id`. `None` for an ordinary room
+    /// or corridor. Read by [`Self::acoustic_path`] to know which crossings
+    /// along a route have a `Door` to ask about.
+    bridge_id: Option<String>,
 }
 
 impl Node {
@@ -70,6 +75,23 @@ struct Edge {
     to: usize,
     /// Middle of the floor the two regions share: where a body crosses over.
     portal: Vec3,
+}
+
+/// What [`NavGraph::acoustic_path`] found between a speaker and a listener
+/// with no clear line between them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AcousticPath {
+    /// Physical distance along the route, portal to portal plus the final
+    /// leg into the listener's region — not straight-line.
+    pub length: f32,
+    /// How many doorway/room boundaries the route crosses.
+    pub portals: usize,
+    /// The last portal before the listener: where an occluded voice should
+    /// sound like it is coming from, not the speaker's true position, which
+    /// the listener may not even be able to see.
+    pub last_portal: Vec3,
+    /// How many of those crossings were through a **closed** door.
+    pub muffled_doors: usize,
 }
 
 /// The station's walkable regions, joined up.
@@ -98,6 +120,7 @@ impl NavGraph {
                     profile_bounds: region.open_bounds,
                     floor: region.floor,
                     edges: Vec::new(),
+                    bridge_id: region.bridge_id.clone(),
                 })
             })
             .collect();
@@ -271,6 +294,112 @@ impl NavGraph {
             }
         }
         Some(waypoints)
+    }
+
+    /// How far a sound travels between two points that do not have a clear
+    /// line between them, following the same rooms-and-doorways graph a body
+    /// would walk.
+    ///
+    /// Deliberately its own method rather than a `path()` variant: `path()`
+    /// measures a body's footsteps and pulls the goal onto standable floor
+    /// "close enough" to walk to; this measures a sound's travel and must
+    /// not — a listener standing right at a doorway threshold is a real
+    /// position sound has to reach exactly, not one to be nudged off of.
+    ///
+    /// `door_open(bridge_id)` lets the caller supply live `Door` state
+    /// without this module reaching into the ECS itself — the same reason
+    /// `build`'s own `radius` is a plain parameter rather than a query. A
+    /// caller should only call this after finding the direct line blocked;
+    /// it does not check that itself, so calling it on a clear line just
+    /// costs a graph search for no reason.
+    pub fn acoustic_path(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        door_open: impl Fn(&str) -> bool,
+    ) -> Option<AcousticPath> {
+        let start = self.held_by(from).or_else(|| self.nearest_to(from))?;
+        let goal = self.held_by(to).or_else(|| self.nearest_to(to))?;
+
+        if start == goal {
+            // Occluded by something other than a wall between two nav
+            // regions — a pillar inside one big room, say. Still a real
+            // distance; just not one this graph has portals for.
+            return Some(AcousticPath {
+                length: from.distance(to),
+                portals: 0,
+                last_portal: to,
+                muffled_doors: 0,
+            });
+        }
+
+        // Same Dijkstra `path()` runs — portal-to-portal physical distance —
+        // reused rather than duplicated, because a sound and a body should
+        // agree on what "the way there" means. What differs is entirely in
+        // what gets read back out of it below.
+        let mut cheapest = vec![f32::INFINITY; self.nodes.len()];
+        let mut entered_at = vec![from; self.nodes.len()];
+        let mut came_from: Vec<Option<usize>> = vec![None; self.nodes.len()];
+        let mut queue = BinaryHeap::new();
+
+        cheapest[start] = 0.0;
+        queue.push(Step {
+            cost: 0.0,
+            node: start,
+        });
+
+        while let Some(Step { cost, node }) = queue.pop() {
+            if node == goal {
+                break;
+            }
+            if cost > cheapest[node] {
+                continue;
+            }
+            for edge in &self.nodes[node].edges {
+                let walked = cost + entered_at[node].distance(edge.portal);
+                if walked < cheapest[edge.to] {
+                    cheapest[edge.to] = walked;
+                    entered_at[edge.to] = edge.portal;
+                    came_from[edge.to] = Some(node);
+                    queue.push(Step {
+                        cost: walked,
+                        node: edge.to,
+                    });
+                }
+            }
+        }
+
+        if cheapest[goal].is_infinite() {
+            return None;
+        }
+
+        let mut portals = 0usize;
+        let mut muffled_doors = 0usize;
+        let mut current = goal;
+        while let Some(previous) = came_from[current] {
+            portals += 1;
+            if let Some(bridge_id) = self.nodes[current].bridge_id.as_deref() {
+                if !door_open(bridge_id) {
+                    muffled_doors += 1;
+                }
+            }
+            if previous == start {
+                break;
+            }
+            current = previous;
+        }
+
+        Some(AcousticPath {
+            // Portal-to-portal to the goal *node*, plus the last, short leg
+            // from that node's entry portal to the listener's exact position
+            // inside it — `path()` never needs this last leg because its
+            // waypoints already end wherever the caller wants; a scalar
+            // total has nowhere else to put it.
+            length: cheapest[goal] + entered_at[goal].distance(to),
+            portals,
+            last_portal: entered_at[goal],
+            muffled_doors,
+        })
     }
 
     /// A destination moved onto floor the route to it actually ends on.

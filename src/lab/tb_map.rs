@@ -2043,13 +2043,17 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
     // Service is drawn as three brushes; every module here sits in the wide
     // eastern one.
     //
-    // `max_z` used to stop at 28.6 — not because the room did, but because
-    // nothing had ever been placed further north. The walkable brush runs to
-    // z 39 (see `station_v2_rooms_are_where_the_plan_says`), and the whole
-    // northern half was bare floor, which is most of why Service measured 0.8
-    // decorations per 100 m² against a station norm of 2.4-4.1.
+    // These bounds have twice been narrower than the room. `max_z` used to stop
+    // at 28.6 and `min_x` at -38.7 — neither because the floor did, but because
+    // nothing had ever been placed further out. The walkable brush is
+    // x -47.5..-23.62, z 15..39 (see `station_v2_rooms_are_where_the_plan_says`),
+    // so the old bounds admitted 365 m² of a 573 m² room and quietly made the
+    // western third unbuildable. That is most of why Service measured 0.8
+    // decorations per 100 m² against a station norm of 2.4-4.1: the validation
+    // that was supposed to keep props inside the room was also keeping them out
+    // of two thirds of it.
     const SERVICE_EAST: Bounds = Bounds {
-        min_x: -38.7,
+        min_x: -47.5,
         max_x: -23.5,
         min_z: 15.0,
         max_z: 39.0,
@@ -3288,25 +3292,7 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.bar_counter",
-            origin: "-998 1174 0",
-            angles: "0 -60.0 0",
-            mount: Mount::Floor,
-            room: SERVICE_EAST,
-            width: 1.02,
-            depth: 0.68,
-        },
-        Placement {
-            kind: "svc.bar_counter",
-            origin: "-1026 1202 0",
-            angles: "0 -30.0 0",
-            mount: Mount::Floor,
-            room: SERVICE_EAST,
-            width: 1.02,
-            depth: 0.68,
-        },
-        Placement {
-            kind: "svc.bar_counter",
-            origin: "-1036 1240 0",
+            origin: "-1156 1400 0",
             angles: "0 0.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3315,7 +3301,7 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.bar_counter",
-            origin: "-1026 1278 0",
+            origin: "-1146 1362 0",
             angles: "0 30.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3324,7 +3310,7 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.bar_counter",
-            origin: "-998 1306 0",
+            origin: "-1118 1334 0",
             angles: "0 60.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3333,7 +3319,7 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.bar_counter",
-            origin: "-960 1316 0",
+            origin: "-1080 1324 0",
             angles: "0 90.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3342,7 +3328,7 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.bar_counter",
-            origin: "-922 1306 0",
+            origin: "-1042 1334 0",
             angles: "0 120.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3351,7 +3337,7 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.bar_counter",
-            origin: "-894 1278 0",
+            origin: "-1014 1362 0",
             angles: "0 150.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3360,16 +3346,7 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.bar_counter",
-            origin: "-884 1240 0",
-            angles: "0 180.0 0",
-            mount: Mount::Floor,
-            room: SERVICE_EAST,
-            width: 1.02,
-            depth: 0.68,
-        },
-        Placement {
-            kind: "svc.bar_counter",
-            origin: "-894 1202 0",
+            origin: "-1014 1438 0",
             angles: "0 210.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3378,7 +3355,7 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.bar_counter",
-            origin: "-922 1174 0",
+            origin: "-1042 1466 0",
             angles: "0 240.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3386,8 +3363,71 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             depth: 0.68,
         },
         Placement {
+            kind: "svc.bar_counter",
+            origin: "-1080 1476 0",
+            angles: "0 270.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.02,
+            depth: 0.68,
+        },
+        Placement {
+            kind: "svc.bar_counter",
+            origin: "-1118 1466 0",
+            angles: "0 300.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.02,
+            depth: 0.68,
+        },
+        Placement {
+            kind: "svc.bar_counter",
+            origin: "-1146 1438 0",
+            angles: "0 330.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.02,
+            depth: 0.68,
+        },
+        Placement {
             kind: "svc.bench",
-            origin: "-1041 1159 0",
+            origin: "-1186 1372 0",
+            angles: "0 15.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-1158 1322 0",
+            angles: "0 45.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-1108 1294 0",
+            angles: "0 75.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-1052 1294 0",
+            angles: "0 105.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-1002 1322 0",
             angles: "0 135.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3396,34 +3436,7 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.bench",
-            origin: "-1070 1210 0",
-            angles: "0 165.0 0",
-            mount: Mount::Floor,
-            room: SERVICE_EAST,
-            width: 0.42,
-            depth: 0.42,
-        },
-        Placement {
-            kind: "svc.bench",
-            origin: "-1070 1270 0",
-            angles: "0 195.0 0",
-            mount: Mount::Floor,
-            room: SERVICE_EAST,
-            width: 0.42,
-            depth: 0.42,
-        },
-        Placement {
-            kind: "svc.bench",
-            origin: "-1041 1321 0",
-            angles: "0 225.0 0",
-            mount: Mount::Floor,
-            room: SERVICE_EAST,
-            width: 0.42,
-            depth: 0.42,
-        },
-        Placement {
-            kind: "svc.bench",
-            origin: "-990 1350 0",
+            origin: "-1052 1506 0",
             angles: "0 255.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3432,7 +3445,25 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.bench",
-            origin: "-850 1270 0",
+            origin: "-1108 1506 0",
+            angles: "0 285.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-1158 1478 0",
+            angles: "0 315.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.42,
+            depth: 0.42,
+        },
+        Placement {
+            kind: "svc.bench",
+            origin: "-1186 1428 0",
             angles: "0 345.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3440,26 +3471,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
             depth: 0.42,
         },
         Placement {
-            kind: "svc.bench",
-            origin: "-850 1210 0",
-            angles: "0 375.0 0",
-            mount: Mount::Floor,
-            room: SERVICE_EAST,
-            width: 0.42,
-            depth: 0.42,
-        },
-        Placement {
-            kind: "svc.bench",
-            origin: "-879 1159 0",
-            angles: "0 405.0 0",
-            mount: Mount::Floor,
-            room: SERVICE_EAST,
-            width: 0.42,
-            depth: 0.42,
-        },
-        Placement {
             kind: "svc.dining_table",
-            origin: "-1180 1420 0",
+            origin: "-760 1800 0",
             angles: "0 0.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3468,8 +3481,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1208 1392 0",
-            angles: "0 135.0 0",
+            origin: "-789 1800 0",
+            angles: "0 0.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3477,8 +3490,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1208 1448 0",
-            angles: "0 225.0 0",
+            origin: "-760 1771 0",
+            angles: "0 90.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3486,8 +3499,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1152 1448 0",
-            angles: "0 315.0 0",
+            origin: "-731 1800 0",
+            angles: "0 180.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3495,8 +3508,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1152 1392 0",
-            angles: "0 405.0 0",
+            origin: "-760 1829 0",
+            angles: "0 270.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3504,7 +3517,7 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_table",
-            origin: "-1180 1080 0",
+            origin: "-760 1660 0",
             angles: "0 0.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3513,8 +3526,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1208 1052 0",
-            angles: "0 135.0 0",
+            origin: "-789 1660 0",
+            angles: "0 0.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3522,8 +3535,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1208 1108 0",
-            angles: "0 225.0 0",
+            origin: "-760 1631 0",
+            angles: "0 90.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3531,8 +3544,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1152 1108 0",
-            angles: "0 315.0 0",
+            origin: "-731 1660 0",
+            angles: "0 180.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3540,8 +3553,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1152 1052 0",
-            angles: "0 405.0 0",
+            origin: "-760 1689 0",
+            angles: "0 270.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3549,7 +3562,7 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_table",
-            origin: "-1380 1420 0",
+            origin: "-1080 1800 0",
             angles: "0 0.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3558,8 +3571,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1408 1392 0",
-            angles: "0 135.0 0",
+            origin: "-1109 1800 0",
+            angles: "0 0.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3567,8 +3580,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1408 1448 0",
-            angles: "0 225.0 0",
+            origin: "-1080 1771 0",
+            angles: "0 90.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3576,8 +3589,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1352 1448 0",
-            angles: "0 315.0 0",
+            origin: "-1051 1800 0",
+            angles: "0 180.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3585,8 +3598,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1352 1392 0",
-            angles: "0 405.0 0",
+            origin: "-1080 1829 0",
+            angles: "0 270.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3594,7 +3607,7 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_table",
-            origin: "-1392 1100 0",
+            origin: "-1240 1660 0",
             angles: "0 0.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
@@ -3603,8 +3616,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1420 1072 0",
-            angles: "0 135.0 0",
+            origin: "-1269 1660 0",
+            angles: "0 0.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3612,8 +3625,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1420 1128 0",
-            angles: "0 225.0 0",
+            origin: "-1240 1631 0",
+            angles: "0 90.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3621,8 +3634,8 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1364 1128 0",
-            angles: "0 315.0 0",
+            origin: "-1211 1660 0",
+            angles: "0 180.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -3630,8 +3643,368 @@ fn decoration_markers_have_known_assets_and_fit_their_rooms() {
         },
         Placement {
             kind: "svc.dining_chair",
-            origin: "-1364 1072 0",
-            angles: "0 405.0 0",
+            origin: "-1240 1689 0",
+            angles: "0 270.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_table",
+            origin: "-1400 1800 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.10,
+            depth: 1.10,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1429 1800 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1400 1771 0",
+            angles: "0 90.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1371 1800 0",
+            angles: "0 180.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1400 1829 0",
+            angles: "0 270.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_table",
+            origin: "-1400 1660 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.10,
+            depth: 1.10,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1429 1660 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1400 1631 0",
+            angles: "0 90.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1371 1660 0",
+            angles: "0 180.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1400 1689 0",
+            angles: "0 270.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_table",
+            origin: "-760 1140 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.10,
+            depth: 1.10,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-789 1140 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-760 1111 0",
+            angles: "0 90.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-731 1140 0",
+            angles: "0 180.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-760 1169 0",
+            angles: "0 270.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_table",
+            origin: "-1080 1140 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.10,
+            depth: 1.10,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1109 1140 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1080 1111 0",
+            angles: "0 90.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1051 1140 0",
+            angles: "0 180.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1080 1169 0",
+            angles: "0 270.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_table",
+            origin: "-1240 1260 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.10,
+            depth: 1.10,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1269 1260 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1240 1231 0",
+            angles: "0 90.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1211 1260 0",
+            angles: "0 180.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1240 1289 0",
+            angles: "0 270.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_table",
+            origin: "-1400 1140 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.10,
+            depth: 1.10,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1429 1140 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1400 1111 0",
+            angles: "0 90.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1371 1140 0",
+            angles: "0 180.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1400 1169 0",
+            angles: "0 270.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_table",
+            origin: "-1400 1260 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.10,
+            depth: 1.10,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1429 1260 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1400 1231 0",
+            angles: "0 90.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1371 1260 0",
+            angles: "0 180.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1400 1289 0",
+            angles: "0 270.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_table",
+            origin: "-1240 1540 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 1.10,
+            depth: 1.10,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1269 1540 0",
+            angles: "0 0.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1240 1511 0",
+            angles: "0 90.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1211 1540 0",
+            angles: "0 180.0 0",
+            mount: Mount::Floor,
+            room: SERVICE_EAST,
+            width: 0.44,
+            depth: 0.46,
+        },
+        Placement {
+            kind: "svc.dining_chair",
+            origin: "-1240 1569 0",
+            angles: "0 270.0 0",
             mount: Mount::Floor,
             room: SERVICE_EAST,
             width: 0.44,
@@ -5148,6 +5521,14 @@ fn utility_spots_are_unique_walkable_and_routable() {
         "service.table.b",
         "service.table.c",
         "service.table.d",
+        "service.table.e",
+        "service.table.f",
+        "service.table.g",
+        "service.table.h",
+        "service.table.i",
+        "service.table.j",
+        "service.table.k",
+        "service.table.l",
         "security.dispatch",
         "security.desk",
         "security.evidence",
@@ -5193,6 +5574,81 @@ fn utility_spots_are_unique_walkable_and_routable() {
             "utility spot '{id}' at {at} cannot route to the counter",
         );
     }
+}
+
+/// The galley bar is concentric with the room's wayfinding hub.
+///
+/// The hub is not decoration: `dress_wayfinding_hubs` spawns a disc with the
+/// department route lines radiating out of it, so the deck itself draws a
+/// starburst converging on one point. The first galley put its bar 5 m away from
+/// that point, and the room read as two competing centres — the floor pointing
+/// at nothing and a bar sitting off to one side of it.
+///
+/// Concentric, the routes run under the counter and out between the stools, and
+/// the thing the floor already pointed at is the thing you walk to.
+///
+/// Falsifies by construction: move either the hub or the ring and the centres
+/// separate. The tolerance is tight because there is no reason for these to be
+/// nearly aligned — they are either the same point or the bug is back.
+#[test]
+fn the_galley_bar_is_built_around_the_wayfinding_hub() {
+    /// The hub disc's own outer radius (`HUB_PORT_OUTER_RADIUS`). A ring that
+    /// cleared this would sit on top of the routes instead of around them.
+    const HUB_RADIUS: f32 = 1.17;
+    const TOLERANCE: f32 = 0.05;
+
+    let map = parse();
+    let hub = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("wayfinding_hub"))
+        .filter_map(origin_xz)
+        .find(|(x, z)| (-47.5..=-23.5).contains(x) && (15.0..=39.0).contains(z))
+        .expect("Service has a wayfinding hub");
+
+    let segments: Vec<(f32, f32)> = map
+        .iter()
+        .filter(|entity| classname(entity).as_deref() == Some("decoration_spot"))
+        .filter(|entity| property(entity, "kind").as_deref() == Some("svc.bar_counter"))
+        .filter_map(origin_xz)
+        .collect();
+    assert!(
+        segments.len() >= 8,
+        "the bar is {} segments; too few to read as a ring",
+        segments.len(),
+    );
+
+    let centre = (
+        segments.iter().map(|(x, _)| x).sum::<f32>() / segments.len() as f32,
+        segments.iter().map(|(_, z)| z).sum::<f32>() / segments.len() as f32,
+    );
+    // The omitted entrance segment biases the mean toward the far side, so
+    // compare radii per segment rather than trusting the centroid alone.
+    let offset = ((centre.0 - hub.0).powi(2) + (centre.1 - hub.1).powi(2)).sqrt();
+    assert!(
+        offset <= 0.35,
+        "the bar's centre is {offset:.2} m from the wayfinding hub at \
+         ({:.1}, {:.1}); the deck's route lines converge somewhere the bar is not",
+        hub.0,
+        hub.1,
+    );
+
+    let radii: Vec<f32> = segments
+        .iter()
+        .map(|(x, z)| ((x - hub.0).powi(2) + (z - hub.1).powi(2)).sqrt())
+        .collect();
+    let (min, max) = radii
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), r| (lo.min(*r), hi.max(*r)));
+    assert!(
+        max - min <= TOLERANCE,
+        "bar segment radii from the hub span {min:.2}..{max:.2} m; \
+         the ring is not centred on the hub",
+    );
+    assert!(
+        min > HUB_RADIUS,
+        "the bar ring sits at {min:.2} m, inside the hub disc's {HUB_RADIUS} m \
+         radius; the counter would cover the route lines instead of framing them",
+    );
 }
 
 /// Service must be able to seat a real fraction of the station.

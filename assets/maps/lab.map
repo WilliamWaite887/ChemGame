@@ -3662,271 +3662,572 @@
 "id" "service.lounge.gather"
 "capacity" "2"
 }
-// The galley. A central circular bar with one segment left out as the way
-// in: staff work inside the ring, crew sit around the outside, and the
-// room finally has a centre. Tables with chairs are spread across the
-// northern half, which was bare floor. Replaces a scatter of loose
-// stools that read as a waiting area rather than a canteen.
+// The galley. The central bar is concentric with the room's wayfinding
+// hub, so the department route lines converging in the deck run under
+// it and out between the stools: the thing the floor already pointed
+// at is now the thing you walk to. One segment is left out as the way
+// in, facing the public door; staff work inside the ring.
+// Twelve slots on a 1.9 m ring give 0.98 m of arc per 1.02 m segment,
+// so the counter reads as continuous rather than as a dashed circle.
 {
 "classname" "decoration_spot"
-"origin" "-998 1174 0"
-"angles" "0 -60.0 0"
-"kind" "svc.bar_counter"
-}
-{
-"classname" "decoration_spot"
-"origin" "-1026 1202 0"
-"angles" "0 -30.0 0"
-"kind" "svc.bar_counter"
-}
-{
-"classname" "decoration_spot"
-"origin" "-1036 1240 0"
+"origin" "-1156 1400 0"
 "angles" "0 0.0 0"
 "kind" "svc.bar_counter"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1026 1278 0"
+"origin" "-1146 1362 0"
 "angles" "0 30.0 0"
 "kind" "svc.bar_counter"
 }
 {
 "classname" "decoration_spot"
-"origin" "-998 1306 0"
+"origin" "-1118 1334 0"
 "angles" "0 60.0 0"
 "kind" "svc.bar_counter"
 }
 {
 "classname" "decoration_spot"
-"origin" "-960 1316 0"
+"origin" "-1080 1324 0"
 "angles" "0 90.0 0"
 "kind" "svc.bar_counter"
 }
 {
 "classname" "decoration_spot"
-"origin" "-922 1306 0"
+"origin" "-1042 1334 0"
 "angles" "0 120.0 0"
 "kind" "svc.bar_counter"
 }
 {
 "classname" "decoration_spot"
-"origin" "-894 1278 0"
+"origin" "-1014 1362 0"
 "angles" "0 150.0 0"
 "kind" "svc.bar_counter"
 }
 {
 "classname" "decoration_spot"
-"origin" "-884 1240 0"
-"angles" "0 180.0 0"
-"kind" "svc.bar_counter"
-}
-{
-"classname" "decoration_spot"
-"origin" "-894 1202 0"
+"origin" "-1014 1438 0"
 "angles" "0 210.0 0"
 "kind" "svc.bar_counter"
 }
 {
 "classname" "decoration_spot"
-"origin" "-922 1174 0"
+"origin" "-1042 1466 0"
 "angles" "0 240.0 0"
 "kind" "svc.bar_counter"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1041 1159 0"
+"origin" "-1080 1476 0"
+"angles" "0 270.0 0"
+"kind" "svc.bar_counter"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1118 1466 0"
+"angles" "0 300.0 0"
+"kind" "svc.bar_counter"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1146 1438 0"
+"angles" "0 330.0 0"
+"kind" "svc.bar_counter"
+}
+// Stools ring the bar from the outside, skipping the three slots at the
+// entrance so the gap stays legible as a doorway rather than a dent.
+{
+"classname" "decoration_spot"
+"origin" "-1186 1372 0"
+"angles" "0 15.0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1158 1322 0"
+"angles" "0 45.0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1108 1294 0"
+"angles" "0 75.0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1052 1294 0"
+"angles" "0 105.0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1002 1322 0"
 "angles" "0 135.0 0"
 "kind" "svc.bench"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1070 1210 0"
-"angles" "0 165.0 0"
-"kind" "svc.bench"
-}
-{
-"classname" "decoration_spot"
-"origin" "-1070 1270 0"
-"angles" "0 195.0 0"
-"kind" "svc.bench"
-}
-{
-"classname" "decoration_spot"
-"origin" "-1041 1321 0"
-"angles" "0 225.0 0"
-"kind" "svc.bench"
-}
-{
-"classname" "decoration_spot"
-"origin" "-990 1350 0"
+"origin" "-1052 1506 0"
 "angles" "0 255.0 0"
 "kind" "svc.bench"
 }
 {
 "classname" "decoration_spot"
-"origin" "-850 1270 0"
+"origin" "-1108 1506 0"
+"angles" "0 285.0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1158 1478 0"
+"angles" "0 315.0 0"
+"kind" "svc.bench"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1186 1428 0"
 "angles" "0 345.0 0"
 "kind" "svc.bench"
 }
+// Twelve tables across the whole 573 m2 floor, including the western
+// third (x -47.5..-38.7) that had never been built on. Two aisles are
+// kept clear: z 23 between the west and east doors, and x -35 between
+// the public and south doors, which is also the bar's own axis.
 {
 "classname" "decoration_spot"
-"origin" "-850 1210 0"
-"angles" "0 375.0 0"
-"kind" "svc.bench"
-}
-{
-"classname" "decoration_spot"
-"origin" "-879 1159 0"
-"angles" "0 405.0 0"
-"kind" "svc.bench"
-}
-{
-"classname" "decoration_spot"
-"origin" "-1180 1420 0"
+"origin" "-760 1800 0"
 "angles" "0 0.0 0"
 "kind" "svc.dining_table"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1208 1392 0"
-"angles" "0 135.0 0"
+"origin" "-789 1800 0"
+"angles" "0 0.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1208 1448 0"
-"angles" "0 225.0 0"
+"origin" "-760 1771 0"
+"angles" "0 90.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1152 1448 0"
-"angles" "0 315.0 0"
+"origin" "-731 1800 0"
+"angles" "0 180.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1152 1392 0"
-"angles" "0 405.0 0"
+"origin" "-760 1829 0"
+"angles" "0 270.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1180 1080 0"
+"origin" "-760 1660 0"
 "angles" "0 0.0 0"
 "kind" "svc.dining_table"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1208 1052 0"
-"angles" "0 135.0 0"
+"origin" "-789 1660 0"
+"angles" "0 0.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1208 1108 0"
-"angles" "0 225.0 0"
+"origin" "-760 1631 0"
+"angles" "0 90.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1152 1108 0"
-"angles" "0 315.0 0"
+"origin" "-731 1660 0"
+"angles" "0 180.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1152 1052 0"
-"angles" "0 405.0 0"
+"origin" "-760 1689 0"
+"angles" "0 270.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1380 1420 0"
+"origin" "-1080 1800 0"
 "angles" "0 0.0 0"
 "kind" "svc.dining_table"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1408 1392 0"
-"angles" "0 135.0 0"
+"origin" "-1109 1800 0"
+"angles" "0 0.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1408 1448 0"
-"angles" "0 225.0 0"
+"origin" "-1080 1771 0"
+"angles" "0 90.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1352 1448 0"
-"angles" "0 315.0 0"
+"origin" "-1051 1800 0"
+"angles" "0 180.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1352 1392 0"
-"angles" "0 405.0 0"
+"origin" "-1080 1829 0"
+"angles" "0 270.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1392 1100 0"
+"origin" "-1240 1660 0"
 "angles" "0 0.0 0"
 "kind" "svc.dining_table"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1420 1072 0"
-"angles" "0 135.0 0"
+"origin" "-1269 1660 0"
+"angles" "0 0.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1420 1128 0"
-"angles" "0 225.0 0"
+"origin" "-1240 1631 0"
+"angles" "0 90.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1364 1128 0"
-"angles" "0 315.0 0"
+"origin" "-1211 1660 0"
+"angles" "0 180.0 0"
 "kind" "svc.dining_chair"
 }
 {
 "classname" "decoration_spot"
-"origin" "-1364 1072 0"
-"angles" "0 405.0 0"
+"origin" "-1240 1689 0"
+"angles" "0 270.0 0"
 "kind" "svc.dining_chair"
 }
-// Dining tables. Service is the one room the whole station visits and it
-// had two seats for thirty residents; a hunger drive would have sent a
-// crowd to a room that could seat four. Capacity 4 apiece, so a table
-// reads as shared rather than as four separate chairs.
+{
+"classname" "decoration_spot"
+"origin" "-1400 1800 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_table"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1429 1800 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1400 1771 0"
+"angles" "0 90.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1371 1800 0"
+"angles" "0 180.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1400 1829 0"
+"angles" "0 270.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1400 1660 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_table"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1429 1660 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1400 1631 0"
+"angles" "0 90.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1371 1660 0"
+"angles" "0 180.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1400 1689 0"
+"angles" "0 270.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-760 1140 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_table"
+}
+{
+"classname" "decoration_spot"
+"origin" "-789 1140 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-760 1111 0"
+"angles" "0 90.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-731 1140 0"
+"angles" "0 180.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-760 1169 0"
+"angles" "0 270.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1080 1140 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_table"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1109 1140 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1080 1111 0"
+"angles" "0 90.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1051 1140 0"
+"angles" "0 180.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1080 1169 0"
+"angles" "0 270.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1240 1260 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_table"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1269 1260 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1240 1231 0"
+"angles" "0 90.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1211 1260 0"
+"angles" "0 180.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1240 1289 0"
+"angles" "0 270.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1400 1140 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_table"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1429 1140 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1400 1111 0"
+"angles" "0 90.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1371 1140 0"
+"angles" "0 180.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1400 1169 0"
+"angles" "0 270.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1400 1260 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_table"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1429 1260 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1400 1231 0"
+"angles" "0 90.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1371 1260 0"
+"angles" "0 180.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1400 1289 0"
+"angles" "0 270.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1240 1540 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_table"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1269 1540 0"
+"angles" "0 0.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1240 1511 0"
+"angles" "0 90.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1211 1540 0"
+"angles" "0 180.0 0"
+"kind" "svc.dining_chair"
+}
+{
+"classname" "decoration_spot"
+"origin" "-1240 1569 0"
+"angles" "0 270.0 0"
+"kind" "svc.dining_chair"
+}
+// A seat spot per table, capacity 4. These are separate authorings from
+// the furniture above and must be moved with it: a previous pass left
+// service.table.a sitting inside the bar ring.
 {
 "classname" "utility_spot"
-"origin" "-1180 1420 0"
+"origin" "-760 1800 0"
 "id" "service.table.a"
 "capacity" "4"
 }
 {
 "classname" "utility_spot"
-"origin" "-1180 1080 0"
+"origin" "-760 1660 0"
 "id" "service.table.b"
 "capacity" "4"
 }
 {
 "classname" "utility_spot"
-"origin" "-1380 1420 0"
+"origin" "-1080 1800 0"
 "id" "service.table.c"
 "capacity" "4"
 }
 {
 "classname" "utility_spot"
-"origin" "-1392 1100 0"
+"origin" "-1240 1660 0"
 "id" "service.table.d"
+"capacity" "4"
+}
+{
+"classname" "utility_spot"
+"origin" "-1400 1800 0"
+"id" "service.table.e"
+"capacity" "4"
+}
+{
+"classname" "utility_spot"
+"origin" "-1400 1660 0"
+"id" "service.table.f"
+"capacity" "4"
+}
+{
+"classname" "utility_spot"
+"origin" "-760 1140 0"
+"id" "service.table.g"
+"capacity" "4"
+}
+{
+"classname" "utility_spot"
+"origin" "-1080 1140 0"
+"id" "service.table.h"
+"capacity" "4"
+}
+{
+"classname" "utility_spot"
+"origin" "-1240 1260 0"
+"id" "service.table.i"
+"capacity" "4"
+}
+{
+"classname" "utility_spot"
+"origin" "-1400 1140 0"
+"id" "service.table.j"
+"capacity" "4"
+}
+{
+"classname" "utility_spot"
+"origin" "-1400 1260 0"
+"id" "service.table.k"
+"capacity" "4"
+}
+{
+"classname" "utility_spot"
+"origin" "-1240 1540 0"
+"id" "service.table.l"
 "capacity" "4"
 }
 // Benches beside the tables, and boards on the west and north walls.

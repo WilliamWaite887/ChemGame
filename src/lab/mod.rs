@@ -721,6 +721,20 @@ pub struct Solid {
     pub half_extents: Vec3,
 }
 
+/// Marks a [`Solid`] as a real structural wall — the only kind of solid
+/// proximity voice chat should let muffle a voice.
+///
+/// `authority_segment_blocked` tests every `Solid` it is given, and most of
+/// what carries one is not a wall: a bench, a delivery counter, a 1.7 m
+/// machine casing. Occlusion built on an unfiltered `Solid` query would make
+/// a countertop muffle speech as heavily as the station's own hull, so
+/// `voice::net` queries `With<AcousticOccluder>` specifically rather than
+/// every `Solid` — see `lab::tb::is_structural_wall` for which authored
+/// brushes actually get this marker.
+#[derive(Component, Reflect)]
+#[reflect(Component)]
+pub struct AcousticOccluder;
+
 /// The highest surface anything can be set down on, in metres.
 ///
 /// A box whose top is above this is something you walk into rather than
@@ -950,7 +964,9 @@ pub struct Region {
     /// belongs to neither of the rooms it joins.
     pub room: Option<String>,
     /// Stable map-authored identity for a dynamic bridge, if this is one.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Read into `nav::NavGraph`'s own nodes and from there by
+    /// `voice::net::relay_voice_frames` to know which doorway an occluded
+    /// voice's path crossed, and so which `Door` to ask whether it is shut.
     pub bridge_id: Option<String>,
     /// The elevation of this floor. Sloped profiles are used by stair runs;
     /// ordinary rooms and corridors remain flat.
@@ -1194,24 +1210,33 @@ impl WalkableAreas {
 }
 
 /// Spawns a scaled cube that blocks movement.
+///
+/// `occludes_sound` marks the entity [`AcousticOccluder`] too — real wall
+/// structure only, never a bench or a shelf. Mirrors `lab::tb`'s own
+/// `is_structural_wall` split of the same `Solid`-bearing colliders in the
+/// TrenchBroom path, so the two build modes agree on what a voice can hide
+/// behind.
 fn solid_box(
     commands: &mut Commands,
     cube: &Handle<Mesh>,
     material: &Handle<StandardMaterial>,
     center: Vec3,
     size: Vec3,
+    occludes_sound: bool,
 ) -> Entity {
-    commands
-        .spawn((
-            Mesh3d(cube.clone()),
-            MeshMaterial3d(material.clone()),
-            Transform::from_translation(center).with_scale(size),
-            Solid {
-                half_extents: size * 0.5,
-            },
-            crate::until_we_leave_the_lab(),
-        ))
-        .id()
+    let mut solid = commands.spawn((
+        Mesh3d(cube.clone()),
+        MeshMaterial3d(material.clone()),
+        Transform::from_translation(center).with_scale(size),
+        Solid {
+            half_extents: size * 0.5,
+        },
+        crate::until_we_leave_the_lab(),
+    ));
+    if occludes_sound {
+        solid.insert(AcousticOccluder);
+    }
+    solid.id()
 }
 
 /// Spawns a scaled cube that does not block movement (floor, ceiling, trim).
@@ -1299,6 +1324,7 @@ fn spawn_shell(
                 &wall,
                 run.point((from + to) * 0.5) + Vec3::Y * (ROOM_HEIGHT * 0.5),
                 run.extent(length, ROOM_HEIGHT),
+                true,
             );
         }
     }
@@ -1661,6 +1687,7 @@ fn spawn_fixtures(mut commands: Commands, assets: Res<MachineAssets>) {
             &assets.bench,
             Vec3::new(x, 0.45, -2.2),
             Vec3::new(2.6, 0.9, 0.9),
+            false,
         );
     }
 
@@ -1672,6 +1699,7 @@ fn spawn_fixtures(mut commands: Commands, assets: Res<MachineAssets>) {
             &assets.bench,
             Vec3::new(ROOMS[PREP].min_x + 0.5, 0.45, z),
             Vec3::new(1.0, 0.9, 1.4),
+            false,
         );
     }
 
@@ -1682,6 +1710,7 @@ fn spawn_fixtures(mut commands: Commands, assets: Res<MachineAssets>) {
         &assets.bench,
         Vec3::new(9.0, 0.45, -1.4),
         Vec3::new(2.2, 0.9, 0.8),
+        false,
     );
 }
 

@@ -10,10 +10,11 @@
 //! tested rather than borrowed from the reliable channels everything else
 //! uses.
 //!
-//! Phase 1 audibility is distance-only: a straight-line range cull, no
-//! occlusion. Walls, corners and closed doors are Phase 2, added entirely by
-//! changing what feeds `gain`/`muffle`/`emitter` here — the wire shape and the
-//! relay's shape do not change.
+//! Audibility itself — range, walls, the portal graph, closed doors — is
+//! [`super::acoustics::compute_audibility`], a pure function this module
+//! feeds and caches per [`AudibilityCache`]. Exactly as anticipated when it
+//! was distance-only: the wire shape and this relay's own shape never had to
+//! change to grow occlusion, only what got passed into that one function.
 
 use std::collections::HashMap;
 
@@ -22,10 +23,14 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::door::Door;
+use crate::lab::{AcousticOccluder, Solid};
+use crate::nav::NavGraph;
 use crate::net::is_authority;
 use crate::player::Chemist;
 use crate::AppState;
 
+use super::acoustics::compute_audibility;
 use super::codec::MAX_PACKET_BYTES;
 
 /// How a frame was spoken. Travels in both directions: the sender is the only
@@ -106,6 +111,14 @@ const MAX_PACKETS_PER_SECOND: u32 = 80;
 /// a sustained flood is not an accident.
 const KICK_AFTER_VIOLATIONS: u32 = 200;
 
+/// How often one (speaker, listener) pair's occlusion is actually
+/// recomputed. The segment tests and, when blocked, a full portal-graph
+/// search are cheap for the handful of pairs four players produce, but not
+/// cheap enough to redo on every single 20 ms voice frame while someone is
+/// mid-sentence — a few Hz is still far faster than anyone can walk through
+/// a doorway or a door can swing shut.
+const AUDIBILITY_RECOMPUTE_INTERVAL: f32 = 0.2;
+
 /// Registers the wire types.
 ///
 /// Called from [`super::VoicePlugin`] rather than inlined there, so the
@@ -114,12 +127,27 @@ pub(super) fn register(app: &mut App) {
     app.add_client_message::<VoiceFrame>(Channel::Unreliable)
         .add_mapped_server_message::<VoiceHeard>(Channel::Unreliable)
         .init_resource::<SenderThrottles>()
+        .init_resource::<AudibilityCache>()
         .add_systems(
             Update,
             relay_voice_frames
                 .run_if(is_authority)
                 .run_if(in_state(AppState::Playing)),
         );
+}
+
+/// One (speaker, listener) pair's last-computed audibility, so the real
+/// geometry work only happens a few times a second per pair rather than
+/// once per voice frame. Authority-only, never replicated — this is server
+/// scratch, the same as `RoomMemory` in `speech`.
+#[derive(Resource, Default)]
+struct AudibilityCache {
+    entries: HashMap<(Entity, Entity), CachedAudibility>,
+}
+
+struct CachedAudibility {
+    computed_at: f32,
+    result: Option<super::acoustics::Audibility>,
 }
 
 /// Per-sender rate-limit bookkeeping. Authority-only, never replicated — a
@@ -138,23 +166,46 @@ struct Throttle {
 }
 
 /// Reads what every connected client sent this frame, and re-sends whatever
-/// is still in range to whoever it is in range of.
+/// is still in range and audible to whoever can hear it.
 ///
 /// Runs once per client entity, not once per message: a hostile or merely
 /// unlucky client can pack many frames into one drain (see
 /// [`super::jitter`]'s module doc on `drain_received`), and the byte/rate
 /// limits below have to see the whole batch to mean anything.
+///
+/// The actual geometry — distance, walls, the portal graph, closed doors —
+/// lives in the pure, unit-tested [`compute_audibility`]; this function's own
+/// job is gathering what that needs from the world and caching the answer,
+/// per [`AudibilityCache`].
 #[allow(clippy::too_many_arguments)]
 fn relay_voice_frames(
     mut incoming: MessageReader<FromClient<VoiceFrame>>,
     mut throttles: ResMut<SenderThrottles>,
+    mut audibility: ResMut<AudibilityCache>,
     time: Res<Time>,
-    speakers: Query<(Entity, &Chemist, &Transform)>,
-    listeners: Query<(&Chemist, &Transform), With<Chemist>>,
+    chemists: Query<(Entity, &Chemist, &Transform)>,
+    occluders: Query<(&Transform, &Solid), With<AcousticOccluder>>,
+    doors: Query<&Door>,
+    nav: Res<NavGraph>,
     mut outgoing: MessageWriter<ToClients<VoiceHeard>>,
     mut commands: Commands,
 ) {
     let now = time.elapsed_secs();
+
+    // Gathered once per relay pass, not once per pair: the wall list is the
+    // same for every (speaker, listener) this frame, and rebuilding it per
+    // pair would be the exact per-audio-frame cost the cache below exists to
+    // avoid paying even once.
+    let walls: Vec<(Vec3, Vec3)> = occluders
+        .iter()
+        .map(|(transform, solid)| (transform.translation, solid.half_extents))
+        .collect();
+    let door_open = |bridge_id: &str| {
+        doors
+            .iter()
+            .find(|door| door.bridge_id == bridge_id)
+            .is_none_or(|door| door.open)
+    };
 
     for message in incoming.read() {
         // Oversized payloads are rejected before they cost anything else —
@@ -164,7 +215,7 @@ fn relay_voice_frames(
             continue;
         }
 
-        let Some((speaker_entity, speaker_chemist, speaker_transform)) = speakers
+        let Some((speaker_entity, speaker_chemist, speaker_transform)) = chemists
             .iter()
             .find(|(_, chemist, _)| chemist.client == message.client_id)
         else {
@@ -181,7 +232,7 @@ fn relay_voice_frames(
             continue;
         }
 
-        for (listener_chemist, listener_transform) in &listeners {
+        for (listener_entity, listener_chemist, listener_transform) in &chemists {
             if listener_chemist.client == speaker_chemist.client {
                 continue; // Never echo a speaker back to themselves.
             }
@@ -189,26 +240,44 @@ fn relay_voice_frames(
                 continue;
             }
 
-            let distance_sq = speaker_transform
-                .translation
-                .distance_squared(listener_transform.translation);
-            if distance_sq > PROXIMITY_RANGE * PROXIMITY_RANGE {
-                continue;
-            }
+            let cache_key = (speaker_entity, listener_entity);
+            let cached = audibility.entries.get(&cache_key);
+            let stale = cached.is_none_or(|cached| {
+                now - cached.computed_at >= AUDIBILITY_RECOMPUTE_INTERVAL
+            });
 
-            // Phase 1: straight-line falloff only, no occlusion. `gain`
-            // covers only what Bevy's own spatial audio cannot see — in
-            // Phase 1 that is nothing, since the emitter *is* the speaker, so
-            // this stays at 1.0 and Bevy's distance attenuation does all the
-            // work. Phase 2 changes this function's body, not its signature.
+            let result = if stale {
+                let result = compute_audibility(
+                    speaker_transform.translation,
+                    listener_transform.translation,
+                    &walls,
+                    Some(&nav),
+                    door_open,
+                );
+                audibility.entries.insert(
+                    cache_key,
+                    CachedAudibility {
+                        computed_at: now,
+                        result,
+                    },
+                );
+                result
+            } else {
+                cached.and_then(|cached| cached.result)
+            };
+
+            let Some(audible) = result else {
+                continue;
+            };
+
             let heard = VoiceHeard {
                 speaker: speaker_entity,
                 stream_id: message.message.stream_id,
                 seq: message.message.seq,
                 mode: message.message.mode,
-                emitter: speaker_transform.translation.to_array(),
-                gain: 1.0,
-                muffle: 0.0,
+                emitter: audible.emitter.to_array(),
+                gain: audible.gain,
+                muffle: audible.muffle,
                 data: message.message.data.clone(),
             };
 

@@ -47,8 +47,8 @@ use crate::crew::{CrewPosts, Departments};
 use crate::utility_ai::UtilitySpots;
 
 use super::{
-    machine_kind_named, Bounds, CrisisSpots, DoorSpots, FloorProfile, LabLight, MachineSpots,
-    MapReady, Solid, WalkableAreas, WalkableSurface, TB_SCALE,
+    machine_kind_named, AcousticOccluder, Bounds, CrisisSpots, DoorSpots, FloorProfile, LabLight,
+    MachineSpots, MapReady, Solid, WalkableAreas, WalkableSurface, TB_SCALE,
 };
 
 /// The only world asset allowed to replace the station's map-derived state.
@@ -79,6 +79,30 @@ fn brush_extents(brush: &bevy_trenchbroom::brush::Brush) -> Option<(Vec3, Vec3)>
 /// in the hand-built lab.
 fn is_scenery(texture: &str) -> bool {
     texture.starts_with("floor_") || matches!(texture, "ceiling" | "stripe")
+}
+
+/// Whether a texture marks real wall structure — the only kind of collider
+/// that should be allowed to occlude proximity voice.
+///
+/// Deliberately narrower than "not scenery": `["wall", "bench"]` are both
+/// real colliders (see `scenery_never_collides_and_structure_always_does`),
+/// but only one of them is a wall. Matches the `"wall"` prefix rather than
+/// `"wall"`/`"wall_chemistry"` verbatim so a future department-tinted
+/// variant is covered automatically, the same way `is_scenery` matches every
+/// `floor_*` room rather than naming each one.
+fn is_structural_wall(texture: &str) -> bool {
+    texture.starts_with("wall")
+}
+
+/// Whether any face of `brush` is textured as wall structure. A brush is
+/// authored uniformly in this map (every face of a given wall shares one
+/// texture), but this checks `any` rather than `all` so a mixed brush still
+/// occludes if even one visible face is a wall.
+fn brush_is_structural_wall(brush: &bevy_trenchbroom::brush::Brush) -> bool {
+    brush
+        .surfaces
+        .iter()
+        .any(|surface| is_structural_wall(&surface.texture))
 }
 
 /// Whether a brush spanning `min_y..max_y` is something a body can walk into.
@@ -137,7 +161,11 @@ impl LabWorldspawn {
                     },
                 ))
                 .id();
-            view.world.entity_mut(solid).insert(ChildOf(view.entity));
+            let mut solid = view.world.entity_mut(solid);
+            solid.insert(ChildOf(view.entity));
+            if brush_is_structural_wall(brush) {
+                solid.insert(AcousticOccluder);
+            }
         }
 
         Ok(())
@@ -2059,6 +2087,7 @@ impl Plugin for LabTrenchBroomPlugin {
             // scene world. The scene spawner panics on any component it cannot
             // find in the registry, so they have to be here too.
             .register_type::<Solid>()
+            .register_type::<AcousticOccluder>()
             .register_type::<FloorProfile>()
             .register_type::<WalkableSurface>()
             .register_type::<WalkableFootprints>();
@@ -2158,6 +2187,19 @@ mod tests {
         }
         for texture in ["wall", "bench"] {
             assert!(!is_scenery(texture), "{texture} should stop the player");
+        }
+    }
+
+    #[test]
+    fn only_real_walls_can_occlude_a_voice() {
+        // The exact case the plan warned about: a bench is a real collider —
+        // `apply_move_input` must stop a body at it — but must not muffle
+        // proximity voice the way a station wall does.
+        for texture in ["wall", "wall_chemistry", "wall_medical"] {
+            assert!(is_structural_wall(texture), "{texture} should occlude");
+        }
+        for texture in ["bench", "floor_lobby", "ceiling", "stripe", ""] {
+            assert!(!is_structural_wall(texture), "{texture} must not occlude");
         }
     }
 

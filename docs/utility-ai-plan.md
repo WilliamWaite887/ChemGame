@@ -3207,6 +3207,62 @@ accidentally revert, and both have falsification tests
 
 ## Decision log
 
+### 2026-09-08, the room already had a centre and we ignored it
+
+The galley's bar was rebuilt once and still read wrong. The user named the fix
+without naming the mechanism: *"the center bar could be on top of where all the
+navigational lines come out of."*
+
+Those lines are not floor texture. `wayfinding_hub` at `-1080 1400 0` — world
+(−35, 27) — spawns a 1.17 m disc with a coloured route strip radiating toward
+every department (`dress_wayfinding_hubs`, `tb.rs:960`). The deck itself draws a
+starburst converging on one point, and it has been there the whole time.
+
+The bar was at (−31, 24): **4.9 m away**. So Service had two competing centres —
+a floor pointing insistently at nothing, and a bar sitting off to one side of
+it. Every screenshot showed the same thing and it read as "off", not as
+"misaligned", which is why the first rebuild fixed the furniture and not the
+composition.
+
+Rebuilt concentric: a 12-slot ring at radius 1.9 m, one segment omitted facing
+the public door. The routes now run under the counter and out between the
+stools. Twelve slots rather than eleven because 1.9 m of radius gives 0.98 m of
+arc per 1.02 m segment — the counter reads continuous instead of dashed.
+
+**The second finding was worse, and nobody asked about it.** The user added
+*"theres more space we can use in general."* `SERVICE_EAST`, the bounds
+`decoration_markers_have_known_assets_and_fit_their_rooms` validates against,
+was `min_x: -38.7`. The walkable floor starts at **x −47.5**. The bounds had
+been narrower than the room in two directions — `max_z` was fixed at 28.6 → 39
+during the last pass for exactly the same reason — and admitted 365 m² of a
+573 m² room.
+
+That inverts what the test was for. A bounds check meant to keep props inside
+the room was silently keeping them out of two thirds of it, and every previous
+density measurement was taken against the truncated figure. **A validation
+constant that is wrong in the conservative direction produces no failure, just a
+quietly smaller world** — it is invisible precisely because it only ever
+rejects. The 0.8 decorations/100 m² that justified this whole stage was measured
+inside a box that was itself the bug.
+
+Widened to the real floor and filled: 12 tables × 4 chairs spread across both
+wings, keeping two aisles clear (z 23 between the west and east doors, x −35
+between the public and south doors — which is also the bar's own axis). Seating
+20 → 57 physical places, 48 reservable across capacity-4 table spots.
+
+`the_galley_bar_is_built_around_the_wayfinding_hub` pins the alignment: it
+asserts the ring's centroid is within 0.35 m of the hub, that per-segment radii
+vary by ≤0.05 m, and that the ring clears the hub disc so the counter frames the
+routes rather than covering them. Falsified by shifting the ring back to
+(−31, 24) — fails with "the bar's centre is 4.90 m from the wayfinding hub".
+The widened bounds were falsified separately: reverting `min_x` to −38.7 fails
+`decoration_markers_have_known_assets_and_fit_their_rooms` on the west wing.
+
+`LOUNGE_SEATS` grew 6 → 14. Forty-eight places for thirty residents is
+deliberate headroom, not a demand estimate: occupancy filtering is per spot, so
+a room sized exactly to the crew bounces the last arrivals back to standing at
+their posts as soon as two tables happen to fill.
+
 ### 2026-09-06, the station was not idle, it was blind
 
 Twenty-one of the thirty residents had no Routine candidate at all, and the

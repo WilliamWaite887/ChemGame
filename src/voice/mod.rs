@@ -43,6 +43,7 @@
 
 use bevy::prelude::*;
 
+mod acoustics;
 mod capture;
 pub mod codec;
 pub mod frame;
