@@ -8,6 +8,8 @@ use std::collections::HashMap;
 #[cfg(debug_assertions)]
 pub(crate) mod asset_tour;
 #[cfg(debug_assertions)]
+mod cult_tour;
+#[cfg(debug_assertions)]
 pub(crate) mod trailer;
 pub struct CapturePlugin;
 impl Plugin for CapturePlugin {

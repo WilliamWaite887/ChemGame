@@ -90,3 +90,4 @@ docs/station-asset-session.md
 assets/textures/ceiling_metal.png
 .gitignore
 assets/textures/ceiling_casing.png
+assets/3dassets/station_starter_kit/generate_cult_expansion.py

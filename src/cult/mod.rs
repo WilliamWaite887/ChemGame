@@ -9,6 +9,8 @@
 //! flash through the same authority-owned world-effect path as every other
 //! spill. Nothing here reaches into hazards or special-cases the ritual ask.
 
+pub mod aftermath;
+
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
@@ -43,6 +45,7 @@ pub struct CultPlugin;
 
 impl Plugin for CultPlugin {
     fn build(&self, app: &mut App) {
+        aftermath::register(app);
         app.add_plugins(threat::ScriptPlugin::<CultScript>::new(
             "data/station.cult.ron",
             "cult.ron",
@@ -140,6 +143,9 @@ pub struct CultScript {
     /// [`CultIncidentDef`]. The one manifestation a diligent chemist could
     /// find and neutralise before Corwin ever makes a single ask.
     pub altar: CultIncidentDef,
+    /// Secondary station contamination, introduced by the existing waves.
+    #[serde(default)]
+    pub defacements: Vec<aftermath::DefacementDef>,
 }
 
 impl CultScript {
@@ -174,7 +180,7 @@ impl CultScript {
     }
 
     /// Where this stage's guard is credited — right after its own anchors.
-    fn guard_ward_index(&self, stage_index: usize) -> usize {
+    pub(crate) fn guard_ward_index(&self, stage_index: usize) -> usize {
         self.stage_ward_base(stage_index) + self.stages[stage_index].incidents.len()
     }
 }
@@ -248,10 +254,18 @@ pub enum CultVisualId {
     AirlessCandle,
     RiftSealScar,
     FinaleFocus,
+    PilgrimMarks,
+    EtchedPanel,
+    WaxShrine,
+    OfferingCache,
+    BoundVent,
+    BloodRoot,
+    ProcessionalBanner,
+    RiftFracture,
 }
 
 impl CultVisualId {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 16] = [
         Self::OuterAltarWard,
         Self::WetChalkSigil,
         Self::WhisperingResidue,
@@ -260,9 +274,17 @@ impl CultVisualId {
         Self::AirlessCandle,
         Self::RiftSealScar,
         Self::FinaleFocus,
+        Self::PilgrimMarks,
+        Self::EtchedPanel,
+        Self::WaxShrine,
+        Self::OfferingCache,
+        Self::BoundVent,
+        Self::BloodRoot,
+        Self::ProcessionalBanner,
+        Self::RiftFracture,
     ];
 
-    fn path(self) -> &'static str {
+    pub(crate) fn path(self) -> &'static str {
         match self {
             Self::OuterAltarWard => "3dassets/station_starter_kit/glb/cult_outer_altar_ward.glb",
             Self::WetChalkSigil => "3dassets/station_starter_kit/glb/cult_wet_chalk_sigil.glb",
@@ -278,6 +300,16 @@ impl CultVisualId {
             Self::AirlessCandle => "3dassets/station_starter_kit/glb/cult_airless_candle.glb",
             Self::RiftSealScar => "3dassets/station_starter_kit/glb/cult_rift_seal_scar.glb",
             Self::FinaleFocus => "3dassets/station_starter_kit/glb/cult_finale_focus.glb",
+            Self::PilgrimMarks => "3dassets/station_starter_kit/glb/cult_pilgrim_marks.glb",
+            Self::EtchedPanel => "3dassets/station_starter_kit/glb/cult_etched_panel.glb",
+            Self::WaxShrine => "3dassets/station_starter_kit/glb/cult_wax_shrine.glb",
+            Self::OfferingCache => "3dassets/station_starter_kit/glb/cult_offering_cache.glb",
+            Self::BoundVent => "3dassets/station_starter_kit/glb/cult_bound_vent.glb",
+            Self::BloodRoot => "3dassets/station_starter_kit/glb/cult_blood_root.glb",
+            Self::ProcessionalBanner => {
+                "3dassets/station_starter_kit/glb/cult_processional_banner.glb"
+            }
+            Self::RiftFracture => "3dassets/station_starter_kit/glb/cult_rift_fracture.glb",
         }
     }
 
@@ -288,7 +320,7 @@ impl CultVisualId {
 
 #[derive(Resource)]
 struct CultVisualAssets {
-    scenes: [Handle<WorldAsset>; 8],
+    scenes: [Handle<WorldAsset>; 16],
 }
 
 fn load_cult_visuals(mut commands: Commands, assets: Res<AssetServer>) {
@@ -1305,10 +1337,11 @@ fn incident_units(
 fn dress_incidents(
     mut commands: Commands,
     assets: Option<Res<CultVisualAssets>>,
-    new: Query<(Entity, &CultVisual), Added<CultVisual>>,
+    new: Query<(Entity, &CultVisual), Without<CultDressed>>,
 ) {
     let Some(assets) = assets else { return };
     for (entity, visual) in &new {
+        commands.entity(entity).insert(CultDressed);
         commands.entity(entity).insert_if_new(Visibility::default());
         commands.spawn((
             Name::new(format!("Cult {:?} visual", visual.0)),
@@ -1322,6 +1355,9 @@ fn dress_incidents(
         ));
     }
 }
+
+#[derive(Component)]
+struct CultDressed;
 
 #[cfg(test)]
 mod tests {

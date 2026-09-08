@@ -108,6 +108,82 @@
             ),
         ),
     ],
+    // Secondary physical contamination follows the existing timed waves.
+    // These sites do not grant ward credit. Their remains survive the finale.
+    defacements: [
+        (
+            name: "Pilgrim markings in the main hall",
+            visual: PilgrimMarks,
+            spot: "cult.scar.hall_marks",
+            wave: 1, cleanup: Cleaner, amount: 3,
+        ),
+        (
+            name: "Etched Medical wall panel",
+            visual: EtchedPanel,
+            spot: "cult.scar.medical_etching",
+            wave: 1, cleanup: Cleaner, amount: 3,
+        ),
+        (
+            name: "Chapel wax shrine",
+            visual: WaxShrine,
+            spot: "cult.scar.chapel_shrine",
+            wave: 1, cleanup: Dismantle, amount: 5,
+        ),
+        (
+            name: "Quiet Room offering cache",
+            visual: OfferingCache,
+            spot: "cult.scar.quiet_cache",
+            wave: 1, cleanup: Dismantle, amount: 5,
+        ),
+        (
+            name: "Bound Engineering ventilation grille",
+            visual: BoundVent,
+            spot: "cult.scar.engineering_vent",
+            wave: 2, cleanup: Cleaner, amount: 5,
+        ),
+        (
+            name: "Blood-root growth in Security",
+            visual: BloodRoot,
+            spot: "cult.scar.security_roots",
+            wave: 2, cleanup: Cleaner, amount: 5,
+        ),
+        (
+            name: "Main hall processional banner",
+            visual: ProcessionalBanner,
+            spot: "cult.scar.hall_banner",
+            wave: 2, cleanup: Dismantle, amount: 5,
+        ),
+        (
+            name: "Cargo wax shrine",
+            visual: WaxShrine,
+            spot: "cult.scar.cargo_shrine",
+            wave: 2, cleanup: Dismantle, amount: 5,
+        ),
+        (
+            name: "Chapel floor fracture",
+            visual: RiftFracture,
+            spot: "cult.scar.chapel_fracture",
+            wave: 3, cleanup: Cleaner, amount: 5,
+        ),
+        (
+            name: "Bound Atmos ventilation grille",
+            visual: BoundVent,
+            spot: "cult.scar.atmos_vent",
+            wave: 3, cleanup: Cleaner, amount: 5,
+        ),
+        (
+            name: "Medical processional banner",
+            visual: ProcessionalBanner,
+            spot: "cult.scar.medical_banner",
+            wave: 3, cleanup: Dismantle, amount: 5,
+        ),
+        (
+            name: "Rear maintenance floor fracture",
+            visual: RiftFracture,
+            spot: "cult.scar.maintenance_fracture",
+            wave: 3, cleanup: Cleaner, amount: 5,
+        ),
+    ],
     altar: (
         name: "The Chapel altar",
         visual: OuterAltarWard,

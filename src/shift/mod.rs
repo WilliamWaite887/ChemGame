@@ -1360,6 +1360,7 @@ impl Plugin for ProgressPlugin {
             .add_systems(
                 Update,
                 (persist_progress, record_thwarting)
+                    .after(crate::cult::aftermath::AftermathUpdate)
                     .run_if(in_state(AppState::Playing))
                     .run_if(crate::session::career_session)
                     .run_if(is_authority),

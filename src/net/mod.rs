@@ -1008,6 +1008,7 @@ fn register_replication(app: &mut App) {
         .replicate::<RitualAnchor>()
         .replicate::<RitualFocus>()
         .replicate::<CultVisual>()
+        .replicate::<crate::cult::aftermath::CultResidue>()
         .replicate::<CultHerald>()
         // Same reasoning as `Assailant`: without this a guest watches an
         // ordinary-looking crew member idle in the chapel or take chemical

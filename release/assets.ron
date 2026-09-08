@@ -47,6 +47,8 @@
         (root: "3dassets/station_starter_kit/textures", extensions: ["png"]),
     ],
     ignored_files: [
+        // Cult expansion contact sheet. Runtime Cult GLBs use content_01.
+        "3dassets/station_starter_kit/preview_expansion_cult.png",
         // These two are compiled into the executable with include_str! and do
         // not need a second copy in a depot pack.
         "data/lab.textbook.ron",

@@ -8401,3 +8401,77 @@
 "kind" "quiet.acoustic_panel"
 "angles" "0 -90 0"
 }
+
+// Cult wave contamination. Surface overlays, with stable cleanup identities.
+{
+"classname" "crisis_spot"
+"origin" "-500 2080 40"
+"id" "cult.scar.hall_marks"
+"angles" "0 0 0"
+}
+{
+"classname" "crisis_spot"
+"origin" "-320 665 40"
+"id" "cult.scar.medical_etching"
+"angles" "0 -90 0"
+}
+{
+"classname" "crisis_spot"
+"origin" "-2000 1016 40"
+"id" "cult.scar.chapel_shrine"
+"angles" "0 180 0"
+}
+{
+"classname" "crisis_spot"
+"origin" "-2012 1840 40"
+"id" "cult.scar.quiet_cache"
+"angles" "0 180 0"
+}
+{
+"classname" "crisis_spot"
+"origin" "-605 4160 40"
+"id" "cult.scar.engineering_vent"
+"angles" "0 0 0"
+}
+{
+"classname" "crisis_spot"
+"origin" "-340 3780 40"
+"id" "cult.scar.security_roots"
+"angles" "0 0 0"
+}
+{
+"classname" "crisis_spot"
+"origin" "-595 3000 40"
+"id" "cult.scar.hall_banner"
+"angles" "0 180 0"
+}
+{
+"classname" "crisis_spot"
+"origin" "-1408 2480 40"
+"id" "cult.scar.cargo_shrine"
+"angles" "0 0 0"
+}
+{
+"classname" "crisis_spot"
+"origin" "-1900 1440 40"
+"id" "cult.scar.chapel_fracture"
+"angles" "0 0 0"
+}
+{
+"classname" "crisis_spot"
+"origin" "-605 2240 40"
+"id" "cult.scar.atmos_vent"
+"angles" "0 0 0"
+}
+{
+"classname" "crisis_spot"
+"origin" "-395 960 40"
+"id" "cult.scar.medical_banner"
+"angles" "0 180 0"
+}
+{
+"classname" "crisis_spot"
+"origin" "420 2000 40"
+"id" "cult.scar.maintenance_fracture"
+"angles" "0 0 0"
+}

@@ -254,6 +254,8 @@ fn default_campaign_id() -> CampaignId {
 pub struct CampaignRoster {
     pub active: Vec<CampaignArc>,
     pub max_active: usize,
+    /// Physical Cult damage belongs to the station, surviving arc replacement.
+    pub cult_aftermath: crate::cult::aftermath::CultAftermath,
 }
 
 impl<'de> Deserialize<'de> for CampaignRoster {
@@ -269,9 +271,9 @@ impl<'de> Deserialize<'de> for CampaignRoster {
         // not self-describing: `deserialize_struct` there is a fixed-arity
         // positional read (see `postcard::Deserializer::deserialize_struct`,
         // which forwards straight to `deserialize_tuple(fields.len(), _)`),
-        // so `#[serde(default)]` on `Compat`'s eleven legacy-only fields is
-        // silently meaningless — postcard demands all thirteen fields be
-        // physically present. `Serialize` only ever emits two. The result
+        // so `#[serde(default)]` on `Compat`'s legacy-only fields is
+        // silently meaningless: postcard demands every declared field be
+        // physically present, but Serialize emits only the current shape. The result
         // was a guaranteed `Hit the end of buffer` on every join, since a
         // network peer can never have sent the flat legacy save shape in the
         // first place: nothing on the wire is a save file. Skip the
@@ -282,16 +284,20 @@ impl<'de> Deserialize<'de> for CampaignRoster {
             struct Wire {
                 active: Vec<CampaignArc>,
                 max_active: usize,
+                cult_aftermath: crate::cult::aftermath::CultAftermath,
             }
             let wire = Wire::deserialize(deserializer)?;
             return Ok(CampaignRoster {
                 active: wire.active,
                 max_active: wire.max_active,
+                cult_aftermath: wire.cult_aftermath,
             });
         }
 
         #[derive(Deserialize)]
         struct Compat {
+            #[serde(default)]
+            cult_aftermath: crate::cult::aftermath::CultAftermath,
             #[serde(default)]
             active: Vec<CampaignArc>,
             #[serde(default = "one_campaign")]
@@ -330,6 +336,7 @@ impl<'de> Deserialize<'de> for CampaignRoster {
             return Ok(CampaignRoster {
                 active: compat.active,
                 max_active: compat.max_active.max(1),
+                cult_aftermath: compat.cult_aftermath,
             });
         }
         Ok(CampaignRoster {
@@ -347,6 +354,7 @@ impl<'de> Deserialize<'de> for CampaignRoster {
                 history: compat.history,
             }],
             max_active: 1,
+            cult_aftermath: compat.cult_aftermath,
         })
     }
 }
@@ -390,6 +398,7 @@ impl CampaignRoster {
                 history: Vec::new(),
             }],
             max_active: 1,
+            cult_aftermath: default(),
         }
     }
 
@@ -763,7 +772,9 @@ fn reroll_campaign(
         campaign.outcome.expect("checked is_none above"),
     ));
     let mode = campaign.mode; // same side the player is playing from, unchanged across re-arcs
+    let aftermath = std::mem::take(&mut campaign.cult_aftermath);
     *campaign = Campaign::new(antag, mode, steps);
+    campaign.cult_aftermath = aftermath;
     campaign.id = next_id;
     campaign.history = history;
     *cooldown = None;
@@ -1920,6 +1931,18 @@ mod tests {
     #[test]
     fn a_resolved_campaign_re_rolls_into_a_fresh_one_after_its_cooldown() {
         let mut app = arc_app(AntagId::Cult);
+        let cult: crate::cult::CultScript =
+            ron::from_str(include_str!("../../assets/data/station.cult.ron")).unwrap();
+        let aftermath = {
+            let mut campaign = app.world_mut().resource_mut::<Campaign>();
+            campaign
+                .cult_incidents
+                .resize(cult.guard_ward_index(0) + 1, false);
+            let arc = campaign.active[0].clone();
+            campaign.cult_aftermath.advance(&arc, &cult);
+            campaign.cult_aftermath.sites[0].cleared = true;
+            campaign.cult_aftermath.clone()
+        };
         app.world_mut().resource_mut::<Campaign>().plot = PLOT_MAX;
         app.update();
         assert!(
@@ -1931,6 +1954,10 @@ mod tests {
 
         let campaign = app.world().resource::<Campaign>();
         assert_eq!(campaign.outcome, None, "a fresh arc has not resolved yet");
+        assert_eq!(
+            campaign.cult_aftermath, aftermath,
+            "re-arc retains physical cleanup history"
+        );
         assert_eq!(campaign.reveal, Reveal::Hidden);
         assert_eq!(
             campaign.history,

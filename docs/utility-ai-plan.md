@@ -2737,6 +2737,14 @@ Exit criteria:
 
 ### P7: Embodied antagonist utility actions
 
+2026-09-08 audit: [Antagonist system review](antagonist-system-review.md) records
+current source findings and the next work packets. The completion statement below
+is historical: knowledge/witness gates, delivery custody, goal restoration and
+exposure attribution still need hardening. Food poisoning is an example of what
+the NPC system can produce, not a required event or a central feature. Build shared
+motive/opportunity/physical-action contracts and use different emergent scenarios
+to validate them.
+
 Status: **Complete for the reference scenario.** The supply invariant, physical
 custody with save/load, private goals, the food-poisoning reference action,
 Botany's minor antagonist, the player response paths with the required-upside

@@ -728,6 +728,11 @@ pub(crate) struct ArcHeadline {
     /// Cult-only case file: discovered anchors and the number neutralised.
     pub(crate) incidents: usize,
     pub(crate) treated_incidents: usize,
+    cult_sites: usize,
+    cult_pending: usize,
+    cult_spent: usize,
+    cult_next: Option<String>,
+    cleanup_only: bool,
     support_only: bool,
     resolved: Option<bool>,
 }
@@ -743,6 +748,7 @@ pub(crate) fn arc_headline(campaign: &Campaign, script: Option<&ArcScript>) -> O
     if campaign.reveal == Reveal::Hidden
         && campaign.outcome.is_none()
         && campaign.cult_incidents.is_empty()
+        && campaign.cult_aftermath.pending() == 0
     {
         return None;
     }
@@ -760,6 +766,18 @@ pub(crate) fn arc_headline(campaign: &Campaign, script: Option<&ArcScript>) -> O
         total: campaign.countered.len(),
         incidents: campaign.cult_incidents.len(),
         treated_incidents: campaign.cult_incidents.iter().filter(|done| **done).count(),
+        cult_sites: campaign.cult_aftermath.sites.len(),
+        cult_pending: campaign.cult_aftermath.pending(),
+        cult_spent: campaign.cult_aftermath.spent_pending(),
+        cult_next: campaign
+            .cult_aftermath
+            .sites
+            .iter()
+            .find(|site| !site.cleared)
+            .map(|site| site.site.name.clone()),
+        cleanup_only: campaign.reveal == Reveal::Hidden
+            && campaign.outcome.is_none()
+            && campaign.cult_incidents.is_empty(),
         support_only: script
             .and_then(|script| script.antagonist(campaign.antag))
             .is_some_and(|def| def.counter_role == crate::arc::CounterTrackRole::SupportOnly),
@@ -2729,6 +2747,11 @@ fn draw_debrief(panel: &mut ChildSpawnerCommands, report: &ShiftReport) {
 /// is only "something is wrong" - [`ArcHeadline::name`] is `None` and there is
 /// nothing here that could give the answer away early.
 fn draw_arc_notice(panel: &mut ChildSpawnerCommands, arc: &ArcHeadline) {
+    if arc.cleanup_only {
+        panel.spawn(label("STATION CLEANUP", 16.0, TEXT));
+        draw_cult_cleanup(panel, arc);
+        return;
+    }
     let (heading, tone) = match (arc.resolved, &arc.name) {
         (Some(true), Some(name)) => (format!("STOOD DOWN - {name}"), GOOD_TEXT),
         (Some(false), Some(name)) => (format!("STATION LOST - {name}"), ERROR_TEXT),
@@ -2760,7 +2783,11 @@ fn draw_arc_notice(panel: &mut ChildSpawnerCommands, arc: &ArcHeadline) {
     };
     panel.spawn(label(detail, 12.0, TEXT_DIM));
     if arc.incidents > 0 {
-        let status = if arc.treated_incidents >= crate::cult::FINALE_WARDS {
+        let status = if arc.resolved.is_some() && arc.cult_pending == 0 {
+            "Ritual concluded - all known contamination cleared."
+        } else if arc.resolved.is_some() {
+            "Ritual concluded - remaining contamination needs physical cleanup."
+        } else if arc.treated_incidents >= crate::cult::FINALE_WARDS {
             "Source exposed - the Chapel focus can be confronted."
         } else if arc.treated_incidents >= 3 {
             "Outer wards failing - the pattern is drawing toward a source."
@@ -2770,6 +2797,25 @@ fn draw_arc_notice(panel: &mut ChildSpawnerCommands, arc: &ArcHeadline) {
             "Ritual signs documented - none neutralised yet."
         };
         panel.spawn(label(format!("Cult case file: {status}"), 12.0, TEXT_DIM));
+    }
+    draw_cult_cleanup(panel, arc);
+}
+
+fn draw_cult_cleanup(panel: &mut ChildSpawnerCommands, arc: &ArcHeadline) {
+    if arc.cult_sites > 0 {
+        let cleanup = if arc.cult_pending == 0 {
+            "Cult cleanup: all known sites cleared.".to_string()
+        } else {
+            format!("Cult cleanup: {} sites remain ({} spent). Space Cleaner for residue; empty hands for spent shrines, caches and banners.", arc.cult_pending, arc.cult_spent)
+        };
+        panel.spawn(label(cleanup, 12.0, TEXT_DIM));
+        if let Some(site) = &arc.cult_next {
+            panel.spawn(label(
+                format!("Next cleanup report: {site}."),
+                12.0,
+                TEXT_DIM,
+            ));
+        }
     }
 }
 
@@ -10512,5 +10558,36 @@ mod tests {
 
         let headline = arc_headline(&campaign, None).unwrap();
         assert_eq!((headline.countered, headline.total), (2, 4));
+    }
+
+    #[test]
+    fn old_cult_cleanup_remains_visible_without_naming_a_new_hidden_antagonist() {
+        let script: crate::cult::CultScript =
+            ron::from_str(include_str!("../../assets/data/station.cult.ron")).unwrap();
+        let mut campaign = campaign_at(Reveal::Hidden);
+        campaign
+            .cult_incidents
+            .resize(script.guard_ward_index(0) + 1, false);
+        campaign.cult_incidents[0] = true;
+        campaign.outcome = Some(crate::arc::ArcOutcome::StoppedDirectly);
+        let arc = campaign.active[0].clone();
+        campaign.cult_aftermath.advance(&arc, &script);
+        campaign.cult_aftermath.sites[0].cleared = true;
+        let mut next = Campaign::new(crate::arc::AntagId::Spy, crate::arc::Mode::Chemist, 4);
+        next.cult_aftermath = campaign.cult_aftermath;
+        let headline = arc_headline(&next, None).unwrap();
+        assert!(headline.name.is_none());
+        assert_eq!(headline.incidents, 0);
+        assert_eq!(headline.cult_pending, 5);
+        assert_eq!(headline.cult_spent, 5);
+        assert!(headline.cleanup_only);
+        assert_eq!(
+            headline.cult_next.as_deref(),
+            Some("Etched Medical wall panel")
+        );
+        for site in &mut next.cult_aftermath.sites {
+            site.cleared = true;
+        }
+        assert!(arc_headline(&next, None).is_none());
     }
 }

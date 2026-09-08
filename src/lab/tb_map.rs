@@ -5805,8 +5805,8 @@ fn every_station_kit_glb_parses_with_bevys_gltf_parser() {
         });
     }
     assert_eq!(
-        count, 154,
-        "the station starter kit should contain 154 GLBs, including the 25 new department and shared-space assets"
+        count, 162,
+        "the station starter kit should contain 162 GLBs, including eight new Cult station assets"
     );
 }
 
@@ -6998,6 +6998,128 @@ fn every_crisis_marker_touches_reachable_floor() {
                     && z <= bounds.max_z + TOLERANCE
             }),
             "crisis_spot `{id}` at ({x}, {z}) is not on reachable walkable floor",
+        );
+    }
+}
+
+#[test]
+fn cult_defacements_have_real_backing_and_reachable_clear_approaches() {
+    use crate::cult::{CultScript, CultVisualId};
+    use bevy::gltf::gltf;
+    use bevy::prelude::{Mat4, Quat};
+    let script: CultScript =
+        ron::from_str(include_str!("../../assets/data/station.cult.ron")).unwrap();
+    let map = parse();
+    let floor: Vec<_> = map
+        .iter()
+        .filter(|e| classname(e).as_deref() == Some("func_walkable"))
+        .flat_map(|e| e.brushes.iter().map(|b| footprint(b)))
+        .collect();
+    let world = map
+        .iter()
+        .find(|e| classname(e).as_deref() == Some("worldspawn"))
+        .unwrap();
+    let walls: Vec<_> = world
+        .brushes
+        .iter()
+        .filter_map(|brush| {
+            let (bottom, top) = vertical_span(brush);
+            (top - bottom > 1.0).then_some((footprint(brush), bottom, top))
+        })
+        .collect();
+    for site in &script.defacements {
+        let marker = map
+            .iter()
+            .find(|e| property(e, "id").as_deref() == Some(&site.spot))
+            .unwrap();
+        let (x, z) = origin_xz(marker).unwrap();
+        let yaw: f32 = property(marker, "angles")
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let rotation = Quat::from_rotation_y(yaw.to_radians());
+        let root = Vec3::new(x, 0.0, z);
+        let glb = gltf::Gltf::open(format!("assets/{}", site.visual.path())).unwrap();
+        let (mut min, mut max) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+        let mut stack: Vec<_> = glb
+            .default_scene()
+            .unwrap()
+            .nodes()
+            .map(|node| (node, Mat4::IDENTITY))
+            .collect();
+        while let Some((node, parent)) = stack.pop() {
+            let matrix = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
+            if let Some(mesh) = node.mesh() {
+                for primitive in mesh.primitives() {
+                    let bounds = primitive.bounding_box();
+                    for x in [bounds.min[0], bounds.max[0]] {
+                        for y in [bounds.min[1], bounds.max[1]] {
+                            for z in [bounds.min[2], bounds.max[2]] {
+                                let point = matrix.transform_point3(Vec3::new(x, y, z));
+                                min = min.min(point);
+                                max = max.max(point);
+                            }
+                        }
+                    }
+                }
+            }
+            stack.extend(node.children().map(|child| (child, matrix)));
+        }
+        let wall_mounted = matches!(
+            site.visual,
+            CultVisualId::EtchedPanel | CultVisualId::BoundVent | CultVisualId::ProcessionalBanner
+        );
+        if wall_mounted {
+            for across in [min.x + 0.03, (min.x + max.x) * 0.5, max.x - 0.03] {
+                let back = root + rotation * Vec3::new(across, 0.0, -0.20);
+                assert!(
+                    walls
+                        .iter()
+                        .any(|(b, low, high)| b.holds(back) && *low < min.y && *high > max.y),
+                    "{} has no wall backing at {back}",
+                    site.spot
+                );
+            }
+        } else {
+            for a in [min.x, (min.x + max.x) * 0.5, max.x] {
+                for b in [min.z, (min.z + max.z) * 0.5, max.z] {
+                    let point = root + rotation * Vec3::new(a, 0.0, b);
+                    assert!(
+                        floor.iter().any(|bounds| bounds.holds(point)),
+                        "{} extends off floor at {point}",
+                        site.spot
+                    );
+                }
+            }
+        }
+        let approach = root + rotation * Vec3::new(0.0, crate::player::EYE_HEIGHT, 1.2);
+        assert!(
+            floor.iter().any(|b| b.holds(approach)),
+            "{} has no walkable approach at {approach}",
+            site.spot
+        );
+        assert!(
+            walls.iter().all(
+                |(b, bottom, top)| !crate::interaction::authority_segment_blocked(
+                    approach,
+                    root + Vec3::Y,
+                    Vec3::new(
+                        (b.min_x + b.max_x) * 0.5,
+                        (bottom + top) * 0.5,
+                        (b.min_z + b.max_z) * 0.5
+                    ),
+                    Vec3::new(
+                        (b.max_x - b.min_x) * 0.5,
+                        (top - bottom) * 0.5,
+                        (b.max_z - b.min_z) * 0.5
+                    )
+                )
+            ),
+            "{} approach crosses a wall",
+            site.spot
         );
     }
 }

@@ -9,10 +9,10 @@ use bevy::{
 };
 
 #[derive(Resource)]
-struct AssetTour {
+pub(super) struct AssetTour {
     output: std::path::PathBuf,
     elapsed: f32,
-    shot: usize,
+    pub(super) shot: usize,
     positioned: bool,
     saved: usize,
     failed: bool,
@@ -37,6 +37,7 @@ pub(super) fn register(app: &mut App) {
         return;
     };
     std::fs::create_dir_all(&output).expect("create asset-tour output directory");
+    super::cult_tour::register(app);
     app.insert_resource(AssetTour {
         output,
         elapsed: -12.0,
@@ -48,6 +49,7 @@ pub(super) fn register(app: &mut App) {
     .add_systems(
         Update,
         tour.after(super::fly_camera)
+            .after(super::cult_tour::ReviewUpdate)
             .run_if(in_state(AppState::Playing))
             .run_if(resource_exists::<MapReady>)
             .run_if(resource_exists::<AssetTour>)
@@ -64,6 +66,7 @@ fn stop_tour(mut commands: Commands) {
     // A cancelled recording must never resume in the next career opened from
     // the menu. CapturePlugin separately restores the ordinary player camera.
     commands.remove_resource::<AssetTour>();
+    commands.remove_resource::<super::cult_tour::CultReview>();
 }
 
 // Eye-height room views. Stable poses
@@ -109,16 +112,25 @@ fn tour(
     mut capture: ResMut<CaptureState>,
     mut cameras: Query<&mut Transform, With<PlayerCamera>>,
     mut exit: MessageWriter<AppExit>,
+    cult: Option<Res<super::cult_tour::CultReview>>,
 ) {
+    if cult.as_ref().is_some_and(|review| !review.ready) {
+        return;
+    }
+    let views = if cult.is_some() {
+        super::cult_tour::VIEWS
+    } else {
+        VIEWS
+    };
     tour.elapsed += time.delta_secs();
     if tour.elapsed < 0.0 {
         return;
     }
-    if tour.shot == VIEWS.len() {
-        if tour.saved == VIEWS.len() {
+    if tour.shot == views.len() {
+        if tour.saved == views.len() {
             info!(
                 "asset tour complete: {} views in {}",
-                VIEWS.len(),
+                views.len(),
                 tour.output.display()
             );
             exit.write(AppExit::Success);
@@ -126,7 +138,7 @@ fn tour(
             error!(
                 "asset tour incomplete: saved {} of {} screenshots",
                 tour.saved,
-                VIEWS.len()
+                views.len()
             );
             exit.write(AppExit::error());
         }
@@ -135,7 +147,7 @@ fn tour(
     let Ok(mut camera) = cameras.single_mut() else {
         return;
     };
-    let (name, eye, aim) = VIEWS[tour.shot];
+    let (name, eye, aim) = views[tour.shot];
     // Reapply on every tick so incidental mouse movement cannot drift a pose.
     *camera = Transform::from_translation(Vec3::from(eye)).looking_at(Vec3::from(aim), Vec3::Y);
     super::orient(&mut capture, &camera);

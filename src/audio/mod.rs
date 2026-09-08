@@ -556,11 +556,9 @@ fn ensure_menu_ambience(
             MenuAmbience,
         ));
     }
-    commands.spawn((
-        AudioPlayer::new(assets.heater_loop.clone()),
-        PlaybackSettings::LOOP.with_volume(Volume::Linear(0.055)),
-        MenuAmbience,
-    ));
+    // No heater/agitation loop here: the backdrop's reaction chamber is a
+    // presentation-only prop (see `menu::backdrop`), not a `Machine`, so it
+    // must not sound like one is running.
 }
 
 fn clear_menu_ambience(mut commands: Commands, playing: Query<Entity, With<MenuAmbience>>) {
