@@ -39,6 +39,7 @@ pub enum RequestSource {
     Quack,
     Smuggler,
     Saboteur,
+    Botanist,
     BentGuard,
     Security,
     MedicalCase,

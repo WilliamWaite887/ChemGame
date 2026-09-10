@@ -59,10 +59,25 @@ const MAX_INTERVIEWS: usize = 6;
 /// Engineering responding to it; nobody needs to be asked who saw a fire. These
 /// are the ones where the question "what did anyone notice?" is the whole
 /// problem.
-fn worth_investigating(kind: IncidentKind) -> bool {
+pub(super) fn worth_investigating(kind: IncidentKind) -> bool {
     matches!(
         kind,
-        IncidentKind::Tampering | IncidentKind::Theft | IncidentKind::Contamination
+        IncidentKind::Tampering
+            | IncidentKind::Theft
+            | IncidentKind::Contamination
+            // Poisoning was missing, which quietly made the food-contamination
+            // thread unfalsifiable: the act emitted `SuspiciousHandling`
+            // memories, and no investigation was ever opened to collect them,
+            // so the one route by which such a memory leaves a witness's head
+            // was never taken. A poisoning is exactly the shape this list
+            // describes — the question "what did anyone notice?" is the whole
+            // problem.
+            //
+            // Note this admits *ordinary* poisonings too: a Botany accident, a
+            // bad batch. That is correct and deliberate. An investigation that
+            // can only be opened when there is a culprit to find would be
+            // consulting private truth to decide whether to look.
+            | IncidentKind::Poisoning
     )
 }
 
@@ -308,6 +323,7 @@ fn record_testimony(
     mut results: MessageReader<UtilityActionResolved>,
     mut board: ResMut<JobBoard>,
     mut ledger: ResMut<InvestigationLedger>,
+    tampered: Option<Res<super::TamperedMeals>>,
     crew: Query<(&Transform, &NpcMemory), With<UtilityAgent>>,
     positions: Query<&Transform, With<UtilityAgent>>,
 ) {
@@ -343,6 +359,16 @@ fn record_testimony(
             continue;
         }
 
+        // What this case is *about*, resolved before the mutable borrow below.
+        //
+        // The meal an exposure links to the incident, when there is one. This
+        // is a subject link, not an answer: it narrows which of the witness's
+        // memories is responsive, and supplies nothing about who did it.
+        let subject = tampered
+            .as_deref()
+            .and_then(|tampered| tampered.exposure_for(incident))
+            .map(|(meal, _culprit)| meal);
+
         let Some(case) = ledger.get_mut(incident) else {
             continue;
         };
@@ -367,8 +393,24 @@ fn record_testimony(
 
         // Read only this witness's own memory. This is the whole point: the
         // investigator learns what one person holds, not what the world knows.
+        //
+        // But it has to be about *this case*. `best` returns the strongest
+        // handling memory a witness holds, which on a busy station is often
+        // something else entirely — somebody topping up a plot yesterday, or a
+        // donation handed over an hour ago, both of which produce the same
+        // ambiguous stimulus by design. Answering a poisoning case with an
+        // unrelated sighting is how an innocent person gets named.
+        //
+        // The subject link comes from the incident record; the *content* still
+        // comes only from the witness. Asking "did you see anything about this
+        // meal" is legitimate investigation. Reading who did it from the
+        // ledger and calling it testimony would not be.
         if let Ok((_, memory)) = crew.get(witness) {
-            if let Some(fact) = memory.best(StimulusKind::SuspiciousHandling, now) {
+            let fact = match subject {
+                Some(subject) => memory.best_about(subject, StimulusKind::SuspiciousHandling, now),
+                None => memory.best(StimulusKind::SuspiciousHandling, now),
+            };
+            if let Some(fact) = fact {
                 case.testimony.push(Testimony {
                     witness,
                     named: fact.actor,
@@ -566,9 +608,50 @@ mod tests {
         assert!(worth_investigating(IncidentKind::Tampering));
         assert!(worth_investigating(IncidentKind::Theft));
         assert!(worth_investigating(IncidentKind::Contamination));
+        // A poisoning is the shape this list describes — "what did anyone
+        // notice?" is the whole problem. Its absence made the food thread
+        // unfalsifiable: the act left `SuspiciousHandling` memories that no
+        // investigation was ever opened to collect.
+        assert!(worth_investigating(IncidentKind::Poisoning));
+
+        // Answered by responding to them, not by asking who saw.
         assert!(!worth_investigating(IncidentKind::Fire));
         assert!(!worth_investigating(IncidentKind::Burn));
         assert!(!worth_investigating(IncidentKind::EquipmentFailure));
+    }
+
+    /// Eligibility must not consult private truth.
+    ///
+    /// An ordinary poisoning — a bad batch, a Botany accident — is opened for
+    /// investigation exactly like a deliberate one, and may legitimately find
+    /// nobody. Opening a case only where a culprit exists would leak the
+    /// answer into the decision to ask the question.
+    #[test]
+    fn an_ordinary_poisoning_is_investigated_like_any_other() {
+        let mut app = app();
+        let victim = crew_at(&mut app, 1, 1.0);
+        let incident = app
+            .world_mut()
+            .resource_mut::<IncidentLedger>()
+            .create(
+                IncidentKind::Poisoning,
+                JobDomain::Service,
+                victim,
+                None,
+                Vec3::ZERO,
+                Normalized::new(0.6).unwrap(),
+                0.0,
+            )
+            .expect("the ledger accepts a poisoning");
+        app.update();
+
+        assert!(
+            app.world()
+                .resource::<InvestigationLedger>()
+                .get(incident)
+                .is_some(),
+            "nobody poisoned them, and Security still asks around",
+        );
     }
 
     /// The load-bearing claim: an interview reads *one witness's own memory*,

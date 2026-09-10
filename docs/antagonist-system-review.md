@@ -2,6 +2,11 @@
 
 Reviewed: 2026-09-08. Status: code audit; implementation gates below are open.
 
+Implementation follow-up: [NPC thread integration plan](npc-thread-integration-plan.md)
+is the current bounded phase and supersedes the broader work-packet suggestions
+below. The user clarified that this pass should connect existing utility-AI
+threads, and that existing characters should share an assistant work profile.
+
 This extends P7 in [utility-ai-plan.md](utility-ai-plan.md). The current request
 is to examine the whole antagonist system and choose its next step. The useful
 next step is to harden the shared motive, knowledge, custody and consequence

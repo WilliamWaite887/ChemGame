@@ -561,6 +561,13 @@ impl CrewRoute {
     /// just finished an [`Errand`], which took its route off it. Built through
     /// [`CrewRoute::leave`] rather than beside it so there is still exactly one
     /// description of what leaving means.
+    ///
+    /// Currently unused: `saboteur` was its only caller, and that thread's
+    /// scripted errand has been replaced by a utility action whose actor stays
+    /// on the station afterwards. Kept because the shape it serves — an errand
+    /// finishing with no route to fall back on — is shared by every thread that
+    /// dispatches one, and `smuggler` and `security` both still do.
+    #[allow(dead_code)]
     pub fn leaving() -> Self {
         let mut route = Self::to(Vec3::ZERO);
         route.leave();

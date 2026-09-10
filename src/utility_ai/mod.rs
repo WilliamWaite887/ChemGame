@@ -19,6 +19,8 @@ use crate::crew::{
 };
 use crate::nav::NavGraph;
 
+#[cfg(test)]
+mod acceptance;
 mod aid;
 mod botany;
 mod bridge;
@@ -38,6 +40,7 @@ mod medical;
 mod perception;
 pub(crate) mod public;
 pub(crate) mod reports;
+mod scripted_residents;
 mod security;
 mod service;
 mod social;
@@ -55,7 +58,12 @@ pub use capacity::{work_capacity, work_risk};
 pub use cargo_pilot::{CargoJobCompleted, CargoWorkState, ForcedWorkplaceOutcome};
 pub use covert::{
     CovertContaminant, CovertGoal, CustodyRecord, CustodyState, IllicitCustody, IllicitStock,
-    PrivateGoal, TamperedMeals,
+    PrivateGoal, TamperAuthorization, TamperedMeals,
+};
+#[cfg(test)]
+pub use covert::{
+    complete_offered_tampering, offered_tampering, tampering_targets, CovertTestHarness,
+    CovertTestSystems,
 };
 pub use deals::{
     grant as grant_deal, recover as recover_batch, AnswerApproachRequested, DealOutcome,
@@ -231,6 +239,7 @@ impl Plugin for UtilityAiPlugin {
         public::register(app);
         decision_log::register(app);
         aid::register(app);
+        scripted_residents::register(app);
         #[cfg(any(debug_assertions, test))]
         invariants::register(app);
     }
@@ -665,6 +674,12 @@ pub enum UtilityActionId {
     Sabotage = 12,
     PoisonFood = 13,
     ConcealEvidence = 14,
+    /// Quietly adulterating a specific unattended container.
+    ///
+    /// Distinct from `Sabotage`, which is the generic department-equipment
+    /// variant: this one names an exact piece of loose glassware, takes an
+    /// exclusive reservation on it, and is defeated by picking it up.
+    TamperContainer = 15,
 }
 
 /// True priority classes. Only candidates in the highest non-empty bucket are
@@ -2125,9 +2140,18 @@ fn select_reference_actions(
             // people sent to it stand inside each other.
             .or_else(|| {
                 let home = home?;
+                // A scripted resident is deliberately absent from every
+                // department roster, so `standing_slot` ranks them `None` and
+                // the fallback below would seat them at slot zero — standing on
+                // the first core member. `scripted_standing_slot` continues the
+                // same ring past the roster instead.
                 let (slot, occupants) = profile
                     .map(|profile| roster_of(profile.primary))
-                    .and_then(|roster| roster.standing_slot(&member.name))
+                    .and_then(|roster| {
+                        roster.standing_slot(&member.name).or_else(|| {
+                            scripted_residents::scripted_standing_slot(&member.name, roster)
+                        })
+                    })
                     .unwrap_or((0, 1));
                 Some(home + department_spread(slot, occupants, DEPARTMENT_SPREAD_RADIUS))
             })
@@ -2678,9 +2702,13 @@ fn activity_for(action: UtilityActionId) -> NpcActivity {
         UtilityActionId::Rest => NpcActivity::Resting,
         UtilityActionId::IdleObserve => NpcActivity::Idle,
         UtilityActionId::ReportIncident => NpcActivity::Helping,
+        // Every covert act reads as ordinary work, because from the outside it
+        // is: a body at a bench handling glassware. A distinct activity here
+        // would replicate the one thing that must stay hidden.
         UtilityActionId::Sabotage
         | UtilityActionId::PoisonFood
-        | UtilityActionId::ConcealEvidence => NpcActivity::Working,
+        | UtilityActionId::ConcealEvidence
+        | UtilityActionId::TamperContainer => NpcActivity::Working,
     }
 }
 

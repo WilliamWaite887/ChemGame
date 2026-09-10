@@ -46,10 +46,20 @@
     contaminant: "water",
     contaminant_units: 12,
 
+    // Aftermath chatter. Every line here has to be something the station could
+    // say *without anyone having witnessed the act* — these are aired on the
+    // physical consequence, not on evidence.
+    //
+    // One line used to read "Boyle was seen leaning over the chem lab counter
+    // with a bottle in his hand." It was aired unconditionally, so it asserted
+    // an eyewitness who may not have existed and named the culprit outright —
+    // handing the player, for free, the one thing an investigation is supposed
+    // to have to establish. A named witness claim requires actually sensed
+    // evidence; that comes from `SuspiciousHandling` and an interview.
     meddling_lines: [
         "Boyle says he 'checked' the glassware on his way past. Nobody asked him to.",
         "Someone's been at the counter. There's a wet ring where nothing was spilled.",
-        "Boyle was seen leaning over the chem lab counter with a bottle in his hand.",
+        "Something on the chem lab counter isn't the colour it was an hour ago.",
         "Engineering logged a maintenance visit to the chem lab. Nobody in the chem lab logged one.",
     ],
 )

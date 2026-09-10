@@ -2737,6 +2737,12 @@ Exit criteria:
 
 ### P7: Embodied antagonist utility actions
 
+Next phase: [NPC thread integration plan](npc-thread-integration-plan.md).
+The user confirmed existing thread characters should use a shared assistant work
+profile between their authored interactions. This bounded phase connects those
+characters to existing jobs, perception, action execution, custody, consequences
+and persistence. It adds no new antagonist stories or required poisoning events.
+
 2026-09-08 audit: [Antagonist system review](antagonist-system-review.md) records
 current source findings and the next work packets. The completion statement below
 is historical: knowledge/witness gates, delivery custody, goal restoration and

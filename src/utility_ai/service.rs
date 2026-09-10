@@ -429,8 +429,10 @@ fn offer_meals_to_hungry_residents(
 /// interaction would use, so contaminated food affects an NPC exactly as it
 /// affects anyone else.
 fn apply_eaten_servings(
+    time: Res<Time>,
     mut results: MessageReader<UtilityActionResolved>,
     chem: Option<Res<crate::chem_data::ChemDb>>,
+    contaminant: Option<Res<super::CovertContaminant>>,
     mut tampered: Option<ResMut<super::TamperedMeals>>,
     mut meals: Query<(Entity, &mut MealBatch, &mut MealChemistry)>,
     mut diners: Query<(
@@ -440,6 +442,7 @@ fn apply_eaten_servings(
     )>,
 ) {
     let data = chem.as_ref().map(|db| &db.0);
+    let now = time.elapsed_secs();
 
     for result in results.read() {
         if result.key.action != UtilityActionId::EatFood || result.result != ActionResult::Completed
@@ -459,13 +462,30 @@ fn apply_eaten_servings(
         let Ok((mut needs, mut body, mut blood)) = diners.get_mut(result.agent) else {
             continue;
         };
+        // What the contaminant looks like, if this meal was tampered with at
+        // all. Measured *before* the serving so the dose that actually left the
+        // bowl can be worked out afterwards.
+        let contaminant = contaminant
+            .as_deref()
+            .map(|c| c.reagent)
+            .filter(|_| tampered.as_deref().is_some_and(|t| t.culprit(meal).is_some()));
+        let before = contaminant.map(|reagent| chemistry.solution.volume_of(reagent));
+
         if consume_meal_serving(&mut batch, &mut chemistry, &mut body, &mut blood, data).is_ok() {
             needs.relieve_hunger(SERVING_SATIETY);
             // Carry provenance from the bowl to the body. The dose itself is
             // now indistinguishable from any other exposure, so if this is not
             // recorded here the later poisoning has no way back to the act.
-            if let Some(tampered) = tampered.as_deref_mut() {
-                tampered.carry_to(result.agent, meal);
+            //
+            // Recorded with what actually moved rather than merely that the
+            // meal was tampered with: an exposure has to be able to say a
+            // *later* poisoning by something else is not its doing, and it
+            // cannot do that without knowing what it put in them.
+            if let (Some(tampered), Some(reagent), Some(before)) =
+                (tampered.as_deref_mut(), contaminant, before)
+            {
+                let moved = before - chemistry.solution.volume_of(reagent);
+                tampered.carry_to(result.agent, meal, reagent, moved, now);
             }
         }
     }

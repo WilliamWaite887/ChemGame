@@ -1502,6 +1502,15 @@ struct ProgressSave {
     botanist_refusals: u32,
     #[serde(default)]
     botanist_supplied: bool,
+    /// Which authored ask comes next, and whether the last one was put and
+    /// turned down. An older save has neither: it defaults to step zero, which
+    /// restarts the asks, and to not-closed — while `botanist_supplied` keeps
+    /// its old meaning, so a save that already completed the thread stays
+    /// completed rather than asking again.
+    #[serde(default)]
+    botanist_step: usize,
+    #[serde(default)]
+    botanist_closed: bool,
     /// Player-supplied batches still in NPC hands, keyed by holder name because
     /// crew entities do not survive walking offscreen, let alone a reload — the
     /// same reasoning as `addictions`. Terminal batches are not written, so
@@ -1760,6 +1769,8 @@ fn load_progress(
     if let Some(progress) = covert.progress.as_mut() {
         progress.refusals = save.botanist_refusals;
         progress.supplied = save.botanist_supplied;
+        progress.step = save.botanist_step;
+        progress.closed = save.botanist_closed;
     }
     // Custody restores only where the holder is currently embodied. A named
     // holder who is not spawned yet is skipped rather than queued: `restore`
@@ -1926,6 +1937,8 @@ fn persist_progress(
             .as_ref()
             .map(|p| p.supplied)
             .unwrap_or(false),
+        botanist_step: covert.progress.as_ref().map(|p| p.step).unwrap_or(0),
+        botanist_closed: covert.progress.as_ref().map(|p| p.closed).unwrap_or(false),
         // A holder this frame cannot name is dropped by `snapshot` rather than
         // saved under a placeholder — see its doc comment.
         illicit_custody: match (covert.custody.as_ref(), covert.crew.as_ref()) {

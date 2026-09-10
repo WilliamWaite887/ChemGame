@@ -38,6 +38,23 @@ pub const SIGHT_RANGE: f32 = 8.0;
 /// cry on the far side of the station reaches nobody.
 pub const EARSHOT: f32 = 14.0;
 
+/// How far a subject registers, once chemical concealment is accounted for.
+///
+/// Factored out of [`witness_stimuli`] because two different systems now ask
+/// this question and they must not be able to disagree. A covert actor
+/// estimating whether it is being watched, and a witness deciding whether it
+/// saw something, are the same geometry read from opposite ends — if one of
+/// them applied concealment and the other did not, an actor could be certain it
+/// was unobserved by someone who was in fact looking straight at it, or hold
+/// back from someone who could not possibly have seen.
+///
+/// `concealment` is the same `Bloodstream` aggregate the cult guards consult,
+/// clamped at 0.95 so no chemistry makes a person entirely invisible.
+/// `strength` floors at 0.2 so a faint event still registers at close range.
+pub fn concealed_sight_range(concealment: f32, strength: f32) -> f32 {
+    SIGHT_RANGE * (1.0 - concealment.clamp(0.0, 0.95)) * strength.max(0.2)
+}
+
 /// What kind of thing was perceived.
 ///
 /// Deliberately coarse. A memory records *that* something happened and how
@@ -372,7 +389,7 @@ pub(super) fn witness_stimuli(
             if event.actor == Some(witness) {
                 continue;
             }
-            let sight_range = SIGHT_RANGE * (1.0 - hidden) * event.strength.max(0.2);
+            let sight_range = concealed_sight_range(*hidden, event.strength);
 
             let (modality, confidence) = if can_see(here, event.at, &areas, &boxes, sight_range) {
                 (Modality::Seen, event.strength)

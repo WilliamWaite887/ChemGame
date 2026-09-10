@@ -57,6 +57,7 @@ impl Plugin for OrderPlugin {
             RonAssetPlugin::<OrderConfig>::new(&["orders.ron"]),
         ))
         .add_message::<OrderResolved>()
+        .add_message::<DeliveryReceipt>()
         .add_message::<FulfillmentApplied>()
         .add_message::<ChemicalExposure>()
         .add_server_message::<ShiftSync>(Channel::Ordered)
@@ -588,6 +589,28 @@ impl OrderUse {
     }
 }
 
+/// This requester keeps what they are handed instead of drinking it.
+///
+/// The third disposition of an accepted container, alongside a linked
+/// [`OrderUse`] and the default personal-consumption branch. A thread inserts
+/// this when the *point* of the request is possession — the batch is meant to
+/// leave the counter intact and stay findable, recoverable and accountable
+/// afterwards.
+///
+/// Without it a thread that wants to keep a delivery has to reconstruct one
+/// from the authored request, which is how the Botany handover ended up
+/// fabricating pure reagent it was never given.
+///
+/// Authority-only, and deliberately inert on its own: it changes where the
+/// solution goes, not what anybody does with it. The owning thread reads the
+/// resulting [`DeliveryReceipt`].
+#[derive(Component, Clone, Debug)]
+pub struct RetainsDelivery {
+    /// Which authored request this answers, echoed into the receipt so the
+    /// thread can tell its own asks apart.
+    pub request: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FulfillmentApplicationResult {
     Applied,
@@ -877,7 +900,45 @@ pub struct OrderResolved {
 pub struct DeliveryQuality {
     pub purity: f32,
     pub potency: u32,
+    /// How much of the requester's **patience** was left when they took it,
+    /// 0..1. This is a timing measure, not a physical one: it says the delivery
+    /// was prompt, never that the container was full. Reading it as a quantity
+    /// grades a complete-but-late handover as a short one — see
+    /// [`DeliveryReceipt::accepted`] for what actually arrived.
     pub remaining_fraction: f32,
+}
+
+/// Proof of what physically changed hands, for a thread that keeps the batch.
+///
+/// [`OrderResolved`] grades a delivery; it does not describe one. Its `reagent`
+/// is deliberately lossy (see that field's own note) and its `quality` measures
+/// promptness and purity rather than contents. A thread that needs to *hold*
+/// what it was given — rather than react to how well the player did — cannot be
+/// built on that, and the one that tried ended up reconstructing an authored
+/// volume of pure reagent instead of keeping the mixture it was handed.
+///
+/// So this is the physical half, emitted only where a delivery is actually
+/// retained. Authority-only: it carries exact contents and a supplier identity,
+/// neither of which any client may see.
+#[derive(Message, Clone, Debug)]
+pub struct DeliveryReceipt {
+    /// Stable identity for this handover, so a repeated or replayed resolution
+    /// can be recognised and paid once. Distinct from the order id: one order
+    /// produces at most one receipt, but a receipt outlives the order.
+    pub id: u64,
+    /// Who took it. Named rather than an `Entity` for the reason custody is:
+    /// crew bodies do not survive walking offscreen, let alone a reload.
+    pub recipient: String,
+    /// The player account that supplied it, when one is known. `None` stays
+    /// `None` — an unknown supplier is never attributed to the host by default.
+    pub supplier: Option<Entity>,
+    /// What was really in the container, mixture, purity and all. Not what was
+    /// asked for, and not a reconstruction from the authored request.
+    pub accepted: chem_sim::Solution,
+    /// What the label claimed, which may not be what [`Self::accepted`] is.
+    pub claimed_label: String,
+    /// Which authored request this settles.
+    pub request: String,
 }
 
 /// A station department whose standing rises and falls with how you treat its
@@ -2081,6 +2142,7 @@ pub(crate) fn handle_delivery(
         Has<DevelopmentOrder>,
         Has<UtilityAgent>,
         Option<&ControlOwner>,
+        Option<&RetainsDelivery>,
     )>,
     mut bodies: Query<(&mut Body, &mut Bloodstream)>,
     containers: Query<(Entity, &Container, &HeldBy)>,
@@ -2107,6 +2169,7 @@ pub(crate) fn handle_delivery(
             development,
             utility_agent,
             owner,
+            retains,
         )) = crew.get_mut(request.target)
         else {
             continue;
@@ -2183,6 +2246,7 @@ pub(crate) fn handle_delivery(
                 body,
                 believed,
                 use_plan: use_plan.copied(),
+                retains: retains.cloned(),
             },
         );
     }
@@ -2215,6 +2279,9 @@ struct Handover<'a> {
     /// Explicit linked destination use. Absence alone means the accepting NPC
     /// is the consumer.
     use_plan: Option<OrderUse>,
+    /// This requester keeps the batch rather than using or drinking it. Takes
+    /// precedence over both other dispositions — see [`RetainsDelivery`].
+    retains: Option<RetainsDelivery>,
     /// The recipient's body, so `complete_delivery` can route what was
     /// actually handed over into them — every crew member has had one since
     /// M12. `Option` because this struct already follows the "the caller
@@ -2252,6 +2319,21 @@ fn is_station_chemical(container: &Container, db: &ChemDb) -> bool {
     station * 2 > total
 }
 
+/// Stable identity for one retained handover.
+///
+/// Built from the facts that were true when it happened rather than a counter,
+/// so it survives a reload and so reprocessing the same delivery recognises
+/// itself. `waited` distinguishes two otherwise identical asks by the same
+/// character: they cannot have been accepted at the same moment.
+fn receipt_id(recipient: &str, request: &str, waited: f32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    recipient.hash(&mut hasher);
+    request.hash(&mut hasher);
+    format!("{waited:.3}").hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Grades a handover and closes the order out.
 ///
 /// Shared by both delivery routes on purpose. The counter and the window have
@@ -2281,6 +2363,7 @@ fn complete_delivery(
         counter,
         development,
         use_plan,
+        retains,
     } = handover;
 
     let (mut outcome, mut matched) = grade(
@@ -2408,7 +2491,41 @@ fn complete_delivery(
         outcome
     );
 
-    if let Some(use_plan) = use_plan {
+    if let Some(retains) = retains {
+        // The requester keeps it. Checked before both dispositions below
+        // because the point of this request is possession: this batch must not
+        // be drunk on the spot, and its container must not be destroyed at the
+        // counter.
+        //
+        // What moves is the solution that is actually in the container — the
+        // real mixture, at its real purity, in whatever volume survived the
+        // player's synthesis. Emphatically not a reconstruction from the
+        // authored request: the thread asked for 12u of one thing, and what it
+        // gets is what a person carried to the window.
+        //
+        // The container is emptied rather than despawned, following the same
+        // convention `take` uses everywhere else. Custody now holds the
+        // contents; leaving a full container behind as well would mean the same
+        // batch existed twice.
+        let mut accepted = chem_sim::Solution::unbounded();
+        let _ = container.solution.clone().transfer_to(
+            &mut accepted,
+            container.solution.total_volume(),
+        );
+        let receipt = DeliveryReceipt {
+            id: receipt_id(&member.name, &retains.request, order.waited),
+            recipient: member.name.clone(),
+            supplier: actor,
+            accepted,
+            claimed_label: order.plea.clone(),
+            request: retains.request.clone(),
+        };
+        commands.queue(move |world: &mut World| {
+            world.write_message(receipt);
+        });
+        commands.entity(container_entity).despawn();
+        route.leave();
+    } else if let Some(use_plan) = use_plan {
         // A linked order transfers custody. It does not turn possession into
         // self-application and it does not destroy the batch at the counter.
         // The exact container and remaining solution now travel with the
@@ -2954,6 +3071,7 @@ fn handle_window_delivery(
         Has<crate::order_intake::AcceptedOrder>,
         Has<UtilityAgent>,
         Option<&ControlOwner>,
+        Option<&RetainsDelivery>,
     )>,
     mut bodies: Query<(Entity, &mut Body, &mut Bloodstream)>,
     instability: Option<Res<crate::instability::Instability>>,
@@ -3008,6 +3126,7 @@ fn handle_window_delivery(
                     accepted,
                     utility_agent,
                     owner,
+                    _,
                 )| {
                     (!unavailable_bodies.contains(&entity)
                         && (!utility_agent || owner == Some(&ControlOwner::OrderVisit)))
@@ -3044,6 +3163,7 @@ fn handle_window_delivery(
                 _,
                 utility_agent,
                 owner,
+                retains,
             )) = crew.get_mut(recipient)
             else {
                 continue;
@@ -3085,6 +3205,7 @@ fn handle_window_delivery(
                     // Nobody is standing there to read the bottle.
                     believed: None,
                     use_plan: use_plan.copied(),
+                    retains: retains.cloned(),
                 },
             );
         }
