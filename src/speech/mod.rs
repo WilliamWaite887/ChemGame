@@ -58,6 +58,7 @@ use crate::orders::{Order, OrderResolved, Outcome};
 use crate::player::{Chemist, PlayerCamera};
 use crate::showdown::Pursuit;
 use crate::threat;
+use crate::utility_ai::{NpcActivity, NpcMemory, StimulusKind};
 use crate::AppState;
 
 /// How long a line stays up, clamping the length-scaled figure below.
@@ -110,6 +111,20 @@ const HEAD_HEIGHT: f32 = 0.78;
 /// the Lobby hangs off it, so this covers the working suite and stops well
 /// short of the departments crew wander between all shift.
 const EARSHOT: f32 = 14.0;
+
+/// How sure a witness has to be before unease reaches their mouth.
+///
+/// Deliberately the same floor `interviews` uses for testimony
+/// (`USABLE_TESTIMONY`), not a second number: a witness whose memory is too
+/// faint to be worth recording under questioning is also too faint to be
+/// muttering about it, and two thresholds would eventually drift into a
+/// character who will not tell an investigator what they will happily say to
+/// the room.
+///
+/// Confidence decays with age, so this doubles as the horizon: a
+/// `SuspiciousHandling` memory is retained 420 s and fades continuously, so
+/// the barks stop on their own without a second timer.
+const WORTH_MENTIONING: f32 = 0.2;
 
 /// How many bubbles may be on screen at once, nearest first.
 ///
@@ -445,7 +460,29 @@ pub struct ResolutionLineDef {
 /// decision about an NPC in this codebase is made — see `docs/npc-ai.md`:
 /// "behaviour is decided entirely by which marker components happen to be
 /// attached".
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+///
+/// # The mute-resident defect
+///
+/// The first four variants are all *visitor* states. Every one of them is a
+/// component that a station resident under utility control does not carry:
+/// [`Ambient`] is removed the moment a resident is migrated (`crew/mod.rs`,
+/// whose [`crate::crew::NotResident`] doc describes residents "executing
+/// utility work without `Ambient`"), and `Errand`/`Order`/`Pursuit` describe
+/// errands and visits rather than ordinary duty.
+///
+/// So for as long as this enum had only those four, the entire utility-
+/// controlled crew — which is most of the station — fell through
+/// `notice_arrivals`' final `else { continue }` and was **structurally
+/// incapable of speaking**, however many lines were authored. That is worth
+/// stating plainly because this module was built precisely to stop the
+/// saboteur's walk being "real and invisible", and rebuilding that thread on
+/// the utility scheduler is what silenced it again.
+///
+/// The activity variants below fix that. They are derived from
+/// [`NpcActivity`], which is deliberately the *public, replicated*
+/// presentation component and carries "no scores, knowledge, allegiance, or
+/// private target identity" — so a spoken line can never leak a decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
 pub enum Situation {
     /// On an [`Errand`] — crossing the room to do something with their hands.
     /// The saboteur heading for your glassware is this one.
@@ -453,9 +490,122 @@ pub enum Situation {
     /// Carrying an [`Order`]: they came to collect something.
     Waiting,
     /// An [`Ambient`] resident, just moving through.
+    ///
+    /// Also where [`NpcActivity::Traveling`] lands. From the player's side a
+    /// resident crossing the room on utility business and one wandering are
+    /// the same event, and splitting them would divide the largest authored
+    /// pool for no gain.
     Passing,
     /// A [`Pursuit`]. Short, and not friendly.
     Hostile,
+    /// [`NpcActivity::Working`] — doing their own department's job.
+    /// The commonest state on the station, and the one that was silent.
+    Working,
+    /// [`NpcActivity::Helping`] — working, but not their own duty.
+    Helping,
+    /// [`NpcActivity::Eating`].
+    Eating,
+    /// [`NpcActivity::Resting`] — on a break.
+    Resting,
+    /// [`NpcActivity::Treating`] — Medical, working on someone.
+    Treating,
+    /// This person saw handling that looked wrong, recently enough to still be
+    /// thinking about it.
+    ///
+    /// Sourced from their own [`NpcMemory`] — a
+    /// [`StimulusKind::SuspiciousHandling`] fact whose confidence has not yet
+    /// decayed — and from nothing else. The covert thread has, until now, been
+    /// entirely silent: an antagonist's approach is visually legible and
+    /// produces no sound at all, so a player who was not looking directly at
+    /// them learns nothing.
+    ///
+    /// # The rule these lines exist under
+    ///
+    /// **A line here never names the person handled.** The witness saw
+    /// handling; they did not see intent, and they cannot distinguish an
+    /// antagonist from a colleague tidying up — `SuspiciousHandling`'s own doc
+    /// says the kind is "deliberately ambiguous: innocent and covert food
+    /// handling produce the same kind". A bark that named someone would
+    /// convert a glimpse into an accusation and hand the player a conclusion
+    /// the fiction never earned.
+    ///
+    /// `interviews` remains the only route by which a name is ever produced,
+    /// and it derives that from the witness's own memory under the same
+    /// confidence rules. This is the ambient half: unease, locally, from
+    /// someone standing where it happened.
+    Witnessed,
+}
+
+impl Situation {
+    /// Every situation, for tests that must cover all of them.
+    ///
+    /// Kept in sync by [`Situation::name`]'s exhaustive match rather than by
+    /// discipline: adding a variant without adding it here fails to compile
+    /// there, and the coverage tests iterate this. The previous version of
+    /// those tests wrote the list out inline, which is a large part of why the
+    /// whole utility-controlled crew could be mute while the suite stayed
+    /// green — a hardcoded list cannot notice a variant nobody added to it.
+    #[cfg(test)]
+    pub const ALL: [Situation; 10] = [
+        Situation::Errand,
+        Situation::Waiting,
+        Situation::Passing,
+        Situation::Hostile,
+        Situation::Working,
+        Situation::Helping,
+        Situation::Eating,
+        Situation::Resting,
+        Situation::Treating,
+        Situation::Witnessed,
+    ];
+
+    /// Exists so [`Situation::ALL`] cannot silently fall behind the enum.
+    ///
+    /// The match is exhaustive, so a new variant breaks the build here, and
+    /// the test below asserts every variant in `ALL` is distinct and that
+    /// `ALL` is the same length as the enum. Together those make an omission a
+    /// compile error rather than a quiet gap in coverage.
+    #[cfg(test)]
+    fn name(self) -> &'static str {
+        match self {
+            Situation::Errand => "Errand",
+            Situation::Waiting => "Waiting",
+            Situation::Passing => "Passing",
+            Situation::Hostile => "Hostile",
+            Situation::Working => "Working",
+            Situation::Helping => "Helping",
+            Situation::Eating => "Eating",
+            Situation::Resting => "Resting",
+            Situation::Treating => "Treating",
+            Situation::Witnessed => "Witnessed",
+        }
+    }
+
+    /// The situation a public activity puts someone in, if it is one worth
+    /// speaking from.
+    ///
+    /// [`NpcActivity::Idle`] and [`NpcActivity::Down`] deliberately return
+    /// `None`. `Idle` is the gap between actions rather than a state anyone
+    /// occupies, so a line there would fire on every handover; `Down` is a
+    /// collapsed body, which the `collapses` pool already answers and which
+    /// should not also produce cheerful small talk.
+    fn from_activity(activity: NpcActivity) -> Option<Self> {
+        match activity {
+            NpcActivity::Working => Some(Situation::Working),
+            NpcActivity::Helping => Some(Situation::Helping),
+            NpcActivity::Eating => Some(Situation::Eating),
+            NpcActivity::Resting => Some(Situation::Resting),
+            NpcActivity::Treating => Some(Situation::Treating),
+            NpcActivity::Traveling => Some(Situation::Passing),
+            // Already spoken for, literally: `UtilityActionId::Socialize` sets
+            // this, and `start_exchanges` below is the system that turns two
+            // residents standing together into an overheard two-hander. A
+            // solo greeting here would talk over the conversation this module
+            // already gives them.
+            NpcActivity::Socializing => None,
+            NpcActivity::Idle | NpcActivity::Down => None,
+        }
+    }
 }
 
 /// This module's authored script, once loaded.
@@ -506,6 +656,26 @@ fn fill(text: &str, member: &CrewMember) -> String {
 // Barks
 // ---------------------------------------------------------------------------
 
+/// Whether this person is still carrying a fresh memory of odd handling.
+///
+/// The whole of [`Situation::Witnessed`]'s trigger, kept as a free function so
+/// the threshold and the decay are testable without a world.
+///
+/// Reads only the witness's *own* memory. Nothing here consults
+/// `TamperedMeals`, `CovertGoal` or `TamperAuthorization` — those are authority
+/// ground truth about who actually did what, and a bark sourced from them would
+/// be the game telling the player something no character knows.
+///
+/// The actor is safe by construction rather than by a check here:
+/// `perception::witness_stimuli` already refuses to let anyone witness their
+/// own deed, so a culprit never holds a memory of their own act to mutter
+/// about.
+fn unsettled(memory: Option<&NpcMemory>, now: f32) -> bool {
+    memory
+        .and_then(|memory| memory.best(StimulusKind::SuspiciousHandling, now))
+        .is_some_and(|fact| fact.confidence_at(now) >= WORTH_MENTIONING)
+}
+
 /// Someone walked into a room the chemist is in, and says so.
 ///
 /// The signal this whole module exists for. Note what is deliberately *not*
@@ -534,6 +704,15 @@ fn notice_arrivals(
         Has<Pursuit>,
         Has<Ambient>,
         Has<Order>,
+        // Public, replicated presentation only. Deliberately `Option`: crew
+        // the utility AI has not taken over do not carry it, and they are
+        // exactly the bodies the four visitor states above already describe.
+        Option<&NpcActivity>,
+        // Their own memory, read only to ask "is this person still unsettled".
+        // Authority-only and unreplicated, which is sound here because the
+        // whole decision half of this module runs `is_authority` and `Speech`
+        // itself carries nothing but words.
+        Option<&NpcMemory>,
     )>,
 ) {
     let Some(script) = script else {
@@ -543,7 +722,10 @@ fn notice_arrivals(
     let listeners: Vec<Vec3> = chemists.iter().map(|at| at.translation).collect();
     let mut rng = rand::rng();
 
-    for (entity, member, at, cooldown, errand, hostile, ambient, waiting) in &mut crew {
+    let now = time.elapsed_secs();
+    for (entity, member, at, cooldown, errand, hostile, ambient, waiting, activity, witnessed) in
+        &mut crew
+    {
         // The *room* is what makes this an arrival rather than "is nearby":
         // a body already standing in the room the chemist walked into has not
         // arrived anywhere.
@@ -576,14 +758,30 @@ fn notice_arrivals(
         // Order matters: an errand and a pursuit both replace `CrewRoute`, so
         // a body can be on one while still carrying the `Order` that sent it.
         // The thing they are doing right now is what they talk about.
+        //
+        // Activity is checked *last*, after every component state, for that
+        // same reason: a utility agent recalled onto an errand or handed an
+        // order still carries an `NpcActivity`, and what they are here to do
+        // outranks what they were doing before.
         let situation = if hostile {
             Situation::Hostile
         } else if errand {
             Situation::Errand
         } else if waiting {
             Situation::Waiting
+        } else if unsettled(witnessed, now) {
+            // Ahead of activity but behind every component state. Someone who
+            // saw something odd a minute ago is still doing their job — the
+            // unease is what they mention, not what they are doing — but a
+            // person on an errand or holding an order is here for a reason,
+            // and that reason still outranks it.
+            Situation::Witnessed
         } else if ambient {
             Situation::Passing
+        } else if let Some(situation) =
+            activity.copied().and_then(Situation::from_activity)
+        {
+            situation
         } else {
             continue;
         };
@@ -1739,13 +1937,16 @@ mod tests {
         // A situation with only role-specific lines is silence for anyone
         // whose department nobody wrote for — and silence exactly when the
         // player needed the signal.
+        //
+        // The list comes from `Situation::ALL` rather than being written out
+        // here. It used to be four names typed inline, and that is a large
+        // part of why the activity variants could be missing for so long: a
+        // hardcoded list cannot notice a variant nobody added to it, so the
+        // test kept passing while most of the station was mute. Adding a
+        // variant without adding it to `ALL` now fails the exhaustive match in
+        // `Situation::ALL`'s own guard below.
         let script = script();
-        for situation in [
-            Situation::Errand,
-            Situation::Waiting,
-            Situation::Passing,
-            Situation::Hostile,
-        ] {
+        for situation in Situation::ALL {
             let general = script
                 .arrivals
                 .iter()
@@ -2748,5 +2949,325 @@ mod tests {
         let body = Entity::from_raw_u32(1).unwrap();
         memory.0.insert(body, "Mixing Hall".to_string());
         assert_eq!(memory.room_of(body), Some("Mixing Hall"));
+    }
+
+    // -----------------------------------------------------------------------
+    // The mute-resident defect
+    // -----------------------------------------------------------------------
+
+    /// `Situation::ALL` really is all of them.
+    ///
+    /// The coverage tests iterate `ALL`, so a variant missing from it is a
+    /// variant nothing checks — which is the shape of the original defect:
+    /// those tests listed four situations inline, passed, and most of the
+    /// station was mute anyway.
+    ///
+    /// `name`'s match is exhaustive, so a new variant is a compile error
+    /// there. This asserts the other half — that `ALL` has no duplicates and
+    /// no gaps relative to it.
+    #[test]
+    fn the_situation_list_the_tests_iterate_is_complete() {
+        let mut names: Vec<&str> = Situation::ALL.iter().map(|s| s.name()).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            count,
+            "`Situation::ALL` lists the same situation twice"
+        );
+    }
+
+    /// Every public activity worth speaking from maps to a real situation.
+    ///
+    /// The other half of the guard. The test above catches a situation with no
+    /// lines; this catches an activity with no situation — a body doing
+    /// something the speech module has no name for, which is precisely how the
+    /// whole utility crew went silent in the first place.
+    ///
+    /// `Idle`, `Down` and `Socializing` are the deliberate exemptions and are
+    /// asserted as such rather than merely skipped, so removing one from
+    /// `from_activity` on purpose is a decision someone has to come here and
+    /// make.
+    #[test]
+    fn every_public_activity_either_speaks_or_is_deliberately_silent() {
+        let speaks = [
+            NpcActivity::Working,
+            NpcActivity::Helping,
+            NpcActivity::Eating,
+            NpcActivity::Resting,
+            NpcActivity::Treating,
+            NpcActivity::Traveling,
+        ];
+        for activity in speaks {
+            assert!(
+                Situation::from_activity(activity).is_some(),
+                "{activity:?} leaves a body with nothing to say"
+            );
+        }
+
+        for activity in [
+            NpcActivity::Idle,
+            NpcActivity::Down,
+            NpcActivity::Socializing,
+        ] {
+            assert!(
+                Situation::from_activity(activity).is_none(),
+                "{activity:?} is deliberately silent — see `from_activity`"
+            );
+        }
+    }
+
+    /// A working resident is not mute.
+    ///
+    /// The behavioural counterpart, through the real `notice_arrivals`. The
+    /// body here is exactly what the utility AI produces: a `StationResident`
+    /// with an `NpcActivity` and none of `Ambient`/`Errand`/`Order`/`Pursuit`.
+    /// Before the activity arm existed this body fell through the situation
+    /// match and said nothing, however close the player stood.
+    ///
+    /// Falsifies the fix: drop the activity arm from `notice_arrivals` and
+    /// this fails while every other speech test still passes.
+    #[test]
+    fn a_resident_at_work_can_still_greet_someone_who_walks_in() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<RoomMemory>()
+            .insert_resource(threat::Authored(script()))
+            .add_systems(Update, notice_arrivals);
+
+        app.world_mut().spawn((
+            Chemist {
+                client: bevy_replicon::prelude::ClientId::Server,
+            },
+            Transform::from_translation(Vec3::ZERO),
+        ));
+        let worker = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Tech Boyle".into(),
+                    role: "Engineering".into(),
+                },
+                Transform::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+                // What a migrated resident actually carries. No `Ambient`.
+                NpcActivity::Working,
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<RoomMemory>()
+            .0
+            .insert(worker, "Reaction Bay".to_string());
+        app.update();
+
+        assert!(
+            app.world().get::<Speech>(worker).is_some(),
+            "a resident at work said nothing to someone standing next to them"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Witnessed
+    // -----------------------------------------------------------------------
+
+    /// **The integrity rule of packet I.** No witness line names anybody.
+    ///
+    /// A `SuspiciousHandling` memory is documented as deliberately ambiguous:
+    /// innocent and covert handling produce the same kind, and the witness saw
+    /// handling rather than intent. A bark that named a person would convert a
+    /// glimpse into an accusation and hand the player a conclusion no character
+    /// holds — `interviews` is the only route to a name, and it reaches one
+    /// from this same memory under questioning and confidence rules.
+    ///
+    /// Checked against the actual cast and the department names, because those
+    /// are what a line would plausibly reach for.
+    #[test]
+    fn a_witness_never_names_anyone() {
+        let script = script();
+        let cast: Vec<String> = ron::from_str::<Vec<crate::crew::CrewDef>>(include_str!(
+            "../../assets/data/station.crew.ron"
+        ))
+        .expect("the roster parses")
+        .into_iter()
+        .map(|member| member.name)
+        .chain(["Tech Boyle".into(), "Grower Aleksy".into()])
+        .collect();
+
+        for line in script
+            .arrivals
+            .iter()
+            .filter(|line| line.situation == Situation::Witnessed)
+        {
+            for name in &cast {
+                // Surnames as well as full names: "Boyle was seen…" is exactly
+                // the claim `station.saboteur.ron` had to have removed.
+                for part in name.split_whitespace().chain(std::iter::once(name.as_str())) {
+                    assert!(
+                        !line.text.contains(part),
+                        "witness line names {part:?}: {:?}",
+                        line.text
+                    );
+                }
+            }
+            for department in DEPARTMENTS {
+                assert!(
+                    !line.text.contains(department),
+                    "witness line names the {department} department: {:?}",
+                    line.text
+                );
+            }
+        }
+    }
+
+    /// Unease needs a real memory, and fades with it.
+    ///
+    /// Three cases in one because they are one rule: no memory, a memory too
+    /// faint to be worth mentioning, and a fresh one. The threshold is shared
+    /// with `interviews::USABLE_TESTIMONY` on purpose — a witness too unsure to
+    /// tell an investigator should not be muttering about it either.
+    #[test]
+    fn unease_needs_a_memory_and_fades_with_it() {
+        assert!(!unsettled(None, 0.0), "nobody with no memory is unsettled");
+
+        let mut memory = NpcMemory::default();
+        assert!(
+            !unsettled(Some(&memory), 0.0),
+            "an empty memory is not a memory"
+        );
+
+        memory.remember(crate::utility_ai::MemoryFact {
+            kind: StimulusKind::SuspiciousHandling,
+            subject: None,
+            actor: None,
+            at: Vec3::ZERO,
+            room_key: None,
+            modality: crate::utility_ai::Modality::Seen,
+            source: None,
+            confidence: 1.0,
+            learned_at: 0.0,
+        });
+        assert!(
+            unsettled(Some(&memory), 1.0),
+            "a fresh sighting is worth mentioning"
+        );
+
+        // `SuspiciousHandling` is retained 420 s and decays continuously, so
+        // the barks stop on their own rather than needing a second timer.
+        assert!(
+            !unsettled(Some(&memory), 419.0),
+            "a memory that has all but faded stops being mentioned"
+        );
+    }
+
+    /// A witness says the unsettled line rather than their work line.
+    ///
+    /// The behavioural half, through the real `notice_arrivals`. Ordering
+    /// matters: this person is still `Working`, and without the `Witnessed`
+    /// arm ahead of activity they would greet the player about their job as if
+    /// nothing had happened.
+    #[test]
+    fn someone_who_saw_something_mentions_that_rather_than_their_work() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<RoomMemory>()
+            .insert_resource(threat::Authored(script()))
+            .add_systems(Update, notice_arrivals);
+
+        app.world_mut().spawn((
+            Chemist {
+                client: bevy_replicon::prelude::ClientId::Server,
+            },
+            Transform::from_translation(Vec3::ZERO),
+        ));
+
+        let mut memory = NpcMemory::default();
+        memory.remember(crate::utility_ai::MemoryFact {
+            kind: StimulusKind::SuspiciousHandling,
+            subject: None,
+            actor: None,
+            at: Vec3::ZERO,
+            room_key: None,
+            modality: crate::utility_ai::Modality::Seen,
+            source: None,
+            confidence: 1.0,
+            learned_at: 0.0,
+        });
+        let witness = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Dr. Vance".into(),
+                    role: "Medical".into(),
+                },
+                Transform::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+                NpcActivity::Working,
+                memory,
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<RoomMemory>()
+            .0
+            .insert(witness, "Reaction Bay".to_string());
+        app.update();
+
+        let said = app
+            .world()
+            .get::<Speech>(witness)
+            .expect("a witness in the room said nothing at all")
+            .text
+            .clone();
+        let authored = script();
+        let witness_lines: Vec<&str> = authored
+            .arrivals
+            .iter()
+            .filter(|line| line.situation == Situation::Witnessed)
+            .map(|line| line.text.as_str())
+            .collect();
+        assert!(
+            witness_lines.contains(&said.as_str()),
+            "a witness talked about their job instead: {said:?}"
+        );
+    }
+
+    /// An idle body still says nothing.
+    ///
+    /// The negative control that keeps the test above honest. `Idle` is the
+    /// gap between actions, not a state anyone occupies — a line there would
+    /// fire on every handover and turn the station into a chorus.
+    #[test]
+    fn a_body_between_actions_stays_quiet() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<RoomMemory>()
+            .insert_resource(threat::Authored(script()))
+            .add_systems(Update, notice_arrivals);
+
+        app.world_mut().spawn((
+            Chemist {
+                client: bevy_replicon::prelude::ClientId::Server,
+            },
+            Transform::from_translation(Vec3::ZERO),
+        ));
+        let idler = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Tech Boyle".into(),
+                    role: "Engineering".into(),
+                },
+                Transform::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+                NpcActivity::Idle,
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<RoomMemory>()
+            .0
+            .insert(idler, "Reaction Bay".to_string());
+        app.update();
+
+        assert!(
+            app.world().get::<Speech>(idler).is_none(),
+            "a body between actions should not announce itself"
+        );
     }
 }

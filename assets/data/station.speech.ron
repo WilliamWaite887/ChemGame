@@ -75,6 +75,96 @@
         (situation: Hostile, tone: Urgent, text: "Don't."),
         (situation: Hostile, tone: Urgent, text: "This was always going to happen."),
         (situation: Hostile, tone: Urgent, text: "You should have kept your head down."),
+
+        // ---- Working ------------------------------------------------------
+        // The residents the utility AI drives. Until these existed, the whole
+        // migrated crew — most of the station — could not speak at all: they
+        // carry no `Ambient`, no `Errand` and no `Order`, so every one of them
+        // fell out of the situation match. See `Situation`'s doc comment.
+        //
+        // These people are AT WORK and the player is a colleague walking past,
+        // not a customer. That is the register: half-attention, mid-task, not
+        // a greeting.
+        (situation: Working, text: "Mm. With you in a second."),
+        (situation: Working, text: "Don't lean on that."),
+        (situation: Working, text: "Nearly got this."),
+        (situation: Working, text: "One thing at a time."),
+        (situation: Working, text: "It was fine yesterday. It was."),
+        (situation: Working, role: Some("Engineering"), text: "Third time this cycle on this same panel."),
+        (situation: Working, role: Some("Engineering"), text: "If it hums, it's working. Mostly."),
+        (situation: Working, role: Some("Botany"), text: "These beds want more light than they're getting."),
+        (situation: Working, role: Some("Botany"), text: "Everything down here grows slower than the paperwork."),
+        (situation: Working, role: Some("Service"), text: "Two hundred covers and one working burner."),
+        (situation: Working, role: Some("Service"), text: "Mind the floor, it's just been done."),
+        (situation: Working, role: Some("Medical"), text: "Stock check. Riveting."),
+        (situation: Working, role: Some("Security"), text: "Paperwork. It's mostly paperwork."),
+        (situation: Working, role: Some("Cargo"), text: "Manifest says twelve. There are nine."),
+
+        // ---- Helping ------------------------------------------------------
+        // Working, but not their own department's job. The assistants —
+        // Boyle and Aleksy — spend most of their time here, and the tell is
+        // that they sound slightly out of place, because they are.
+        (situation: Helping, text: "Not my department, but here we are."),
+        (situation: Helping, text: "They asked. I'm not going to say no."),
+        (situation: Helping, text: "Somebody has to, apparently."),
+        (situation: Helping, text: "I'm told this counts as cross-training."),
+        (situation: Helping, text: "Don't tell my supervisor where I am."),
+        (situation: Helping, role: Some("Engineering"), text: "I fix things. This is not a thing. I'm doing it anyway."),
+        (situation: Helping, role: Some("Botany"), text: "I grow things. Ask me about anything else and you'll be disappointed."),
+
+        // ---- Eating -------------------------------------------------------
+        // Short and unbothered. Someone with a fork in their hand is not
+        // going to hold a conversation.
+        (situation: Eating, text: "Mm. Break."),
+        (situation: Eating, text: "It's hot, at least."),
+        (situation: Eating, text: "Twenty minutes. That's all I get."),
+        (situation: Eating, text: "Don't ask what's in it."),
+        (situation: Eating, role: Some("Service"), text: "I made this, so I'm allowed to complain about it."),
+
+        // ---- Resting ------------------------------------------------------
+        (situation: Resting, text: "Five minutes. I've earned five minutes."),
+        (situation: Resting, text: "Sitting down is the best part of this job."),
+        (situation: Resting, text: "I'm on a break. Officially."),
+        (situation: Resting, text: "Whatever it is, it can wait a bit."),
+        (situation: Resting, role: Some("Medical"), text: "First time I've sat down all shift."),
+
+        // ---- Treating -----------------------------------------------------
+        // Medical, working on a person. Deliberately never says how bad it is
+        // — the patient's state is the player's to read off the body, not
+        // something a line hands them.
+        (situation: Treating, tone: Urgent, text: "Give me some room, please."),
+        (situation: Treating, tone: Urgent, text: "I've got them. Stand back."),
+        (situation: Treating, text: "They'll be fine. Probably want to sit down a while."),
+        (situation: Treating, text: "Not the first one this shift."),
+        (situation: Treating, tone: Wary, text: "I'd like to know what they'd been near."),
+
+        // ---- Witnessed ----------------------------------------------------
+        // Someone who saw handling that looked wrong, recently enough to still
+        // be chewing on it. Until these existed the covert thread made no
+        // sound whatsoever: an antagonist's approach was visible and silent,
+        // so a player who happened not to be looking learned nothing.
+        //
+        // THE RULE, and it is not negotiable: NOT ONE OF THESE NAMES ANYBODY.
+        //
+        // The witness saw handling. They did not see intent, and they cannot
+        // tell an antagonist from a colleague tidying up — `SuspiciousHandling`
+        // is documented as "deliberately ambiguous: innocent and covert food
+        // handling produce the same kind". A line naming a person would turn a
+        // glimpse into an accusation and hand the player a conclusion the
+        // fiction never earned. `interviews` is the only route to a name, and
+        // it gets there from this same memory under questioning.
+        //
+        // So: no names, no roles, no departments, no "I saw X". Unease only.
+        // `speech::tests::a_witness_never_names_anyone` enforces it.
+        (situation: Witnessed, tone: Wary, text: "Probably nothing. Probably."),
+        (situation: Witnessed, tone: Wary, text: "Did that get moved? I thought that got moved."),
+        (situation: Witnessed, tone: Wary, text: "Something back there wasn't sitting right."),
+        (situation: Witnessed, tone: Wary, text: "I'm sure there's a reason for it."),
+        (situation: Witnessed, tone: Wary, text: "I wasn't really watching. I should have been."),
+        (situation: Witnessed, text: "Odd sort of shift, this one."),
+        (situation: Witnessed, tone: Wary, role: Some("Security"), text: "Nothing I could write up. Doesn't mean nothing."),
+        (situation: Witnessed, tone: Wary, role: Some("Medical"), text: "I'd rather people didn't handle things they don't know."),
+        (situation: Witnessed, tone: Wary, role: Some("Service"), text: "People wander through my kitchen like it's a corridor."),
     ],
 
     // Said as the errand is set, before they start walking — so the line and
