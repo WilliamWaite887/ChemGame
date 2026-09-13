@@ -1,12 +1,20 @@
 # NPC thread — live acceptance checklist
 
-For the player to run. Packets A–F are automated-green (1673 tests), but no
-test can tell you whether the behaviour *reads* from the chair. That is what
-this is for.
+For the player to run. Packets A–G (the NPC thread) and H–K (resident voice) are
+all automated-green — 1695 tests as of this writing — but no test can tell you
+whether the behaviour *reads* from the chair. That is what this is for.
 
 Automated coverage proves the rules hold. It cannot prove you can notice an
-antagonist approaching, understand why the batch changed colour, or follow the
-crew's reaction. Those are the only questions here.
+antagonist approaching, understand why the batch changed colour, follow the
+crew's reaction, or hear a station that sounds inhabited rather than noisy.
+Those are the only questions here.
+
+**Nothing in this file has ever been run.** Every packet shipped on automated
+tests alone, and the three judgement calls most likely to change the design —
+whether an antagonist's approach is noticeable (section 4), whether the work
+interval is long enough to interrupt on reaction (section 4), and whether the
+station now sounds inhabited or like a laugh track (section 7) — are all still
+unanswered.
 
 ## Before you start
 
@@ -126,7 +134,71 @@ Only reachable if section 4 or 5 actually produced a completed act on food.
 - [ ] A tampered beaker that nobody drank from summons nobody.
 - [ ] A *later, unrelated* poisoning is not blamed on the earlier meal.
 
-## 7. Authority and reconnect
+## 7. The listening pass (added for the resident-voice phase)
+
+Everything above asks what the crew *did*. This asks what they **said**, which
+is a separate phase's work (`docs/resident-voice-plan.md`, packets H–K) and has
+its own failure mode: before it, most of the station was structurally mute, and
+the obvious overcorrection is a station that will not shut up.
+
+**The question this section exists to answer, and it outranks every checkbox
+below: does the station sound like people work there, or like a room with a
+laugh track?** Volume is not the goal. A line the player has stopped reading is
+worse than silence, because it trains them to ignore the channel the important
+lines arrive on.
+
+### 7a. Stand in each department for two minutes
+
+One at a time, doing nothing. Chemistry, Medical, Engineering, Botany, Service,
+Cargo, Security.
+
+- [ ] Did anyone speak at all? A department that is still silent is the packet-H
+      defect surviving somewhere — note **which** department, because that
+      points at a specific `NpcActivity` never being set there.
+- [ ] Did you hear the **same line twice** from any one person? The cooldown is
+      16–30 s, so two minutes is four or five lines from one body. A repeat
+      inside that window means that situation's pool is too thin — note the
+      line and the room.
+- [ ] Did the lines fit what the person was visibly doing? Someone sitting down
+      should not be saying "nearly got this."
+- [ ] **Did any line tell you something its speaker could not know?** This is
+      the integrity rule and the one real failure. Write down the exact line.
+
+### 7b. The witness barks
+
+Only reachable once section 4 or 5 has produced a covert act somebody saw.
+
+- [ ] Stand near someone who was in the room when it happened. They should
+      sound uneasy without explaining why.
+- [ ] **No bark ever names anybody.** A witness saw handling, not intent, and
+      cannot tell an antagonist from a colleague tidying up. If a line names a
+      person, that is a hard failure — write it down verbatim.
+- [ ] Come back several minutes later. The unease should have faded on its own
+      (the memory decays over ~420 s), not persisted all session.
+- [ ] Ask them directly. What they say **under questioning** may be much more
+      specific than what they mutter to the room — that difference is the
+      design, not a bug.
+
+### 7c. Interruption and the stall signature
+
+- [ ] Walk in and stop someone mid-task. **Did you hear that you had stopped
+      something?** Before this phase there was no acknowledgement at all, so an
+      interruption was indistinguishable from nothing having happened.
+- [ ] Was the acknowledgement legible as *interruption* rather than as a
+      generic greeting? Cross-check `grep "DONE!" ailog.txt` for an
+      `Interrupted` at the same moment.
+- [ ] If you hear **"can't get to it"-type lines repeatedly in one room**, that
+      is not flavour — it is the stall signature reaching you through the
+      fiction. Note the room and cross-check `grep "Unreachable" ailog.txt`.
+      This is the one line in the game that is a bug report.
+
+**Reads-well questions for this section:**
+1. After ten minutes in a busy department, were you still reading the bubbles,
+   or had you started tuning them out? If you tuned out, roughly when?
+2. Was there a moment where a line made you look at someone you would otherwise
+   have walked past? That is the whole phase working.
+
+## 8. Authority and reconnect
 
 - [ ] Host a session, have a client join. The client sees activity and posture,
       never intent — no indication of who is armed or what they are planning.
@@ -138,8 +210,16 @@ Only reachable if section 4 or 5 actually produced a completed act on food.
 ## What to send back
 
 For each section, one line: **worked / didn't / never came up**. For the
-reads-well questions in sections 1 and 4, a sentence each — those are judgement
-calls no test can make, and they are the ones most likely to change the code.
+reads-well questions in sections 1, 4 and 7, a sentence each — those are
+judgement calls no test can make, and they are the ones most likely to change
+the code.
+
+Two answers are worth more than all the checkboxes combined, so give them even
+if you skip everything else:
+
+1. **Could you tell an antagonist was approaching, before anything happened?**
+   (section 4)
+2. **Does the station sound inhabited, or like a laugh track?** (section 7)
 
 If something felt wrong but you can't say why, say that too, with roughly when
 it happened; the log timestamps will find it.

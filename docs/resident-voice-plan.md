@@ -197,7 +197,62 @@ anyone can see a room.
 has decayed past threshold says nothing; the line is asserted not to contain the
 handled party's name.
 
-### Packet J — interrupted, and the rest of the utility lifecycle
+### Packet J — interrupted, and the rest of the utility lifecycle — **landed 2026-09-13**
+
+`notice_action_results`, a new system reading `UtilityActionResolved`, matched
+to the body **by entity**. Two outcomes speak; four stay silent.
+
+**The authoring enum, and why it is not `ActionResult`.** `SpokenResult` is a
+speech-local enum with exactly two variants, converted by `SpokenResult::of`.
+The alternative — deriving `Deserialize` on `utility_ai::ActionResult` so the
+RON could name it — was rejected for two reasons. Only two of that enum's six
+variants describe anything a character experiences: `Completed` is most work
+most of the time, and `ReservationUnavailable`/`InvalidTarget`/`TimedOut` are
+scheduler bookkeeping nobody notices. Making them *authorable* invites exactly
+the lines that should not exist. And it points the dependency the wrong way:
+speech reads the utility AI's public output, and the utility AI should not grow
+a serialization surface to serve a bark pool. `of`'s match is exhaustive, so a
+new `ActionResult` variant is a compile error that forces the question.
+
+**Two gates the plan did not specify, and both earn their place.**
+
+*Cooldown.* The plan said "with the existing cooldown", but `notice_resolutions`
+— the system whose shape this reuses — does **not** set one, because a line at
+the counter is a one-off answer to something the player just did. These are
+unprompted and fire on the scheduler's clock, and `Unreachable` repeats by
+nature — that repetition is precisely what makes it a stall signature. Without
+the gate a genuinely stuck agent becomes a stuck record, which is worse than the
+silence it replaced. The countdown is still ticked by `notice_arrivals` alone;
+this system reads it without decrementing, because two systems subtracting `dt`
+from one timer would halve the authored cooldown.
+
+*Earshot before cooldown.* Checked in that order deliberately. A resolution the
+player could not hear must not spend the body's next chance to speak — otherwise
+a resident whose work failed across the station arrives in the room a moment
+later already mute.
+
+**Nothing says what the work was.** A resident interrupted mid-sabotage and one
+interrupted mid-repair draw from the same pool, for the same reason the `Errand`
+pool does: a line that read differently for a covert act would label the act,
+and the tell is supposed to be behaviour.
+`an_interruption_never_says_what_was_interrupted` enforces it against the words
+a line would reach for.
+
+**Falsified, three times, each failing only its own tests:**
+
+| Guard removed | Result |
+| --- | --- |
+| `Interrupted` arm of `SpokenResult::of` | 2 failed (`an_interrupted_worker_says_so`, `a_resolution_speaks_through_its_own_entity_and_no_one_elses`) |
+| the cooldown gate | 1 failed (`a_repeatedly_failing_worker_does_not_become_a_stuck_record`) |
+| earshot ahead of the cooldown set | 1 failed (`a_failure_across_the_station_is_neither_heard_nor_charged_for`) |
+
+`ordinary_and_bookkeeping_outcomes_stay_quiet` is the negative control over all
+four silent results.
+
+Commands: `cargo test --bin chemgame` → **1694 passed, 0 failed** (1685 before).
+Clippy 124, unchanged.
+
+### Packet J — original scope
 
 `UtilityActionResolved` already carries `ActionResult`, and `decision_log`
 already writes `DONE!` for every non-`Completed` result. The room stays silent.
@@ -216,7 +271,54 @@ no entity. `UtilityActionResolved` carries `agent: Entity` directly, so this one
 matches by entity and is strictly sounder. Worth stating so the next reader does
 not "fix" it into consistency with the older one.
 
-### Packet K — density and acceptance
+### Packet K — density and acceptance — **landed 2026-09-13**
+
+**The count, measured rather than assumed.** The distribution after H–J was
+healthier than this plan feared: every situation already had at least four
+role-agnostic lines, twice the existing test's floor. The thin pools by *total*
+were `Eating` (5), `Resting` (5) and `Treating` (5) — and those are exactly the
+three a player stands **near** the longest, because a mess hall or a medbay is
+somewhere you linger, unlike a corridor you cross. Repetition surfaces there
+first, at a lower line count than anywhere else. Filled to 11, 10 and 10.
+
+Arrivals now stand at **99 lines over ten situations**, plus 16 action-result
+lines. The point the original scope made is the one that held up: the total was
+never the number that mattered. The same body of writing spread over ten
+situations instead of four is what made the station sound inhabited, and packet
+H's redistribution did more for density than any new authoring.
+
+**`Hostile` was deliberately left at 4**, and is now asserted to *stay* under
+the floor rather than merely skipped. Its own note in the file — "nobody making
+a speech is actually coming for you" — is a design choice, and a player hears at
+most one of these before the encounter resolves, so breadth buys nothing and
+dilutes lines chosen to land hard. Widening the exemption should require coming
+to the test and arguing for it.
+
+**The structural guard.** `no_situation_is_thin_enough_to_repeat_itself` floors
+each situation at five *total* lines. Five because that is where repetition
+becomes audible: the cooldown is 16–30 s, so two minutes in one room is four or
+five lines from the same body, and a pool of four guarantees a repeat inside
+that window. It iterates `Situation::ALL`, so it inherits H's fix — a variant
+nobody added to the test cannot ship thin. Falsified by cutting `Resting` to
+three: fails with `Resting has 3 lines; under 5 a body repeats itself…`.
+
+`every_spoken_result_has_a_role_agnostic_line` and
+`the_spoken_result_list_the_tests_iterate_is_complete` give `SpokenResult` the
+same treatment.
+
+**The listening pass** is `docs/npc-thread-live-acceptance.md` section 7, in
+three parts: two minutes standing in each department (7a), the witness barks
+and their decay (7b), and interruption plus the stall signature (7c). Its
+framing question is this plan's own: does the station sound like people work
+there, or like a room with a laugh track.
+
+The doc's header now also states plainly that **nothing in it has ever been
+run**, and names the three judgement calls still unanswered.
+
+Commands: `cargo test --bin chemgame` → **1695 passed, 0 failed**.
+Clippy 124, unchanged.
+
+### Packet K — original scope
 
 - Count lines per situation after H–J and fill the thin ones. The metric that
   matters is lines *per situation*, not the total: 363 over four situations is

@@ -115,18 +115,34 @@
         // ---- Eating -------------------------------------------------------
         // Short and unbothered. Someone with a fork in their hand is not
         // going to hold a conversation.
+        //
+        // Density note (packet K): this pool and `Resting` below are the two a
+        // player stands NEAR the longest — a mess hall is somewhere you linger,
+        // unlike a corridor you cross — so repetition shows up here first, at a
+        // lower line count than anywhere else.
         (situation: Eating, text: "Mm. Break."),
         (situation: Eating, text: "It's hot, at least."),
         (situation: Eating, text: "Twenty minutes. That's all I get."),
         (situation: Eating, text: "Don't ask what's in it."),
+        (situation: Eating, text: "First thing I've eaten since the start of shift."),
+        (situation: Eating, text: "Sit down, you're making the room nervous."),
+        (situation: Eating, text: "It's fine. It's food. It's fine."),
         (situation: Eating, role: Some("Service"), text: "I made this, so I'm allowed to complain about it."),
+        (situation: Eating, role: Some("Service"), text: "Nobody says thank you. Not once, all cycle."),
+        (situation: Eating, role: Some("Engineering"), text: "Eating with my hands like this. Don't look."),
+        (situation: Eating, role: Some("Medical"), text: "I've got eleven minutes and I'm counting them."),
 
         // ---- Resting ------------------------------------------------------
         (situation: Resting, text: "Five minutes. I've earned five minutes."),
         (situation: Resting, text: "Sitting down is the best part of this job."),
         (situation: Resting, text: "I'm on a break. Officially."),
         (situation: Resting, text: "Whatever it is, it can wait a bit."),
+        (situation: Resting, text: "Don't tell me anything. Not for five minutes."),
+        (situation: Resting, text: "My feet have opinions about this station."),
+        (situation: Resting, text: "Ask me again when I'm standing up."),
         (situation: Resting, role: Some("Medical"), text: "First time I've sat down all shift."),
+        (situation: Resting, role: Some("Security"), text: "I'm still watching. I'm just watching sitting down."),
+        (situation: Resting, role: Some("Cargo"), text: "Everything I lift today, I lift after this."),
 
         // ---- Treating -----------------------------------------------------
         // Medical, working on a person. Deliberately never says how bad it is
@@ -137,6 +153,11 @@
         (situation: Treating, text: "They'll be fine. Probably want to sit down a while."),
         (situation: Treating, text: "Not the first one this shift."),
         (situation: Treating, tone: Wary, text: "I'd like to know what they'd been near."),
+        (situation: Treating, tone: Urgent, text: "Keep the walkway clear, both of you."),
+        (situation: Treating, text: "Breathing. That's the main thing."),
+        (situation: Treating, tone: Wary, text: "They'll want to talk to somebody about this."),
+        (situation: Treating, role: Some("Medical"), tone: Urgent, text: "I need this bay clear, not busy."),
+        (situation: Treating, role: Some("Security"), text: "I'm no medic. I'm what's here."),
 
         // ---- Witnessed ----------------------------------------------------
         // Someone who saw handling that looked wrong, recently enough to still
@@ -225,6 +246,52 @@
         (outcome: Expired, role: Some("Security"), tone: Wary, text: "Right. Noted, and remembered."),
         (outcome: Expired, role: Some("Engineering"), tone: Wary, text: "I'll bodge it. I always do."),
         (outcome: Expired, role: Some("Cargo"), tone: Wary, text: "Order's cancelled. Don't bother."),
+    ],
+
+    // What a utility-driven resident says when their own work ends badly.
+    //
+    // Only two outcomes are authored, and that is deliberate. `Completed` is
+    // silent because most work completes and a line every time would be the
+    // laugh track this module is trying not to become; `ReservationUnavailable`,
+    // `InvalidTarget` and `TimedOut` are scheduler bookkeeping that no character
+    // experiences as an event.
+    //
+    // The two that are left are the two the PLAYER caused or should know about:
+    //
+    //   Interrupted — you just stopped something. Until this existed, walking
+    //   in on an act produced no acknowledgement whatsoever, so an interruption
+    //   was indistinguishable from nothing having happened.
+    //
+    //   Unreachable — the stall signature, reaching the player through the
+    //   fiction rather than through `ailog.txt`. If you start hearing these
+    //   repeatedly in one room, something is genuinely wrong with the floor and
+    //   the game has just told you so in character.
+    //
+    // Nothing here says WHAT the work was. A resident interrupted mid-sabotage
+    // and one interrupted mid-repair draw from the same pool, for the same
+    // reason the `Errand` pool does: a line that reads differently for a covert
+    // act would label the act, and the tell is supposed to be behaviour.
+    action_results: [
+        // ---- Interrupted --------------------------------------------------
+        (result: Interrupted, tone: Wary, text: "—right. Leaving that, then."),
+        (result: Interrupted, tone: Wary, text: "I'll come back to it."),
+        (result: Interrupted, tone: Wary, text: "Fine. Not now, apparently."),
+        (result: Interrupted, text: "Hold on, I'd nearly finished that."),
+        (result: Interrupted, tone: Wary, text: "That'll have to wait."),
+        (result: Interrupted, role: Some("Engineering"), tone: Wary, text: "It'll still be broken later. It's patient."),
+        (result: Interrupted, role: Some("Medical"), tone: Wary, text: "I'd rather not leave that half done."),
+        (result: Interrupted, role: Some("Security"), tone: Wary, text: "We'll pick this up again."),
+        (result: Interrupted, role: Some("Service"), tone: Wary, text: "That's going cold, whatever it was."),
+
+        // ---- Unreachable --------------------------------------------------
+        // Said as a complaint about the station, never about the player.
+        (result: Unreachable, tone: Wary, text: "Can't get to it from here."),
+        (result: Unreachable, tone: Wary, text: "There's no way through."),
+        (result: Unreachable, tone: Wary, text: "Whatever's in the way, it's winning."),
+        (result: Unreachable, tone: Wary, text: "I've been round twice. It's not happening."),
+        (result: Unreachable, role: Some("Engineering"), tone: Wary, text: "You can't service what you can't stand next to."),
+        (result: Unreachable, role: Some("Cargo"), tone: Wary, text: "Blocked. Again. I'll note it and nobody will read it."),
+        (result: Unreachable, role: Some("Botany"), tone: Wary, text: "It's right there and I still can't reach it."),
     ],
 
     // On the way down. Short, because they are not finishing the sentence.

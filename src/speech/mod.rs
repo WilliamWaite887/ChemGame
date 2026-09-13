@@ -58,7 +58,9 @@ use crate::orders::{Order, OrderResolved, Outcome};
 use crate::player::{Chemist, PlayerCamera};
 use crate::showdown::Pursuit;
 use crate::threat;
-use crate::utility_ai::{NpcActivity, NpcMemory, StimulusKind};
+use crate::utility_ai::{
+    ActionResult, NpcActivity, NpcMemory, StimulusKind, UtilityActionResolved,
+};
 use crate::AppState;
 
 /// How long a line stays up, clamping the length-scaled figure below.
@@ -163,6 +165,10 @@ impl Plugin for SpeechPlugin {
                     notice_arrivals.run_if(crate::session::career_session),
                     notice_errands.run_if(crate::session::career_session),
                     notice_resolutions.run_if(crate::session::career_session),
+                    // After `notice_arrivals`, which owns the `SpeechCooldown`
+                    // countdown this reads. Before `start_exchanges` for the
+                    // same reason every bark is: a prompted line wins.
+                    notice_action_results.run_if(crate::session::career_session),
                     // Answering a question outranks every unprompted bark:
                     // last writer wins on one body, and a greeting landing on
                     // top of the answer you just asked for is the one ordering
@@ -389,6 +395,13 @@ pub struct SpeechScript {
     pub arrivals: Vec<ArrivalLineDef>,
     pub errands: Vec<SpeechLineDef>,
     pub resolutions: Vec<ResolutionLineDef>,
+    /// What a utility-driven resident says when their own work ends badly.
+    ///
+    /// Separate from [`SpeechScript::resolutions`], which is keyed by
+    /// [`Outcome`] and is about an order the *player* filled. These are about
+    /// the station's own work, and the two pools would say very different
+    /// things about the same word.
+    pub action_results: Vec<ActionResultLineDef>,
     pub collapses: Vec<SpeechLineDef>,
     /// What they tell you when you walk up and ask — see the Conversation
     /// section below.
@@ -445,6 +458,16 @@ pub struct ArrivalLineDef {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct ActionResultLineDef {
+    pub result: SpokenResult,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub tone: SpeechTone,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct ResolutionLineDef {
     pub outcome: Outcome,
     #[serde(default)]
@@ -452,6 +475,78 @@ pub struct ResolutionLineDef {
     #[serde(default)]
     pub tone: SpeechTone,
     pub text: String,
+}
+
+/// An outcome of a utility action that is worth saying something about.
+///
+/// Deliberately **not** [`crate::utility_ai::ActionResult`] itself, and not a
+/// `Deserialize` derive bolted onto it.
+///
+/// Two reasons, and the second is the load-bearing one. First, only two of that
+/// enum's six variants describe anything a character experiences: `Completed`
+/// is most work most of the time and would be a line on every handover,
+/// while `ReservationUnavailable`, `InvalidTarget` and `TimedOut` are scheduler
+/// bookkeeping — a resident does not notice that a claim was contended. Second,
+/// making the scheduler's result type deserializable so a content file can name
+/// it would invite exactly the lines that shouldn't exist, and would point the
+/// dependency the wrong way: the speech module reads the utility AI's public
+/// output, and the utility AI should not grow a serialization surface to serve
+/// a bark pool.
+///
+/// [`SpokenResult::of`] is the whole seam, and it is where a new authorable
+/// outcome would be added.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
+pub enum SpokenResult {
+    /// The player (or an emergency) stopped this action before it finished.
+    ///
+    /// The one the player most needs: until this had a voice, walking in on
+    /// something and stopping it produced no sound at all, so an interruption
+    /// was indistinguishable from nothing having been happening.
+    Interrupted,
+    /// The agent could not get to the target.
+    ///
+    /// Also the **stall signature**. A worker that selects happily and resolves
+    /// `Unreachable` every time is the bug that has bitten this system twice —
+    /// an off-floor target the walker can never arrive at — and
+    /// `decision_log::log_resolutions` exists to catch it in `ailog.txt`. A line
+    /// here puts the same diagnostic in front of a player who is not reading
+    /// logs: repeated "can't get to it" in one room is the game reporting a real
+    /// defect in character.
+    Unreachable,
+}
+
+impl SpokenResult {
+    /// The spoken outcome for a resolved action, if it is one worth a line.
+    ///
+    /// The exhaustive match is the point: a new [`ActionResult`] variant is a
+    /// compile error here, which forces whoever adds it to decide whether a
+    /// resident would notice it rather than letting it default to silence.
+    fn of(result: ActionResult) -> Option<Self> {
+        match result {
+            ActionResult::Interrupted => Some(SpokenResult::Interrupted),
+            ActionResult::Unreachable => Some(SpokenResult::Unreachable),
+            ActionResult::Completed
+            | ActionResult::ReservationUnavailable
+            | ActionResult::InvalidTarget
+            | ActionResult::TimedOut => None,
+        }
+    }
+
+    /// Every spoken result, for tests that must cover all of them.
+    ///
+    /// Same discipline as [`Situation::ALL`], for the same reason: the coverage
+    /// test below iterates this rather than an inline list, so a variant nobody
+    /// added to the test cannot ship mute.
+    #[cfg(test)]
+    pub const ALL: [SpokenResult; 2] = [SpokenResult::Interrupted, SpokenResult::Unreachable];
+
+    #[cfg(test)]
+    fn name(self) -> &'static str {
+        match self {
+            SpokenResult::Interrupted => "Interrupted",
+            SpokenResult::Unreachable => "Unreachable",
+        }
+    }
 }
 
 /// Why this person is in your room.
@@ -778,9 +873,7 @@ fn notice_arrivals(
             Situation::Witnessed
         } else if ambient {
             Situation::Passing
-        } else if let Some(situation) =
-            activity.copied().and_then(Situation::from_activity)
-        {
+        } else if let Some(situation) = activity.copied().and_then(Situation::from_activity) {
             situation
         } else {
             continue;
@@ -876,6 +969,94 @@ fn notice_resolutions(
             continue;
         };
         say(&mut commands, entity, fill(&line.text, member), line.tone);
+    }
+}
+
+/// What a resident says when their own work ends badly.
+///
+/// The other half of [`notice_resolutions`]: that one is about an order the
+/// player filled, this one about the station's own work, and until it existed
+/// the whole utility lifecycle was silent at the moment it most needed not to
+/// be. `decision_log` has written `DONE!` for every non-`Completed` result since
+/// packet C; the room never heard any of it.
+///
+/// # Matched by entity, and do not "fix" that
+///
+/// [`notice_resolutions`] matches by *name*, because [`OrderResolved`] carries
+/// no entity and adding one would touch five modules' construction sites.
+/// [`UtilityActionResolved`] carries `agent: Entity` directly, so this matches
+/// on that and is strictly sounder — no roster lookup, no possibility of two
+/// bodies sharing a name. The inconsistency between the two systems is the
+/// correct state of affairs, not an oversight to be tidied up.
+///
+/// # Why this one takes the cooldown and `notice_resolutions` does not
+///
+/// A line at the counter is an answer to something the player just did, once,
+/// while standing there. These are unprompted, fire on the scheduler's clock,
+/// and `Unreachable` in particular repeats — that is what makes it a useful
+/// stall signature. Without [`SpeechCooldown`] a genuinely stuck agent would
+/// become a stuck record, which is worse than the silence it replaced.
+///
+/// Earshot is checked *before* the cooldown is set, so a resolution the player
+/// could not hear does not quietly consume the body's next chance to speak.
+fn notice_action_results(
+    mut commands: Commands,
+    script: Option<Res<Script>>,
+    mut resolved: MessageReader<UtilityActionResolved>,
+    chemists: Query<&Transform, (With<Chemist>, Without<CrewMember>)>,
+    crew: Query<(&CrewMember, &Transform, Option<&SpeechCooldown>)>,
+) {
+    let Some(script) = script else {
+        // Cleared rather than left to accumulate: without this the reader's
+        // backlog is replayed the frame the script finishes loading, and the
+        // player would hear a burst of complaints about work that ended
+        // minutes ago.
+        resolved.clear();
+        return;
+    };
+    let listeners: Vec<Vec3> = chemists.iter().map(|at| at.translation).collect();
+    let mut rng = rand::rng();
+
+    for report in resolved.read() {
+        let Some(spoken) = SpokenResult::of(report.result) else {
+            continue;
+        };
+        let Ok((member, at, cooldown)) = crew.get(report.agent) else {
+            continue;
+        };
+        // Ticked by `notice_arrivals`, which runs earlier in the same chain and
+        // owns the countdown. Reading it here without decrementing is
+        // deliberate: two systems subtracting `dt` from one timer would halve
+        // the authored cooldown.
+        if cooldown.is_some_and(|cooldown| cooldown.0 > 0.0) {
+            continue;
+        }
+        let heard = listeners
+            .iter()
+            .any(|listener| listener.distance_squared(at.translation) <= EARSHOT * EARSHOT);
+        if !heard {
+            continue;
+        }
+        let Some(line) = pick(
+            script
+                .action_results
+                .iter()
+                .filter(|line| line.result == spoken),
+            |line| line.role.as_deref(),
+            &member.role,
+            &mut rng,
+        ) else {
+            continue;
+        };
+        say(
+            &mut commands,
+            report.agent,
+            fill(&line.text, member),
+            line.tone,
+        );
+        commands.entity(report.agent).insert(SpeechCooldown(
+            rng.random_range(script.cooldown_seconds.0..=script.cooldown_seconds.1),
+        ));
     }
 }
 
@@ -1956,6 +2137,52 @@ mod tests {
                 general >= 2,
                 "{situation:?} needs two role-agnostic fallbacks so an \
                  unwritten department stays varied"
+            );
+        }
+    }
+
+    /// **Packet K's metric.** Lines *per situation*, not lines in total.
+    ///
+    /// The number that was always quoted about this file — "363 authored
+    /// lines" — is the one that does not matter. 363 spread over four
+    /// situations is thin per situation; the same 363 over eleven reads as
+    /// richer with no new writing, and that redistribution is the actual lever
+    /// packet H pulled. So the guard has to be per-situation, or it measures
+    /// the wrong thing.
+    ///
+    /// Five is the floor because that is roughly where repetition becomes
+    /// audible: the cooldown is 16-30 s, so a player standing in one room for a
+    /// couple of minutes hears four or five lines from the same body, and a
+    /// pool of four guarantees a repeat inside that.
+    ///
+    /// [`Situation::Hostile`] is the deliberate exemption, asserted rather than
+    /// skipped. Its pool is short on purpose — the file's own note is that
+    /// "nobody making a speech is actually coming for you" — and a player hears
+    /// at most one of these before the encounter resolves, so breadth buys
+    /// nothing and dilutes lines chosen to land hard.
+    #[test]
+    fn no_situation_is_thin_enough_to_repeat_itself() {
+        const FLOOR: usize = 5;
+        let script = script();
+        for situation in Situation::ALL {
+            let total = script
+                .arrivals
+                .iter()
+                .filter(|line| line.situation == situation)
+                .count();
+            if situation == Situation::Hostile {
+                assert!(
+                    total < FLOOR,
+                    "`Hostile` has grown past the short pool it is deliberately \
+                     kept to; if that is intended, move it out of this exemption \
+                     rather than widening the exemption"
+                );
+                continue;
+            }
+            assert!(
+                total >= FLOOR,
+                "{situation:?} has {total} lines; under {FLOOR} a body repeats \
+                 itself inside the two minutes a player spends in one room"
             );
         }
     }
@@ -3101,7 +3328,10 @@ mod tests {
             for name in &cast {
                 // Surnames as well as full names: "Boyle was seen…" is exactly
                 // the claim `station.saboteur.ron` had to have removed.
-                for part in name.split_whitespace().chain(std::iter::once(name.as_str())) {
+                for part in name
+                    .split_whitespace()
+                    .chain(std::iter::once(name.as_str()))
+                {
                     assert!(
                         !line.text.contains(part),
                         "witness line names {part:?}: {:?}",
@@ -3269,5 +3499,273 @@ mod tests {
             app.world().get::<Speech>(idler).is_none(),
             "a body between actions should not announce itself"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Packet J — the utility lifecycle
+    // -----------------------------------------------------------------------
+
+    /// Builds a resolution message for `agent`. The key and claim are inert
+    /// here — nothing in `notice_action_results` reads either, deliberately,
+    /// because *what* the work was is exactly what a line must not reveal.
+    fn resolution(agent: Entity, result: ActionResult) -> UtilityActionResolved {
+        UtilityActionResolved {
+            agent,
+            key: crate::utility_ai::ActionKey {
+                action: crate::utility_ai::UtilityActionId::PerformJob,
+                target_key: 1,
+            },
+            claim: crate::utility_ai::ReservationOwner {
+                agent,
+                action_instance: 1,
+            },
+            result,
+        }
+    }
+
+    /// One worker within earshot, and the systems that give them a voice.
+    fn app_with_worker(distance: f32) -> (App, Entity) {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<RoomMemory>()
+            .add_message::<UtilityActionResolved>()
+            .insert_resource(threat::Authored(script()))
+            .add_systems(Update, notice_action_results);
+
+        app.world_mut().spawn((
+            Chemist {
+                client: bevy_replicon::prelude::ClientId::Server,
+            },
+            Transform::from_translation(Vec3::ZERO),
+        ));
+        let worker = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Tech Boyle".into(),
+                    role: "Engineering".into(),
+                },
+                Transform::from_translation(Vec3::new(distance, 0.0, 0.0)),
+            ))
+            .id();
+        (app, worker)
+    }
+
+    #[test]
+    fn every_spoken_result_has_a_role_agnostic_line() {
+        // Same guard as `every_situation_has_a_role_agnostic_line`, and for the
+        // same reason: a result with only Engineering lines is silence for the
+        // rest of the station at the exact moment the player needs the signal.
+        let script = script();
+        for result in SpokenResult::ALL {
+            let general = script
+                .action_results
+                .iter()
+                .filter(|line| line.result == result && line.role.is_none())
+                .count();
+            assert!(
+                general >= 2,
+                "{result:?} needs two role-agnostic fallbacks so an unwritten \
+                 department stays varied"
+            );
+        }
+    }
+
+    #[test]
+    fn the_spoken_result_list_the_tests_iterate_is_complete() {
+        let mut names: Vec<&str> = SpokenResult::ALL.iter().map(|r| r.name()).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            count,
+            "`SpokenResult::ALL` lists the same result twice"
+        );
+    }
+
+    /// The packet's headline: interrupting something is now audible.
+    ///
+    /// Falsifies the whole system — remove the `notice_action_results`
+    /// registration, or the `Interrupted` arm of `SpokenResult::of`, and this
+    /// is the test that fails.
+    #[test]
+    fn an_interrupted_worker_says_so() {
+        let (mut app, worker) = app_with_worker(1.0);
+        app.world_mut()
+            .write_message(resolution(worker, ActionResult::Interrupted));
+        app.update();
+
+        assert!(
+            app.world().get::<Speech>(worker).is_some(),
+            "the player stopped this person's work and got no acknowledgement \
+             that anything had been stopped"
+        );
+    }
+
+    /// The stall signature reaching the player through the fiction.
+    #[test]
+    fn a_worker_who_cannot_reach_its_target_complains() {
+        let (mut app, worker) = app_with_worker(1.0);
+        app.world_mut()
+            .write_message(resolution(worker, ActionResult::Unreachable));
+        app.update();
+
+        assert!(
+            app.world().get::<Speech>(worker).is_some(),
+            "the repeated-`Unreachable` stall is the bug this system is meant \
+             to report in character, and it reported nothing"
+        );
+    }
+
+    /// The negative control, and the one that keeps this from becoming a laugh
+    /// track.
+    ///
+    /// Most work completes. A line on every completion would be a resident
+    /// narrating their own shift, and the bookkeeping results describe nothing
+    /// a character experiences.
+    #[test]
+    fn ordinary_and_bookkeeping_outcomes_stay_quiet() {
+        for result in [
+            ActionResult::Completed,
+            ActionResult::ReservationUnavailable,
+            ActionResult::InvalidTarget,
+            ActionResult::TimedOut,
+        ] {
+            let (mut app, worker) = app_with_worker(1.0);
+            app.world_mut().write_message(resolution(worker, result));
+            app.update();
+
+            assert!(
+                app.world().get::<Speech>(worker).is_none(),
+                "{result:?} produced a line; only outcomes a character would \
+                 notice may speak"
+            );
+        }
+    }
+
+    /// A resolution the player could not hear is not spoken — and, crucially,
+    /// does not burn the cooldown.
+    ///
+    /// The second half is the subtle one. If the far worker set a
+    /// `SpeechCooldown`, a resident whose work failed across the station would
+    /// arrive silent in the room a moment later, having spent their greeting on
+    /// nobody.
+    #[test]
+    fn a_failure_across_the_station_is_neither_heard_nor_charged_for() {
+        let (mut app, worker) = app_with_worker(EARSHOT * 3.0);
+        app.world_mut()
+            .write_message(resolution(worker, ActionResult::Interrupted));
+        app.update();
+
+        assert!(
+            app.world().get::<Speech>(worker).is_none(),
+            "a failure across the station was spoken into the player's ear"
+        );
+        assert!(
+            app.world().get::<SpeechCooldown>(worker).is_none(),
+            "an unheard resolution spent the body's next chance to speak"
+        );
+    }
+
+    /// A stuck agent is a stall signature, not a stuck record.
+    ///
+    /// `Unreachable` repeats by nature — that is what makes it diagnostic — so
+    /// without the cooldown gate the useful signal becomes unreadable noise.
+    #[test]
+    fn a_repeatedly_failing_worker_does_not_become_a_stuck_record() {
+        let (mut app, worker) = app_with_worker(1.0);
+        app.world_mut()
+            .write_message(resolution(worker, ActionResult::Unreachable));
+        app.update();
+        assert!(
+            app.world().get::<Speech>(worker).is_some(),
+            "the first failure should be heard"
+        );
+
+        // The line and its timer, gone, as `expire_speech` would leave them —
+        // so the only thing standing between the agent and a second bark is
+        // the cooldown this test is about.
+        app.world_mut().entity_mut(worker).remove::<Speech>();
+        app.world_mut()
+            .write_message(resolution(worker, ActionResult::Unreachable));
+        app.update();
+
+        assert!(
+            app.world().get::<Speech>(worker).is_none(),
+            "a stuck agent barked twice in a row; `Unreachable` repeats by \
+             nature and the cooldown is what keeps it a signal"
+        );
+    }
+
+    /// Matched by entity, which is the note packet J left for its next reader.
+    ///
+    /// `notice_resolutions` matches `OrderResolved` by *name* because that
+    /// message carries no entity. `UtilityActionResolved` carries `agent`
+    /// directly, so this one does not consult the roster at all — and a
+    /// resolution for a body that is not crew must fall out silently rather
+    /// than finding someone by name.
+    #[test]
+    fn a_resolution_speaks_through_its_own_entity_and_no_one_elses() {
+        let (mut app, worker) = app_with_worker(1.0);
+        // A second body with the same name, standing just as close. Were this
+        // matched by name like the older system, a resolution could land on
+        // the wrong one of these.
+        let namesake = app
+            .world_mut()
+            .spawn((
+                CrewMember {
+                    name: "Tech Boyle".into(),
+                    role: "Engineering".into(),
+                },
+                Transform::from_translation(Vec3::new(2.0, 0.0, 0.0)),
+            ))
+            .id();
+
+        app.world_mut()
+            .write_message(resolution(worker, ActionResult::Interrupted));
+        app.update();
+
+        assert!(
+            app.world().get::<Speech>(worker).is_some(),
+            "the agent named in the message stayed silent"
+        );
+        assert!(
+            app.world().get::<Speech>(namesake).is_none(),
+            "a resolution reached a body it did not name; this system matches \
+             by entity precisely so that cannot happen"
+        );
+    }
+
+    /// Nothing in this pool says what the work was.
+    ///
+    /// The same rule `Witnessed` lines live under, reaching the same conclusion
+    /// from the other direction: a resident interrupted mid-sabotage and one
+    /// interrupted mid-repair draw from one pool, so an interruption cannot
+    /// tell the player they have caught someone at something.
+    #[test]
+    fn an_interruption_never_says_what_was_interrupted() {
+        let script = script();
+        // The words a line would reach for if it tried to describe the act.
+        const TELLS: [&str; 8] = [
+            "sabotage",
+            "poison",
+            "tamper",
+            "conceal",
+            "evidence",
+            "contaminat",
+            "spike",
+            "dose",
+        ];
+        for line in &script.action_results {
+            let text = line.text.to_lowercase();
+            for tell in TELLS {
+                assert!(
+                    !text.contains(tell),
+                    "an action-result line describes the act ({tell:?}): {:?}",
+                    line.text
+                );
+            }
+        }
     }
 }
