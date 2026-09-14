@@ -28,6 +28,8 @@ use crate::AppState;
 use super::codec::VoiceDecoder;
 use super::frame::{FRAME_MS, FRAME_SAMPLES, SAMPLE_RATE};
 use super::jitter::{FrameAction, JitterBuffer};
+use super::net::VoiceMode;
+use super::radio_filter::RadioFilter;
 use super::VoiceHeard;
 
 /// Same anchor height `speech::SpeechBubble` uses. Not shared as a `pub`
@@ -167,13 +169,34 @@ struct PlayerVoice {
     /// The stream id the decoder was last reset for, so a new talk-spurt is
     /// noticed exactly once rather than every tick.
     decoder_stream: Option<u16>,
+    /// What this entry — its playback entity, spatial or not, and this
+    /// filter — was built for. Compared against each arriving message's own
+    /// `mode`; see [`receive_voice_heard`] for why a mismatch means a full
+    /// rebuild rather than an update.
+    mode: VoiceMode,
+    /// The handset's band-limit/distortion, present only while `mode` is
+    /// [`VoiceMode::Handset`]. Its own state, separate from the jitter
+    /// buffer's and the Opus decoder's, but reset alongside them — see
+    /// [`RadioFilter::reset`].
+    filter: Option<RadioFilter>,
     gain: f32,
     muffle: f32,
     last_heard: Instant,
 }
 
 /// Accepts arriving frames into each speaker's jitter buffer, and spawns the
-/// playback entity the first time a given speaker is heard from.
+/// playback entity the first time a given speaker is heard from — or rebuilds
+/// it, if this message's `mode` differs from what the entity currently
+/// playing was built for.
+///
+/// A rebuild rather than an update because `PlaybackSettings` changes do
+/// nothing to audio already playing (`bevy_audio`'s own doc for the type says
+/// so), so there is no way to flip an existing sink between spatial and
+/// non-spatial. In practice a mid-conversation switch between the room and
+/// the handset is rare and the respawn it costs is inaudible; the
+/// alternative — one playback pipeline per speaker per mode, running
+/// permanently rather than only while used — was heavier for a case this
+/// infrequent.
 ///
 /// Ungated by `is_authority` — this is presentation, built from a replicated…
 /// no, from a *received message*, but the principle is the co-op rule all the
@@ -198,36 +221,64 @@ fn receive_voice_heard(
             continue;
         }
 
-        let entry = match players.entries.entry(message.speaker) {
-            std::collections::hash_map::Entry::Occupied(occupied) => occupied.into_mut(),
-            std::collections::hash_map::Entry::Vacant(vacant) => {
-                let Ok(decoder) = VoiceDecoder::new() else {
-                    warn!("voice playback: could not start a decoder for a new speaker");
-                    continue;
-                };
-                let (producer, consumer) = rtrb::RingBuffer::new(RING_CAPACITY);
-                let handle = assets.add(VoiceStream {
-                    consumer: std::sync::Mutex::new(Some(consumer)),
-                });
-                let playback_entity = commands
-                    .spawn((
-                        AudioPlayer::<VoiceStream>(handle),
-                        PlaybackSettings::LOOP.with_spatial(true),
-                        Transform::from_translation(Vec3::from_array(message.emitter)),
-                        crate::until_we_leave_the_lab(),
-                    ))
-                    .id();
-                vacant.insert(PlayerVoice {
+        let needs_rebuild = players
+            .entries
+            .get(&message.speaker)
+            .is_none_or(|entry| entry.mode != message.mode);
+
+        if needs_rebuild {
+            if let Some(old) = players.entries.remove(&message.speaker) {
+                commands.entity(old.playback_entity).despawn();
+            }
+            let Ok(decoder) = VoiceDecoder::new() else {
+                warn!("voice playback: could not start a decoder for a new speaker");
+                continue;
+            };
+            let (producer, consumer) = rtrb::RingBuffer::new(RING_CAPACITY);
+            let handle = assets.add(VoiceStream {
+                consumer: std::sync::Mutex::new(Some(consumer)),
+            });
+
+            // The handset is deliberately not spatial: a station-wide
+            // broadcast has no one true position for Bevy's panning to place
+            // it at, and playing it flat is also the clearest possible
+            // signal — beyond the filter — that this voice is not in the
+            // room. `PlaybackSettings::with_spatial` is the one thing this
+            // module cannot change after the fact, so it has to be decided
+            // correctly right here, at spawn.
+            let spatial = message.mode == VoiceMode::Proximity;
+            let mut entity = commands.spawn((
+                AudioPlayer::<VoiceStream>(handle),
+                PlaybackSettings::LOOP.with_spatial(spatial),
+                crate::until_we_leave_the_lab(),
+            ));
+            if spatial {
+                entity.insert(Transform::from_translation(Vec3::from_array(message.emitter)));
+            }
+            let playback_entity = entity.id();
+
+            let filter =
+                matches!(message.mode, VoiceMode::Handset(_)).then(|| RadioFilter::new(SAMPLE_RATE));
+
+            players.entries.insert(
+                message.speaker,
+                PlayerVoice {
                     playback_entity,
                     producer,
                     jitter: JitterBuffer::new(),
                     decoder,
                     decoder_stream: None,
+                    mode: message.mode,
+                    filter,
                     gain: 1.0,
                     muffle: 0.0,
                     last_heard: Instant::now(),
-                })
-            }
+                },
+            );
+        }
+
+        let Some(entry) = players.entries.get_mut(&message.speaker) else {
+            continue;
         };
         entry
             .jitter
@@ -236,8 +287,10 @@ fn receive_voice_heard(
         entry.muffle = message.muffle;
         entry.last_heard = Instant::now();
 
-        if let Ok(mut transform) = transforms.get_mut(entry.playback_entity) {
-            transform.translation = Vec3::from_array(message.emitter);
+        if entry.mode == VoiceMode::Proximity {
+            if let Ok(mut transform) = transforms.get_mut(entry.playback_entity) {
+                transform.translation = Vec3::from_array(message.emitter);
+            }
         }
     }
 }
@@ -272,6 +325,13 @@ fn tick_voice_playback(
                 if let Err(error) = entry.decoder.reset() {
                     warn!("voice playback: could not reset decoder for a new talk-spurt: {error}");
                 }
+                // The filter's own memory is as stale as the decoder's the
+                // moment a new talk-spurt starts — see `RadioFilter::reset`'s
+                // own doc for why leaving it running would smear one
+                // utterance's tail into the next one's start.
+                if let Some(filter) = entry.filter.as_mut() {
+                    filter.reset();
+                }
                 entry.decoder_stream = current_stream;
             }
 
@@ -295,14 +355,18 @@ fn tick_voice_playback(
 
             // Attenuation ownership, per the plan: `gain` is everything Bevy's
             // own spatial falloff cannot see (the speaker-to-emitter leg, and
-            // in Phase 2 corner/door penalties); `voice_volume` is the
-            // player's own dial; `muffle` softens the signal itself rather
-            // than only its volume. Phase 1 sends `muffle == 0.0` always, so
-            // this line is presently a no-op multiply by 1.0 — it is written
-            // now because Phase 2 changes only what feeds this, never this.
+            // corner/door penalties from Phase 2's occlusion); `voice_volume`
+            // is the player's own dial; `muffle` softens the signal itself
+            // rather than only its volume. The relay always sends
+            // `gain: 1.0, muffle: 0.0` for a handset frame — nothing here has
+            // to special-case that; the formula is already a no-op multiply
+            // for it, and the filter below is what actually shapes it.
             let volume = entry.gain * settings.voice_volume * (1.0 - entry.muffle);
             for sample in &mut pcm {
                 *sample *= volume;
+            }
+            if let Some(filter) = entry.filter.as_mut() {
+                filter.process_frame(&mut pcm);
             }
             for sample in pcm {
                 // Best-effort: if the audio thread has fallen behind enough
@@ -574,6 +638,8 @@ mod tests {
                 jitter: JitterBuffer::new(),
                 decoder: VoiceDecoder::new().expect("decoder"),
                 decoder_stream: None,
+                mode: VoiceMode::Proximity,
+                filter: None,
                 gain: 1.0,
                 muffle: 0.0,
                 last_heard: Instant::now(),
@@ -594,6 +660,8 @@ mod tests {
                 jitter: JitterBuffer::new(),
                 decoder: VoiceDecoder::new().expect("decoder"),
                 decoder_stream: None,
+                mode: VoiceMode::Proximity,
+                filter: None,
                 gain: 1.0,
                 muffle: 0.0,
                 last_heard: Instant::now() - SPEAKING_WINDOW - Duration::from_millis(1),

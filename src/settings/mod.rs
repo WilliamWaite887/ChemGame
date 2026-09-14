@@ -1133,6 +1133,7 @@ impl Settings {
             Ok(Ok(mut settings)) => {
                 settings.bindings.migrate_inspect_binding();
                 settings.bindings.migrate_push_to_talk_binding();
+                settings.bindings.migrate_handset_talk_binding();
                 settings
             }
             Ok(Err(error)) => {
@@ -1196,6 +1197,12 @@ pub struct Bindings {
     /// same way `sprint` is read, since talking is a hold like sprinting is,
     /// not a tap like `interact`.
     pub push_to_talk: KeyCode,
+    /// The handset's own push-to-talk, held the same way — see
+    /// [`Self::push_to_talk`]. A second, separate key rather than a modifier
+    /// on the first: the two must be distinguishable by `keys.pressed` alone,
+    /// and holding both at once has to mean something definite (`voice::capture`
+    /// gives the handset priority) rather than requiring careful timing.
+    pub handset_talk: KeyCode,
 }
 
 impl Default for Bindings {
@@ -1215,6 +1222,7 @@ impl Default for Bindings {
             label: KeyCode::KeyL,
             inspect: KeyCode::KeyI,
             push_to_talk: KeyCode::KeyV,
+            handset_talk: KeyCode::KeyC,
         }
     }
 }
@@ -1247,6 +1255,36 @@ impl Bindings {
             .find(|k| !old.contains(k))
             {
                 self.push_to_talk = key;
+            }
+        }
+    }
+
+    /// The same problem again, for the key added alongside the handset.
+    /// `KeyCode::KeyV` is deliberately absent from the fallback list — it is
+    /// `push_to_talk`'s own default, and offering it here would just swap
+    /// which of the two voice binds collides instead of fixing anything.
+    fn migrate_handset_talk_binding(&mut self) {
+        let old: Vec<_> = BindingSlot::ALL
+            .iter()
+            .filter(|s| **s != BindingSlot::HandsetTalk)
+            .map(|s| s.read(self))
+            .collect();
+        if old.contains(&self.handset_talk) {
+            if let Some(key) = [
+                KeyCode::KeyC,
+                KeyCode::KeyG,
+                KeyCode::KeyN,
+                KeyCode::KeyM,
+                KeyCode::KeyX,
+                KeyCode::KeyZ,
+                KeyCode::CapsLock,
+                KeyCode::AltLeft,
+                KeyCode::ControlLeft,
+            ]
+            .into_iter()
+            .find(|k| !old.contains(k))
+            {
+                self.handset_talk = key;
             }
         }
     }
@@ -1322,12 +1360,13 @@ enum BindingSlot {
     Label,
     Inspect,
     PushToTalk,
+    HandsetTalk,
 }
 
 impl BindingSlot {
     /// In the order the Controls screen reads best — movement, then the
     /// hands, then the book, then voice last since it is the newest.
-    const ALL: [BindingSlot; 14] = [
+    const ALL: [BindingSlot; 15] = [
         BindingSlot::Forward,
         BindingSlot::Back,
         BindingSlot::Left,
@@ -1342,6 +1381,7 @@ impl BindingSlot {
         BindingSlot::Label,
         BindingSlot::Inspect,
         BindingSlot::PushToTalk,
+        BindingSlot::HandsetTalk,
     ];
 
     fn title(self) -> &'static str {
@@ -1360,6 +1400,7 @@ impl BindingSlot {
             BindingSlot::Label => "Write on what you hold",
             BindingSlot::Inspect => "Inspect held item",
             BindingSlot::PushToTalk => "Push to talk",
+            BindingSlot::HandsetTalk => "Handset (station-wide)",
         }
     }
 
@@ -1379,6 +1420,7 @@ impl BindingSlot {
             BindingSlot::Label => bindings.label,
             BindingSlot::Inspect => bindings.inspect,
             BindingSlot::PushToTalk => bindings.push_to_talk,
+            BindingSlot::HandsetTalk => bindings.handset_talk,
         }
     }
 
@@ -1398,6 +1440,7 @@ impl BindingSlot {
             BindingSlot::Label => bindings.label = key,
             BindingSlot::Inspect => bindings.inspect = key,
             BindingSlot::PushToTalk => bindings.push_to_talk = key,
+            BindingSlot::HandsetTalk => bindings.handset_talk = key,
         }
     }
 }
@@ -1587,6 +1630,7 @@ mod tests {
         assert_eq!(settings.bindings.book, KeyCode::KeyB);
         assert_eq!(settings.bindings.social, KeyCode::Tab);
         assert_eq!(settings.bindings.push_to_talk, KeyCode::KeyV);
+        assert_eq!(settings.bindings.handset_talk, KeyCode::KeyC);
         assert_eq!(settings.voice_volume, 1.0);
         assert_eq!(settings.mic_gain, 1.0);
         assert_eq!(settings.voice_input_device, None);
@@ -1722,7 +1766,7 @@ mod tests {
         // `label` had no row on the old `described()`-based Controls screen —
         // no way for a player to ever discover it existed. `BindingSlot::ALL`
         // enumerating every field of `Bindings` fixes that by construction.
-        assert_eq!(BindingSlot::ALL.len(), 14);
+        assert_eq!(BindingSlot::ALL.len(), 15);
         assert!(BindingSlot::ALL.iter().all(|slot| !slot.title().is_empty()));
         assert!(
             BindingSlot::ALL.contains(&BindingSlot::Label),
@@ -2086,7 +2130,11 @@ mod tests {
         old.migrate_push_to_talk_binding();
         assert_eq!(old.drop, KeyCode::KeyV, "the rebound key must survive");
         assert_ne!(old.push_to_talk, old.drop);
-        assert_eq!(old.push_to_talk, KeyCode::KeyC);
+        // Not `KeyC`: the sparse file's own `#[serde(default)]` already fills
+        // `handset_talk` in as `KeyC` (its own real default), so the first
+        // key actually free for push_to_talk to fall back onto is the next
+        // one down the list.
+        assert_eq!(old.push_to_talk, KeyCode::KeyG);
     }
 
     #[test]
@@ -2094,5 +2142,36 @@ mod tests {
         let mut old = Bindings::default();
         old.migrate_push_to_talk_binding();
         assert_eq!(old.push_to_talk, KeyCode::KeyV);
+    }
+
+    #[test]
+    fn a_save_from_before_the_handset_gets_an_unused_handset_talk_key() {
+        let mut old: Bindings = ron::from_str("(drop:KeyC)").unwrap();
+        assert_eq!(
+            old.handset_talk,
+            KeyCode::KeyC,
+            "sanity: the sparse file must not already specify handset_talk"
+        );
+        old.migrate_handset_talk_binding();
+        assert_eq!(old.drop, KeyCode::KeyC, "the rebound key must survive");
+        assert_ne!(old.handset_talk, old.drop);
+        assert_eq!(old.handset_talk, KeyCode::KeyG);
+    }
+
+    #[test]
+    fn handset_talk_migration_never_offers_push_to_talks_own_key() {
+        // The trap the fallback list's ordering exists to avoid: if it
+        // started with V, a collision here would just relocate itself onto
+        // push_to_talk's key instead of resolving anything.
+        let mut old: Bindings = ron::from_str("(drop:KeyC)").unwrap();
+        old.migrate_handset_talk_binding();
+        assert_ne!(old.handset_talk, KeyCode::KeyV);
+    }
+
+    #[test]
+    fn a_save_with_no_collision_keeps_the_default_handset_talk_key() {
+        let mut old = Bindings::default();
+        old.migrate_handset_talk_binding();
+        assert_eq!(old.handset_talk, KeyCode::KeyC);
     }
 }

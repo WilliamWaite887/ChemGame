@@ -21,7 +21,7 @@ use crate::AppState;
 
 use super::codec::VoiceEncoder;
 use super::frame::{apply_gain, FrameAccumulator};
-use super::net::VoiceMode;
+use super::net::{VoiceChannel, VoiceMode};
 use super::VoiceFrame;
 
 /// How long to wait after a failed device open before trying again.
@@ -36,6 +36,12 @@ pub(super) fn register(app: &mut App) {
         .add_systems(
             Update,
             (maintain_capture_device, capture_and_send_voice)
+                .chain()
+                .run_if(in_state(AppState::Playing)),
+        )
+        .add_systems(
+            Update,
+            (spawn_transmitting_indicator, update_transmitting_indicator)
                 .chain()
                 .run_if(in_state(AppState::Playing)),
         )
@@ -58,7 +64,14 @@ struct CaptureState {
     encoder: Option<VoiceEncoder>,
     stream_id: u16,
     seq: u16,
-    was_transmitting: bool,
+    /// `None` while not transmitting; otherwise which of the two the player
+    /// is currently talking on. A held key alone is not enough state —
+    /// switching from one mode to the other while both happen to be held
+    /// (or in the one frame between releasing one and pressing the other)
+    /// has to read as a genuinely new talk-spurt, not a continuation, or the
+    /// jitter buffer on the far end would try to stitch two different
+    /// characters of audio into one stream.
+    current_mode: Option<VoiceMode>,
     /// Mirrors `Settings.voice_input_device` as of the last successful open,
     /// so a change to the setting is noticed without re-opening every frame.
     open_device_id: Option<String>,
@@ -250,12 +263,23 @@ fn capture_and_send_voice(
     // A closed window (headless test, or a moment during teardown) is not a
     // reason to stop transmitting; only an actually-unfocused real window is.
     let focused = windows.iter().next().is_none_or(|window| window.focused);
+    let live = !paused.0 && focused;
 
-    let should_transmit = !paused.0 && focused && keys.pressed(settings.bindings.push_to_talk);
+    // The handset wins a simultaneous press: reaching for it is a deliberate
+    // choice to be heard station-wide, and letting the far quieter, easy to
+    // brush "proximity" key silently win instead would bury that choice.
+    let wanted_mode = if live && keys.pressed(settings.bindings.handset_talk) {
+        Some(VoiceMode::Handset(VoiceChannel::Common))
+    } else if live && keys.pressed(settings.bindings.push_to_talk) {
+        Some(VoiceMode::Proximity)
+    } else {
+        None
+    };
 
-    if should_transmit && !state.was_transmitting {
-        // A new press. `wrapping_add` rather than a plain `+= 1`: the stream
-        // id is meant to wrap, and this is the only place it advances.
+    if wanted_mode.is_some() && wanted_mode != state.current_mode {
+        // A new press, or a switch from one mode to the other. `wrapping_add`
+        // rather than a plain `+= 1`: the stream id is meant to wrap, and
+        // this is the only place it advances.
         state.stream_id = state.stream_id.wrapping_add(1);
         state.seq = 0;
         state.accumulator.clear();
@@ -264,12 +288,12 @@ fn capture_and_send_voice(
                 .inspect_err(|error| warn!("voice capture: could not start encoder: {error}"))
                 .ok();
         }
-    } else if !should_transmit && state.was_transmitting {
+    } else if wanted_mode.is_none() && state.current_mode.is_some() {
         // Drop whatever partial frame was mid-collection so a later press
         // does not open with a fragment of silence stitched onto real audio.
         state.accumulator.clear();
     }
-    state.was_transmitting = should_transmit;
+    state.current_mode = wanted_mode;
 
     let available = microphone.size_hint().0;
     let mut scratch = Vec::with_capacity(available);
@@ -286,7 +310,10 @@ fn capture_and_send_voice(
         }
     }
 
-    if !should_transmit || scratch.is_empty() {
+    let Some(mode) = wanted_mode else {
+        return;
+    };
+    if scratch.is_empty() {
         return;
     }
 
@@ -313,12 +340,82 @@ fn capture_and_send_voice(
                 outgoing.write(VoiceFrame {
                     stream_id: state.stream_id,
                     seq: state.seq,
-                    mode: VoiceMode::Proximity,
+                    mode,
                     data,
                 });
                 state.seq = state.seq.wrapping_add(1);
             }
             Err(error) => warn!("voice capture: encode failed: {error}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The local "your mic is live" indicator
+// ---------------------------------------------------------------------------
+//
+// A hot mic with no on-screen sign of it is a real mistake to be able to
+// make — talking to your desk while everyone else in the lab hears it, with
+// no way to notice short of them telling you. Two lines, not one: which of
+// proximity or the handset is live matters, since only one of them reaches
+// people who are not standing next to you.
+
+/// Marks the indicator so it is found once rather than re-queried by type
+/// every frame, and so a future screenshot-mode sweep (`capture::hide_hud`)
+/// has something narrower than "every root `Node`" to filter on if it ever
+/// needs to hide this too.
+#[derive(Component)]
+struct TransmittingIndicator;
+
+fn spawn_transmitting_indicator(mut commands: Commands, existing: Query<(), With<TransmittingIndicator>>) {
+    if !existing.is_empty() {
+        return;
+    }
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(16),
+            bottom: px(16),
+            padding: UiRect::axes(px(10), px(6)),
+            border_radius: BorderRadius::all(px(4)),
+            ..default()
+        },
+        Visibility::Hidden,
+        BackgroundColor(Color::srgba(0.05, 0.06, 0.08, 0.8)),
+        GlobalZIndex(29),
+        TransmittingIndicator,
+        crate::until_we_leave_the_lab(),
+        children![(Text::new(""), TextFont::from_font_size(13.0), TextColor::WHITE)],
+    ));
+}
+
+fn update_transmitting_indicator(
+    state: NonSend<CaptureState>,
+    mut indicator: Query<(&mut Visibility, &Children), With<TransmittingIndicator>>,
+    mut labels: Query<(&mut Text, &mut TextColor)>,
+) {
+    let Ok((mut visibility, children)) = indicator.single_mut() else {
+        return;
+    };
+
+    let Some(mode) = state.current_mode else {
+        if *visibility != Visibility::Hidden {
+            *visibility = Visibility::Hidden;
+        }
+        return;
+    };
+    if *visibility != Visibility::Visible {
+        *visibility = Visibility::Visible;
+    }
+
+    let (text, color) = match mode {
+        VoiceMode::Proximity => ("● Talking", Color::srgba(0.5, 0.95, 0.6, 1.0)),
+        VoiceMode::Handset(_) => ("📻 On the handset", Color::srgba(0.95, 0.75, 0.4, 1.0)),
+    };
+    for &child in children {
+        if let Ok((mut label, mut label_color)) = labels.get_mut(child) {
+            label.0 = text.to_string();
+            label_color.0 = color;
         }
     }
 }

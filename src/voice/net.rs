@@ -33,18 +33,35 @@ use crate::AppState;
 use super::acoustics::compute_audibility;
 use super::codec::MAX_PACKET_BYTES;
 
+/// A station-wide comms channel the handset can be tuned to.
+///
+/// One variant today: every human co-op player is a chemist in the same lab
+/// (`net::MAX_REMOTE_CLIENTS` caps the whole session at four people total),
+/// so a Bridge/Medical/Security-style department picker — the shape
+/// `radio::RadioChannel` uses for one-way *NPC* dispatch — would offer
+/// channels with no other human player ever on them. Kept as a real enum
+/// rather than a bare struct so a second channel is later a variant, not a
+/// wire-format change.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VoiceChannel {
+    #[default]
+    Common,
+}
+
 /// How a frame was spoken. Travels in both directions: the sender is the only
 /// one who knows which it was, and the listener needs it back to decide
 /// whether to apply the handset's filter. An explicit enum rather than an
 /// `Option`, because postcard is positional and non-self-describing — a
 /// `None` and a zero-length `Vec` are easy to conflate by accident, and an
 /// enum makes the two frame shapes impossible to confuse.
-///
-/// `VoiceChannel` does not exist yet (Phase 3); the variant is here now so the
-/// wire shape does not change again when it lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VoiceMode {
     Proximity,
+    /// Reaches every other connected chemist regardless of distance or
+    /// geometry — see `net::relay_voice_frames`. Never occluded, never
+    /// range-culled; the handset's whole point is reaching someone
+    /// proximity voice cannot.
+    Handset(VoiceChannel),
 }
 
 /// One Opus frame, client to server.
@@ -240,34 +257,50 @@ fn relay_voice_frames(
                 continue;
             }
 
-            let cache_key = (speaker_entity, listener_entity);
-            let cached = audibility.entries.get(&cache_key);
-            let stale = cached.is_none_or(|cached| {
-                now - cached.computed_at >= AUDIBILITY_RECOMPUTE_INTERVAL
-            });
+            // The handset reaches everyone on the channel unconditionally —
+            // that is its entire point, the reason to reach for it instead
+            // of just talking. No distance cull, no occlusion, and so
+            // nothing worth caching: this branch is already O(listeners),
+            // not O(listeners × a graph search), before the cache would ever
+            // save anything.
+            let audible = match message.message.mode {
+                VoiceMode::Handset(_) => super::acoustics::Audibility {
+                    emitter: speaker_transform.translation,
+                    gain: 1.0,
+                    muffle: 0.0,
+                },
+                VoiceMode::Proximity => {
+                    let cache_key = (speaker_entity, listener_entity);
+                    let cached = audibility.entries.get(&cache_key);
+                    let stale = cached.is_none_or(|cached| {
+                        now - cached.computed_at >= AUDIBILITY_RECOMPUTE_INTERVAL
+                    });
 
-            let result = if stale {
-                let result = compute_audibility(
-                    speaker_transform.translation,
-                    listener_transform.translation,
-                    &walls,
-                    Some(&nav),
-                    door_open,
-                );
-                audibility.entries.insert(
-                    cache_key,
-                    CachedAudibility {
-                        computed_at: now,
-                        result,
-                    },
-                );
-                result
-            } else {
-                cached.and_then(|cached| cached.result)
-            };
+                    let result = if stale {
+                        let result = compute_audibility(
+                            speaker_transform.translation,
+                            listener_transform.translation,
+                            &walls,
+                            Some(&nav),
+                            door_open,
+                        );
+                        audibility.entries.insert(
+                            cache_key,
+                            CachedAudibility {
+                                computed_at: now,
+                                result,
+                            },
+                        );
+                        result
+                    } else {
+                        cached.and_then(|cached| cached.result)
+                    };
 
-            let Some(audible) = result else {
-                continue;
+                    let Some(audible) = result else {
+                        continue;
+                    };
+                    audible
+                }
             };
 
             let heard = VoiceHeard {
@@ -345,6 +378,22 @@ mod tests {
         assert_eq!(round_tripped.seq, frame.seq);
         assert_eq!(round_tripped.mode, frame.mode);
         assert_eq!(round_tripped.data, frame.data);
+    }
+
+    #[test]
+    fn a_handset_frame_round_trips_through_the_actual_wire_format() {
+        // The variant with a payload of its own (`VoiceChannel`), so this is
+        // the one that would actually catch a positional-encoding mismatch
+        // between the two `VoiceMode` variants — `Proximity` alone could not.
+        let frame = VoiceFrame {
+            stream_id: 1,
+            seq: 0,
+            mode: VoiceMode::Handset(VoiceChannel::Common),
+            data: vec![9],
+        };
+        let bytes = postcard::to_allocvec(&frame).expect("postcard serialize");
+        let round_tripped: VoiceFrame = postcard::from_bytes(&bytes).expect("postcard deserialize");
+        assert_eq!(round_tripped.mode, frame.mode);
     }
 
     #[test]
