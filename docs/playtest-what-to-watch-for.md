@@ -155,7 +155,7 @@ If someone **saw** something suspicious, they'll get uneasy and mutter about it.
   **that's a hard failure — copy it down exactly.**
 - **Walk up and talk to them directly.** What they tell you when asked can be
   much more specific than what they mutter to themselves. That difference is
-  intentional — it's the reward for going and asking.
+  intentional it's the reward for going and asking.
 - Come back several minutes later. They should have **gotten over it**. If
   someone is still muttering about the same thing half an hour later, tell us.
 
