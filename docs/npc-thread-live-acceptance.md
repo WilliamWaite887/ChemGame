@@ -9,6 +9,12 @@ antagonist approaching, understand why the batch changed colour, follow the
 crew's reaction, or hear a station that sounds inhabited rather than noisy.
 Those are the only questions here.
 
+**This file is for someone who knows the codebase.** It names components,
+packet numbers and `ailog.txt` greps. For handing to an outside playtester, use
+`docs/playtest-what-to-watch-for.md` instead — the same questions in plain
+language, with no internal vocabulary. The two cover the same ground; if you
+change an acceptance criterion here, change it there too.
+
 **Nothing in this file has ever been run.** Every packet shipped on automated
 tests alone, and the three judgement calls most likely to change the design —
 whether an antagonist's approach is noticeable (section 4), whether the work
