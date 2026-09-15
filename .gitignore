@@ -91,3 +91,16 @@ assets/textures/ceiling_metal.png
 .gitignore
 assets/textures/ceiling_casing.png
 assets/3dassets/station_starter_kit/generate_cult_expansion.py
+art-source/life-between-departments/source/validate_assets.py
+art-source/life-between-departments/source/render_fan_review.py
+art-source/life-between-departments/source/build_assets.py
+art-source/life-between-departments/verification/build.log
+art-source/life-between-departments/verification/fan-review.log
+art-source/life-between-departments/verification/material-donor.blend
+art-source/life-between-departments/verification/validate.log
+art-source/life-between-departments/CATALOG.md
+art-source/life-between-departments/README.md
+art-source/life-between-departments/verification/existing-files-after.json
+art-source/life-between-departments/verification/existing-files-before.json
+art-source/life-between-departments/verification/export-validation.json
+art-source/life-between-departments/inventory.json
